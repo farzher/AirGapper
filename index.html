@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f7f7f5">
+<title>AirGapper — Air-gapped file transfer</title>
+<style>
+  :root { color-scheme: light; --bg:#f7f7f5; --card:#fff; --ink:#141414; --muted:#777; --line:#e7e7e3; --soft:#efefec; --good:#21864a; --warn:#a56a00; --bad:#b93838; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--bg); color:var(--ink); font:15px/1.35 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  button,input,textarea { font:inherit; }
+  button { color:inherit; }
+  .app { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
+  header { width:min(920px,calc(100% - 32px)); margin:0 auto; padding:22px 0 10px; display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+  .brand { font-weight:750; font-size:18px; letter-spacing:-.02em; }
+  .tag { color:var(--muted); font-size:12px; margin-top:2px; }
+  .ghost { border:1px solid var(--line); background:transparent; border-radius:10px; padding:8px 11px; cursor:pointer; }
+  .ghost:hover { background:var(--card); }
+  main { width:min(920px,calc(100% - 32px)); margin:auto; padding:24px 0 42px; }
+  .home { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .mode { min-height:180px; border:1px solid var(--line); background:var(--card); border-radius:20px; cursor:pointer; font-weight:700; font-size:27px; letter-spacing:-.035em; transition:.16s ease; }
+  .mode:hover { transform:translateY(-2px); border-color:#d3d3ce; box-shadow:0 12px 36px #00000009; }
+  .view { display:none; }
+  .view.active { display:block; }
+  .topline { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; gap:12px; }
+  .back { border:0; background:transparent; padding:6px 0; cursor:pointer; color:var(--muted); }
+  .back:hover { color:var(--ink); }
+  .title { font-weight:700; font-size:17px; }
+  .sendStart { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .drop,.textWrap { min-height:240px; border:1px solid var(--line); background:var(--card); border-radius:18px; }
+  .drop { display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer; position:relative; transition:.14s; }
+  .drop.drag { border-color:#999; background:#fbfbfa; transform:scale(.995); }
+  .drop input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .drop strong { display:block; font-size:18px; margin-bottom:5px; }
+  .sub { color:var(--muted); font-size:12px; }
+  .textWrap { padding:16px; display:flex; flex-direction:column; gap:10px; }
+  textarea { resize:none; flex:1; border:0; outline:0; background:transparent; color:var(--ink); font-size:17px; line-height:1.45; }
+  textarea::placeholder { color:#aaa; }
+  .textSend { align-self:flex-end; border:0; background:#171717; color:white; border-radius:10px; padding:8px 13px; cursor:pointer; font-weight:650; }
+  .textSend:disabled { opacity:.35; cursor:default; }
+  .sender { display:none; }
+  .sender.active { display:block; }
+  .qrStage { position:relative; background:white; border:1px solid var(--line); border-radius:20px; overflow:hidden; min-height:470px; display:flex; align-items:center; justify-content:center; }
+  #qrCanvas { width:100%; height:100%; min-height:470px; display:block; background:#fff; }
+  .qrOverlay { position:absolute; inset:auto 12px 12px 12px; display:flex; justify-content:space-between; align-items:end; pointer-events:none; mix-blend-mode:multiply; }
+  .qrMeta { background:#ffffffdd; backdrop-filter:blur(8px); border:1px solid #ecece8; border-radius:12px; padding:7px 9px; font-size:11px; color:#555; }
+  .fullscreen { pointer-events:auto; border:1px solid #ddd; background:#fffffff0; border-radius:10px; padding:8px 10px; cursor:pointer; }
+  .qrStage:fullscreen { width:100vw; height:100vh; border:0; border-radius:0; }
+  .qrStage:fullscreen #qrCanvas { min-height:100vh; }
+  .controls { margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .control { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; }
+  .controlHead { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+  .controlHead b { font-size:13px; }
+  .value { font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
+  input[type=range] { width:100%; accent-color:#222; }
+  .sendInfo { margin-top:9px; color:var(--muted); font-size:12px; text-align:center; }
+  .receiveCard { border:1px solid var(--line); background:#111; border-radius:20px; overflow:hidden; position:relative; min-height:520px; }
+  #video { width:100%; height:520px; object-fit:cover; display:block; background:#111; }
+  .scanShade { position:absolute; inset:0; pointer-events:none; background:linear-gradient(#0002,#0000 22%,#0000 78%,#0002); }
+  .scanBox { position:absolute; inset:50% auto auto 50%; transform:translate(-50%,-50%); width:min(78%,560px); aspect-ratio:1; border:1px solid #ffffff88; border-radius:24px; box-shadow:0 0 0 999px #00000018; pointer-events:none; }
+  .scanBox:before,.scanBox:after { content:""; position:absolute; width:48px; height:48px; border-color:white; border-style:solid; }
+  .scanBox:before { left:-1px; top:-1px; border-width:3px 0 0 3px; border-radius:20px 0 0 0; }
+  .scanBox:after { right:-1px; bottom:-1px; border-width:0 3px 3px 0; border-radius:0 0 20px 0; }
+  .receiveHud { position:absolute; left:12px; right:12px; bottom:12px; display:flex; align-items:end; justify-content:space-between; gap:10px; }
+  .statusCard { min-width:220px; background:#111d; color:white; border:1px solid #ffffff25; backdrop-filter:blur(10px); border-radius:14px; padding:10px 11px; }
+  .statusTop { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:650; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#aaa; box-shadow:0 0 0 3px #ffffff16; }
+  .dot.good { background:#57d985; }
+  .dot.warn { background:#f4bd59; }
+  .dot.bad { background:#f26c6c; }
+  .stats { margin-top:7px; display:flex; gap:12px; color:#ffffffb0; font-size:11px; font-variant-numeric:tabular-nums; }
+  .progressBar { height:3px; background:#ffffff25; margin-top:9px; overflow:hidden; border-radius:9px; }
+  .progressBar i { display:block; height:100%; width:0; background:white; transition:width .15s linear; }
+  .cameraBtn { border:1px solid #ffffff35; background:#111c; color:white; border-radius:11px; padding:9px 11px; cursor:pointer; backdrop-filter:blur(8px); }
+  .cameraGate { position:absolute; inset:0; display:none; place-items:center; background:#111; z-index:3; }
+  .cameraGate.active { display:grid; }
+  .enableCamera { border:1px solid #ffffff35; background:#fff; color:#111; border-radius:12px; padding:11px 16px; cursor:pointer; font-weight:700; }
+  .result { margin-top:12px; border:1px solid var(--line); background:var(--card); border-radius:16px; padding:14px; display:none; }
+  .result.active { display:block; }
+  .resultHead { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .resultTitle { font-weight:700; }
+  .files { display:grid; gap:8px; margin-top:10px; }
+  .fileRow { display:flex; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid var(--line); padding-top:9px; }
+  .fileName { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .smallBtn { border:1px solid var(--line); background:var(--soft); border-radius:9px; padding:6px 9px; cursor:pointer; flex:none; }
+  .textResult { margin-top:10px; white-space:pre-wrap; word-break:break-word; background:var(--bg); border-radius:10px; padding:12px; max-height:260px; overflow:auto; }
+  .toast { position:fixed; left:50%; bottom:22px; transform:translate(-50%,15px); opacity:0; pointer-events:none; background:#111; color:#fff; padding:9px 12px; border-radius:10px; font-size:12px; transition:.18s; z-index:50; }
+  .toast.show { opacity:1; transform:translate(-50%,0); }
+  @media(max-width:700px){
+    header { padding-top:16px; }
+    main { padding-top:12px; }
+    .home,.sendStart,.controls { grid-template-columns:1fr; }
+    .mode { min-height:130px; }
+    .drop,.textWrap { min-height:190px; }
+    .qrStage,#qrCanvas { min-height:390px; }
+    .receiveCard,#video { height:calc(100dvh - 175px); min-height:430px; }
+    .statusCard { min-width:0; flex:1; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div><div class="brand">AirGapper</div><div class="tag">Air-gapped file transfer</div></div>
+    <button class="ghost" id="offlineBtn">Download offline</button>
+  </header>
+
+  <main>
+    <section id="homeView" class="view active">
+      <div class="home">
+        <button class="mode" data-mode="send">Send</button>
+        <button class="mode" data-mode="receive">Receive</button>
+      </div>
+    </section>
+
+    <section id="sendView" class="view">
+      <div class="topline"><button class="back">← Back</button><div class="title">Send</div><div style="width:42px"></div></div>
+      <div id="sendStart" class="sendStart">
+        <label class="drop" id="dropZone">
+          <input id="fileInput" type="file" multiple>
+          <div><strong>Drop files</strong><div class="sub">or click to choose</div></div>
+        </label>
+        <div class="textWrap"><textarea id="textInput" placeholder="Or paste text…"></textarea><button class="textSend" id="textSendBtn" disabled>Send text</button></div>
+      </div>
+
+      <div id="sender" class="sender">
+        <div class="qrStage" id="qrStage">
+          <canvas id="qrCanvas"></canvas>
+          <div class="qrOverlay">
+            <div class="qrMeta" id="qrMeta">Preparing…</div>
+            <button class="fullscreen" id="fullscreenBtn">Fullscreen</button>
+          </div>
+        </div>
+        <div class="controls">
+          <div class="control">
+            <div class="controlHead"><b>Speed</b><span class="value" id="fpsValue">10 FPS</span></div>
+            <input id="fpsRange" type="range" min="1" max="60" step="1" value="10">
+          </div>
+          <div class="control">
+            <div class="controlHead"><b>Size</b><span class="value" id="sizeValue">900 B/frame</span></div>
+            <input id="sizeRange" type="range" min="128" max="1900" step="64" value="900">
+          </div>
+        </div>
+        <div class="sendInfo" id="sendInfo"></div>
+      </div>
+    </section>
+
+    <section id="receiveView" class="view">
+      <div class="topline"><button class="back">← Back</button><div class="title">Receive</div><div style="width:42px"></div></div>
+      <div class="receiveCard">
+        <video id="video" playsinline muted></video>
+        <div class="cameraGate" id="cameraGate"><button class="enableCamera" id="enableCameraBtn">Enable camera</button></div>
+        <div class="scanShade"></div><div class="scanBox"></div>
+        <div class="receiveHud">
+          <div class="statusCard">
+            <div class="statusTop"><span id="statusDot" class="dot"></span><span id="statusText">Starting camera…</span></div>
+            <div class="stats"><span id="progressText">0%</span><span id="cameraText">— fps</span><span id="dropText">— drop</span></div>
+            <div class="progressBar"><i id="progressFill"></i></div>
+          </div>
+          <button class="cameraBtn" id="flipBtn">Flip</button>
+        </div>
+      </div>
+      <div class="result" id="result"></div>
+      <canvas id="scanCanvas" hidden></canvas>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script data-vendor="qrcode" src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script data-vendor="jsqr" src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script data-vendor="fflate" src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
+<script>
+(() => {
+'use strict';
+
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const MAX_QR_RAW = 1900;
+const MAX_FRAME_BYTES = MAX_QR_RAW;
+
+const state = {
+  mode: 'home', stream: null, facing: 'environment', scanToken: 0,
+  transfer: null, sendTimer: null, serial: 0,
+  rx: null, barcodeDetector: null,
+  cameraFrames: 0, cameraFps: 0, cameraWindowAt: performance.now(),
+  decodeHits: 0, decodeAttempts: 0, lastDecodeAt: 0,
+};
+
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 1700);
+}
+function humanBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n/1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  return (n/1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+}
+function concatBytes(arrays) {
+  let n = 0; for (const a of arrays) n += a.length;
+  const out = new Uint8Array(n); let p = 0;
+  for (const a of arrays) { out.set(a,p); p += a.length; }
+  return out;
+}
+function u32(n) { return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
+function readU32(a,o) { return ((a[o]<<24)>>>0) + (a[o+1]<<16) + (a[o+2]<<8) + a[o+3]; }
+function bytesToB64(bytes) {
+  let s = ''; const step = 0x8000;
+  for (let i=0;i<bytes.length;i+=step) s += String.fromCharCode(...bytes.subarray(i,i+step));
+  return btoa(s);
+}
+function b64ToBytes(s) {
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function shortHash(bytes) {
+  try {
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return [...h.subarray(0,8)].map(x=>x.toString(16).padStart(2,'0')).join('');
+  } catch { return 'nohash'; }
+}
+function randomId() {
+  const a = new Uint8Array(5); (crypto.getRandomValues ? crypto.getRandomValues(a) : a.fill(Math.random()*255));
+  return [...a].map(x=>x.toString(36).padStart(2,'0')).join('').slice(0,8);
+}
+
+function resetSend() {
+  stopSender(); state.transfer = null; state.serial = 0;
+  $('#sender').classList.remove('active'); $('#sendStart').style.display = 'grid';
+  $('#fileInput').value = ''; $('#textInput').value = '';
+}
+function showView(name) {
+  const prev = state.mode;
+  state.mode = name;
+  $$('.view').forEach(v => v.classList.remove('active'));
+  $('#' + name + 'View').classList.add('active');
+  if (name !== 'receive') stopCamera();
+  if (name !== 'send' && prev === 'send') resetSend();
+  else if (name !== 'send') stopSender();
+  if (name === 'receive') prepareCamera();
+}
+$$('.mode').forEach(b => b.onclick = () => showView(b.dataset.mode));
+$$('.back').forEach(b => b.onclick = () => showView('home'));
+
+// ---------- Pack / unpack ----------
+async function packFiles(files) {
+  const meta = { kind:'files', files: files.map(f => ({name:f.name, type:f.type || 'application/octet-stream', size:f.size})) };
+  const header = enc.encode(JSON.stringify(meta));
+  const parts = [enc.encode('AGC1'), u32(header.length), header];
+  for (const f of files) parts.push(new Uint8Array(await f.arrayBuffer()));
+  return concatBytes(parts);
+}
+function packText(text) {
+  const body = enc.encode(text);
+  const header = enc.encode(JSON.stringify({kind:'text', size:body.length}));
+  return concatBytes([enc.encode('AGC1'),u32(header.length),header,body]);
+}
+function unpackContainer(bytes) {
+  if (dec.decode(bytes.subarray(0,4)) !== 'AGC1') throw new Error('Unknown AirGapper data');
+  const hlen = readU32(bytes,4), meta = JSON.parse(dec.decode(bytes.subarray(8,8+hlen)));
+  let p = 8 + hlen;
+  if (meta.kind === 'text') return {kind:'text', text:dec.decode(bytes.subarray(p,p+meta.size))};
+  const files = meta.files.map(f => { const data = bytes.slice(p,p+f.size); p += f.size; return {...f,data}; });
+  return {kind:'files', files};
+}
+
+async function prepareTransfer(raw, label) {
+  if (!window.fflate || !window.qrcode) { toast('QR libraries are still loading'); return; }
+  stopSender();
+  const compressed = fflate.gzipSync(raw, {level:6});
+  const hash = await shortHash(compressed);
+  state.transfer = { id:randomId(), raw, compressed, hash, label, frameBytes:+$('#sizeRange').value, frames:[], total:0 };
+  rebuildFrames();
+  $('#sendStart').style.display = 'none';
+  $('#sender').classList.add('active');
+  state.serial = 0;
+  startSender();
+  const ratio = raw.length ? Math.round((1 - compressed.length/raw.length)*100) : 0;
+  $('#sendInfo').textContent = `${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0 ? ` · ${ratio}% smaller` : ''}`;
+}
+function rebuildFrames() {
+  const t = state.transfer; if (!t) return;
+  t.frameBytes = Math.min(MAX_FRAME_BYTES, +$('#sizeRange').value);
+  t.frames = [];
+  for (let i=0;i<t.compressed.length;i+=t.frameBytes) t.frames.push(t.compressed.subarray(i,i+t.frameBytes));
+  t.total = t.frames.length || 1;
+  if (!t.frames.length) t.frames = [new Uint8Array()];
+  updateSendLabels();
+}
+function updateSendLabels() {
+  $('#fpsValue').textContent = $('#fpsRange').value + ' FPS';
+  const b = +$('#sizeRange').value;
+  $('#sizeValue').textContent = `${b} B/frame`;
+}
+$('#fpsRange').oninput = () => { updateSendLabels(); if (state.transfer) startSender(); };
+$('#sizeRange').oninput = () => { updateSendLabels(); if (state.transfer) { rebuildFrames(); state.transfer.id = randomId(); state.serial = 0; } };
+updateSendLabels();
+
+function encodePayload(t, serial, frameIndex, part, parts, bytes) {
+  const fps = +$('#fpsRange').value;
+  return ['AG1',t.id,serial,frameIndex,t.total,part,parts,fps,t.frameBytes,t.compressed.length,t.hash,bytesToB64(bytes)].join('|');
+}
+function makeQrMatrix(text) {
+  const qr = qrcode(0,'L'); qr.addData(text); qr.make();
+  const n = qr.getModuleCount(), matrix = new Array(n);
+  for (let y=0;y<n;y++) { matrix[y] = new Uint8Array(n); for (let x=0;x<n;x++) matrix[y][x] = qr.isDark(y,x) ? 1 : 0; }
+  return matrix;
+}
+function drawMatrix(ctx, matrix, x,y,w,h) {
+  const quiet=4, n=matrix.length, total=n+quiet*2, cell=Math.floor(Math.min(w,h)/total);
+  const size=cell*total, ox=Math.round(x+(w-size)/2), oy=Math.round(y+(h-size)/2);
+  ctx.fillStyle='#fff'; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle='#000';
+  for (let r=0;r<n;r++) for (let c=0;c<n;c++) if (matrix[r][c]) ctx.fillRect(ox+(c+quiet)*cell,oy+(r+quiet)*cell,cell,cell);
+}
+function fitCanvas(canvas) {
+  const rect=canvas.getBoundingClientRect(), dpr=Math.min(devicePixelRatio||1,2);
+  const w=Math.max(320,Math.round(rect.width*dpr)), h=Math.max(320,Math.round(rect.height*dpr));
+  if (canvas.width!==w || canvas.height!==h) { canvas.width=w; canvas.height=h; }
+}
+function renderSendFrame() {
+  const t=state.transfer; if (!t || state.mode!=='send') return;
+  const serial=state.serial++, frameIndex=serial%t.total, frame=t.frames[frameIndex];
+  let matrix;
+  try { matrix=makeQrMatrix(encodePayload(t,serial,frameIndex,0,1,frame)); }
+  catch (e) {
+    setStatus('Size too large','bad');
+    return;
+  }
+  const canvas=$('#qrCanvas'); fitCanvas(canvas); const ctx=canvas.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  const pad=Math.round(Math.min(canvas.width,canvas.height)*.035), W=canvas.width-2*pad,H=canvas.height-2*pad;
+  drawMatrix(ctx,matrix,pad,pad,W,H);
+  $('#qrMeta').textContent = `${frameIndex+1}/${t.total} · ${$('#fpsRange').value} FPS · ${t.frameBytes} B`;
+}
+function startSender() {
+  stopSender(); if (!state.transfer) return;
+  const loop=()=>{ if(state.mode!=='send'||!state.transfer)return; renderSendFrame(); state.sendTimer=setTimeout(loop,1000/(+$('#fpsRange').value)); };
+  loop();
+}
+function stopSender(){ clearTimeout(state.sendTimer); state.sendTimer=null; }
+$('#fullscreenBtn').onclick=()=>{ const el=$('#qrStage'); if(!document.fullscreenElement) el.requestFullscreen?.(); else document.exitFullscreen?.(); };
+
+// inputs
+const dz=$('#dropZone'), fi=$('#fileInput');
+fi.onchange=async()=>{ if(fi.files.length) prepareTransfer(await packFiles([...fi.files]), fi.files.length===1?fi.files[0].name:`${fi.files.length} files`); };
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));
+dz.addEventListener('drop',async e=>{ const files=[...e.dataTransfer.files]; if(files.length) prepareTransfer(await packFiles(files),files.length===1?files[0].name:`${files.length} files`); });
+const textInput=$('#textInput'), textSendBtn=$('#textSendBtn');
+textInput.addEventListener('input',()=>{ textSendBtn.disabled=!textInput.value.trim(); });
+textSendBtn.onclick=()=>{ const text=textInput.value; if(text.trim()) prepareTransfer(packText(text),'Text'); };
+
+// ---------- Receive ----------
+function isIOS() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function cameraPolicyBlocked() {
+  try {
+    const p = document.permissionsPolicy || document.featurePolicy;
+    return !!(p?.allowsFeature && !p.allowsFeature('camera'));
+  } catch { return false; }
+}
+function prepareCamera() {
+  stopCamera(); resetRx();
+  const gate=$('#cameraGate');
+  gate.classList.add('active');
+  if (!navigator.mediaDevices?.getUserMedia) setStatus('Camera unavailable here','bad');
+  else if (!window.isSecureContext) setStatus('Camera needs HTTPS','bad');
+  else if (cameraPolicyBlocked()) setStatus('Open in browser to use camera','bad');
+  else if (location.protocol === 'file:' && isIOS()) setStatus('Local file · camera unavailable on iPhone','bad');
+  else setStatus('Tap Enable camera','');
+}
+function cameraErrorText(e) {
+  if (!window.isSecureContext) return 'Camera needs HTTPS';
+  if (cameraPolicyBlocked()) return 'Open in browser to use camera';
+  if (location.protocol === 'file:' && isIOS()) return 'Local file · camera unavailable on iPhone';
+  if (window.top !== window.self && e?.name === 'NotAllowedError') return 'Open in browser to use camera';
+  if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') return 'Camera permission denied';
+  if (e?.name === 'NotFoundError') return 'No camera found';
+  if (e?.name === 'NotReadableError') return 'Camera is busy';
+  if (e?.name === 'OverconstrainedError') return 'Camera mode unsupported';
+  return `Camera error${e?.name ? ' · ' + e.name : ''}`;
+}
+async function requestCamera() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing}},audio:false});
+  } catch(e) {
+    if (e?.name === 'OverconstrainedError' || e?.name === 'NotFoundError') {
+      return navigator.mediaDevices.getUserMedia({video:true,audio:false});
+    }
+    throw e;
+  }
+}
+async function startCamera() {
+  stopCamera(); resetRx();
+  const gate=$('#cameraGate');
+  if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext || cameraPolicyBlocked() || (location.protocol === 'file:' && isIOS())) {
+    prepareCamera();
+    return;
+  }
+  try {
+    state.stream=await requestCamera();
+    const video=$('#video'); video.srcObject=state.stream; video.setAttribute('playsinline',''); video.muted=true;
+    await video.play();
+    gate.classList.remove('active');
+    if ('BarcodeDetector' in window) { try { state.barcodeDetector=new BarcodeDetector({formats:['qr_code']}); } catch{} }
+    setStatus('Point at sender','');
+    state.scanToken++; scanLoop(state.scanToken);
+  } catch(e) {
+    console.warn('AirGapper camera:', e?.name, e?.message, {secure:isSecureContext, protocol:location.protocol, embedded:window.top!==window.self, policyBlocked:cameraPolicyBlocked()});
+    gate.classList.add('active');
+    setStatus(cameraErrorText(e),'bad');
+  }
+}
+function stopCamera(){ state.scanToken++; if(state.stream){ state.stream.getTracks().forEach(t=>t.stop()); state.stream=null; } $('#video').srcObject=null; }
+$('#enableCameraBtn').onclick=()=>startCamera();
+$('#flipBtn').onclick=()=>{ state.facing=state.facing==='environment'?'user':'environment'; startCamera(); };
+function resetRx() {
+  state.rx={id:null,total:0,totalBytes:0,hash:null,frameBytes:0,targetFps:0,frames:new Map(), partsBySerial:new Map(), completeSerials:new Set(), maxSerial:null, missed:0, observed:0, startedAt:performance.now(), expectedParts:1, done:false};
+  state.cameraFrames=0; state.cameraFps=0; state.cameraWindowAt=performance.now(); state.decodeHits=0; state.decodeAttempts=0; state.lastDecodeAt=0;
+  $('#progressFill').style.width='0%'; $('#progressText').textContent='0%'; $('#dropText').textContent='— drop'; $('#cameraText').textContent='— fps'; $('#result').classList.remove('active'); $('#result').innerHTML='';
+}
+function setStatus(text,kind=''){ $('#statusText').textContent=text; $('#statusDot').className='dot'+(kind?' '+kind:''); }
+function parsePayload(raw) {
+  if (!raw?.startsWith('AG1|')) return null;
+  const a=raw.split('|'); if(a.length<12)return null;
+  return {id:a[1],serial:+a[2],frame:+a[3],total:+a[4],part:+a[5],parts:+a[6],fps:+a[7],frameBytes:+a[8],totalBytes:+a[9],hash:a[10],data:b64ToBytes(a[11])};
+}
+function ingest(raw) {
+  const p=parsePayload(raw); if(!p)return false;
+  let rx=state.rx;
+  if(rx.id!==p.id){ resetRx(); rx=state.rx; rx.id=p.id; rx.total=p.total; rx.totalBytes=p.totalBytes; rx.hash=p.hash; rx.frameBytes=p.frameBytes; rx.targetFps=p.fps; rx.expectedParts=p.parts; }
+  state.lastDecodeAt=performance.now(); state.decodeHits++;
+  rx.targetFps=p.fps; rx.expectedParts=p.parts;
+  const key=p.serial;
+  let group=rx.partsBySerial.get(key); if(!group){group={frame:p.frame,parts:p.parts,got:new Map()};rx.partsBySerial.set(key,group);} group.got.set(p.part,p.data);
+  if(group.got.size===group.parts && !rx.completeSerials.has(key)){
+    const data=concatBytes([...Array(group.parts)].map((_,i)=>group.got.get(i)));
+    rx.completeSerials.add(key); rx.frames.set(group.frame,data); rx.observed++;
+    if(rx.maxSerial==null)rx.maxSerial=key; else if(key>rx.maxSerial){ if(key>rx.maxSerial+1)rx.missed+=key-rx.maxSerial-1; rx.maxSerial=key; }
+    for(const s of rx.partsBySerial.keys()) if(s<key-8)rx.partsBySerial.delete(s);
+    updateRxUi();
+    if(rx.frames.size===rx.total&&!rx.done){rx.done=true; finishReceive();}
+  }
+  return true;
+}
+function updateRxUi(){
+  const rx=state.rx, pct=rx.total?Math.min(100,Math.round(rx.frames.size/rx.total*100)):0;
+  $('#progressText').textContent=pct+'%'; $('#progressFill').style.width=pct+'%';
+  const denom=rx.observed+rx.missed, drop=denom?rx.missed/denom:0;
+  $('#dropText').textContent=denom>4?`${Math.round(drop*100)}% drop`:'— drop';
+  $('#cameraText').textContent=state.cameraFps?`${state.cameraFps.toFixed(0)} fps`:'— fps';
+  let msg='Receiving',kind='good';
+  if(performance.now()-state.lastDecodeAt>1800){msg='Move closer or lower size';kind='warn';}
+  else if(state.cameraFps&&rx.targetFps>state.cameraFps*.9){msg=`Lower speed · camera ${state.cameraFps.toFixed(0)} fps`;kind='warn';}
+  else if(denom>8&&drop>.15){msg = rx.targetFps>state.cameraFps*.65 ? 'Lower speed' : 'Lower size'; kind='warn';}
+  else if(denom>12&&drop<.03&&state.cameraFps>rx.targetFps*1.5){msg='Good · room to go faster';kind='good';}
+  else if(pct===100){msg='Complete';kind='good';}
+  setStatus(msg,kind);
+}
+async function finishReceive(){
+  try{
+    const rx=state.rx, chunks=[]; for(let i=0;i<rx.total;i++){const c=rx.frames.get(i);if(!c)throw new Error('Missing frame');chunks.push(c);} const compressed=concatBytes(chunks).subarray(0,rx.totalBytes);
+    const hash=await shortHash(compressed); if(rx.hash!=='nohash'&&hash!==rx.hash)throw new Error('Integrity check failed');
+    if(!window.fflate)throw new Error('gzip unavailable');
+    const unpacked=unpackContainer(fflate.gunzipSync(compressed)); renderResult(unpacked); setStatus('Complete','good');
+  }catch(e){setStatus(e.message||'Could not decode','bad'); state.rx.done=false;}
+}
+function renderResult(data){
+  const el=$('#result'); el.classList.add('active'); el.textContent='';
+  const head=document.createElement('div'); head.className='resultHead';
+  const title=document.createElement('div'); title.className='resultTitle'; title.textContent=data.kind==='text'?'Text received':`${data.files.length} file${data.files.length===1?'':'s'} received`; head.appendChild(title);
+  el.appendChild(head);
+  if(data.kind==='text'){
+    const copy=document.createElement('button');copy.className='smallBtn';copy.textContent='Copy';copy.onclick=async()=>{await navigator.clipboard?.writeText(data.text);toast('Copied')};head.appendChild(copy);
+    const t=document.createElement('div');t.className='textResult';t.textContent=data.text;el.appendChild(t);
+  }else{
+    const list=document.createElement('div');list.className='files';
+    for(const f of data.files){const row=document.createElement('div');row.className='fileRow';const name=document.createElement('div');name.className='fileName';name.textContent=`${f.name} · ${humanBytes(f.size)}`;const b=document.createElement('button');b.className='smallBtn';b.textContent='Download';b.onclick=()=>downloadBlob(new Blob([f.data],{type:f.type}),f.name);row.append(name,b);list.appendChild(row);}el.appendChild(list);
+  }
+}
+function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1500);}
+
+function cropData(ctx,canvas,region){
+  const [x,y,w,h]=region, img=ctx.getImageData(Math.round(x*canvas.width),Math.round(y*canvas.height),Math.round(w*canvas.width),Math.round(h*canvas.height)); return img;
+}
+function jsQrDecodeRegion(ctx,canvas,region){
+  if(!window.jsQR)return null; const img=cropData(ctx,canvas,region); state.decodeAttempts++;
+  try { const r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'}); return r?.data||null; } catch{return null;}
+}
+async function decodeFrame(video){
+  state.cameraFrames++;
+  const now=performance.now(); if(now-state.cameraWindowAt>=1000){state.cameraFps=state.cameraFrames*1000/(now-state.cameraWindowAt);state.cameraFrames=0;state.cameraWindowAt=now;updateRxUi();}
+  if(state.barcodeDetector){
+    try { state.decodeAttempts++; const codes=await state.barcodeDetector.detect(video); let any=false; for(const c of codes) any=ingest(c.rawValue)||any; if(any)return; } catch{}
+  }
+  if(!window.jsQR)return;
+  const canvas=$('#scanCanvas'), maxW=960, ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16; canvas.width=maxW; canvas.height=Math.max(540,Math.round(maxW*ratio));
+  const ctx=canvas.getContext('2d',{willReadFrequently:true}); ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  const parts=state.rx?.expectedParts||1;
+  let regions;
+  if(parts===2) regions=[[-.02,0,.54,1],[.48,0,.54,1]];
+  else if(parts>=3) regions=[[-.02,-.02,.54,.54],[.48,-.02,.54,.54],[-.02,.48,.54,.54],[.48,.48,.54,.54]];
+  else regions=[[0,0,1,1]];
+  let hit=false;
+  for(const r of regions){ const safe=[Math.max(0,r[0]),Math.max(0,r[1]),Math.min(1-r[0],r[2]),Math.min(1-r[1],r[3])]; const raw=jsQrDecodeRegion(ctx,canvas,safe); if(raw) hit=ingest(raw)||hit; }
+  if(!hit&&parts===1){ // a multi-QR stream may not decode as a whole; probe quadrants occasionally
+    if((state.cameraFrames%3)===0){ for(const r of [[0,0,.55,.55],[.45,0,.55,.55],[0,.45,.55,.55],[.45,.45,.55,.55]]){const raw=jsQrDecodeRegion(ctx,canvas,r);if(raw){ingest(raw);break;}} }
+  }
+  if(performance.now()-state.lastDecodeAt>2200) updateRxUi();
+}
+function scanLoop(token){
+  const video=$('#video');
+  const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return; if(video.readyState>=2)await decodeFrame(video); if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(()=>tick()); else setTimeout(tick,33);};
+  tick();
+}
+
+// ---------- Offline download ----------
+$('#offlineBtn').onclick=async()=>{
+  const btn=$('#offlineBtn'), old=btn.textContent; btn.textContent='Preparing…'; btn.disabled=true;
+  try{
+    const clone=document.documentElement.cloneNode(true);
+    // Offline copies always boot cleanly on Home, regardless of where Download was clicked.
+    clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    clone.querySelector('#homeView')?.classList.add('active');
+    clone.querySelector('#sender')?.classList.remove('active');
+    const sendStart=clone.querySelector('#sendStart'); if(sendStart) sendStart.style.display='grid';
+    clone.querySelector('#cameraGate')?.classList.remove('active');
+    const fileInput=clone.querySelector('#fileInput'); if(fileInput) fileInput.value='';
+    const textInput=clone.querySelector('#textInput'); if(textInput) { textInput.value=''; textInput.textContent=''; }
+    const textSend=clone.querySelector('#textSendBtn'); if(textSend) textSend.disabled=true;
+    const live=[...document.querySelectorAll('script[data-vendor]')]; const copies=[...clone.querySelectorAll('script[data-vendor]')];
+    for(let i=0;i<live.length;i++){
+      const src=live[i].src;
+      if(!src)continue;
+      const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text()});
+      copies[i].removeAttribute('src'); copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');
+    }
+    const html='<!doctype html>\n'+clone.outerHTML;
+    downloadBlob(new Blob([html],{type:'text/html'}),'AirGapper.html'); toast('Offline copy downloaded');
+  }catch(e){ toast(e.message||'Could not build offline copy'); }
+  finally{btn.textContent=old;btn.disabled=false;}
+};
+
+window.addEventListener('resize',()=>{if(state.transfer)renderSendFrame()});
+})();
+</script>
+</body>
+</html>
