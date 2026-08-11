@@ -66,6 +66,10 @@ const metric = (id: string) => document.getElementById(id)!;
 // updateStats() are derived from this, so the window and the divisor can't
 // drift apart.
 const STATS_WINDOW_MS = 2000;
+const STATS_TICK_MS = 250;
+const LIVE_RATE_WINDOW_MS = 1000;
+// With a 250 ms UI tick, this guarantees a dead stream reads 0 within 1 s.
+const LIVE_RATE_ZERO_MS = 750;
 
 let stream: MediaStream | null = null;
 let decoder: LTDecoder | null = null;
@@ -88,6 +92,10 @@ const pool = new DecodeWorkerPool(
 );
 const captureTimes: number[] = [];
 const decodeTimes: number[] = [];
+// Timestamps of frames that contributed new fountain information. Unlike the
+// transfer-wide average, this window drops immediately when optical lock is
+// lost, so the speed display works as aiming feedback.
+const usefulFrameTimes: number[] = [];
 
 // Run-level totals for the diagnostics report (npm run diagnostics). The
 // captureTimes/decodeTimes windows above are pruned for the live fps metrics
@@ -106,11 +114,11 @@ let zeroRegionMs = 0; // transfer time spent with tracking fully collapsed
 let degradedMs = 0; // transfer time spent below the expected code count
 let minSeq = Infinity; // seq span ≈ what the sender emitted while we watched;
 let maxSeq = -1; //        framesNew / span is the fraction we actually caught
-// One sample per stats tick (500 ms): elapsed s, framesNew, solved blocks,
+// One sample per stats tick (250 ms): elapsed s, framesNew, solved blocks,
 // live regions, capture fps, decode fps. The shape of a bad run — where it
 // stalled, when tracking collapsed — is invisible in run totals.
 const timeline: number[][] = [];
-const TIMELINE_MAX_SAMPLES = 1200; // 10 min — past that the tail tells nothing new
+const TIMELINE_MAX_SAMPLES = 2400; // 10 min — past that the tail tells nothing new
 
 // Per-code crop tracking. The scene is static (both devices propped), so once
 // a code has been seen its next frames are decoded from a padded crop around
@@ -393,6 +401,7 @@ function stopReceiver(): void {
   cropRotate = 0;
   captureTimes.length = 0;
   decodeTimes.length = 0;
+  usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
   fullScans = 0;
@@ -503,7 +512,7 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   scheduleFrame(captureGen);
-  statsTimer = setInterval(updateStats, 500);
+  statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
 
@@ -713,6 +722,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const identity = streamIdentity(header);
   if (!decoder || streamKey !== identity) {
     decoder = new LTDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
+    usefulFrameTimes.length = 0;
     streamKey = identity;
     reportSessionId = header.sessionId;
     startTs = performance.now();
@@ -721,7 +731,11 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   minSeq = Math.min(minSeq, header.seq);
   maxSeq = Math.max(maxSeq, header.seq);
+  const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
+  if (decoder.framesNew - decoder.framesRedundant > usefulBefore) {
+    usefulFrameTimes.push(performance.now());
+  }
   updateProgressEstimate();
 
   if (decoder.isComplete) {
@@ -759,18 +773,17 @@ function updateProgressEstimate() {
   etaLabel.textContent = eta;
 }
 
-/** Payload KB/s, discounting the frames the fountain spends on overhead. That
- *  discount is k-dependent — assuming a flat 1.18 over-reported small transfers
- *  by up to 2×, because a short stream needs far more redundancy per block.
- *  Redundant re-sweep arrivals are excluded outright: they move no payload. */
-function goodputKbs(elapsed: number): number {
-  if (!decoder) return 0;
-  return (
-    ((decoder.framesNew - decoder.framesRedundant) * decoder.blockLen) /
-    expectedFountainOverhead(decoder.k) /
-    1024 /
-    Math.max(0.1, elapsed)
-  );
+/** One-second information goodput for live aiming feedback. The completed
+ * transfer still reports verified original bytes divided by total time. */
+function liveGoodputKbs(now: number): number {
+  while (usefulFrameTimes.length && usefulFrameTimes[0]! <= now - LIVE_RATE_WINDOW_MS) {
+    usefulFrameTimes.shift();
+  }
+  if (!decoder || !usefulFrameTimes.length) return 0;
+  if (now - usefulFrameTimes[usefulFrameTimes.length - 1]! >= LIVE_RATE_ZERO_MS) return 0;
+  const observedSeconds = Math.min(1, Math.max(0.25, (now - startTs) / 1000));
+  return usefulFrameTimes.length * decoder.blockLen /
+    expectedFountainOverhead(decoder.k) / 1024 / observedSeconds;
 }
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
@@ -1067,14 +1080,14 @@ function updateStats() {
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
-  // time doesn't pollute it. 500 ms granularity matches this timer. Decode-
+  // time doesn't pollute it. Tick granularity matches this timer. Decode-
   // proven regions are the signal, matching the scheduler: a probationary
   // sighting region must not mask a missing code (degradedMs) or hide a full
   // tracking collapse (zeroRegionMs). The timeline carries BOTH counts so
   // phantom churn stays visible next to the real one.
   const liveNow = decodedCount();
-  if (liveNow === 0) zeroRegionMs += 500;
-  if (liveNow < expectedRegions) degradedMs += 500;
+  if (liveNow === 0) zeroRegionMs += STATS_TICK_MS;
+  if (liveNow < expectedRegions) degradedMs += STATS_TICK_MS;
   if (timeline.length < TIMELINE_MAX_SAMPLES) {
     timeline.push([
       Number(elapsed.toFixed(1)),
@@ -1088,7 +1101,7 @@ function updateStats() {
     ]);
   }
   updateProgressEstimate();
-  const liveRate = goodputKbs(elapsed);
+  const liveRate = liveGoodputKbs(now);
   metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;
   const quality = liveRate < 5
     ? ["Weak signal", "speed-low"]
