@@ -85,7 +85,7 @@ try{
     if(!await d.initAirWorker(1))throw new Error('AirGrid worker unavailable');
     async function decode(bitmap){return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>reject(new Error('decode timeout')),15000),worker=d.state.scanWorker;
-      worker.onmessage=event=>{clearTimeout(timer);const x=event.data;resolve({groups:x.groups,visible:x.visibleTiles,ok:x.okTiles,known:x.known?x.knownOk/x.known:0,knownShape:x.known?x.knownShapeOk/x.known:0,knownColor:x.known?x.knownColorOk/x.known:0,shape:x.visibleTiles?x.shapeConf/x.visibleTiles:0,color:x.visibleTiles?x.colorConf/x.visibleTiles:0,qrCandidates:x.qrCandidates,bootstrapQrs:x.bootstrapQrs,pages:x.pages,crcFailures:x.crcFailures,corrections:x.corrections,transition:x.transition,groupDiagnostics:x.groupDiagnostics,tileDiagnostics:x.tileDiagnostics,ms:x.ms,error:x.error||''});};
+      worker.onmessage=event=>{clearTimeout(timer);const x=event.data;resolve({groups:x.groups,visible:x.visibleTiles,ok:x.okTiles,known:x.known?x.knownOk/x.known:0,knownShape:x.known?x.knownShapeOk/x.known:0,knownColor:x.known?x.knownColorOk/x.known:0,shape:x.visibleTiles?x.shapeConf/x.visibleTiles:0,color:x.visibleTiles?x.colorConf/x.visibleTiles:0,qrCandidates:x.qrCandidates,bootstrapQrs:x.bootstrapQrs,pages:x.pages,crcFailures:x.crcFailures,corrections:x.corrections,transition:x.transition,groupDiagnostics:x.groupDiagnostics,tileDiagnostics:x.tileDiagnostics,canvasMs:x.canvasMs,zxingMs:x.zxingMs,payloadMs:Math.max(0,(x.ms||0)-(x.canvasMs||0)-(x.zxingMs||0)),ms:x.ms,error:x.error||''});};
       worker.onerror=event=>{clearTimeout(timer);reject(new Error(event.message));};
       worker.postMessage({id:1,bitmap,target:1920},[bitmap]);
     });}
@@ -95,6 +95,11 @@ try{
       if(moire){ctx.globalCompositeOperation='multiply';ctx.fillStyle='#777';ctx.globalAlpha=moire;for(let x=1;x<width;x+=3)ctx.fillRect(x,0,1,height);ctx.globalAlpha=moire*.45;for(let y=2;y<height;y+=5)ctx.fillRect(0,y,width,1);ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';}
       return{name,size:[width,height],...await decode(await createImageBitmap(canvas))};
     }
+    async function portraitSynthetic(){
+      const opticalScale=d.air.senderScale||1,contentW=source.width*opticalScale,contentH=source.height*opticalScale,width=Math.ceil(contentW+80),height=Math.ceil(width*16/9),canvas=document.createElement('canvas');
+      canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.fillStyle=d.air.darkOptical?'#000':'#fff';ctx.fillRect(0,0,width,height);ctx.drawImage(source,(width-contentW)/2,(height-contentH)/2,contentW,contentH);
+      return{name:'portrait',size:[width,height],...await decode(await createImageBitmap(canvas))};
+    }
     async function inspectFixture(name){
       const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=name.includes('profile3')?await decode(await createImageBitmap(image)):null;
       return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps})),production:current};
@@ -102,7 +107,8 @@ try{
     return{build:d.build,profile:d.air.profile,darkOptical:d.air.darkOptical,senderModes,synthetic:[
       await synthetic('clean',{margin:20}),
       await synthetic('phone-a',{scale:.8,blur:.5,rotation:3,moire:.035,margin:60}),
-      await synthetic('phone-b',{scale:.7,blur:.65,rotation:-3,moire:.05,margin:60})
+      await synthetic('phone-b',{scale:.7,blur:.65,rotation:-3,moire:.05,margin:60}),
+      await portraitSynthetic()
     ],fixtures:[${fixtures.map(name=>`await inspectFixture('${name}')`).join(',')}],selfTests:d.runSelfTests()};
   })()`;
   const result=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
