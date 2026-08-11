@@ -68,7 +68,12 @@ const receiverLinkQr = document.getElementById("receiver-link-qr") as HTMLCanvas
 function renderReceiverLink(): void {
   const qr = QRCode.create(receiverLink.href, { errorCorrectionLevel: "L" });
   const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
-  const scale = 3;
+  // Keep every module an integer number of physical display pixels. A fixed
+  // 111 CSS-pixel box resampled this raster on most DPRs, producing gray
+  // module edges; choose the nearest whole-module size instead.
+  const dpr = window.devicePixelRatio || 1;
+  const targetCssSize = 111;
+  const scale = Math.max(1, Math.round((targetCssSize * dpr) / raster.size));
   const source = document.createElement("canvas");
   source.width = source.height = raster.size;
   source.getContext("2d")!.putImageData(
@@ -77,6 +82,8 @@ function renderReceiverLink(): void {
     0,
   );
   receiverLinkQr.width = receiverLinkQr.height = raster.size * scale;
+  receiverLinkQr.style.width = receiverLinkQr.style.height = `${receiverLinkQr.width / dpr}px`;
+  receiverLinkQr.style.imageRendering = "pixelated";
   const ctx = receiverLinkQr.getContext("2d")!;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(source, 0, 0, receiverLinkQr.width, receiverLinkQr.height);
@@ -453,19 +460,15 @@ async function startStream(revealStage = false) {
     staging.height = totalH;
     canvas.width = totalW * scale;
     canvas.height = totalH * scale;
-    // Fill the whole budget: the canvas raster stays at an integer module
-    // scale and CSS stretches the remainder SMOOTHLY — never `pixelated`.
-    // Nearest-neighbor makes adjacent modules differ by a whole device pixel,
-    // and at grid densities (scale 2, ~2 camera px/module) that jitter is the
-    // difference between 4/4 codes decoding and 0/4, measured with zxing on
-    // simulated captures. Uniform slight blur beats jagged module widths.
-    // Stretched by one factor on both axes so the modules stay square.
+    // Present the backing raster at exactly its device-pixel size. Do not
+    // stretch it to consume the last few CSS pixels in the budget: fractional
+    // resampling turns black/white module boundaries gray. The unused strip is
+    // always smaller than one module-scale step on the limiting axis.
     const cssNativeW = (totalW * scale) / dpr;
     const cssNativeH = (totalH * scale) / dpr;
-    const stretch = Math.max(1, Math.min(budgetW / cssNativeW, budgetH / cssNativeH));
-    canvas.style.width = `${cssNativeW * stretch}px`;
-    canvas.style.height = `${cssNativeH * stretch}px`;
-    canvas.style.imageRendering = "auto";
+    canvas.style.width = `${cssNativeW}px`;
+    canvas.style.height = `${cssNativeH}px`;
+    canvas.style.imageRendering = "pixelated";
     // Both canvases were just cleared by the dimension writes — repaint every
     // cell the stream has shown so far, so a resize never blanks the grid.
     const stagingCtx = staging.getContext("2d")!;

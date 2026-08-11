@@ -89,7 +89,7 @@ a { color: inherit; }
   text-decoration: none;
 }
 .receiver-link:hover { background: #00000003; }
-.receiver-handoff canvas { display: block; width: 111px; height: 111px; flex: none; }
+.receiver-handoff canvas { display: block; flex: none; image-rendering: pixelated; }
 .receiver-handoff-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
 .receiver-handoff-copy strong { font-size: 15px; letter-spacing: -.015em; }
 .receiver-handoff-copy small { color: var(--muted); font-size: 12px; }
@@ -165,7 +165,7 @@ a { color: inherit; }
   padding: 0;
 }
 .stage[hidden] { display: none; }
-.stage canvas { display: block; max-width: 100%; cursor: pointer; }
+.stage canvas { display: block; max-width: 100%; cursor: pointer; image-rendering: pixelated; }
 .status-line { min-height: 18px; margin-top: 9px; text-align: center; }
 .status-line.error { color: var(--bad); font-weight: 650; }
 .footer-hint { text-align: center; }
