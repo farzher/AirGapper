@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v25: smooth capture and cached QR geometry -->
+<!-- AirGapper v26: responsive tracking for portrait-locked rotation -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -130,7 +130,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v25</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v26</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -208,7 +208,7 @@
 (() => {
 'use strict';
 
-const BUILD='v25';
+const BUILD='v26';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -703,7 +703,7 @@ function updateOpticalTrack(p,det){
   if(!(t.w>.08&&t.w<1.45&&t.h>.08&&t.h<1.45))return;
   // Never average tracks from different orientations: that creates capture boxes
   // between the old and new grids when the phone is turned sideways.
-  if(prev?.confidence&&prev.rotation===rotation){const a=.28;t={x:prev.x*(1-a)+t.x*a,y:prev.y*(1-a)+t.y*a,w:prev.w*(1-a)+t.w*a,h:prev.h*(1-a)+t.h*a,confidence:Math.min(1,prev.confidence+.08),lastAt:t.lastAt,rotation};}
+  if(prev?.confidence&&prev.rotation===rotation){const a=.72;t={x:prev.x*(1-a)+t.x*a,y:prev.y*(1-a)+t.y*a,w:prev.w*(1-a)+t.w*a,h:prev.h*(1-a)+t.h*a,confidence:Math.min(1,prev.confidence+.08),lastAt:t.lastAt,rotation};}
   state.opticalRotation=rotation;state.opticalTrack=t;drawDebugOverlay();
 }
 function ingest(raw,det=null){
@@ -836,10 +836,10 @@ let canvas=null,ctx=null;
 function ensureCanvas(w,h){if(!canvas){canvas=new OffscreenCanvas(w,h);ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});}if(canvas.width!==w)canvas.width=w;if(canvas.height!==h)canvas.height=h;}
 function boxFor(r,w,h){const p=r?.position;if(!p)return null;const pts=[p.topLeft,p.topRight,p.bottomRight,p.bottomLeft].filter(Boolean);if(!pts.length)return null;let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;for(const q of pts){x1=Math.min(x1,q.x);y1=Math.min(y1,q.y);x2=Math.max(x2,q.x);y2=Math.max(y2,q.y);}return{x:x1/w,y:y1/h,w:(x2-x1)/w,h:(y2-y1)/h};}
 self.onmessage=async e=>{
-  const {id,bitmap,target=680,mode='tile',slot=-1,meta=null}=e.data,t0=performance.now(),detections=[];
+  const {id,bitmap,target=680,mode='tile',slot=-1,meta=null,rotate=false}=e.data,t0=performance.now(),detections=[];
   try{
     const ratio=bitmap.height/bitmap.width,w=Math.max(300,Math.min(target,bitmap.width)),h=Math.max(240,Math.round(w*ratio));ensureCanvas(w,h);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(bitmap,0,0,bitmap.width,bitmap.height,0,0,w,h);bitmap.close();
-    const img=ctx.getImageData(0,0,w,h),full=mode==='full',results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:false,tryRotate:false,tryInvert:false,tryDownscale:full,tryDenoise:false});
+    const img=ctx.getImageData(0,0,w,h),full=mode==='full',results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:false,tryRotate:rotate,tryInvert:false,tryDownscale:full,tryDenoise:false});
     for(const r of results||[]){if(r?.text)detections.push({text:r.text,bbox:boxFor(r,w,h),version:r.version||'',orientation:r.orientation||0});}
     self.postMessage({id,detections,ms:performance.now()-t0,mode,slot,meta,engine:'ZXing-C++ WASM · tracked tiles'});
   }catch(err){try{bitmap.close();}catch{}self.postMessage({id,detections:[],ms:performance.now()-t0,mode,slot,meta,error:String(err?.message||err),engine:'ZXing-C++ WASM · tracked tiles'});}
@@ -901,7 +901,7 @@ async function dispatchWorkerFrame(video,token){
       let count,index,mode,forceDefault=false;
       if(fresh){count=knownQrs;index=state.scanRegionCursor++%count;mode='tile';}
       else{const candidate=search[state.scanRegionCursor++%search.length];count=candidate.count;index=candidate.index;mode='search';forceDefault=true;}
-      const reg=cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
+      const reg=cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm,rotate:((fresh?state.opticalTrack?.rotation:inferredOpticalRotation())||0)%180!==0},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
     }
     await Promise.all(jobs);
   }catch(e){console.warn('AirGapper frame capture:',e);}finally{state.scanCaptureBusy=false;}
