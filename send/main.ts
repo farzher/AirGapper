@@ -116,9 +116,14 @@ function updateFilePicker(): void {
   if (armed && selectedFile) {
     const names = document.createElement("span");
     const total = document.createElement("span");
-    names.textContent = selectedFile.files.map((file) => file.name).join(" · ");
+    names.textContent = selectedFile.files.length > 1
+      ? `${selectedFile.files.length} files`
+      : selectedFile.files[0]!.name;
     names.title = names.textContent;
-    total.textContent = formatBytes(selectedFile.files.reduce((sum, file) => sum + file.size, 0));
+    const originalTotal = selectedFile.files.reduce((sum, file) => sum + file.size, 0);
+    total.textContent = formatBytes(
+      selectedFile.compression === "gzip" ? selectedFile.transmittedSize : originalTotal,
+    );
     selectionSummary.replaceChildren(names, total);
   } else selectionSummary.replaceChildren();
 }
@@ -151,6 +156,7 @@ function setStageFullscreen(on: boolean): void {
   if (on === document.body.classList.contains("qr-full")) return;
   if (on) scrollBeforeFullscreen = window.scrollY;
   document.body.classList.toggle("qr-full", on);
+  if (!on && document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
   resizeDisplay?.();
   // Entering: the stage IS the page now, start at its top. Leaving: put the
   // user back on the exact spot they expanded from.
@@ -158,7 +164,12 @@ function setStageFullscreen(on: boolean): void {
 }
 
 stage.addEventListener("click", () => {
-  setStageFullscreen(!document.body.classList.contains("qr-full"));
+  const entering = !document.body.classList.contains("qr-full");
+  setStageFullscreen(entering);
+  if (entering) void document.documentElement.requestFullscreen?.().catch(() => undefined);
+});
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement) setStageFullscreen(false);
 });
 stageBottom.addEventListener("click", (event) => event.stopPropagation());
 window.addEventListener("keydown", (event) => {
@@ -209,6 +220,7 @@ async function startSelection(
       transmittedSize: packed.transmittedSize,
       files,
     };
+    updateFilePicker();
     await startStream(true);
   } catch (error) {
     showError(error instanceof Error ? error.message : String(error));
@@ -239,7 +251,9 @@ async function selectFiles(fileList: FileList | readonly File[]): Promise<void> 
     return {
       name: `${files.length}-files.zip`,
       size: total,
-      packed: await packFile(`${files.length}-files.zip`, "application/zip", archive),
+      // Our ZIP entries are stored, not deflated, so unlike an uploaded ZIP
+      // the archive can still benefit substantially from container gzip.
+      packed: await packFile(`${files.length}-files.zip`, "application/zip", archive, true),
       files: files.map(({ name, size }) => ({ name, size })),
     };
   });
@@ -363,7 +377,6 @@ async function startStream(revealStage = false) {
   stage.hidden = false;
   if (sendStart) sendStart.hidden = true;
   showStreamPanels(true);
-  setStageFullscreen(true);
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;

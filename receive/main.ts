@@ -459,7 +459,7 @@ async function start() {
   video.srcObject = stream;
   await video.play().catch(() => undefined);
   syncPreviewAspect();
-  setStatus("Looking for QR codes…");
+  setStatus("");
 
   pool.resize(workerCount);
   void applyCameraExtras();

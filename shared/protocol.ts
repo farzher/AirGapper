@@ -167,6 +167,7 @@ export async function packFile(
   name: string,
   type: string,
   bytes: Uint8Array,
+  tryCompression = false,
 ): Promise<PackedOpticalFile> {
   if (bytes.length === 0) throw new Error("Choose a non-empty file.");
   if (bytes.length > MAX_FILE_BYTES) {
@@ -180,7 +181,7 @@ export async function packFile(
   }
 
   // Too small to be worth a gzip header, or a format gzip cannot help with.
-  const tryGzip = bytes.length >= 768 && !isPrecompressedType(type);
+  const tryGzip = bytes.length >= 768 && (tryCompression || !isPrecompressedType(type));
   const [sha256, compressed] = await Promise.all([
     digest(bytes),
     tryGzip ? gzipAsync(bytes) : Promise.resolve(undefined),
