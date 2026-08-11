@@ -107,7 +107,7 @@ a { color: inherit; }
 .selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
 .selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
-.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
+.send-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
 .send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
 .send-controls output { min-width: 100px; text-align: right; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }

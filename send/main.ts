@@ -37,9 +37,7 @@ import { requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
-// Zero quiet zones are intentional for the current compact-layout test.
 const HEADER_MARGIN = 0;
-const GRID_MARGIN = 0;
 const LOOKAHEAD = 3;
 // Every density uses the same portrait 3×4 frame. The Size control changes
 // only the bytes (and therefore QR version) in each of the twelve cells, so
@@ -99,8 +97,10 @@ function showStreamPanels(visible: boolean): void {
 
 const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
+const cfgMargin = document.getElementById("cfg-margin") as HTMLInputElement;
 const fpsValue = document.getElementById("fps-value")!;
 const sizeValue = document.getElementById("size-value")!;
+const marginValue = document.getElementById("margin-value")!;
 
 let selectedFile: {
   name: string;
@@ -360,8 +360,10 @@ async function main() {
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
     sizeValue.textContent = `${formatBytes(bytes)} · ${GRID_CODES} QRs`;
+    const margin = Number(cfgMargin.value);
+    marginValue.textContent = `${margin} module${margin === 1 ? "" : "s"}`;
   };
-  for (const el of [cfgFps, cfgSize]) {
+  for (const el of [cfgFps, cfgSize, cfgMargin]) {
     el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => void startStream());
   }
@@ -391,6 +393,7 @@ async function startStream(revealStage = false) {
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);
   const sizeLevel = Number(cfgSize.value);
+  const gridMargin = Number(cfgMargin.value);
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
   // Fill one standard QR from 500 B through its 2,953 B maximum, then add
@@ -438,10 +441,11 @@ async function startStream(revealStage = false) {
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    // Symbols currently tile edge-to-edge for compact-layout testing.
-    const stride = modules + GRID_MARGIN;
-    const totalW = modules * gridCols + GRID_MARGIN * (gridCols + 1);
-    const totalH = modules * gridRows + GRID_MARGIN * (gridRows + 1);
+    // One shared quiet margin separates adjacent symbols; the same margin is
+    // retained around the outside of the grid.
+    const stride = modules + gridMargin;
+    const totalW = modules * gridCols + gridMargin * (gridCols + 1);
+    const totalH = modules * gridRows + gridMargin * (gridRows + 1);
     let budgetW: number;
     let budgetH: number;
     if (document.body.classList.contains("qr-full")) {
@@ -535,6 +539,7 @@ async function startStream(revealStage = false) {
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
               sizeLevel,
+              gridMargin,
             },
             qr: { version, modules },
             fountain: { k: encoder.k, blockLen },
@@ -543,7 +548,7 @@ async function startStream(revealStage = false) {
         }).catch(() => undefined);
       }
     }
-    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, gridMargin);
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
   };
 
@@ -635,8 +640,8 @@ async function startStream(revealStage = false) {
         nextAt = now + subInterval;
         break;
       }
-      const cell = modules + 2 * GRID_MARGIN;
-      const stride = modules + GRID_MARGIN;
+      const cell = modules + 2 * gridMargin;
+      const stride = modules + gridMargin;
       const cx = (cellCursor % gridCols) * stride;
       const cy = Math.floor(cellCursor / gridCols) * stride;
       cells[cellCursor] = img;
