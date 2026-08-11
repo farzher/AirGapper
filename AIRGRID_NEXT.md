@@ -42,6 +42,8 @@ The information header is exactly 128 bits:
 | CRC16-CCITT | 16 |
 | **Total** | **128** |
 
+In laboratory frames, flag bit 7 marks a sounder condition, bits 6–4 encode the pitch index (`2/3/4/5/6/8`), bits 3–1 encode the requested page-rate index (`Frozen/1/2/5/10/15/30`), and bit 0 is set. This lets an offline receiver aggregate an unsynchronized sender sweep without a network control channel.
+
 The first 128 bits are padded to twelve 11-bit words. Each word uses binary BCH/Hamming `(15,11)` encoding. The 180 coded bits are repeated twice, spatially permuted with multiplier 137 modulo 360, and followed by 24 alternating timing chips. The decoder combines both copies as soft values, corrects each BCH word, then requires magic, bounds, version, and CRC16. This 384-chip product construction is intentionally much stronger than payload protection.
 
 Fountain ESI is the deterministic 32-bit mix of session ID, 24-bit frame ID, and tile coordinates. It is not transmitted separately. A later production format must specify collision handling for transfers large enough to make a 32-bit ESI unsafe.
@@ -111,20 +113,20 @@ At 20 useful camera frames/s, 1 MiB/s requires 52,429 verified **unique** bytes/
 9. Deinterleave, min-sum decode, and CRC32-check.
 10. Cache accepted normalized quadrilaterals and track them on following frames; reacquire after tracking failure.
 
-Reported timing fields are capture, detector raster, fiducial detection, ROI raster, header, modulation, ECC, and total worker time.
+Reported timing fields are capture, detector raster, fiducial detection, ROI raster, header, modulation, ECC, and total worker time. The JavaScript laboratory bounds each frame to 32 full-resolution candidate ROIs and periodically rotates the candidate batch so dense fullscreen grids cover all screen positions without locking the phone on one frame. It reports both actually CRC-validated bytes and an explicitly labeled full-grid projection from the sampled tile success rate; only the former is measured work.
 
 ## Sounder metrics
 
-`?airgridLab=1` renders deterministic session/frame/tile patterns at selectable pitch, binary/M1/M2/M3 profile, and Frozen/1/2/5/10/15/30 page FPS. Receiver mode uses the camera and reports:
+`?airgridLab=1` renders deterministic session/frame/tile patterns at selectable pitch, binary/M1/M2/M3 profile, and Frozen/1/2/5/10/15/30 page FPS. The auto sender has a 24-condition quick sweep and a complete 168-condition sweep, holds each condition for a configurable dwell, uses a fullscreen physical-pixel grid, and alternates two pre-rendered pages on `requestAnimationFrame` boundaries. Receiver mode uses the camera and reports:
 
 - fiducials, quadrilateral candidates, complete/header-valid/payload-valid tiles;
 - symbol confusion, occupancy and color error;
 - raw BER and mutual information per block/chip;
-- verified unique bytes and estimated bytes/frame by ECC rate;
-- tile-local frame IDs (including mixed transition frames);
-- camera capture and worker stage timings.
+- CRC-valid sampled channel bytes/frame, unique validated symbol IDs, projected full-grid bytes/frame, and estimated bytes/frame by ECC rate;
+- tile-local frame IDs and measured mixed-transition-frame rate;
+- camera capture, worker utilization, and worker stage timings.
 
-Screen position is represented by tile coordinates in every result. Aggregate sweep/export UI, exposure telemetry, and automatic transition-rate aggregation remain to be implemented before hardware characterization.
+Screen position is represented by tile coordinates in every result. Results are aggregated by the condition encoded in each protected header, periodically persisted in local storage, and exportable as detailed JSON or summary CSV. The receiver should start before the independent sender sweep; it latches the last valid condition to account for acquisition failures. Exposure telemetry is limited to fields made available by `MediaStreamTrack.getSettings()`.
 
 ## Stage gates
 

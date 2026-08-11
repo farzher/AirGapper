@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v35a: AirGrid X1 acquisition/modulation laboratory -->
+<!-- AirGapper v35b: automated AirGrid X1 hardware sounder -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -140,8 +140,8 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v35a</span></div><div class="tag">Air-gapped file transfer</div></div>
-    <button class="ghost" id="offlineBtn">Download offline</button>
+    <div><div class="brand">AirGapper <span class="version">v35b</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><button class="ghost" id="labBtn">Hardware lab</button> <button class="ghost" id="offlineBtn">Download offline</button></div>
   </header>
 
   <main>
@@ -217,7 +217,7 @@
 
 if(new URLSearchParams(location.search).get('airgridLab')==='1')return;
 
-const BUILD='v35a';
+const BUILD='v35b';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $=s=>document.querySelector(s);
@@ -354,7 +354,7 @@ dz.addEventListener('drop',async e=>{const files=[...e.dataTransfer.files];if(fi
 const textInput=$('#textInput'),textSendBtn=$('#textSendBtn');textInput.addEventListener('input',()=>{textSendBtn.disabled=!textInput.value.trim();});textSendBtn.onclick=()=>{const text=textInput.value;if(text.trim())prepareTransfer(packText(text),'Text');};
 
 function showView(name){const prev=state.mode;state.mode=name;document.body.classList.toggle('receiving',name==='receive');$$('.view').forEach(v=>v.classList.remove('active'));$('#'+name+'View').classList.add('active');if(name!=='receive')stopCamera();if(name!=='send'&&prev==='send')resetSend();else if(name!=='send')stopSender();if(name==='receive'){prepareCamera();startCamera();}}
-$$('.mode').forEach(b=>b.onclick=()=>showView(b.dataset.mode));$$('.back').forEach(b=>b.onclick=()=>showView('home'));
+$$('.mode').forEach(b=>b.onclick=()=>showView(b.dataset.mode));$$('.back').forEach(b=>b.onclick=()=>showView('home'));$('#labBtn').onclick=()=>{location.search='airgridLab=1';};
 
 // ---------- Receive ----------
 function isIOS(){return/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);}

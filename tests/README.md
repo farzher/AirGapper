@@ -27,3 +27,5 @@ For a stable profile 3 diagnostic capture, use a sender showing **v34i**, start 
 `airgrid-next-benchmark.mjs` is deterministic, uses no QR library, and exercises the exact worker source created by `airgrid-x1.js`. It covers full grids, arbitrary one- and multiple-tile crops, perspective, rotation, mirror, blur, moiré, exposure/white-balance/channel mixing, mixed frame IDs, header and payload corruption, false positives, clean binary/M1/M2/M3 modulation, persistent tracking, BCH header recovery, soft LDPC reconstruction, and fountain reconstruction.
 
 The benchmark's BER, mutual information, verified bytes, and stage timings are synthetic regression measurements. They are not evidence of physical screen/camera capacity. Use `?airgridLab=1` for X1 sender/receiver hardware sounding; retain captures and exported measurements before selecting a production pitch or palette.
+
+See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sweep procedure, fixed-device controls, JSON/CSV exports, and acceptance gates.
