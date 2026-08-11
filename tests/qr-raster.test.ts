@@ -41,6 +41,7 @@ test("every offered layout gets an as-square-as-possible grid, taller first", ()
   assert.deepEqual(gridDims(4), { cols: 2, rows: 2 });
   assert.deepEqual(gridDims(6), { cols: 2, rows: 3 });
   assert.deepEqual(gridDims(9), { cols: 3, rows: 3 });
+  assert.deepEqual(gridDims(12), { cols: 3, rows: 4 });
 });
 
 test("a 2×2 grid tiles four matrices, each inside its own quiet zone", () => {
@@ -76,6 +77,14 @@ test("a 6-code grid fills two columns by three rows", () => {
   assert.equal(width, 2);
   assert.equal(height, 3);
   assert.deepEqual([...pixels], [BLACK, WHITE, BLACK, WHITE, BLACK, WHITE]);
+});
+
+test("a 12-code grid matches a portrait 3×4 camera frame", () => {
+  const matrices = Array.from({ length: 12 }, (_, i) => [i % 2]);
+  const { width, height, pixels } = rasterizeQrGrid(1, matrices, 0);
+  assert.equal(width, 3);
+  assert.equal(height, 4);
+  assert.deepEqual([...pixels], matrices.map(([value]) => value ? BLACK : WHITE));
 });
 
 test("a grid of one is exactly the plain raster", () => {

@@ -47,12 +47,12 @@ export interface QrGridRaster {
  *  the sender is typically a portrait phone screen, and a stack uses that
  *  height where a row would shrink every code to fit the narrow edge.
  *  The count must fill the rectangle exactly — 1 (1×1), 2 (1×2), 4 (2×2),
- *  6 (2×3), 9 (3×3)… — a part-empty grid would silently waste the channel. */
+ *  6 (2×3), 9 (3×3), 12 (3×4)… — a part-empty grid would silently waste the channel. */
 export function gridDims(count: number): { cols: number; rows: number } {
   const cols = Math.floor(Math.sqrt(count));
   const rows = Math.ceil(count / Math.max(1, cols));
   if (count < 1 || cols * rows !== count) {
-    throw new Error(`grid needs a count that fills its rows (1, 2, 4, 6, 9…), got ${count}`);
+    throw new Error(`grid needs a count that fills its rows (1, 2, 4, 6, 9, 12…), got ${count}`);
   }
   return { cols, rows };
 }

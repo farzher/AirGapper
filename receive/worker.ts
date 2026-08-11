@@ -84,7 +84,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     /** Crop origin within the capture, for mapping positions back. */
     ox?: number;
     oy?: number;
-    /** Full-frame scan (up to a 3×3 grid) vs a single-code crop. */
+    /** Full-frame scan (up to a 3×4 grid) vs a single-code crop. */
     full?: boolean;
     /** The region's last decoded quad, capture coordinates — tracked path. */
     quad?: DecimenQuad;
@@ -128,10 +128,10 @@ ctx.onmessage = async (e: MessageEvent) => {
 
     if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       // Full scans get returnErrors (sightings live there — error results
-      // COUNT against the symbol cap, hence the headroom above 9 codes) and a
+      // COUNT against the symbol cap, hence the headroom above 12 codes) and a
       // crop fallback stays in the cheapest configuration. tryHarder stays on
       // everywhere: real marginal captures are where it earns its keep.
-      const vec = zx.readFull(ptr, pw, ph, true, full ? 12 : 2, full);
+      const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
       for (let i = 0; i < vec.size(); i++) {
         const r = vec.get(i);
         if (r.valid && r.bytes.length > 0) {

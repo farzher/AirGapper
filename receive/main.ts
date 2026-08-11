@@ -175,7 +175,9 @@ const ACQUISITION_SCAN_MS = 100;
 // exist until the transfer ends.
 const EXPECTED_REGIONS_DECAY_MS = 10_000;
 const REGION_PAD = 0.35;
-const MAX_REGIONS = 9;
+// The densest sender layout is a portrait 3×4 grid. Keep one tracked region
+// for every cell so full acquisition can hand all twelve off to crop decoding.
+const MAX_REGIONS = 12;
 let lastFullScan = 0;
 let cropRotate = 0;
 let expectedRegions = 0;

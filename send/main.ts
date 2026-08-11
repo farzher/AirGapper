@@ -39,6 +39,10 @@ import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
+// Dense levels keep maximum-capacity standard QRs and add parallel cells.
+// Twelve fills a portrait 3×4 frame, matching the receiver camera's 4:3
+// sensor shape when the phone is held upright.
+const GRID_CODE_OPTIONS: readonly number[] = [1, 1, 1, 1, 1, 1, 2, 4, 6, 12];
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
@@ -345,7 +349,7 @@ async function main() {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    const codes = [1, 1, 1, 1, 1, 1, 2, 4, 6][level] ?? 1;
+    const codes = GRID_CODE_OPTIONS[level] ?? 1;
     sizeValue.textContent = `${formatBytes(bytes)} · ${codes} QR${codes === 1 ? "" : "s"}`;
   };
   for (const el of [cfgFps, cfgSize]) {
@@ -383,7 +387,7 @@ async function startStream(revealStage = false) {
   // Fill one standard QR from 500 B through its 2,953 B maximum, then add
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
-  const gridCodes = [1, 1, 1, 1, 1, 1, 2, 4, 6][sizeLevel] ?? 1;
+  const gridCodes = GRID_CODE_OPTIONS[sizeLevel] ?? 1;
   const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
