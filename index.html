@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v29: full-frame single-QR decoding -->
+<!-- AirGapper v30: measured latest-frame receiver pipeline -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -141,7 +141,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v29</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v30</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -218,7 +218,7 @@
 (() => {
 'use strict';
 
-const BUILD='v29';
+const BUILD='v30';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -250,6 +250,8 @@ const state = {
   scanHits:0, scanExpected:0, scanHitRate:0, symbolRate:0,
   sampledFrames:0, sampledWindowCount:0, sampledRate:0, decodeJobs:0, decodeJobWindow:0, decodeJobRate:0,
   qrSuccesses:0, failedQrAttempts:0, duplicateSymbols:0, uselessSymbols:0, usefulRecoveredBytes:0, verifiedBytes:0, verifiedMs:0,
+  uniqueWindow:0, duplicateWindow:0, uniqueRate:0, duplicateRate:0, captureMs:0, captureTimes:[], queueMs:0, canvasMs:0, zxingMs:0,
+  scanStartedAt:0, firstQrMs:0, trackingError:0, trackingLostAt:0, reacquireMs:0, longTaskCount:0, longTaskMs:0,
   cameraSkippedFrames:0, workerBusyWindowMs:0, workerUtil:0, metricsWindowAt:0,
   nativeDetectBusy:false, nativeDetectHits:0, scanDispatchMisses:0, scanDispatches:0, scanWorkerLimit:1, scanRegionCursor:0, nativeProbeAt:0, cameraWidth:0, cameraHeight:0,
   opticalTrack:null, opticalRotation:0, qrModules:0, debug:false, tileHits:[], tileAttempts:[], tileScores:[], tileLastScan:[], tilePickSeq:0, closeupUntil:0, lastRescueAt:0, lastOverlayAt:0,
@@ -260,6 +262,9 @@ function toast(msg) {
   const el=$('#toast'); el.textContent=msg; el.classList.add('show');
   clearTimeout(toast.t); toast.t=setTimeout(()=>el.classList.remove('show'),1700);
 }
+// Long tasks are measured rather than inferred from low camera FPS. They are
+// especially important on old phones where a single 100 ms stall loses frames.
+try{new PerformanceObserver(list=>{if(state.mode!=='receive')return;for(const e of list.getEntries()){state.longTaskCount++;state.longTaskMs+=e.duration;}}).observe({type:'longtask',buffered:true});}catch{}
 function humanBytes(n) {
   if(n<1024)return n+' B';
   if(n<1048576)return (n/1024).toFixed(n<10240?1:0)+' KB';
@@ -631,23 +636,28 @@ $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>flipCa
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraRequestedWidth=0;state.cameraRequestedHeight=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
   state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.rxIngressSamples=[];state.lastUiAt=0;state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.opticalRotation=0;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.tileScores=[];state.tileLastScan=[];state.tilePickSeq=0;state.closeupUntil=0;state.lastRescueAt=0;state.lastOverlayAt=0;
-  state.decodeMs=0;state.decodeSamples=0;state.decodeTimes=[];state.sampledFrames=0;state.sampledWindowCount=0;state.sampledRate=0;state.decodeJobs=0;state.decodeJobWindow=0;state.decodeJobRate=0;state.qrSuccesses=0;state.failedQrAttempts=0;state.duplicateSymbols=0;state.uselessSymbols=0;state.usefulRecoveredBytes=0;state.verifiedBytes=0;state.verifiedMs=0;state.cameraSkippedFrames=0;state.workerBusyWindowMs=0;state.workerUtil=0;state.metricsWindowAt=performance.now();
+  state.decodeMs=0;state.decodeSamples=0;state.decodeTimes=[];state.sampledFrames=0;state.sampledWindowCount=0;state.sampledRate=0;state.decodeJobs=0;state.decodeJobWindow=0;state.decodeJobRate=0;state.qrSuccesses=0;state.failedQrAttempts=0;state.duplicateSymbols=0;state.uselessSymbols=0;state.usefulRecoveredBytes=0;state.verifiedBytes=0;state.verifiedMs=0;
+  state.uniqueWindow=0;state.duplicateWindow=0;state.uniqueRate=0;state.duplicateRate=0;state.captureMs=0;state.captureTimes=[];state.queueMs=0;state.canvasMs=0;state.zxingMs=0;state.scanStartedAt=0;state.firstQrMs=0;state.trackingError=0;state.trackingLostAt=0;state.reacquireMs=0;state.longTaskCount=0;state.longTaskMs=0;
+  state.cameraSkippedFrames=0;state.workerBusyWindowMs=0;state.workerUtil=0;state.metricsWindowAt=performance.now();
   $('#progressFill').style.width='0%';$('#qualityFill').style.width='0%';$('#qualityFill').style.background='#f26c6c';$('#qualityText').textContent='Waiting for QR…';$('#progressText').textContent='0%';$('#rateText').textContent='— KB/s';$('#etaText').textContent='— ETA';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
 }
 function newRx(p){
   return{protocol:p.protocol,id:p.id,K:p.K,symbolBytes:p.symbolBytes,totalBytes:p.totalBytes,hash:p.hash,targetFps:p.fps,expectedQrs:p.qrs,moduleCount:state.qrModules||0,cdf:robustSolitonCDF(p.K),source:new Array(p.K),solved:0,equations:new Map(),adj:new Array(p.K),nextEq:1,seen:new Set(),minEsi:null,maxEsi:null,packets:0,done:false,startedAt:performance.now()};
 }
-function recordDecodeTiming(ms){
+function recordDecodeTiming(ms,detail={}){
   if(!Number.isFinite(ms))return;state.decodeMs=state.decodeSamples?state.decodeMs*.8+ms*.2:ms;state.decodeSamples++;state.decodeTimes.push(ms);if(state.decodeTimes.length>256)state.decodeTimes.shift();
+  for(const [key,value] of [['queueMs',detail.queueMs],['canvasMs',detail.canvasMs],['zxingMs',detail.zxingMs]])if(Number.isFinite(value))state[key]=state[key]?state[key]*.8+value*.2:value;
 }
+function recordCaptureTiming(ms){if(!Number.isFinite(ms))return;state.captureMs=state.captureMs?state.captureMs*.8+ms*.2:ms;state.captureTimes.push(ms);if(state.captureTimes.length>128)state.captureTimes.shift();}
 function decodePercentile(q){
   if(!state.decodeTimes.length)return 0;const a=state.decodeTimes.slice().sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.floor((a.length-1)*q))];
 }
 function rollMetrics(now=performance.now()){
   if(!state.metricsWindowAt)state.metricsWindowAt=now;const dt=now-state.metricsWindowAt;if(dt<1000)return;
   state.sampledRate=state.sampledWindowCount*1000/dt;state.decodeJobRate=state.decodeJobWindow*1000/dt;
+  state.uniqueRate=state.uniqueWindow*1000/dt;state.duplicateRate=state.duplicateWindow*1000/dt;
   state.workerUtil=state.scanWorkers.length?Math.min(1,state.workerBusyWindowMs/(dt*state.scanWorkers.length)):0;
-  state.sampledWindowCount=0;state.decodeJobWindow=0;state.workerBusyWindowMs=0;state.metricsWindowAt=now;
+  state.sampledWindowCount=0;state.decodeJobWindow=0;state.uniqueWindow=0;state.duplicateWindow=0;state.workerBusyWindowMs=0;state.metricsWindowAt=now;
 }
 function setStatus(text,kind=''){ $('#statusText').textContent=text;$('#statusDot').className='dot'+(kind?' '+kind:'');}
 function solveBlock(rx,index,data){
@@ -663,7 +673,7 @@ function solveBlock(rx,index,data){
   }
 }
 function addFountainPacket(rx,p){
-  if(rx.seen.has(p.esi)){state.duplicateSymbols++;return{fresh:false,useful:false};}rx.seen.add(p.esi);rx.packets++;
+  if(rx.seen.has(p.esi)){state.duplicateSymbols++;state.duplicateWindow++;return{fresh:false,useful:false};}rx.seen.add(p.esi);rx.packets++;state.uniqueWindow++;
   state.rxIngressSamples.push([performance.now(),p.data.length]);
   if(rx.minEsi===null||p.esi<rx.minEsi)rx.minEsi=p.esi;if(rx.maxEsi===null||p.esi>rx.maxEsi)rx.maxEsi=p.esi;
   const before=rx.solved,idxs=fountainIndices(rx.K,rx.id,p.esi,rx.cdf,rx.protocol),data=p.data.slice(),remaining=new Set();
@@ -703,30 +713,39 @@ function defaultOpticalTrack(rotation=inferredOpticalRotation()){
   if(a>aspect){const rw=aspect/a;return{x:(1-rw)/2,y:0,w:rw,h:1,confidence:0,lastAt:0,rotation};}
   const rh=a/aspect;return{x:0,y:(1-rh)/2,w:1,h:rh,confidence:0,lastAt:0,rotation};
 }
+function opticalTrackFromDetection(p,b,cw,ch,moduleCount,rotation){
+  const e=expectedQrRect(p.qrs,p.slot,moduleCount,rotation),bw=b.w*cw,bh=b.h*ch;if(bw<12||bh<12)return null;
+  const scale=((bw+bh)*.5)/e.w,cx=(b.x+b.w*.5)*cw,cy=(b.y+b.h*.5)*ch;
+  const t={x:(cx-(e.x+e.w*.5)*scale)/cw,y:(cy-(e.y+e.h*.5)*scale)/ch,w:e.vw*scale/cw,h:e.vh*scale/ch,confidence:1,lastAt:performance.now(),rotation};
+  return t.w>.08&&t.w<1.45&&t.h>.08&&t.h<1.45?t:null;
+}
 function updateOpticalTrack(p,det){
   if(!det?.bbox)return;const cw=$('#video').videoWidth||state.cameraWidth||0,ch=$('#video').videoHeight||state.cameraHeight||0;if(!cw||!ch)return;
   const modules=state.qrModules||0;if(modules&&state.rx)state.rx.moduleCount=modules;
-  const prev=state.opticalTrack,rotation=detectionRotation(det.orientation,prev?.rotation??state.opticalRotation??0),e=expectedQrRect(p.qrs,p.slot,state.qrModules,rotation),b=det.bbox;
-  const bw=b.w*cw,bh=b.h*ch;if(bw<12||bh<12)return;
+  const prev=state.opticalTrack,rotation=detectionRotation(det.orientation,prev?.rotation??state.opticalRotation??0),b=det.bbox,now=performance.now();
+  // Measure prediction residual before updating the track. A rising normalized
+  // error catches motion/rotation without inventing another lock heuristic.
+  if(prev?.confidence&&now-prev.lastAt<1200){const e=expectedQrRect(p.qrs,p.slot,modules,prev.rotation||0),pred={x:prev.x+(e.x/e.vw)*prev.w,y:prev.y+(e.y/e.vh)*prev.h,w:(e.w/e.vw)*prev.w,h:(e.h/e.vh)*prev.h},center=Math.hypot((b.x+b.w/2)-(pred.x+pred.w/2),(b.y+b.h/2)-(pred.y+pred.h/2)),size=Math.abs(Math.log(Math.max(.01,b.w)/Math.max(.01,pred.w)));const err=center+size*.15;state.trackingError=state.trackingError?state.trackingError*.75+err*.25:err;}
   // When one tile from a multi-QR frame fills the camera, the complete sender
   // grid lies outside the image and cannot be tracked. Stay in full-frame
   // close-up mode and consume that visible fountain stream at full speed.
-  if(p.qrs>1&&Math.max(b.w,b.h)>.42)state.closeupUntil=performance.now()+1800;
-  const scale=((bw+bh)*.5)/e.w,cx=(b.x+b.w*.5)*cw,cy=(b.y+b.h*.5)*ch;
-  let t={x:(cx-(e.x+e.w*.5)*scale)/cw,y:(cy-(e.y+e.h*.5)*scale)/ch,w:e.vw*scale/cw,h:e.vh*scale/ch,confidence:1,lastAt:performance.now(),rotation};
-  if(!(t.w>.08&&t.w<1.45&&t.h>.08&&t.h<1.45)){if(p.qrs>1)state.closeupUntil=performance.now()+1800;return;}
+  if(p.qrs>1&&Math.max(b.w,b.h)>.42)state.closeupUntil=now+1800;
+  let t=opticalTrackFromDetection(p,b,cw,ch,modules,rotation);
+  if(!t){if(p.qrs>1)state.closeupUntil=now+1800;return;}
   // Never average tracks from different orientations: that creates capture boxes
   // between the old and new grids when the phone is turned sideways.
   if(prev?.confidence&&prev.rotation===rotation){const a=.72;t={x:prev.x*(1-a)+t.x*a,y:prev.y*(1-a)+t.y*a,w:prev.w*(1-a)+t.w*a,h:prev.h*(1-a)+t.h*a,confidence:Math.min(1,prev.confidence+.08),lastAt:t.lastAt,rotation};}
+  if(state.trackingLostAt){state.reacquireMs=now-state.trackingLostAt;state.trackingLostAt=0;}
   state.opticalRotation=rotation;state.opticalTrack=t;drawDebugOverlay();
 }
 function ingest(raw,det=null){
   const p=parsePacket(raw);if(!p||p.K<1||p.symbolBytes<1||p.symbolBytes>MAX_SYMBOL_BYTES)return false;
+  const now=performance.now();if(!state.firstQrMs&&state.scanStartedAt)state.firstQrMs=now-state.scanStartedAt;
   if(det){det.raw=raw;const m=qrModulesForRaw(raw,det.version);if(m)state.qrModules=m;}
   let rx=state.rx;if(!rx||rx.protocol!==p.protocol||rx.id!==p.id||rx.K!==p.K||rx.symbolBytes!==p.symbolBytes){rx=state.rx=newRx(p);state.tileHits=new Array(p.qrs).fill(0);state.tileAttempts=new Array(p.qrs).fill(0);state.tileScores=new Array(p.qrs);state.tileLastScan=new Array(p.qrs).fill(0);state.tilePickSeq=0;}
   if(!sameBytes(rx.hash,p.hash)||rx.totalBytes!==p.totalBytes)return false;
   state.qrSuccesses++;if(det)updateOpticalTrack(p,det);
-  state.lastDecodeAt=performance.now();rx.targetFps=p.fps;rx.expectedQrs=p.qrs;if(state.qrModules)rx.moduleCount=state.qrModules;
+  state.lastDecodeAt=now;rx.targetFps=p.fps;rx.expectedQrs=p.qrs;if(state.qrModules)rx.moduleCount=state.qrModules;
   const result=addFountainPacket(rx,p);if(result.fresh)updateRxUi();if(rx.solved===rx.K&&!rx.done){rx.done=true;finishReceive();}return true;
 }
 function lossRate(rx){if(!rx||rx.minEsi===null||rx.maxEsi===null)return 0;const span=rx.maxEsi-rx.minEsi+1;return span>0?Math.max(0,(span-rx.seen.size)/span):0;}
@@ -753,8 +772,8 @@ function drawDebugOverlay(){
 function updateDebug(){
   const el=$('#debugPanel');if(!el||!state.debug)return;rollMetrics();const rx=state.rx,workers=state.scanWorkers.length,busy=state.scanWorkers.filter(x=>x.busy).length,total=state.scanDispatches+state.scanDispatchMisses,skip=total?Math.round(state.scanDispatchMisses/total*100):0,last=state.lastDecodeAt?Math.round(performance.now()-state.lastDecodeAt):0,track=state.opticalTrack;
   const focus=state.cameraSettings?.focusMode||'—',layout=rx?`${rx.expectedQrs} QR · ${rx.symbolBytes} B/QR · rot ${track?.rotation||0}°`:'acquiring',elapsed=rx?Math.max(1,performance.now()-rx.startedAt):0,usefulRate=state.verifiedBytes?state.verifiedBytes*1000/state.verifiedMs:elapsed?state.usefulRecoveredBytes*1000/elapsed:0;
-  const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95),fpsCap=state.cameraCaps?.frameRate,capText=fpsCap?`${Math.round(fpsCap.min)}–${Math.round(fpsCap.max)}`:'?';
-  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented\nrequested max ${state.cameraRequestedWidth||'?'}×${state.cameraRequestedHeight||'?'} @ ${Math.round(state.cameraRequestedFps||0)} · FPS cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames}\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
+  const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95),fpsCap=state.cameraCaps?.frameRate,capText=fpsCap?`${Math.round(fpsCap.min)}–${Math.round(fpsCap.max)}`:'?',trackAge=track?.lastAt?performance.now()-track.lastAt:0,dupPct=(state.uniqueRate+state.duplicateRate)?state.duplicateRate/(state.uniqueRate+state.duplicateRate)*100:0,scores=state.tileScores.map((v,i)=>`${i+1}:${Number.isFinite(v)?Math.round(v*100):'?'}`).join(' ');
+  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented\nrequested max ${state.cameraRequestedWidth||'?'}×${state.cameraRequestedHeight||'?'} @ ${Math.round(state.cameraRequestedFps||0)} · FPS cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames} · long tasks ${state.longTaskCount}/${Math.round(state.longTaskMs)} ms\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nunique ${state.uniqueRate.toFixed(1)} QR/s · duplicates ${dupPct.toFixed(0)}% · hit ${Math.round((state.scanHitRate||0)*100)}%\ncapture ${state.captureMs.toFixed(1)} ms · queue ${state.queueMs.toFixed(1)} ms · canvas ${state.canvasMs.toFixed(1)} ms\nZXing ${state.zxingMs.toFixed(1)} ms · total med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanRate(state.verifiedBytes*1000/state.verifiedMs)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\nfirst QR ${state.firstQrMs?Math.round(state.firstQrMs)+' ms':'—'} · reacquire ${state.reacquireMs?Math.round(state.reacquireMs)+' ms':'—'}\ntracking age ${trackAge?Math.round(trackAge)+' ms':'—'} · error ${(state.trackingError||0).toFixed(3)}\nregions ${scores||'searching'}\ndispatch skipped ${skip}% · last QR ${last} ms`;
   drawDebugOverlay();
 }
 function liveIngressRate(rx,now){
@@ -856,14 +875,15 @@ async function initScanWorkers(token){
 let canvas=null,ctx=null;
 function ensureCanvas(w,h){if(!canvas){canvas=new OffscreenCanvas(w,h);ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});}if(canvas.width!==w)canvas.width=w;if(canvas.height!==h)canvas.height=h;}
 function boxFor(r,w,h){const p=r?.position;if(!p)return null;const pts=[p.topLeft,p.topRight,p.bottomRight,p.bottomLeft].filter(Boolean);if(!pts.length)return null;let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;for(const q of pts){x1=Math.min(x1,q.x);y1=Math.min(y1,q.y);x2=Math.max(x2,q.x);y2=Math.max(y2,q.y);}return{x:x1/w,y:y1/h,w:(x2-x1)/w,h:(y2-y1)/h};}
+function angleFor(r){const p=r?.position,a=p?.topLeft,b=p?.topRight;if(!a||!b)return 0;return Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;}
 self.onmessage=async e=>{
-  const {id,bitmap,target=680,mode='tile',slot=-1,meta=null,rotate=false}=e.data,t0=performance.now(),detections=[];
+  const {id,bitmap,target=680,mode='tile',slot=-1,meta=null,rotate=false,capturedAt=0}=e.data,t0=performance.now(),detections=[],queueMs=capturedAt?Math.max(0,Date.now()-capturedAt):0;let canvasMs=0,zxingMs=0;
   try{
-    const ratio=bitmap.height/bitmap.width,w=Math.max(300,Math.min(target,bitmap.width)),h=Math.max(240,Math.round(w*ratio));ensureCanvas(w,h);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(bitmap,0,0,bitmap.width,bitmap.height,0,0,w,h);bitmap.close();
-    const img=ctx.getImageData(0,0,w,h),full=mode==='full',results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:false,tryRotate:rotate,tryInvert:false,tryDownscale:full,tryDenoise:false});
-    for(const r of results||[]){if(r?.text)detections.push({text:r.text,bbox:boxFor(r,w,h),version:r.version||'',orientation:r.orientation||0});}
-    self.postMessage({id,detections,ms:performance.now()-t0,mode,slot,meta,engine:'ZXing-C++ WASM · tracked tiles'});
-  }catch(err){try{bitmap.close();}catch{}self.postMessage({id,detections:[],ms:performance.now()-t0,mode,slot,meta,error:String(err?.message||err),engine:'ZXing-C++ WASM · tracked tiles'});}
+    const ratio=bitmap.height/bitmap.width,w=Math.max(300,Math.min(target,bitmap.width)),h=Math.max(240,Math.round(w*ratio)),c0=performance.now();ensureCanvas(w,h);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(bitmap,0,0,bitmap.width,bitmap.height,0,0,w,h);bitmap.close();
+    const img=ctx.getImageData(0,0,w,h);canvasMs=performance.now()-c0;const full=mode==='full',z0=performance.now(),results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:false,tryRotate:rotate,tryInvert:false,tryDownscale:full,tryDenoise:false});zxingMs=performance.now()-z0;
+    for(const r of results||[]){if(r?.text)detections.push({text:r.text,bbox:boxFor(r,w,h),version:r.version||'',orientation:angleFor(r)});}
+    self.postMessage({id,detections,ms:performance.now()-t0,queueMs,canvasMs,zxingMs,mode,slot,meta,engine:'ZXing-C++ WASM · latest frame'});
+  }catch(err){try{bitmap.close();}catch{}self.postMessage({id,detections:[],ms:performance.now()-t0,queueMs,canvasMs,zxingMs,mode,slot,meta,error:String(err?.message||err),engine:'ZXing-C++ WASM · latest frame'});}
 };`;
     state.scanWorkerUrl=URL.createObjectURL(new Blob([zxingSource,'\n',readerPrelude,'\n',logic],{type:'text/javascript'}));
     // More decoders can starve camera delivery on older phones. Keep one core
@@ -873,7 +893,7 @@ self.onmessage=async e=>{
       const worker=new Worker(state.scanWorkerUrl),slotObj={worker,busy:false};
       worker.onmessage=e=>{
         if(slotObj.startedAt)state.workerBusyWindowMs+=performance.now()-slotObj.startedAt;slotObj.startedAt=0;slotObj.busy=false;if(token!==state.scanToken||state.mode!=='receive')return;const d=e.data;state.scanEngine=d.engine||'WASM';
-        recordDecodeTiming(d.ms);
+        recordDecodeTiming(d.ms,d);
         if(d.error){state.wasmFailures++;if(state.wasmFailures>=4){console.warn('AirGapper WASM scanner unavailable, falling back:',d.error);stopScanWorkers();state.scanEngine='jsQR fallback';legacyScanLoop(token);return;}}else state.wasmFailures=0;
         const detections=d.detections||[];let hits=0;
         for(const det of detections){let bbox=det.bbox;if(bbox&&d.meta){bbox={x:d.meta.x+bbox.x*d.meta.w,y:d.meta.y+bbox.y*d.meta.h,w:bbox.w*d.meta.w,h:bbox.h*d.meta.h};}if(ingest(det.text,{bbox,version:det.version,orientation:det.orientation,source:d.mode}))hits++;}
@@ -925,6 +945,7 @@ async function dispatchWorkerFrame(video,token){
     if(!fresh&&state.barcodeDetector&&!state.nativeDetectBusy&&now-state.nativeProbeAt>600){state.nativeProbeAt=now;state.nativeDetectBusy=true;state.barcodeDetector.detect(video).then(codes=>{for(const c of codes||[])if(c?.rawValue)ingest(c.rawValue,nativeDetectionMeta(c,video));}).catch(()=>{}).finally(()=>state.nativeDetectBusy=false);}
     const jobs=[],search=[],picked=new Set();
     if(!fresh){
+      if(state.opticalTrack?.confidence&&now-state.opticalTrack.lastAt>=850&&!state.trackingLostAt)state.trackingLostAt=now;
       // Forget visibility preferences after tracking is lost. The next lock
       // quickly samples every slot before selecting the newly visible ones.
       state.tileScores.fill(undefined);state.tileLastScan.fill(0);state.tilePickSeq=0;
@@ -939,7 +960,8 @@ async function dispatchWorkerFrame(video,token){
       if(fresh){count=knownQrs;index=chooseTrackedTile(count,now,picked);picked.add(index);mode='tile';}
       else if(!fullView&&state.scanRegionCursor%8!==0){const candidate=search[state.scanRegionCursor++%search.length];count=candidate.count;index=candidate.index;mode='search';forceDefault=true;}
       else{state.scanRegionCursor++;count=1;index=0;mode='search';fullView=true;}
-      const reg=fullView?cameraQrRegion(video,1,0,true):cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm,rotate:((fresh?state.opticalTrack?.rotation:inferredOpticalRotation())||0)%180!==0},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
+      if(fullView)mode='full';
+      const reg=fullView?cameraQrRegion(video,1,0,true):cameraQrRegion(video,count,index,forceDefault),captureStarted=performance.now();slot.busy=true;slot.startedAt=captureStarted;jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{const capturedPerf=performance.now(),capturedAt=Date.now();recordCaptureTiming(capturedPerf-captureStarted);if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm,rotate:((fresh?state.opticalTrack?.rotation:inferredOpticalRotation())||0)%180!==0,capturedAt},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
     }
     await Promise.all(jobs);
   }catch(e){console.warn('AirGapper frame capture:',e);}finally{state.scanCaptureBusy=false;}
@@ -961,9 +983,35 @@ function legacyScanLoop(token){
   const video=$('#video');const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return;if(video.readyState>=2)await decodeFrameLegacy(video);if(token===state.scanToken&&state.mode==='receive')setTimeout(tick,0);};tick();
 }
 async function startScanPipeline(token){
-  const threaded=await initScanWorkers(token);if(token!==state.scanToken)return;
+  state.scanStartedAt=performance.now();const threaded=await initScanWorkers(token);if(token!==state.scanToken)return;
   if(threaded){state.scanEngine='ZXing-C++ WASM';threadedScanLoop(token);}else{state.scanEngine='jsQR fallback';legacyScanLoop(token);}
 }
+
+// Deterministic browser-side tests for the two correctness-critical pieces of
+// the hot path. Run from DevTools with AirGapperDiagnostics.runSelfTests(), or
+// add ?airgapperTest=1. They require no camera or network.
+function runSelfTests(){
+  const failures=[],assert=(ok,msg)=>{if(!ok)failures.push(msg);},near=(a,b)=>Math.abs(a-b)<1e-6;
+  for(const count of QR_COUNTS)for(const rotation of [0,90,180,270]){
+    const seen=[];for(let slot=0;slot<count;slot++){
+      const e=expectedQrRect(count,slot,177,rotation),scale=.45,truth={x:.07,y:.11,w:e.vw*scale/1920,h:e.vh*scale/1080},bbox={x:truth.x+e.x/e.vw*truth.w,y:truth.y+e.y/e.vh*truth.h,w:e.w/e.vw*truth.w,h:e.h/e.vh*truth.h},got=opticalTrackFromDetection({qrs:count,slot},bbox,1920,1080,177,rotation);
+      assert(got&&near(got.x,truth.x)&&near(got.y,truth.y)&&near(got.w,truth.w)&&near(got.h,truth.h),`coordinate inverse ${count}/${slot}/${rotation}`);
+      assert(e.x>=0&&e.y>=0&&e.x+e.w<=e.vw+1e-6&&e.y+e.h<=e.vh+1e-6,`layout bounds ${count}/${slot}/${rotation}`);seen.push(e);
+    }
+    for(let a=0;a<seen.length;a++)for(let b=a+1;b<seen.length;b++){const A=seen[a],B=seen[b],overlap=Math.min(A.x+A.w,B.x+B.w)-Math.max(A.x,B.x)>1e-6&&Math.min(A.y+A.h,B.y+B.h)-Math.max(A.y,B.y)>1e-6;assert(!overlap,`layout overlap ${count}/${rotation}`);}
+  }
+  function fec(protocol){
+    const K=31,size=47,id=0x1234abcd,cdf=robustSolitonCDF(K),sources=Array.from({length:K},(_,i)=>Uint8Array.from({length:size},(_,j)=>(i*73+j*29)&255)),rx={source:new Array(K),solved:0,equations:new Map(),adj:new Array(K),nextEq:1};
+    function solve(index,data){const queue=[[index,data]];while(queue.length){const [idx,block]=queue.shift();if(rx.source[idx])continue;rx.source[idx]=block.slice();rx.solved++;for(const eqId of rx.adj[idx]||[]){const eq=rx.equations.get(eqId);if(!eq||!eq.idxs.has(idx))continue;eq.idxs.delete(idx);xorInto(eq.data,block);if(!eq.idxs.size)rx.equations.delete(eqId);else if(eq.idxs.size===1){rx.equations.delete(eqId);queue.push([eq.idxs.values().next().value,eq.data]);}}}}
+    for(let esi=0;esi<12000&&rx.solved<K;esi++){
+      if(mix32(esi^0x51f15e)%100<55)continue;const idxs=fountainIndices(K,id,esi,cdf,protocol),data=new Uint8Array(size);for(const i of idxs)xorInto(data,sources[i]);const left=new Set();for(const i of idxs){if(rx.source[i])xorInto(data,rx.source[i]);else left.add(i);}if(left.size===1)solve(left.values().next().value,data);else if(left.size>1){const n=rx.nextEq++,eq={idxs:left,data};rx.equations.set(n,eq);for(const i of left)(rx.adj[i]||(rx.adj[i]=[])).push(n);}
+    }
+    assert(rx.solved===K,`protocol ${protocol} heavy-loss reconstruction`);for(let i=0;i<K;i++)assert(sameBytes(rx.source[i],sources[i]),`protocol ${protocol} block ${i}`);
+  }
+  fec(1);fec(2);const result={ok:!failures.length,failures,tests:QR_COUNTS.reduce((n,c)=>n+c*4,0)+4+2};console[result.ok?'info':'error']('AirGapper self-tests',result);return result;
+}
+window.AirGapperDiagnostics={build:BUILD,runSelfTests};
+if(new URLSearchParams(location.search).get('airgapperTest')==='1')setTimeout(()=>{const r=runSelfTests();toast(r.ok?'Self-tests passed':`${r.failures.length} self-tests failed`);},0);
 
 function bytesToBase64(bytes){let out='';const step=0x8000;for(let i=0;i<bytes.length;i+=step)out+=String.fromCharCode(...bytes.subarray(i,Math.min(bytes.length,i+step)));return btoa(out);}
 async function fetchWasmBase64(url){const r=await fetch(url,{cache:'force-cache'});if(!r.ok)throw new Error('Could not download WASM');return bytesToBase64(new Uint8Array(await r.arrayBuffer()));}
