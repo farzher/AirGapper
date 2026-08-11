@@ -37,7 +37,9 @@ import { requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
-const MARGIN = 4; // quiet-zone modules
+// Zero quiet zones are intentional for the current compact-layout test.
+const HEADER_MARGIN = 0;
+const GRID_MARGIN = 0;
 const LOOKAHEAD = 3;
 // Every density uses the same portrait 3×4 frame. The Size control changes
 // only the bytes (and therefore QR version) in each of the twelve cells, so
@@ -68,7 +70,7 @@ function renderReceiverLink(): void {
   const receiverUrl = receiverLinkQr.dataset.receiverUrl;
   if (!receiverUrl) return;
   const qr = QRCode.create(receiverUrl, { errorCorrectionLevel: "L" });
-  const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
+  const raster = rasterizeQr(qr.modules.size, qr.modules.data, HEADER_MARGIN);
   // Keep every module an integer number of physical display pixels. Size the
   // handoff code like a small logo while choosing the nearest whole-module
   // size, avoiding gray edges from browser resampling.
@@ -436,11 +438,10 @@ async function startStream(revealStage = false) {
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    // Adjacent symbols share one four-module quiet zone. Giving each cell a
-    // separate quiet zone produced an unnecessary eight-module gutter.
-    const stride = modules + MARGIN;
-    const totalW = modules * gridCols + MARGIN * (gridCols + 1);
-    const totalH = modules * gridRows + MARGIN * (gridRows + 1);
+    // Symbols currently tile edge-to-edge for compact-layout testing.
+    const stride = modules + GRID_MARGIN;
+    const totalW = modules * gridCols + GRID_MARGIN * (gridCols + 1);
+    const totalH = modules * gridRows + GRID_MARGIN * (gridRows + 1);
     let budgetW: number;
     let budgetH: number;
     if (document.body.classList.contains("qr-full")) {
@@ -542,7 +543,7 @@ async function startStream(revealStage = false) {
         }).catch(() => undefined);
       }
     }
-    const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
   };
 
@@ -634,8 +635,8 @@ async function startStream(revealStage = false) {
         nextAt = now + subInterval;
         break;
       }
-      const cell = modules + 2 * MARGIN;
-      const stride = modules + MARGIN;
+      const cell = modules + 2 * GRID_MARGIN;
+      const stride = modules + GRID_MARGIN;
       const cx = (cellCursor % gridCols) * stride;
       const cy = Math.floor(cellCursor / gridCols) * stride;
       cells[cellCursor] = img;
