@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 const args=process.argv.slice(2),videoArg=args.find(x=>!x.startsWith('--'));
 if(!videoArg){
-  console.error('Usage: node tests/airgrid-video-benchmark.mjs <phone-video.webm> [--sample-fps=5] [--pipeline=i420|canvas] [--detector=768] [--output=dir]');
+  console.error('Usage: node tests/airgrid-video-benchmark.mjs <phone-video.webm> [--sample-fps=5] [--pipeline=i420|canvas] [--detector=768] [--roi-budget=32] [--max-seconds=0] [--output=dir]');
   process.exit(2);
 }
 const option=(name,fallback)=>args.find(x=>x.startsWith(`--${name}=`))?.slice(name.length+3)??fallback;
-const videoPath=resolve(videoArg),sampleFps=Math.max(.5,Math.min(30,+option('sample-fps',5)||5)),pipeline=option('pipeline','i420'),detector=Math.max(480,Math.min(900,+option('detector',768)||768));
+const videoPath=resolve(videoArg),sampleFps=Math.max(.5,Math.min(30,+option('sample-fps',5)||5)),pipeline=option('pipeline','i420'),detector=Math.max(480,Math.min(900,+option('detector',768)||768)),roiBudget=Math.max(1,Math.min(128,+option('roi-budget',32)||32)),maxSeconds=Math.max(0,+option('max-seconds',0)||0);
 if(!existsSync(videoPath))throw new Error(`Video not found: ${videoPath}`);
 if(!['i420','canvas'].includes(pipeline))throw new Error(`Unsupported pipeline: ${pipeline}`);
 const testsDir=dirname(fileURLToPath(import.meta.url)),root=resolve(testsDir,'..'),stem=basename(videoPath,extname(videoPath));
@@ -77,37 +77,36 @@ try{
   cdp=await Cdp.connect(target.webSocketDebuggerUrl);
   await cdp.send('Runtime.enable');
   await sleep(750);
-  const config=JSON.stringify({sampleFps,pipeline,detector});
+  const config=JSON.stringify({sampleFps,pipeline,detector,roiBudget,maxSeconds});
   const expression=String.raw`(async()=>{
     const config=${config},wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
     for(let i=0;i<100&&!window.AirGridX1;i++)await wait(50);
     if(!window.AirGridX1)throw new Error('AirGridX1 did not load');
     const video=document.createElement('video');video.muted=true;video.playsInline=true;video.preload='auto';video.src='/video';document.body.append(video);
     await new Promise((resolve,reject)=>{video.onloadedmetadata=resolve;video.onerror=()=>reject(new Error('Video metadata failed to load'));});
-    const seek=async time=>{const target=Math.max(0,Math.min(video.duration-.001,time));if(video.readyState>=2&&Math.abs(video.currentTime-target)<.0005)return;await new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve();},fail=()=>{cleanup();reject(new Error('Video seek failed at '+target));},cleanup=()=>{video.removeEventListener('seeked',done);video.removeEventListener('error',fail);};video.addEventListener('seeked',done);video.addEventListener('error',fail);video.currentTime=target;});};
     const worker=AirGridX1.createWorker(),PITCHES=[2,3,4,5,6,8],FPS=[0,1,2,5,10,15,30],PROFILES=['binary','M1','M2','M3'];
     const conditionFor=result=>{const h=result.tiles?.[0]?.header;if(!h||(h.flags&0x80)===0)return null;const profile=PROFILES[h.modulation],pitch=PITCHES[(h.flags>>>4)&7],fps=FPS[(h.flags>>>1)&7];return profile&&pitch&&fps!==undefined?{key:profile+'-p'+pitch+'-f'+fps,profile,pitch,fps}:null;};
     const conditions={},frames=[],saved=new Set(),timingSums={capture:0,detectorRaster:0,fiducialDetection:0,roiRaster:0,header:0,modulation:0,ecc:0,total:0};let latched='',unattributed=0,totalComplete=0,totalPayload=0,totalErrors=0,totalBits=0;
-    const saveStill=async(label,time)=>{if(saved.has(label)||saved.size>=18)return;saved.add(label);const canvas=new OffscreenCanvas(video.videoWidth,video.videoHeight),ctx=canvas.getContext('2d',{alpha:false});ctx.drawImage(video,0,0);const blob=await canvas.convertToBlob({type:'image/png'}),name=String(saved.size).padStart(2,'0')+'-'+label.replace(/[^a-zA-Z0-9_.-]/g,'_')+'-'+time.toFixed(3).replace('.','_')+'s.png';await fetch('/capture/'+encodeURIComponent(name),{method:'POST',body:blob});};
-    const count=Math.max(1,Math.floor((video.duration-.001)*config.sampleFps)+1),wallStart=performance.now();
-    for(let i=0;i<count;i++){
-      const time=Math.min(video.duration-.001,i/config.sampleFps);await seek(time);if(i===0)await saveStill('first-frame',time);
-      let source,sourceKind='ImageBitmap',captureStart=performance.now();
-      if(typeof VideoFrame==='function')try{source=new VideoFrame(video,{timestamp:Math.round(time*1000000)});sourceKind='VideoFrame';}catch{}
-      if(!source)source=await createImageBitmap(video);
-      const captureMs=performance.now()-captureStart,decodeStart=performance.now();let result;
-      try{const response=await AirGridX1.request(worker,'decode',{bitmap:source,options:{captureMs,detectorLongSide:config.detector,detectorPipeline:config.pipeline,track:true}},[source]);result=response.result;}catch(error){frames.push({index:i,time,error:String(error)});continue;}
-      const condition=conditionFor(result);if(condition){latched=condition.key;if(!saved.has('acquired-'+condition.key))await saveStill('acquired-'+condition.key,time);}const key=condition?.key||latched;
-      if(!key){unattributed++;if(result.completeTiles===0&&i===Math.floor(count/4))await saveStill('unattributed-miss',time);}else{
+    const saveStill=async(label,time,picture)=>{if(saved.has(label)||saved.size>=18)return;saved.add(label);const canvas=new OffscreenCanvas(video.videoWidth,video.videoHeight),ctx=canvas.getContext('2d',{alpha:false});ctx.drawImage(picture,0,0);const blob=await canvas.convertToBlob({type:'image/png'}),name=String(saved.size).padStart(2,'0')+'-'+label.replace(/[^a-zA-Z0-9_.-]/g,'_')+'-'+time.toFixed(3).replace('.','_')+'s.png';await fetch('/capture/'+encodeURIComponent(name),{method:'POST',body:blob});};
+    const count=config.maxSeconds?Math.max(1,Math.floor(config.maxSeconds*config.sampleFps)):Infinity,wallStart=performance.now(),queue=[],waiters=[];let producerDone=false,nextTarget=0,produced=0;
+    const push=item=>{const waiter=waiters.shift();waiter?waiter(item):queue.push(item);},finishProducer=()=>{if(producerDone)return;producerDone=true;video.pause();while(waiters.length)waiters.shift()(null);},take=()=>queue.length?Promise.resolve(queue.shift()):producerDone?Promise.resolve(null):new Promise(resolve=>waiters.push(resolve));
+    const captureFrame=async(_now,meta)=>{try{while(meta.mediaTime+.001>=nextTarget&&produced<count){const captureStart=performance.now(),timestamp=Math.round(meta.mediaTime*1000000);let source,preview,sourceKind='ImageBitmap';if(typeof VideoFrame==='function')try{source=new VideoFrame(video,{timestamp});preview=new VideoFrame(video,{timestamp});sourceKind='VideoFrame';}catch{}if(!source){source=await createImageBitmap(video);preview=await createImageBitmap(video);}push({index:produced++,time:meta.mediaTime,targetTime:nextTarget,source,preview,sourceKind,captureMs:performance.now()-captureStart});nextTarget+=1/config.sampleFps;}if(produced>=count){finishProducer();return;}video.requestVideoFrameCallback(captureFrame);}catch(error){push({error:String(error)});finishProducer();}};
+    video.addEventListener('ended',finishProducer,{once:true});video.addEventListener('error',()=>{push({error:'Video playback failed'});finishProducer();},{once:true});video.requestVideoFrameCallback(captureFrame);video.play().catch(error=>{if(!producerDone){push({error:String(error)});finishProducer();}});
+    for(let item;(item=await take());){
+      if(item.error)throw new Error(item.error);const {index:i,time,targetTime,source,preview,sourceKind,captureMs}=item;if(i===0)await saveStill('first-frame',time,preview);
+      const decodeStart=performance.now();let result;
+      try{const response=await AirGridX1.request(worker,'decode',{bitmap:source,options:{captureMs,detectorLongSide:config.detector,detectorPipeline:config.pipeline,roiBudget:config.roiBudget,track:true}},[source]);result=response.result;}catch(error){preview.close();frames.push({index:i,time,error:String(error)});continue;}
+      const condition=conditionFor(result);if(condition){latched=condition.key;if(!saved.has('acquired-'+condition.key))await saveStill('acquired-'+condition.key,time,preview);}const key=condition?.key||latched;
+      if(!key){unattributed++;if(result.completeTiles===0&&i===Math.floor(count/4))await saveStill('unattributed-miss',time,preview);}else{
         const a=conditions[key]||(conditions[key]={key,profile:condition?.profile||key.split('-')[0],pitch:condition?.pitch||0,pageFps:condition?.fps??0,scanFrames:0,acquiredFrames:0,completeTiles:0,payloadOkTiles:0,rawErrors:0,rawBits:0,validatedBytes:0,timingSums:{capture:0,detectorRaster:0,fiducialDetection:0,roiRaster:0,header:0,modulation:0,ecc:0,total:0}});a.scanFrames++;if(result.completeTiles)a.acquiredFrames++;a.completeTiles+=result.completeTiles;a.payloadOkTiles+=result.payloadOk;a.rawErrors+=result.metrics.rawErrors;a.rawBits+=result.metrics.rawBits;a.validatedBytes+=result.metrics.verifiedUniqueBytes;for(const k of Object.keys(a.timingSums))a.timingSums[k]+=result.timings[k]||0;
       }
-      if(result.completeTiles&&!result.payloadOk)await saveStill('first-payload-failure',time);if(result.payloadOk)await saveStill('first-payload-success',time);
+      if(result.completeTiles&&!result.payloadOk)await saveStill('first-payload-failure',time,preview);if(result.payloadOk)await saveStill('first-payload-success',time,preview);
       totalComplete+=result.completeTiles;totalPayload+=result.payloadOk;totalErrors+=result.metrics.rawErrors;totalBits+=result.metrics.rawBits;for(const k of Object.keys(timingSums))timingSums[k]+=result.timings[k]||0;
-      frames.push({index:i,time,sourceKind,condition:condition?.key||null,attributedCondition:key||null,detectorPipeline:result.detectorPipeline,detectorFallback:result.detectorFallback,sourceFormat:result.sourceFormat,detectorSize:result.detectorSize,fiducials:result.fiducials,candidates:result.candidates,roiCandidates:result.roiCandidates,completeTiles:result.completeTiles,payloadOk:result.payloadOk,rawBer:result.metrics.rawBer,validatedBytes:result.metrics.verifiedUniqueBytes,timings:result.timings,wallDecodeMs:performance.now()-decodeStart,tiles:result.tiles.map(tile=>({x:tile.header.tileX,y:tile.header.tileY,frame:tile.header.frame,flags:tile.header.flags,profile:tile.profile,payloadOk:tile.payloadOk,rawErrors:tile.rawErrors,rawBits:tile.rawBits}))});
+      frames.push({index:i,time,targetTime,sourceKind,condition:condition?.key||null,attributedCondition:key||null,detectorPipeline:result.detectorPipeline,detectorFallback:result.detectorFallback,sourceFormat:result.sourceFormat,detectorSize:result.detectorSize,fiducials:result.fiducials,candidates:result.candidates,roiCandidates:result.roiCandidates,completeTiles:result.completeTiles,payloadOk:result.payloadOk,rawBer:result.metrics.rawBer,validatedBytes:result.metrics.verifiedUniqueBytes,timings:result.timings,wallDecodeMs:performance.now()-decodeStart,tiles:result.tiles.map(tile=>({x:tile.header.tileX,y:tile.header.tileY,frame:tile.header.frame,flags:tile.header.flags,profile:tile.profile,payloadOk:tile.payloadOk,rawErrors:tile.rawErrors,rawBits:tile.rawBits}))});preview.close();
     }
     worker.terminate();
     for(const a of Object.values(conditions)){const n=Math.max(1,a.scanFrames);a.metrics={acquisitionRate:a.acquiredFrames/n,completeTilesPerFrame:a.completeTiles/n,payloadOkTilesPerFrame:a.payloadOkTiles/n,rawBer:a.rawBits?a.rawErrors/a.rawBits:0,validatedBytesPerFrame:a.validatedBytes/n,averageTimings:Object.fromEntries(Object.entries(a.timingSums).map(([k,v])=>[k,v/n]))};}
-    return{format:'AirGrid X1 recorded camera replay',schema:1,workerBuild:AirGridX1.build,video:{duration:video.duration,width:video.videoWidth,height:video.videoHeight},config,sampledFrames:frames.length,unattributedFrames:unattributed,totalCompleteTiles:totalComplete,totalPayloadOkTiles:totalPayload,rawBer:totalBits?totalErrors/totalBits:0,averageTimings:Object.fromEntries(Object.entries(timingSums).map(([k,v])=>[k,v/Math.max(1,frames.length)])),wallMs:performance.now()-wallStart,conditions,frames,stills:[...saved]};
+    return{format:'AirGrid X1 recorded camera replay',schema:1,workerBuild:AirGridX1.build,workerFormatVersion:AirGridX1.format.version,video:{duration:video.duration,width:video.videoWidth,height:video.videoHeight},config,sampledFrames:frames.length,unattributedFrames:unattributed,totalCompleteTiles:totalComplete,totalPayloadOkTiles:totalPayload,rawBer:totalBits?totalErrors/totalBits:0,averageTimings:Object.fromEntries(Object.entries(timingSums).map(([k,v])=>[k,v/Math.max(1,frames.length)])),wallMs:performance.now()-wallStart,conditions,frames,stills:[...saved]};
   })()`;
   const evaluated=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
   if(evaluated.exceptionDetails)throw new Error(evaluated.exceptionDetails.exception?.description||evaluated.exceptionDetails.text);

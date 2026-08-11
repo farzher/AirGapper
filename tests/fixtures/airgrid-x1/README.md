@@ -252,3 +252,45 @@ Across the mixed raster run, useful FPS rose from v35i's 9.14 to 10.19 and weigh
 The report measured 3,364 CRC-valid sounder bytes (17.99 B/attributed scan) and projected 62.33 full-grid B/frame in aggregate. The per-raster projections above are sparse sounder estimates, not unique file throughput, and remain far below the 52,429 B/frame capacity gate.
 
 **Decision:** no Canvas detector size meets both speed and acquisition requirements. v35k fixes the detector at 768 and tests the planned architectural change: `MediaStreamTrackProcessor` transfers native camera `VideoFrame` objects, and the worker copies/downsamples native I420 or NV12 planes without a Canvas detector raster. The same frame still supplies full-resolution color ROIs, and unsupported formats report an explicit Canvas fallback. A deterministic native-I420 pitch-2 grid retains at least 20 complete and 15 CRC-valid tiles. If phone-native YUV does not materially beat the 38.5 ms Canvas raster while preserving acquisition, stop detector micro-optimization and reassess the browser receiver architecture. This report does not justify X2 or file transfer.
+
+## `phone-v35l-quick-a.json` and `.webm`
+
+This is the first recorded X1 phone sweep and the first physical report from the direct native-YUV build. The sanitized JSON identifies **v35l**, started at `2026-08-11T19:38:51.148Z`, and contains no persistent camera identifiers. The VP9 WebM is the original 1080x1920, 30 FPS, 29.397-second camera recording (40,308,101 bytes; SHA-256 `e849ae54f836c6488586b7996a3e4824ed83d63149c5e2aee02846fa3bf5a7a4`). The nominal 40-second capture ended after 29.7 seconds; the complete useful sender sweep is present.
+
+### Native phone path
+
+All 360 live scans used `i420-d768`, source format I420, with no fallback. The recorder ran concurrently, so these are architecture and channel measurements rather than final unrecorded speed acceptance.
+
+| Metric | v35j Canvas 768 | v35l native I420 768 |
+|---|---:|---:|
+| Detector raster | 38.45 ms | 11.18 ms |
+| Fiducial/candidate | 15.04 ms | 22.84 ms |
+| Header | 4.49 ms | 5.46 ms |
+| Total worker | 65.75 ms | 50.46 ms |
+| Useful scans/s | mixed-run 10.19 overall | 12.11 |
+| Acquired scans | 3/105 | 10/360 |
+| Complete / CRC-valid tiles | 38 / 14 | 43 / 8 |
+
+The native detector architecture succeeded: raster cost fell 70.9% and total worker cost fell 23.3% versus the v35j Canvas-768 variant. It reached the edge of the 50 ms worker gate, but recorder contention and camera delivery limited end-to-end scans to 12.1 FPS. There were 195 initial unattributed scans, and only four conditions were identified live.
+
+The channel result is unambiguous. M1 pitch 4 at 5 FPS passed 8/10 complete tiles at 11.43% BER. Its active-dot position was correct 99.33% of the time, while color was exact only 70.75%; color separation, not geometry, is now the M1 payload limit. All 33 complete binary pitch-3/4 tiles failed CRC at roughly 27–36% BER. Binary's dense occupancy remains rejected, and no pitch-2 or usable pitch-3 channel was demonstrated.
+
+### v35m immutable replay optimization
+
+`phone-v35l-quick-a-replay-v35m.json` samples the original recording at 10 FPS through the exact v35m worker. Replay first exposed that the old broad component test admitted hundreds of payload/header holes as marker candidates. True phone marker components cluster near square aspect and the designed 0.816 ring fill. v35m rejects components whose existing aspect/fill/contrast quality score exceeds 0.4.
+
+At the same five-sample/s replay settings, v35l baseline versus v35m was:
+
+| Replay metric | v35l | v35m |
+|---|---:|---:|
+| Conditions observed | 3 | 7 |
+| Complete tiles | 9 | 73 |
+| CRC-valid tiles | 4 | 18 |
+| Fiducial/candidate time | 9.17 ms | 4.74 ms |
+| Total worker time | 16.83 ms | 15.65 ms |
+
+The committed 10 FPS v35m replay processes 280 deterministic target samples over the first 28 seconds, recovers 152 complete and 29 CRC-valid tiles, and averages 4.60 ms fiducial / 15.84 ms total on the benchmark computer. Desktop replay timings are not phone-speed measurements. The replay benchmark now streams the WebM once instead of repeatedly seeking its uncued MediaRecorder VP9 stream, reducing this fixture's run from more than ten minutes to its 29-second natural duration.
+
+The live M1 matrix provides a sender-format improvement too. Legacy labels red/green/blue/yellow as 00/01/10/11, making frequent red-to-yellow and green-to-blue confusions cost two bits. Exhaustively scoring the 24 label permutations selects red/blue/yellow/green for labels 00/01/10/11 and reduces projected hard color-bit error from 22.46% to 15.24%. v35m advances the X1 header version to 2 for this map while decoding version 1 with the legacy map, so this recording remains a valid acquisition/demodulation fixture. The projected gain is not physical proof of the new sender map.
+
+**Decision:** retain direct I420, the 768 detector, M1, and the measured marker-quality filter. Obtain one recorded v35m quick test to validate the filter and version-2 color map, then use an unrecorded run for the 20 useful FPS acceptance gate. In parallel, use the recording to improve M1 color demodulation or test a lower-state color alphabet. Changing optical symbols or pitch requires a new recording; decoder-only changes do not.
