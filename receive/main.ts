@@ -940,7 +940,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     }
     const actions = document.createElement("div");
     actions.className = "note-actions";
-    actions.append(download);
+    actions.append(download, restartButton("Home"));
     result.append(actions);
   } catch (error) {
     sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
@@ -1015,7 +1015,7 @@ function showSnippet(text: string) {
       copy.textContent = "Copy failed";
     }
   });
-  actions.append(copy);
+  actions.append(copy, restartButton("Home"));
 
   result.replaceChildren(body, actions);
 }
