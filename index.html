@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v18: resilient fountain repair and balanced high-bandwidth capture -->
+<!-- AirGapper v19: strict high-frame-rate camera negotiation -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -126,7 +126,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v18</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v19</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -202,7 +202,7 @@
 (() => {
 'use strict';
 
-const BUILD='v18';
+const BUILD='v19';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -553,22 +553,34 @@ function cameraErrorText(e){if(!window.isSecureContext)return'Camera needs HTTPS
 const MAX_CAMERA_FPS=120,MAX_CAMERA_WIDTH=3840,MAX_CAMERA_HEIGHT=2160;
 function cameraTargets(caps={}){
   const capFps=Number(caps.frameRate?.max)||MAX_CAMERA_FPS,capW=Number(caps.width?.max)||MAX_CAMERA_WIDTH,capH=Number(caps.height?.max)||MAX_CAMERA_HEIGHT;
-  if(state.cameraMode==='detail')return{fps:Math.min(30,capFps),w:Math.min(MAX_CAMERA_WIDTH,capW),h:Math.min(MAX_CAMERA_HEIGHT,capH)};
+  if(state.cameraMode==='detail')return{fps:Math.min(60,capFps),w:Math.min(MAX_CAMERA_WIDTH,capW),h:Math.min(MAX_CAMERA_HEIGHT,capH)};
   if(state.cameraMode==='fps')return{fps:Math.min(MAX_CAMERA_FPS,capFps),w:Math.min(1280,capW),h:Math.min(720,capH)};
   // 1080p/60 is normally a much better QR throughput point than either a
   // browser-default 640p stream or 4K frames that overwhelm an older phone.
   return{fps:Math.min(60,capFps),w:Math.min(1920,capW),h:Math.min(1080,capH)};
 }
+function videoConstraints(t,{strictFps=false,strictSize=false}={}){
+  return{facingMode:{ideal:state.facing},width:strictSize?{exact:t.w}:{ideal:t.w},height:strictSize?{exact:t.h}:{ideal:t.h},aspectRatio:{ideal:16/9},frameRate:strictFps?{min:t.fps,ideal:t.fps,max:t.fps}:{ideal:t.fps,max:t.fps}};
+}
 async function requestCamera(){
-  const t=cameraTargets(),video={facingMode:{ideal:state.facing},width:{ideal:t.w},height:{ideal:t.h},aspectRatio:{ideal:16/9},frameRate:{ideal:t.fps,max:t.fps}};
-  try{return await navigator.mediaDevices.getUserMedia({video,audio:false});}
-  catch(e){if(e?.name==='OverconstrainedError'||e?.name==='NotFoundError')return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}},audio:false});throw e;}
+  const t=cameraTargets(),attempts=[];
+  // `ideal: 60` is only a hint and Chrome commonly returns 30. First force the
+  // requested rate. Detail mode also tries the exact 4K60 tuple before allowing
+  // the browser to select a lower-resolution 60 FPS camera mode.
+  if(state.cameraMode==='detail')attempts.push(videoConstraints(t,{strictFps:true,strictSize:true}));
+  attempts.push(videoConstraints(t,{strictFps:true}),videoConstraints(t));
+  attempts.push({facingMode:{ideal:state.facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}});
+  let lastError;
+  for(const video of attempts){try{return await navigator.mediaDevices.getUserMedia({video,audio:false});}catch(e){lastError=e;if(e?.name!=='OverconstrainedError'&&e?.name!=='NotFoundError')throw e;}}
+  throw lastError||new Error('No supported camera profile');
 }
 async function tuneCameraTrack(track){
   const caps=track?.getCapabilities?.()||{},t=cameraTargets(caps);state.cameraRequestedFps=t.fps;state.cameraRequestedWidth=t.w;state.cameraRequestedHeight=t.h;
   if(!track?.applyConstraints)return caps;
-  try{await track.applyConstraints({width:{ideal:t.w},height:{ideal:t.h},aspectRatio:{ideal:16/9},frameRate:{ideal:t.fps,max:t.fps}});}
-  catch(e){console.warn('AirGapper high-bandwidth camera mode unavailable:',e?.message||e);}
+  // Keep 60 FPS mandatory while tuning resolution; otherwise applying a 4K
+  // preference can silently downgrade an already-working 1080p60 stream.
+  try{await track.applyConstraints(videoConstraints(t,{strictFps:true}));}
+  catch(e){console.warn('AirGapper strict high-frame-rate mode unavailable:',e?.message||e);}
   return track.getCapabilities?.()||caps;
 }
 async function startCamera(){
