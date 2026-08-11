@@ -1,0 +1,62 @@
+AirGapper
+Modified 2026-08-11 from Decimen Optical Transfer
+Source: https://github.com/farzher/AirGapper
+Licensed AGPL-3.0-or-later; distributed WITHOUT ANY WARRANTY.
+
+Decimen Optical Transfer
+Copyright (c) 2026 Evan Crawley (Bash Alarmist)
+
+Licensed under the GNU Affero General Public License, version 3 or (at your
+option) any later version (AGPL-3.0-or-later). See LICENSE for the full text.
+
+Releases up to and including v0.3.0 were published under the MIT License and
+remain available under those terms.
+
+-------------------------------------------------------------------------------
+
+Portions contributed by Steve Dakh
+
+Portions of this project were contributed by Steve Dakh under the MIT License
+(the project's license at the time of contribution) and are incorporated into
+this AGPL-licensed work under the MIT License's terms. These portions include
+parts of the frame protocol, transfer progress, and display/styling code,
+contributed in commits 5e3fc81, 728526e, ca0a349, 3ebaa47, 50189b6, and
+0e003cc (2026-07-31); the git history carries line-level attribution.
+
+  MIT License
+
+  Copyright (c) 2026 Steve Dakh
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+  IN THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+Vendored decimen-codec build (vendor/decimen-codec)
+
+vendor/decimen-codec contains the compiled decimen-codec decoder, licensed
+under AGPL-3.0-or-later like the rest of this project; its source is
+pinned as corresponding source at vendor/decimen-codec-source (upstream
+commit aa89be22977b031a1f1f49502e015368dbbbb148). It incorporates zxing-cpp
+(https://github.com/zxing-cpp/zxing-cpp) under the Apache License, Version 2.0.
+See vendor/decimen-codec/LICENSE.zxing-cpp and vendor/decimen-codec/NOTICE.md.
+
+The generated JavaScript glue includes Emscripten runtime output under the
+MIT license. Emscripten copyright and license information is available at
+https://emscripten.org and in the pinned, reproducible codec toolchain described
+in UPSTREAM.md.

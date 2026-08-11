@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>AirGapper — send</title>
+    <meta name="theme-color" content="#070a11" />
+    <link rel="canonical" href="%SITE_URL%send/" />
+    <link rel="icon" href="../icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="../shared/style.css" />
+  </head>
+  <body class="tool-page">
+    <header class="site-header">
+      <a class="brand" href="../">AirGapper</a>
+      <nav class="mode-nav" aria-label="Mode"><a href="../send/">Send</a><a href="../receive/">Receive</a></nav>
+    </header>
+    <main class="send-shell">
+      <section class="tool-intro">
+        <p class="eyebrow">Screen → camera</p>
+        <h1 id="tool-title">Send a file</h1>
+        <p>Select a file or enter text. The QR stream stays on this device.</p>
+      </section>
+
+      <div class="mode-picker" id="mode-picker" role="radiogroup" aria-label="What to send">
+        <label><input type="radio" name="send-mode" value="file" checked /><span>File</span></label>
+        <label><input type="radio" name="send-mode" value="snippet" /><span>Text</span></label>
+      </div>
+
+      <label class="file-picker" id="pane-file">
+        <span class="file-picker-button" id="file-picker-button">Select file</span>
+        <span class="file-picker-text" id="file-picker-label">Any file · up to %MAX_FILE_LABEL%</span>
+        <input id="cfg-file" type="file" />
+      </label>
+
+      <div class="note-composer" id="pane-snippet" hidden>
+        <label for="snippet-text" id="snippet-label">Text to send</label>
+        <textarea id="snippet-text" rows="7" placeholder="Paste or type text"></textarea>
+        <button id="send-snippet" type="button">Start text stream</button>
+      </div>
+
+      <div class="stage" id="stage" hidden><canvas id="qr" width="16" height="16"></canvas></div>
+      <div class="hint status-line" id="specs">Choose a file to begin</div>
+      <div class="hint footer-hint" id="footer-hint" hidden>Open Receive on the other device and turn up this screen's brightness.</div>
+
+      <details class="settings">
+        <summary>Transfer settings</summary>
+        <div class="row">
+          <label>tx fps<select id="cfg-fps">%TX_FPS_OPTIONS%</select></label>
+          <label>bytes / frame<select id="cfg-bytes">%FRAME_BYTES_OPTIONS%</select></label>
+          <label>error correction<select id="cfg-ecc"><option selected>L</option><option>M</option><option>Q</option><option>H</option></select></label>
+          <label>layout<select id="cfg-grid"><option value="1" selected>1 code</option><option value="2">2 codes</option><option value="4">4 codes</option><option value="6">6 codes</option></select></label>
+          <label>display size<input id="cfg-size" type="range" min="300" max="1200" step="50" value="900" /></label>
+        </div>
+        <dl class="stream-specs" id="stream-specs" hidden>
+          <div><dt>tx rate</dt><dd id="spec-fps">—</dd></div><div><dt>frame payload</dt><dd id="spec-frame">—</dd></div>
+          <div><dt>qr</dt><dd id="spec-qr">—</dd></div><div><dt>sending</dt><dd id="spec-payload">—</dd></div>
+          <div><dt>compression</dt><dd id="spec-compression">—</dd></div><div><dt>fountain blocks</dt><dd id="spec-k">—</dd></div>
+        </dl>
+      </details>
+    </main>
+    <footer class="site-footer">%LEGAL_BLOCK%<span>v%APP_VERSION% · build %BUILD_ID%</span></footer>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
