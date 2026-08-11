@@ -124,6 +124,9 @@ interface Region extends SymbolBox {
    *  probationary: they get crops, but they are not drawn, not counted
    *  toward the expected code total, and evicted first. */
   decoded: boolean;
+  /** Last successful byte decode. Failed detector sightings keep the crop
+   * alive but must not make the success outline flash. */
+  decodedSeen?: number;
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
   drift?: number;
@@ -190,6 +193,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       r.drift = 0.5 * (r.drift ?? 0) + 0.5 * Math.hypot(dx, dy);
       Object.assign(r, box, { seen: now });
       r.decoded = true;
+      r.decodedSeen = now;
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -206,7 +210,14 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     const ratio = Math.max(box.w, box.h) / Math.max(reference.w, reference.h);
     if (ratio < 0.5 || ratio > 2) return;
   }
-  regions.push({ ...box, seen: now, decoded, quad: info?.quad, dim: info?.modules });
+  regions.push({
+    ...box,
+    seen: now,
+    decoded,
+    decodedSeen: decoded ? now : undefined,
+    quad: info?.quad,
+    dim: info?.modules,
+  });
   if (regions.length > MAX_REGIONS) {
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
     regions.length = MAX_REGIONS;
@@ -232,6 +243,7 @@ video.addEventListener("resize", syncPreviewAspect);
 // brackets answer "is it reading THIS code right now", so they should die as
 // soon as the answer stops being yes, while the crop tracker keeps trying.
 const INDICATOR_FADE_MS = 700;
+const SIGHTING_FADE_MS = 450;
 const overlayCtx = overlay.getContext("2d")!;
 // One vivid color per code so a multi-code stream reads at a glance — "the
 // amber one isn't decoding" beats counting brackets. Assigned by layout order
@@ -277,28 +289,38 @@ function drawOverlay(now: number) {
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
   const offY = (ph - vh * scale) / 2;
-  overlayCtx.lineWidth = Math.max(2, 2 * dpr);
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
-  // Brackets are for codes this stream has actually read — probationary
-  // sighting regions stay invisible, or every stray failed quad would paint
-  // a phantom box.
-  const ordered = regions.filter((r) => r.decoded).sort(layoutOrder);
+  // Solid glowing corners mean a successful frame. A plausible code that the
+  // detector can see but cannot decode gets a short-lived dashed outline;
+  // this makes distance/focus/cropping trouble visible without covering the
+  // camera image or adding instructions over it.
+  const ordered = [...regions].sort(layoutOrder);
   for (const [slot, r] of ordered.entries()) {
-    const age = now - r.seen;
-    if (age > INDICATOR_FADE_MS) continue;
-    const color = INDICATOR_COLORS[slot % INDICATOR_COLORS.length]!;
+    const decodedAge = now - (r.decodedSeen ?? -Infinity);
+    const sightingAge = now - r.seen;
+    const successful = decodedAge <= INDICATOR_FADE_MS;
+    if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
+
+    const nearEdge = r.x < vw * 0.015 || r.y < vh * 0.015 ||
+      r.x + r.w > vw * 0.985 || r.y + r.h > vh * 0.985;
+    const slotColor = INDICATOR_COLORS[slot % INDICATOR_COLORS.length]!;
+    const color = !successful && nearEdge ? "#ff665c" : slotColor;
     overlayCtx.strokeStyle = color;
     overlayCtx.shadowColor = color;
-    overlayCtx.shadowBlur = 4 * dpr;
-    // Brackets sit just outside the code so they never cover its modules.
+    overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
+    overlayCtx.lineWidth = Math.max(successful ? 2.5 : 1.5, (successful ? 2.5 : 1.5) * dpr);
+    overlayCtx.setLineDash(successful ? [] : [5 * dpr, 5 * dpr]);
+    // Brackets sit just outside the code so they never obscure its modules.
     const pad = 0.06 * Math.max(r.w, r.h) * scale;
     const x = offX + r.x * scale - pad;
     const y = offY + r.y * scale - pad;
     const w = r.w * scale + 2 * pad;
     const h = r.h * scale + 2 * pad;
     const len = 0.24 * Math.min(w, h);
-    overlayCtx.globalAlpha = 1 - age / INDICATOR_FADE_MS;
+    const age = successful ? decodedAge : sightingAge;
+    const fade = successful ? INDICATOR_FADE_MS : SIGHTING_FADE_MS;
+    overlayCtx.globalAlpha = successful ? 1 - 0.65 * age / fade : 0.7 * (1 - age / fade);
     overlayCtx.beginPath();
     overlayCtx.moveTo(x, y + len);
     overlayCtx.lineTo(x, y);
@@ -316,6 +338,7 @@ function drawOverlay(now: number) {
   }
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
+  overlayCtx.setLineDash([]);
 }
 startBtn.onclick = () => void start();
 window.addEventListener("airgapper:enter-receive", () => {
