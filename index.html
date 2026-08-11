@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v16: rotation-aware optical tracking -->
+<!-- AirGapper v17: selectable camera performance modes -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -65,6 +65,7 @@
   .receiveCard.debug .debugOverlay,.receiveCard.debug .debugPanel { display:block; }
   .debugPanel { display:none; position:absolute; left:12px; top:12px; z-index:2; max-width:min(88%,420px); background:#111e; color:#fff; border:1px solid #ffffff2d; border-radius:12px; padding:9px 10px; font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; backdrop-filter:blur(10px); pointer-events:none; }
   .cameraActions { display:flex; gap:7px; }
+  .cameraSelect { max-width:104px; border:1px solid #ffffff35; background:#111c; color:white; border-radius:11px; padding:9px 7px; cursor:pointer; backdrop-filter:blur(8px); }
   .scanBox:before,.scanBox:after { content:""; position:absolute; width:48px; height:48px; border-color:white; border-style:solid; }
   .scanBox:before { left:-1px; top:-1px; border-width:3px 0 0 3px; border-radius:20px 0 0 0; }
   .scanBox:after { right:-1px; bottom:-1px; border-width:0 3px 3px 0; border-radius:0 0 20px 0; }
@@ -125,7 +126,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v16</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v17</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -182,7 +183,7 @@
             <div class="stats"><span id="progressText">0%</span><span id="rateText">— KB/s</span><span id="etaText">— ETA</span><span id="cameraText">— camera</span><span id="scanText">— scan</span><span id="dropText">— loss</span></div>
             <div class="progressBar"><i id="progressFill"></i></div>
           </div>
-          <div class="cameraActions"><button class="cameraBtn" id="debugBtn">Debug</button><button class="cameraBtn" id="flipBtn">Flip</button></div>
+          <div class="cameraActions"><select class="cameraSelect" id="cameraMode" aria-label="Camera performance mode"><option value="fps">Max FPS</option><option value="detail">Max detail</option></select><button class="cameraBtn" id="debugBtn">Debug</button><button class="cameraBtn" id="flipBtn">Flip</button></div>
         </div>
       </div>
       <div class="result" id="result"></div>
@@ -201,7 +202,7 @@
 (() => {
 'use strict';
 
-const BUILD='v16';
+const BUILD='v17';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -219,7 +220,7 @@ const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
 const B45_REV = (() => { const a = new Int16Array(128); a.fill(-1); for (let i=0;i<B45.length;i++) a[B45.charCodeAt(i)] = i; return a; })();
 
 const state = {
-  mode:'home', stream:null, facing:'environment', scanToken:0,
+  mode:'home', stream:null, facing:'environment', cameraMode:'fps', scanToken:0,
   transfer:null, sendTimer:null, esi:0, displaySeq:0,
   rx:null, barcodeDetector:null,
   cameraFps:0, cameraMeasuredFps:0, cameraRequestedFps:0, cameraRequestedWidth:0, cameraRequestedHeight:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
@@ -545,16 +546,21 @@ function prepareCamera(){stopCamera();resetRx();const gate=$('#cameraGate');gate
 function cameraErrorText(e){if(!window.isSecureContext)return'Camera needs HTTPS';if(cameraPolicyBlocked())return'Open in browser to use camera';if(window.top!==window.self&&e?.name==='NotAllowedError')return'Open in browser to use camera';if(e?.name==='NotAllowedError'||e?.name==='SecurityError')return'Camera permission denied';if(e?.name==='NotFoundError')return'No camera found';if(e?.name==='NotReadableError')return'Camera is busy';if(e?.name==='OverconstrainedError')return'Camera mode unsupported';return`Camera error${e?.name?' · '+e.name:''}`;}
 const MAX_CAMERA_FPS=120,MAX_CAMERA_WIDTH=3840,MAX_CAMERA_HEIGHT=2160;
 async function requestCamera(){
-  // Resolution and frame rate remain ideals. This permits 4K spatial modes as
-  // well as high-speed lower-resolution modes without making either mandatory.
-  try{return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},width:{ideal:MAX_CAMERA_WIDTH},height:{ideal:MAX_CAMERA_HEIGHT},aspectRatio:{ideal:16/9},frameRate:{ideal:MAX_CAMERA_FPS,max:MAX_CAMERA_FPS}},audio:false});}
+  // Browsers do not expose the supported resolution/FPS combinations. Asking
+  // only for FPS lets the camera choose whatever lower resolution reaches its
+  // fastest mode; detail mode explicitly asks for the largest image instead.
+  const video=state.cameraMode==='fps'
+    ?{facingMode:{ideal:state.facing},frameRate:{ideal:MAX_CAMERA_FPS,max:MAX_CAMERA_FPS}}
+    :{facingMode:{ideal:state.facing},width:{ideal:MAX_CAMERA_WIDTH},height:{ideal:MAX_CAMERA_HEIGHT},aspectRatio:{ideal:16/9},frameRate:{ideal:MAX_CAMERA_FPS,max:MAX_CAMERA_FPS}};
+  try{return await navigator.mediaDevices.getUserMedia({video,audio:false});}
   catch(e){if(e?.name==='OverconstrainedError'||e?.name==='NotFoundError')return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},frameRate:{ideal:60}},audio:false});throw e;}
 }
 async function tuneCameraTrack(track){
-  const caps=track?.getCapabilities?.()||{},max=Number(caps.frameRate?.max)||0,target=Math.min(MAX_CAMERA_FPS,max||MAX_CAMERA_FPS),targetW=Math.min(MAX_CAMERA_WIDTH,Number(caps.width?.max)||MAX_CAMERA_WIDTH),targetH=Math.min(MAX_CAMERA_HEIGHT,Number(caps.height?.max)||MAX_CAMERA_HEIGHT);state.cameraRequestedFps=target;state.cameraRequestedWidth=targetW;state.cameraRequestedHeight=targetH;
+  const caps=track?.getCapabilities?.()||{},max=Number(caps.frameRate?.max)||0,target=Math.min(MAX_CAMERA_FPS,max||MAX_CAMERA_FPS),targetW=Math.min(MAX_CAMERA_WIDTH,Number(caps.width?.max)||MAX_CAMERA_WIDTH),targetH=Math.min(MAX_CAMERA_HEIGHT,Number(caps.height?.max)||MAX_CAMERA_HEIGHT);state.cameraRequestedFps=target;state.cameraRequestedWidth=state.cameraMode==='detail'?targetW:0;state.cameraRequestedHeight=state.cameraMode==='detail'?targetH:0;
   if(!track?.applyConstraints||!target)return caps;
   try{
-    await track.applyConstraints({width:{ideal:targetW},height:{ideal:targetH},aspectRatio:{ideal:16/9},frameRate:{ideal:target,max:target}});
+    const constraints=state.cameraMode==='fps'?{frameRate:{ideal:target,max:target}}:{width:{ideal:targetW},height:{ideal:targetH},aspectRatio:{ideal:16/9},frameRate:{ideal:target,max:target}};
+    await track.applyConstraints(constraints);
   }catch(e){console.warn('AirGapper high-bandwidth camera mode unavailable:',e?.message||e);}
   return track.getCapabilities?.()||caps;
 }
@@ -569,6 +575,7 @@ async function startCamera(){
   }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
 }
 function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
+const cameraModeSelect=$('#cameraMode');cameraModeSelect.value=state.cameraMode;cameraModeSelect.onchange=()=>{state.cameraMode=cameraModeSelect.value;if(state.stream)startCamera();};
 $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();else{const c=$('#debugOverlay');c?.getContext('2d')?.clearRect(0,0,c.width,c.height);}};
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraRequestedWidth=0;state.cameraRequestedHeight=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
@@ -680,7 +687,7 @@ function updateDebug(){
   const el=$('#debugPanel');if(!el||!state.debug)return;rollMetrics();const rx=state.rx,workers=state.scanWorkers.length,busy=state.scanWorkers.filter(x=>x.busy).length,total=state.scanDispatches+state.scanDispatchMisses,skip=total?Math.round(state.scanDispatchMisses/total*100):0,last=state.lastDecodeAt?Math.round(performance.now()-state.lastDecodeAt):0,track=state.opticalTrack;
   const focus=state.cameraSettings?.focusMode||'—',layout=rx?`${rx.expectedQrs} QR · ${rx.symbolBytes} B/QR · rot ${track?.rotation||0}°`:'acquiring',elapsed=rx?Math.max(1,performance.now()-rx.startedAt):0,usefulRate=state.verifiedBytes?state.verifiedBytes*1000/state.verifiedMs:elapsed?state.usefulRecoveredBytes*1000/elapsed:0;
   const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95),fpsCap=state.cameraCaps?.frameRate,capText=fpsCap?`${Math.round(fpsCap.min)}–${Math.round(fpsCap.max)}`:'?';
-  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented\nrequested ${state.cameraRequestedWidth||MAX_CAMERA_WIDTH}×${state.cameraRequestedHeight||MAX_CAMERA_HEIGHT} @ ${Math.round(state.cameraRequestedFps||MAX_CAMERA_FPS)} · FPS cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames}\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
+  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented\nrequested ${state.cameraMode==='fps'?'max FPS / auto resolution':`${state.cameraRequestedWidth||MAX_CAMERA_WIDTH}×${state.cameraRequestedHeight||MAX_CAMERA_HEIGHT}`} @ ${Math.round(state.cameraRequestedFps||MAX_CAMERA_FPS)} · FPS cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames}\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
   drawDebugOverlay();
 }
 function updateRxUi(){
