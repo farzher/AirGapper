@@ -8,12 +8,14 @@ const views = {
 };
 type ViewName = keyof typeof views;
 let active: ViewName = "home";
+const headerQr = document.getElementById("receiver-link-qr") as HTMLCanvasElement;
 
 function showView(name: ViewName): void {
   if (name === active) return;
   if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
   active = name;
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
+  headerQr.hidden = name === "receive";
   if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   window.scrollTo(0, 0);
 }
@@ -73,8 +75,10 @@ async function runSmoke(): Promise<void> {
     if (!views.home.classList.contains("active")) throw new Error("Title did not return home");
     (document.querySelector('[data-mode="receive"]') as HTMLButtonElement).click();
     if (!views.receive.classList.contains("active")) throw new Error("Receive did not open");
+    if (!headerQr.hidden) throw new Error("receiver QR remained visible on Receive");
     (document.getElementById("home-button") as HTMLButtonElement).click();
     if (!views.home.classList.contains("active")) throw new Error("second title navigation failed");
+    if (headerQr.hidden) throw new Error("receiver QR did not return on Home");
     (document.getElementById("download-offline") as HTMLButtonElement).click();
     await new Promise((resolve) => setTimeout(resolve, 250));
     const unexpectedLoads = performance.getEntriesByType("resource").filter((entry) => {

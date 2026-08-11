@@ -40,6 +40,8 @@ a { color: inherit; }
   gap: 16px;
 }
 .app-main { margin-block: auto; padding: 12px 0 30px; }
+.brand-lockup { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.header-qr { display: block; flex: none; image-rendering: pixelated; }
 .brand-button { border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
 .brand { display: block; color: var(--ink); font-weight: 750; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
 .tag { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -79,20 +81,6 @@ a { color: inherit; }
 .receiver-shell { min-width: 0; }
 .send-start { display: flex; flex-direction: column; gap: 12px; }
 .send-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.receiver-handoff { display: flex; justify-content: center; }
-.receiver-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 14px;
-  padding: 4px;
-  border-radius: 10px;
-  text-decoration: none;
-}
-.receiver-link:hover { background: #00000003; }
-.receiver-handoff canvas { display: block; flex: none; image-rendering: pixelated; }
-.receiver-handoff-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
-.receiver-handoff-copy strong { font-size: 15px; letter-spacing: -.015em; }
-.receiver-handoff-copy small { color: var(--muted); font-size: 12px; }
 .file-picker,
 .note-composer {
   min-height: 180px;

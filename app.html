@@ -14,10 +14,13 @@
 <body>
 <div class="app">
   <header class="app-header">
-    <button class="brand-button" id="home-button" type="button">
-      <span class="brand">AirGapper</span>
-      <span class="tag">Air-gapped file transfer</span>
-    </button>
+    <div class="brand-lockup">
+      <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="%SITE_URL%?receive" aria-label="Scan to open AirGapper Receive on your phone"></canvas>
+      <button class="brand-button" id="home-button" type="button">
+        <span class="brand">AirGapper</span>
+        <span class="tag">Air-gapped file transfer</span>
+      </button>
+    </div>
     <div class="header-actions"><button class="download-offline" id="download-offline" type="button">Download offline</button></div>
   </header>
 
@@ -31,15 +34,6 @@
 
     <section id="sendView" class="view send-shell">
       <div class="send-start">
-        <aside class="receiver-handoff">
-          <a id="receiver-link" class="receiver-link" href="%SITE_URL%?receive" aria-label="Open AirGapper Receive on your phone">
-            <canvas id="receiver-link-qr" aria-hidden="true"></canvas>
-            <span class="receiver-handoff-copy">
-              <strong>Receive on your phone</strong>
-              <small>Scan to open the camera</small>
-            </span>
-          </a>
-        </aside>
         <div class="send-inputs">
           <label class="file-picker drop" id="pane-file">
             <input id="cfg-file" type="file" multiple />

@@ -59,14 +59,15 @@ const snippetLabel = document.getElementById("snippet-label")!;
 const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElement;
 const paneFile = document.getElementById("pane-file")!;
 const paneSnippet = document.getElementById("pane-snippet")!;
-const receiverLink = document.getElementById("receiver-link") as HTMLAnchorElement;
 const receiverLinkQr = document.getElementById("receiver-link-qr") as HTMLCanvasElement;
 
 /** A quiet, static handoff code lets a phone join as the receiver before the
  * transfer starts. It deliberately points to HTTPS even in the standalone
  * file, because mobile browsers generally deny camera access from file://. */
 function renderReceiverLink(): void {
-  const qr = QRCode.create(receiverLink.href, { errorCorrectionLevel: "L" });
+  const receiverUrl = receiverLinkQr.dataset.receiverUrl;
+  if (!receiverUrl) return;
+  const qr = QRCode.create(receiverUrl, { errorCorrectionLevel: "L" });
   const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
   // Keep every module an integer number of physical display pixels. A fixed
   // 111 CSS-pixel box resampled this raster on most DPRs, producing gray
