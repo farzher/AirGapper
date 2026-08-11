@@ -69,11 +69,11 @@ function renderReceiverLink(): void {
   if (!receiverUrl) return;
   const qr = QRCode.create(receiverUrl, { errorCorrectionLevel: "L" });
   const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
-  // Keep every module an integer number of physical display pixels. A fixed
-  // 111 CSS-pixel box resampled this raster on most DPRs, producing gray
-  // module edges; choose the nearest whole-module size instead.
+  // Keep every module an integer number of physical display pixels. Size the
+  // handoff code like a small logo while choosing the nearest whole-module
+  // size, avoiding gray edges from browser resampling.
   const dpr = window.devicePixelRatio || 1;
-  const targetCssSize = 111;
+  const targetCssSize = 40;
   const scale = Math.max(1, Math.round((targetCssSize * dpr) / raster.size));
   const source = document.createElement("canvas");
   source.width = source.height = raster.size;
