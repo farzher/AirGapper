@@ -31,6 +31,7 @@ function showView(name: ViewName): void {
   if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
   active = name;
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
+  document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name === "receive";
   if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   window.scrollTo(0, 0);
