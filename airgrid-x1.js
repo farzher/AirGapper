@@ -2,7 +2,7 @@
 (() => {
 'use strict';
 
-const LAB_BUILD='v35f';
+const LAB_BUILD='v35g';
 const X1={version:1,tileChips:64,markerChips:7,headerBits:128,headerCodeChips:360,headerRegionChips:384,payloadBlocks:480,payloadRegion:[8,23,48,40],payloadCrcBytes:4,defaultPitch:3,detectorLongSide:900};
 const PROFILES={binary:{id:0,bits:4,colors:0},M1:{id:1,bits:4,colors:4},M2:{id:2,bits:6,colors:4},M3:{id:3,bits:8,colors:8}};
 const PROFILE_BY_ID=['binary','M1','M2','M3'];
@@ -87,8 +87,8 @@ async function startLab(){
       <select id="x1Profile">${PROFILES_LIST.map(x=>`<option${x==='M1'?' selected':''}>${x}</option>`).join('')}</select>
       <label id="x1PitchWrap">pitch <select id="x1Pitch">${PITCHES.map(x=>`<option${x===3?' selected':''}>${x}</option>`).join('')}</select></label>
       <label id="x1FpsWrap">page FPS <select id="x1Fps">${FPS.map(x=>`<option value="${x}">${x?x:'Frozen'}</option>`).join('')}</select></label>
-      <label id="x1DwellWrap">dwell <input id="x1Dwell" type="number" min="2" max="60" value="4" style="width:55px"> s</label>
-      <select id="x1Sweep"><option value="quick">Quick sweep</option><option value="full">Full 168-condition sweep</option></select>
+      <label id="x1DwellWrap">dwell <input id="x1Dwell" type="number" min="2" max="60" value="2" style="width:55px"> s</label>
+      <select id="x1Sweep"><option value="quick">Quick 12-condition sweep</option><option value="full">Full 168-condition sweep</option></select>
       <button id="x1Render">Render</button><button id="x1Auto">Start auto sender</button>
       <button id="x1Camera">Start auto receiver</button><button id="x1Stop">Stop</button>
       <button id="x1Export">Export JSON</button><button id="x1Csv">Export CSV</button><button id="x1Clear">Clear saved</button>
@@ -118,10 +118,10 @@ async function startLab(){
   function displayLoop(t){if(display.bitmaps.length&&display.fps&&t-display.last>=1000/display.fps){display.last=t;display.index^=1;ctx.drawImage(display.bitmaps[display.index],0,0);display.flips++;}requestAnimationFrame(displayLoop);}
   requestAnimationFrame(displayLoop);
   async function manualRender(){autoSender=false;running=false;const condition={profile:el('#x1Profile').value,pitch:+el('#x1Pitch').value,fps:+el('#x1Fps').value};condition.key=`${condition.profile}-p${condition.pitch}-f${condition.fps}`;await prepareDisplay(condition,frame++);report.textContent='Manual deterministic sounder frame. Use fullscreen/auto sender for exact physical pitch.';}
-  function sweepConditions(){if(el('#x1Sweep').value==='full'){const out=[];for(const pitch of PITCHES)for(const profile of PROFILES_LIST)for(const fps of FPS)out.push({pitch,profile,fps,key:`${profile}-p${pitch}-f${fps}`});return out;}const out=[];for(const pitch of[2,3,4])for(const profile of['M1','M2'])for(const fps of[0,5,15,30])out.push({pitch,profile,fps,key:`${profile}-p${pitch}-f${fps}`});return out;}
+  function sweepConditions(){if(el('#x1Sweep').value==='full'){const out=[];for(const pitch of PITCHES)for(const profile of PROFILES_LIST)for(const fps of FPS)out.push({pitch,profile,fps,key:`${profile}-p${pitch}-f${fps}`});return out;}const out=[];for(const pitch of[2,3,4])for(const profile of['M1','M2'])for(const fps of[0,5])out.push({pitch,profile,fps,key:`${profile}-p${pitch}-f${fps}`});return out;}
   async function startAutoSender(){
     if(running)return;running=true;autoSender=true;el('#x1Mode').value='Sender';try{if(document.fullscreenElement!==stage)await stage.requestFullscreen();}catch{}
-    const conditions=sweepConditions(),dwell=Math.max(2,+el('#x1Dwell').value||4),senderLog=[];
+    const conditions=sweepConditions(),dwell=Math.max(2,+el('#x1Dwell').value||2),senderLog=[];
     for(let i=0;i<conditions.length&&running;i++){const c=conditions[i];el('#x1Profile').value=c.profile;el('#x1Pitch').value=c.pitch;el('#x1Fps').value=String(c.fps);progress.textContent=`Preparing ${i+1}/${conditions.length} ${c.key}`;const prep=await prepareDisplay(c,i+1),start=performance.now();progress.textContent=`AUTO ${i+1}/${conditions.length} ${c.key} · ${prep.grid.cols}×${prep.grid.rows}`;while(running&&performance.now()-start<dwell*1000)await new Promise(r=>setTimeout(r,50));const shown=Math.max(1,performance.now()-start);senderLog.push({...c,...prep,dwellMs:shown,actualPageFps:c.fps?Math.max(0,display.flips-1)*1000/shown:0});}
     autoSender=false;running=false;closeFrames();try{if(document.fullscreenElement===stage)await document.exitFullscreen();}catch{}lastSenderSweep={senderSweep:true,completedAt:new Date().toISOString(),displayPixelRatio:dpr(),conditions:senderLog};report.textContent=JSON.stringify(lastSenderSweep,null,2);progress.textContent=`Sender sweep complete · ${senderLog.length} conditions`;
   }
@@ -148,7 +148,7 @@ async function startLab(){
   function csv(){const snap=snapshot(),heads=['key','profile','pitch','pageFps','scanFrames','acquisitionRate','detectedMarkersPerFrame','quadCandidatesPerFrame','testedHeaderCandidatesPerFrame','phaseRetriedTiles','completeTilesPerFrame','payloadOkTilesPerFrame','rawBer','mutualInformationPerChip','transitionFrameRate','validatedBytesPerFrame','projectedFullGridBytesPerFrame','projectedBytesPerSecond20Fps','estimatedBytesPerSecond20Fps','workerTotalMs'];const lines=[heads.join(',')];for(const a of Object.values(snap.conditions)){const m=a.metrics;lines.push([a.key,a.profile,a.pitch,a.pageFps,a.scanFrames,m.fiducialAcquisitionRate,m.detectedMarkersPerFrame,m.quadCandidatesPerFrame,m.testedHeaderCandidatesPerFrame,m.phaseRetriedTiles,m.completeTilesPerFrame,m.payloadOkTilesPerFrame,m.rawBer,m.mutualInformationPerChip,m.transitionFrameRate,m.validatedBytesPerFrame,m.projectedFullGridBytesPerFrame,m.projectedBytesPerSecond20Fps,m.estimatedBytesPerSecond20Fps,m.averageTimings.total].join(','));}return lines.join('\n');}
   document.addEventListener('fullscreenchange',()=>{if(autoSender&&document.fullscreenElement!==stage)running=false;});el('#x1Render').onclick=manualRender;el('#x1Auto').onclick=startAutoSender;el('#x1Camera').onclick=startReceiver;el('#x1Stop').onclick=stop;el('#x1Export').onclick=()=>{const data=el('#x1Mode').value==='Sender'&&lastSenderSweep?lastSenderSweep:snapshot();download(`airgrid-x1-hardware-${Date.now()}.json`,JSON.stringify(data,null,2),'application/json');};el('#x1Csv').onclick=()=>download(`airgrid-x1-hardware-${Date.now()}.csv`,csv(),'text/csv');el('#x1Clear').onclick=()=>{hardware={format:'AirGrid X1 hardware sounder',schema:2,startedAt:new Date().toISOString(),build:currentBuild,userAgent:navigator.userAgent,devicePixelRatio:dpr(),conditions:{}};localStorage.removeItem('airgridX1HardwareResults');progress.textContent='Saved results cleared';};
   function updateRole(){const receiver=el('#x1Mode').value==='Receiver';for(const id of['#x1Profile','#x1PitchWrap','#x1FpsWrap','#x1DwellWrap','#x1Render','#x1Auto'])el(id).style.display=receiver?'none':'';el('#x1Camera').style.display=receiver?'':'none';canvas.style.display=receiver?'none':'block';if(!receiver)video.style.display='none';progress.textContent=receiver?'Receiver ready · start camera before the sender sweep':'Sender ready';}
-  el('#x1Mode').onchange=updateRole;if(params.get('role')==='receiver'||(!params.get('role')&&/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)))el('#x1Mode').value='Receiver';updateRole();if(el('#x1Mode').value==='Sender')await manualRender();
+  el('#x1Mode').onchange=updateRole;el('#x1Sweep').onchange=()=>{const dwell=el('#x1Dwell');if(el('#x1Sweep').value==='full'&&dwell.value==='2')dwell.value='4';else if(el('#x1Sweep').value==='quick'&&dwell.value==='4')dwell.value='2';};if(params.get('role')==='receiver'||(!params.get('role')&&/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)))el('#x1Mode').value='Receiver';updateRole();if(el('#x1Mode').value==='Sender')await manualRender();
 }
 window.AirGridX1={build:LAB_BUILD,format:X1,profiles:PROFILES,profileById:PROFILE_BY_ID,createWorker,request,startLab,workerSource};
 startLab();
