@@ -15,14 +15,12 @@ function showView(name: ViewName): void {
   if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
   active = name;
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
+  if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   window.scrollTo(0, 0);
 }
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")) {
   button.addEventListener("click", () => showView(button.dataset.mode as "send" | "receive"));
-}
-for (const button of document.querySelectorAll<HTMLButtonElement>(".back")) {
-  button.addEventListener("click", () => showView("home"));
 }
 document.getElementById("home-button")!.addEventListener("click", () => showView("home"));
 
@@ -64,12 +62,12 @@ async function runSmoke(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     if ((document.getElementById("stage") as HTMLElement).hidden) throw new Error("text sender did not start");
-    (views.send.querySelector(".back") as HTMLButtonElement).click();
-    if (!views.home.classList.contains("active")) throw new Error("Back did not return home");
+    (document.getElementById("home-button") as HTMLButtonElement).click();
+    if (!views.home.classList.contains("active")) throw new Error("Title did not return home");
     (document.querySelector('[data-mode="receive"]') as HTMLButtonElement).click();
     if (!views.receive.classList.contains("active")) throw new Error("Receive did not open");
-    (views.receive.querySelector(".back") as HTMLButtonElement).click();
-    if (!views.home.classList.contains("active")) throw new Error("second Back did not return home");
+    (document.getElementById("home-button") as HTMLButtonElement).click();
+    if (!views.home.classList.contains("active")) throw new Error("second title navigation failed");
     (document.getElementById("download-offline") as HTMLButtonElement).click();
     await new Promise((resolve) => setTimeout(resolve, 250));
     const unexpectedLoads = performance.getEntriesByType("resource").filter((entry) => {

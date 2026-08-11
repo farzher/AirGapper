@@ -34,7 +34,7 @@ import {
   verifyFile,
   type OpticalFile,
 } from "../shared/protocol";
-import { NO_SIGNAL_HINT_FRAME_BYTES, NO_SIGNAL_HINT_TX_FPS } from "../shared/send-settings";
+import { NO_SIGNAL_HINT_TX_FPS } from "../shared/send-settings";
 import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
@@ -53,12 +53,10 @@ const progressLabel = document.getElementById("progress-label")!;
 const etaLabel = document.getElementById("eta-label")!;
 const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
-const diagnosticsEl = document.getElementById("diagnostics") as HTMLDetailsElement | null;
-const settingsEl = document.getElementById("settings")!;
-const cfgWidth = document.getElementById("cfg-width") as HTMLSelectElement;
-const cfgCapFps = document.getElementById("cfg-capfps") as HTMLSelectElement;
-const cfgWorkers = document.getElementById("cfg-workers") as HTMLSelectElement;
-const cameraActual = document.getElementById("camera-actual")!;
+const diagnosticsEl: HTMLDetailsElement | null = null;
+const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const requestedWidth = 4096;
+const requestedFps = 60;
 const noSignalToast = document.getElementById("no-signal")!;
 const noSignalDialog = document.getElementById("no-signal-dialog") as HTMLDialogElement;
 const noSignalTips = document.getElementById("no-signal-tips")!;
@@ -83,7 +81,6 @@ let reportSessionId = 0; // pairs this run with the sender's diagnostics post
 let startTs = 0;
 let captureGen = 0;
 let done = false;
-let settingsWired = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 
 let noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
@@ -329,19 +326,9 @@ function drawOverlay(now: number) {
   overlayCtx.shadowBlur = 0;
 }
 startBtn.onclick = () => void start();
-
-// More decode workers than the device has cores just adds contention —
-// counts the device can't use are removed outright rather than grayed out:
-// a dead option is noise here, not information.
-if (navigator.hardwareConcurrency) {
-  for (const option of Array.from(cfgWorkers.options)) {
-    if (Number(option.value) > navigator.hardwareConcurrency) option.remove();
-  }
-}
-// Two workers is a conservative old-phone default. Keep it when available;
-// otherwise use the largest count the device can actually offer.
-const workerOptions = Array.from(cfgWorkers.options, (option) => Number(option.value));
-cfgWorkers.value = String(workerOptions.includes(2) ? 2 : Math.max(...workerOptions));
+window.addEventListener("airgapper:enter-receive", () => {
+  if (!stream && !startBtn.disabled) void start();
+});
 
 const { setStatus, showError } = statusLine(stats);
 
@@ -349,8 +336,8 @@ const { setStatus, showError } = statusLine(stats);
 // built here rather than in the HTML so its numbers stay tied to the shared
 // send-settings constants the sender's controls are rendered from.
 for (const line of [
-  `On the sender, open Transfer settings and drop bytes / frame to ${NO_SIGNAL_HINT_FRAME_BYTES}.`,
-  `Still nothing? Drop the sender's tx fps to ${NO_SIGNAL_HINT_TX_FPS} as well.`,
+  "On the sender, move QR size to the right so fewer, larger codes are shown.",
+  `Still nothing? Lower the sender's speed to ${NO_SIGNAL_HINT_TX_FPS} fps or less.`,
   "Fill this camera's view with the code, and prop the phone against something — autofocus hunting from hand tremor is the usual culprit.",
   "Turn the sending screen's brightness all the way up.",
 ]) {
@@ -392,8 +379,9 @@ function restartButton(label: string): HTMLButtonElement {
  *  a dead page with no button is a bad answer to it. */
 function offerRetry(message: string) {
   startBtn.disabled = false;
+  startBtn.hidden = false;
   startBtn.style.display = "";
-  startBtn.textContent = "Enable camera";
+  startBtn.textContent = "Try camera again";
   preview.style.display = "none";
   metricsEl.style.display = "none";
   if (diagnosticsEl) diagnosticsEl.style.display = "none";
@@ -445,7 +433,6 @@ function stopReceiver(): void {
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
-  settingsEl.style.display = "";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
     diagnosticsEl.open = false;
@@ -457,8 +444,7 @@ function stopReceiver(): void {
   startBtn.disabled = false;
   startBtn.style.display = "";
   startBtn.textContent = "Enable camera";
-  cameraActual.textContent = "Applied when the camera starts.";
-  setStatus("Ready to scan a file or text stream");
+  setStatus("");
 }
 window.addEventListener("airgapper:leave-mode", () => {
   if (document.getElementById("receiveView")?.classList.contains("active")) stopReceiver();
@@ -477,8 +463,8 @@ async function start() {
     );
     return;
   }
-  const captureWidth = Number(cfgWidth.value);
-  const captureFps = Number(cfgCapFps.value);
+  const captureWidth = requestedWidth;
+  const captureFps = requestedFps;
   // Nothing on the page changes until the camera is actually running: the
   // error paths below all have to leave a usable Start button behind.
   startBtn.disabled = true;
@@ -520,20 +506,10 @@ async function start() {
   video.srcObject = stream;
   await video.play().catch(() => undefined);
   syncPreviewAspect();
-  const settings = stream.getVideoTracks()[0]?.getSettings();
-  setStatus(
-    `camera ${settings?.width}×${settings?.height}@${settings?.frameRate} — searching for a stream…`,
-  );
+  setStatus("Looking for QR codes…");
 
-  pool.resize(Number(cfgWorkers.value));
-  reportCameraSettings();
+  pool.resize(workerCount);
   void applyCameraExtras();
-  if (!settingsWired) {
-    settingsWired = true;
-    for (const el of [cfgWidth, cfgCapFps, cfgWorkers]) {
-      el.addEventListener("change", () => void applyReceiveSettings());
-    }
-  }
 
   noSignal.cameraStarted(performance.now());
   cameraStartedTs = performance.now();
@@ -545,18 +521,6 @@ async function start() {
 
 /** Report what the camera actually negotiated — iOS in particular will happily
  *  hand back 30 fps after accepting a request for 60. */
-function reportCameraSettings() {
-  const track = stream?.getVideoTracks()[0];
-  if (!track) return;
-  const s = track.getSettings();
-  const askedFps = Number(cfgCapFps.value);
-  const gotFps = Math.round(s.frameRate ?? 0);
-  const fpsNote = gotFps && gotFps !== askedFps ? ` (asked ${askedFps})` : "";
-  cameraActual.textContent =
-    `camera ${s.width}×${s.height} @ ${gotFps} fps${fpsNote} · ${pool.size} decode ` +
-    `worker${pool.size === 1 ? "" : "s"} · changes apply live`;
-}
-
 /** Use what this camera can actually do, probed rather than UA-sniffed.
  *  Continuous autofocus is applied silently — a lens hunting between frames is
  *  the top decode killer, and a camera that refuses is left as it was. Frame
@@ -568,38 +532,6 @@ async function applyCameraExtras() {
   if (caps.continuousFocus) {
     await applyAdvancedConstraint(track, { focusMode: "continuous" });
   }
-  if (caps.maxFrameRate) {
-    for (const option of Array.from(cfgCapFps.options)) {
-      option.disabled = Number(option.value) > caps.maxFrameRate;
-    }
-  }
-  if (caps.maxWidth) {
-    for (const option of Array.from(cfgWidth.options)) {
-      option.disabled = Number(option.value) > caps.maxWidth;
-    }
-  }
-}
-
-async function applyReceiveSettings() {
-  // finish() has already torn the pool down — don't resurrect it.
-  if (done) return;
-  pool.resize(Number(cfgWorkers.value));
-  const track = stream?.getVideoTracks()[0];
-  if (!track) return;
-  const width = Number(cfgWidth.value);
-  try {
-    await track.applyConstraints({
-      width: { ideal: width },
-      height: { ideal: Math.round((width * 3) / 4) },
-      frameRate: { ideal: Number(cfgCapFps.value) },
-    });
-  } catch {
-    // Some devices (notably iOS) refuse a live reconfigure. Keep the stream we
-    // have rather than tearing down a transfer in progress.
-    cameraActual.textContent = "this camera refused a live change — restart to apply";
-    return;
-  }
-  reportCameraSettings();
 }
 
 type VideoRVFC = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
@@ -841,12 +773,16 @@ function updateProgressEstimate() {
     `${shownPercent}% · ${decoder.solvedCount}/${decoder.k} blocks`;
   // Held back for the first few frames — a two-frame sample reads wildly wrong.
   const rate = decoder.framesNew >= 4 ? ` · ${goodputKbs(elapsed).toFixed(1)} KB/s` : "";
+  const eta = estimate.etaSeconds === undefined
+    ? estimate.phase === "decoding" ? "Decoding…" : "Estimating…"
+    : formatDuration(estimate.etaSeconds);
+  metric("m-eta").textContent = eta;
   etaLabel.textContent =
     (estimate.etaSeconds === undefined
       ? estimate.phase === "decoding"
         ? `${decoder.framesNew} frames · decoding`
         : "Estimating time…"
-      : `About ${formatDuration(estimate.etaSeconds)} · ${decoder.framesNew} frames`) + rate;
+      : `About ${eta} · ${decoder.framesNew} frames`) + rate;
 }
 
 /** Payload KB/s, discounting the frames the fountain spends on overhead. That
@@ -906,7 +842,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         degradedMs,
       },
       workers: pool.size,
-      requested: { width: Number(cfgWidth.value), fps: Number(cfgCapFps.value), workers: Number(cfgWorkers.value) },
+      requested: { width: requestedWidth, fps: requestedFps, workers: workerCount },
       camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: camera.facingMode ?? null } : null,
       cameraCapabilities: track ? probeCameraCapabilities(track) : null,
       device: { cores: navigator.hardwareConcurrency ?? null, ua: navigator.userAgent },
@@ -939,9 +875,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   statsTimer = undefined;
   pool.resize(0);
   preview.style.display = "none";
-  // The transfer is over and the pipeline is gone: settings for a camera that
-  // no longer exists would just be a dead control panel.
-  settingsEl.style.display = "none";
   // The metrics stay, frozen at their last tick — but "Live" is no longer
   // true, so the panel relabels itself as the record of the run it now is.
   const diagnosticsLabel = diagnosticsEl?.querySelector("summary");
@@ -1166,8 +1099,8 @@ function updateStats() {
   prune(captureTimes);
   prune(decodeTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
-  metric("m-cap").textContent = perSecond(captureTimes).toFixed(0);
-  metric("m-dec").textContent = perSecond(decodeTimes).toFixed(1);
+  metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
+  metric("m-dec").textContent = `${perSecond(decodeTimes).toFixed(1)} fps`;
   if (noSignal.tick(now)) showNoSignalHint();
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
@@ -1194,9 +1127,5 @@ function updateStats() {
   }
   updateProgressEstimate();
   metric("m-rate").textContent = `${goodputKbs(elapsed).toFixed(1)} KB/s`;
-  metric("m-time").textContent = `${elapsed.toFixed(0)} s`;
-  metric("m-frames").textContent = `${decoder.framesNew}/${decoder.framesDup}`;
-  metric("m-k").textContent = String(decoder.k);
-  metric("m-block").textContent = `${decoder.blockLen} B`;
-  metric("m-payload").textContent = `${Math.round(decoder.totalLen / 1024)} KB`;
+
 }

@@ -55,6 +55,7 @@ a { color: inherit; }
 .ghost:hover,
 .secondary-button:hover,
 .download-offline:hover { background: var(--card); }
+.header-actions { display: flex; align-items: center; gap: 14px; }
 .view { display: none; }
 .view.active { display: block; }
 .home { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -70,23 +71,8 @@ a { color: inherit; }
   transition: .16s ease;
 }
 .mode:hover { transform: translateY(-2px); border-color: #d3d3ce; box-shadow: 0 12px 36px #00000009; }
-.app-footer {
-  width: min(920px, calc(100% - 32px));
-  margin: 0 auto;
-  padding: 16px 0 max(18px, env(safe-area-inset-bottom));
-  display: flex;
-  justify-content: space-between;
-  color: var(--muted);
-  border-top: 1px solid var(--line);
-  font-size: 11px;
-}
-.legal-link { border: 0; padding: 0; color: inherit; background: transparent; cursor: pointer; }
+.legal-link { border: 0; padding: 0; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; }
 .legal-link:hover { color: var(--ink); }
-.topline { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 12px; }
-.back { border: 0; background: transparent; padding: 6px 0; cursor: pointer; color: var(--muted); }
-.back:hover { color: var(--ink); }
-.title { font-weight: 700; font-size: 17px; }
-.topline-spacer { width: 42px; }
 
 /* Sender ------------------------------------------------------------------- */
 .send-shell,
@@ -109,11 +95,18 @@ a { color: inherit; }
   padding: 16px;
   transition: .14s;
 }
-.file-picker:hover { border-color: #d3d3ce; }
+.file-picker:hover, .file-picker.dragging { border-color: #999; background: #fdfdfb; }
 .file-picker input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
-.file-picker.has-file strong { color: var(--bad); }
+.file-picker.has-file strong { color: var(--ink); }
+.selection-summary { margin: 12px 0 0; padding: 10px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.selection-summary > div { display: flex; justify-content: space-between; gap: 20px; padding: 4px 0; }
+.selection-summary > div span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selection-summary > div span:last-child { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+.send-controls output { min-width: 48px; text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 .note-composer textarea {
   resize: none;
@@ -141,7 +134,8 @@ a { color: inherit; }
 .stage {
   position: relative;
   margin-top: 12px;
-  min-height: 470px;
+  min-height: 0;
+  aspect-ratio: 4 / 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -160,7 +154,6 @@ a { color: inherit; }
 
 body.qr-full { overflow: hidden; }
 body.qr-full .app-header,
-body.qr-full .app-footer,
 body.qr-full .app-main > :not(#sendView),
 body.qr-full .send-shell > :not(#stage) { display: none !important; }
 body.qr-full .app-main,
@@ -193,10 +186,11 @@ details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 select, input[type="range"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
 input[type="range"] { accent-color: #222; }
-.stream-specs, .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.stream-specs, .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 0; }
 .stream-specs dt, .metric .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
 .stream-specs dd { margin: 2px 0 0; overflow-wrap: anywhere; }
-.metric { background: var(--bg); border-radius: 9px; padding: 8px 10px; }
+.metric { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+.live-metrics { margin-top: 0; }
 .metric .v { margin-top: 2px; font-variant-numeric: tabular-nums; }
 .settings-actual { margin: 10px 0 0; }
 
@@ -220,7 +214,7 @@ input[type="range"] { accent-color: #222; }
 .preview {
   position: relative;
   width: 100%;
-  min-height: 430px;
+  min-height: 0;
   aspect-ratio: 4 / 3;
   overflow: hidden;
   background: #111;
@@ -229,10 +223,6 @@ input[type="range"] { accent-color: #222; }
 }
 .preview video { width: 100%; height: 100%; display: block; object-fit: contain; background: #111; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; }
-.scan-box { position: absolute; z-index: 1; inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(78%, 560px); aspect-ratio: 1; border: 1px solid #ffffff88; border-radius: 24px; box-shadow: 0 0 0 999px #00000018; pointer-events: none; }
-.scan-box::before, .scan-box::after { content: ""; position: absolute; width: 48px; height: 48px; border-color: white; border-style: solid; }
-.scan-box::before { left: -1px; top: -1px; border-width: 3px 0 0 3px; border-radius: 20px 0 0; }
-.scan-box::after { right: -1px; bottom: -1px; border-width: 0 3px 3px 0; border-radius: 0 0 20px; }
 .transfer-hud { position: absolute; z-index: 3; left: 12px; right: 12px; bottom: 12px; padding: 10px 11px; color: white; background: #111d; border: 1px solid #ffffff25; backdrop-filter: blur(10px); border-radius: 14px; }
 .progress-status { display: flex; justify-content: space-between; gap: 10px; color: #ffffffb8; font-size: 11px; }
 .progress-status strong { color: white; }
@@ -268,6 +258,7 @@ dialog::backdrop { background: #0004; }
   .home, .send-start { grid-template-columns: 1fr; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 190px; }
-  .stage { min-height: 390px; }
-  .preview { min-height: 430px; max-height: calc(100dvh - 175px); }
+  .send-controls { grid-template-columns: 1fr; gap: 12px; }
+  .stage { min-height: 0; }
+  .preview { min-height: 0; max-height: calc(100dvh - 150px); }
 }

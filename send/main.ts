@@ -13,15 +13,12 @@
 //   handles erasures, and a frame is either decoded whole or discarded.
 
 import QRCode from "qrcode";
-import { fitQrDisplaySize } from "../shared/display";
 import { gridDims, rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
-  MAX_SOURCE_BLOCKS,
   blockLength,
   fitsInOneStream,
   minimumFrameBytes,
-  smallestSufficientFrameSize,
   sourceBlockCount,
 } from "../shared/frame-capacity";
 import { LTEncoder } from "../shared/fountain";
@@ -37,6 +34,8 @@ import {
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
+import { makeZip } from "../shared/zip";
+import { DEFAULT_FRAME_BYTES } from "../shared/send-settings";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
@@ -48,28 +47,21 @@ const specs = document.getElementById("specs")!;
 const cfgFile = document.getElementById("cfg-file") as HTMLInputElement;
 const filePickerLabel = document.getElementById("file-picker-label")!;
 const filePickerButton = document.getElementById("file-picker-button")!;
-const toolTitle = document.getElementById("tool-title")!;
+const selectionSummary = document.getElementById("selection-summary")!;
+const sendControls = document.getElementById("send-controls")!;
 const snippetText = document.getElementById("snippet-text") as HTMLTextAreaElement;
 const snippetLabel = document.getElementById("snippet-label")!;
 const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElement;
 const paneFile = document.getElementById("pane-file")!;
 const paneSnippet = document.getElementById("pane-snippet")!;
-const streamSpecs = document.getElementById("stream-specs")!;
-const footerHint = document.getElementById("footer-hint")!;
-const spec = (id: string) => document.getElementById(id)!;
-
-/** Panels that only mean something while a stream is up: the spec grid at the
- *  bottom of Transfer settings, and the receiver hint under the status line. */
 function showStreamPanels(visible: boolean): void {
-  streamSpecs.hidden = !visible;
-  footerHint.hidden = !visible;
+  sendControls.hidden = !visible;
 }
 
-const cfgFps = document.getElementById("cfg-fps") as HTMLSelectElement;
-const cfgBytes = document.getElementById("cfg-bytes") as HTMLSelectElement;
-const cfgEcc = document.getElementById("cfg-ecc") as HTMLSelectElement;
-const cfgGrid = document.getElementById("cfg-grid") as HTMLSelectElement;
+const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
+const fpsValue = document.getElementById("fps-value")!;
+const sizeValue = document.getElementById("size-value")!;
 
 let selectedFile: {
   name: string;
@@ -77,6 +69,7 @@ let selectedFile: {
   payload: Uint8Array;
   compression: "none" | "gzip";
   transmittedSize: number;
+  files: { name: string; size: number }[];
 } | null = null;
 let generation = 0; // bumped on every restart; stale loops see it and die
 let resizeDisplay: (() => void) | null = null;
@@ -116,9 +109,20 @@ function selectMode(mode: "file" | "snippet"): void {
 function updateFilePicker(): void {
   const armed = currentMode() === "file" && selectedFile !== null;
   paneFile.classList.toggle("has-file", armed);
-  filePickerButton.textContent = armed ? "Stop transfer" : "Select File";
-  filePickerLabel.textContent =
-    armed && selectedFile ? `Selected file: ${selectedFile.name}` : `Any file · up to ${MAX_FILE_LABEL}`;
+  filePickerButton.textContent = armed ? "Stop transfer" : "Drop files here";
+  filePickerLabel.textContent = armed ? "Select different files" : "or select files";
+  selectionSummary.hidden = !armed;
+  if (armed && selectedFile) {
+    selectionSummary.replaceChildren(...selectedFile.files.map((file) => {
+      const row = document.createElement("div");
+      const name = document.createElement("span");
+      const size = document.createElement("span");
+      name.textContent = file.name;
+      size.textContent = formatBytes(file.size);
+      row.append(name, size);
+      return row;
+    }));
+  } else selectionSummary.replaceChildren();
 }
 
 /** Tear the stream down and disarm the picker. The input is cleared so the
@@ -133,7 +137,7 @@ function stopTransfer(): void {
   showStreamPanels(false);
   cfgFile.value = "";
   updateFilePicker();
-  setStatus("Choose a file to begin");
+  setStatus("");
 }
 
 /** Tap the code to fill the screen with it — a bigger physical code lets the
@@ -175,8 +179,7 @@ function applyMode(): void {
   // either one simply chooses the payload type for the stream.
   paneFile.hidden = false;
   paneSnippet.hidden = false;
-  toolTitle.textContent = "Send";
-  setStatus("Choose a file or enter text");
+  setStatus("");
   updateFilePicker();
 }
 
@@ -190,14 +193,14 @@ function applyMode(): void {
  */
 async function startSelection(
   status: string,
-  prepare: () => Promise<{ name: string; size: number; packed: PackedOpticalFile }>,
+  prepare: () => Promise<{ name: string; size: number; packed: PackedOpticalFile; files: { name: string; size: number }[] }>,
 ): Promise<void> {
   const selectionGeneration = ++generation;
   selectedFile = null;
   stage.hidden = true;
   setStatus(status);
   try {
-    const { name, size, packed } = await prepare();
+    const { name, size, packed, files } = await prepare();
     if (selectionGeneration !== generation) return;
     selectedFile = {
       name,
@@ -205,6 +208,7 @@ async function startSelection(
       payload: packed.container,
       compression: packed.compression,
       transmittedSize: packed.transmittedSize,
+      files,
     };
     await startStream(true);
   } catch (error) {
@@ -212,23 +216,33 @@ async function startSelection(
   }
 }
 
-async function selectFile(): Promise<void> {
-  const file = cfgFile.files?.[0];
-  if (!file) return;
+async function selectFiles(fileList: FileList | readonly File[]): Promise<void> {
+  const files = Array.from(fileList);
+  if (!files.length) return;
   selectMode("file");
-  await startSelection(`preparing ${file.name}…`, async () => {
-    // Checked here, off File.size, rather than after reading the bytes: a file
-    // well past the limit should be refused instantly instead of after the
-    // browser has spent time and memory materialising it. Name the actual size —
-    // "too large" without a number leaves you guessing by how much.
-    if (file.size === 0) {
-      throw new Error(`${file.name} is empty — there is nothing to send.`);
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  await startSelection(`Preparing ${files.length === 1 ? files[0]!.name : `${files.length} files`}…`, async () => {
+    const empty = files.find((file) => file.size === 0);
+    if (empty) throw new Error(`${empty.name} is empty — there is nothing to send.`);
+    if (total > MAX_FILE_BYTES) {
+      throw new Error(`The selection is ${formatBytes(total)}, over the ${MAX_FILE_LABEL} limit.`);
     }
-    if (file.size > MAX_FILE_BYTES) {
-      throw new Error(`${file.name} is ${formatBytes(file.size)}, over the ${MAX_FILE_LABEL} limit.`);
+    if (files.length === 1) {
+      const file = files[0]!;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return { name: file.name, size: file.size, packed: await packFile(file.name, file.type, bytes), files: [{ name: file.name, size: file.size }] };
     }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    return { name: file.name, size: file.size, packed: await packFile(file.name, file.type, bytes) };
+    const entries = await Promise.all(files.map(async (file) => ({
+      name: file.name,
+      bytes: new Uint8Array(await file.arrayBuffer()),
+    })));
+    const archive = makeZip(entries);
+    return {
+      name: `${files.length}-files.zip`,
+      size: total,
+      packed: await packFile(`${files.length}-files.zip`, "application/zip", archive),
+      files: files.map(({ name, size }) => ({ name, size })),
+    };
   });
   updateFilePicker();
 }
@@ -237,7 +251,7 @@ async function selectSnippet(): Promise<void> {
   selectMode("snippet");
   await startSelection("preparing text snippet…", async () => {
     const packed = await packSnippet(snippetText.value);
-    return { name: "Text snippet", size: packed.originalSize, packed };
+    return { name: "Text snippet", size: packed.originalSize, packed, files: [{ name: "Text snippet", size: packed.originalSize }] };
   });
 }
 
@@ -248,7 +262,17 @@ async function main() {
   snippetText.maxLength = MAX_SNIPPET_BYTES;
   snippetLabel.textContent = `Text to send · up to ${MAX_SNIPPET_LABEL}`;
 
-  cfgFile.addEventListener("change", () => void selectFile());
+  cfgFile.addEventListener("change", () => void selectFiles(cfgFile.files ?? []));
+  for (const eventName of ["dragenter", "dragover"]) {
+    paneFile.addEventListener(eventName, (event) => { event.preventDefault(); paneFile.classList.add("dragging"); });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    paneFile.addEventListener(eventName, () => paneFile.classList.remove("dragging"));
+  }
+  paneFile.addEventListener("drop", (event) => {
+    event.preventDefault();
+    if (event.dataTransfer?.files.length) void selectFiles(event.dataTransfer.files);
+  });
   // While a file is armed the picker label must NOT open the file dialog:
   // preventDefault cancels the label→input forwarding, and only the button
   // (or a keyboard activation of the hidden input, whose click bubbles up
@@ -262,9 +286,15 @@ async function main() {
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
   window.addEventListener("resize", () => resizeDisplay?.());
-  for (const el of [cfgFps, cfgBytes, cfgEcc, cfgGrid, cfgSize]) {
+  const updateControlLabels = () => {
+    fpsValue.textContent = `${cfgFps.value} fps`;
+    sizeValue.textContent = `${cfgSize.value} px`;
+  };
+  for (const el of [cfgFps, cfgSize]) {
+    el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => void startStream());
   }
+  updateControlLabels();
   await requestScreenWakeLock();
 }
 
@@ -283,23 +313,25 @@ async function startStream(revealStage = false) {
   // Stale until this stream's first frame locks its version and refills them.
   showStreamPanels(false);
   if (!selectedFile) {
-    setStatus(
-      currentMode() === "snippet" ? "Paste or type some text to begin" : "Choose a file to begin",
-    );
+    setStatus("");
     return;
   }
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);
-  const frameBytes = Number(cfgBytes.value);
-  const ecc = cfgEcc.value as "L" | "M" | "Q" | "H";
-  // Grid layouts: 2, 4 or 6 independent fountain frames on screen at once,
-  // tiled as same-version QRs. Same header, same capacity math — each code is
-  // an ordinary frame, so the receiver's fountain needs no notion of "layout".
-  // Cells flip on staggered phases rather than all at once — see tick().
-  const gridCodes = Number(cfgGrid.value) || 1;
-  const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
+  const frameBytes = DEFAULT_FRAME_BYTES;
+  const ecc = "L" as const;
   const displayPx = Number(cfgSize.value);
+  // Fit ordinary QR codes into a camera-shaped 4:3 stage. Moving the size
+  // slider smaller naturally adds codes; no layout knowledge is required by
+  // the receiver because every cell remains an independent fountain frame.
+  const availableWidth = Math.max(280, Math.min(920, window.innerWidth - 32) - 36);
+  const availableHeight = availableWidth * 3 / 4;
+  const gridCodes = [6, 4, 2, 1].find((count) => {
+    const dims = gridDims(count);
+    return availableWidth / dims.cols >= displayPx && availableHeight / dims.rows >= displayPx;
+  }) ?? 1;
+  const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = blockLength(frameBytes);
@@ -307,15 +339,10 @@ async function startStream(revealStage = false) {
   // and dropping the pick would hide that.
   if (!fitsInOneStream(payload.length, frameBytes)) {
     // Name a setting that is actually in the dropdown, not the bare minimum.
-    const offered = [...cfgBytes.options].map((option) => Number(option.value));
-    const suggestion =
-      smallestSufficientFrameSize(payload.length, offered) ?? minimumFrameBytes(payload.length);
+    const suggestion = minimumFrameBytes(payload.length);
     showError(
-      `${formatBytes(payload.length)} needs ` +
-        `${sourceBlockCount(payload.length, frameBytes).toLocaleString()} blocks at ` +
-        `${frameBytes} bytes per frame, and a frame can only number ` +
-        `${MAX_SOURCE_BLOCKS.toLocaleString()} of them. ` +
-        `Raise bytes / frame to ${suggestion} or more.`,
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, frameBytes).toLocaleString()} blocks. ` +
+      `This transfer needs at least ${suggestion} bytes per frame and cannot be displayed safely.`,
     );
     return;
   }
@@ -357,21 +384,10 @@ async function startStream(revealStage = false) {
       budgetW = window.innerWidth;
       budgetH = window.innerHeight;
     } else {
-      const containerWidth =
-        stage.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
+      const rect = stage.getBoundingClientRect();
       const stageStyle = getComputedStyle(stage);
-      const horizontalChrome =
-        Number.parseFloat(stageStyle.paddingLeft) +
-        Number.parseFloat(stageStyle.paddingRight) +
-        Number.parseFloat(stageStyle.borderLeftWidth) +
-        Number.parseFloat(stageStyle.borderRightWidth);
-      budgetW = budgetH = fitQrDisplaySize(
-        window.innerWidth,
-        window.innerHeight,
-        containerWidth,
-        displayPx,
-        horizontalChrome,
-      );
+      budgetW = rect.width - Number.parseFloat(stageStyle.paddingLeft) - Number.parseFloat(stageStyle.paddingRight);
+      budgetH = rect.height - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
     }
     scale = Math.max(1, Math.floor(Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH)));
     staging.width = totalW;
@@ -425,20 +441,8 @@ async function startStream(revealStage = false) {
       // Scroll only now: before sizeCanvas() the canvas is still 16×16, so the
       // scroll target would be the wrong height.
       if (revealStage) scrollStageIntoView();
-      // The stream's parameters live at the bottom of Transfer settings, next
-      // to the knobs that produced them; the status line stays for prose.
-      spec("spec-fps").textContent =
-        gridCodes > 1 ? `${txFps} fps × ${gridCodes} codes` : `${txFps} fps`;
-      spec("spec-frame").textContent =
-        gridCodes > 1 ? `${frameBytes} bytes × ${gridCodes}` : `${frameBytes} bytes`;
-      spec("spec-qr").textContent =
-        `V${version}${gridCodes > 1 ? ` ×${gridCodes}` : ""} · ECC ${ecc}`;
-      spec("spec-payload").textContent = `${name} · ${formatBytes(fileSize)}`;
-      spec("spec-compression").textContent =
-        compression === "gzip" ? `gzip → ${formatBytes(transmittedSize)}` : "none";
-      spec("spec-k").textContent = `K = ${encoder.k}`;
       showStreamPanels(true);
-      setStatus(`Streaming ${name}`);
+      setStatus(`Sending ${name} · ${formatBytes(fileSize)} · ${gridCodes} QR${gridCodes === 1 ? "" : "s"}`);
       // npm run diagnostics: announce this stream's settings so the server
       // log can pair them with the receiver's end-of-run report — the
       // receiver only ever learns k and blockLen from the wire, never the

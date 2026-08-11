@@ -18,7 +18,7 @@
       <span class="brand">AirGapper</span>
       <span class="tag">Air-gapped file transfer</span>
     </button>
-    <button class="download-offline" id="download-offline" type="button">Download offline</button>
+    <div class="header-actions"><button class="legal-link" id="legal-button" type="button">Legal / Source</button><button class="download-offline" id="download-offline" type="button">Download offline</button></div>
   </header>
 
   <main class="app-main">
@@ -30,11 +30,10 @@
     </section>
 
     <section id="sendView" class="view send-shell">
-      <div class="topline"><button class="back" type="button">← Back</button><div class="title" id="tool-title">Send</div><div class="topline-spacer"></div></div>
       <div class="send-start">
         <label class="file-picker drop" id="pane-file">
-          <input id="cfg-file" type="file" />
-          <span><strong class="file-picker-button" id="file-picker-button">Drop a file</strong><span class="sub" id="file-picker-label">or click to choose · up to %MAX_FILE_LABEL%</span></span>
+          <input id="cfg-file" type="file" multiple />
+          <span><strong class="file-picker-button" id="file-picker-button">Drop files here</strong><span class="sub" id="file-picker-label">or select files</span></span>
         </label>
         <div class="note-composer text-wrap" id="pane-snippet">
           <label for="snippet-text" id="snippet-label" class="sr-only">Text to send</label>
@@ -42,37 +41,23 @@
           <button id="send-snippet" class="text-send" type="button">Send text</button>
         </div>
       </div>
-
+      <div class="selection-summary" id="selection-summary" hidden></div>
       <div class="stage" id="stage" hidden><canvas id="qr" width="16" height="16"></canvas></div>
-      <div class="hint status-line" id="specs">Choose a file or enter text</div>
-      <div class="hint footer-hint" id="footer-hint" hidden>Open Receive on the other device and turn up this screen's brightness.</div>
-      <details class="settings">
-        <summary>Transfer settings</summary>
-        <div class="row">
-          <label>tx fps<select id="cfg-fps">%TX_FPS_OPTIONS%</select></label>
-          <label>bytes / frame<select id="cfg-bytes">%FRAME_BYTES_OPTIONS%</select></label>
-          <label>error correction<select id="cfg-ecc"><option selected>L</option><option>M</option><option>Q</option><option>H</option></select></label>
-          <label>layout<select id="cfg-grid"><option value="1" selected>1 code</option><option value="2">2 codes</option><option value="4">4 codes</option><option value="6">6 codes</option></select></label>
-          <label>display size<input id="cfg-size" type="range" min="300" max="1200" step="50" value="900" /></label>
-        </div>
-        <dl class="stream-specs" id="stream-specs" hidden>
-          <div><dt>tx rate</dt><dd id="spec-fps">—</dd></div><div><dt>frame payload</dt><dd id="spec-frame">—</dd></div>
-          <div><dt>qr</dt><dd id="spec-qr">—</dd></div><div><dt>sending</dt><dd id="spec-payload">—</dd></div>
-          <div><dt>compression</dt><dd id="spec-compression">—</dd></div><div><dt>fountain blocks</dt><dd id="spec-k">—</dd></div>
-        </dl>
-      </details>
+      <div class="hint status-line" id="specs"></div>
+      <div class="send-controls" id="send-controls" hidden>
+        <label><span>Speed</span><input id="cfg-fps" type="range" min="10" max="30" step="1" value="24" /><output id="fps-value">24 fps</output></label>
+        <label><span>QR size</span><input id="cfg-size" type="range" min="180" max="520" step="20" value="380" /><output id="size-value">380 px</output></label>
+      </div>
     </section>
 
     <section id="receiveView" class="view receiver-shell">
-      <div class="topline"><button class="back" type="button">← Back</button><div class="title">Receive</div><div class="topline-spacer"></div></div>
       <section class="receiver-primary">
-        <div class="receiver-heading"><div class="hint status-line" id="stats">Ready to scan a file or text stream</div></div>
-        <button id="start" class="enable-camera" type="button">Enable camera</button>
+        <div class="receiver-heading"><div class="hint status-line" id="stats"></div></div>
+        <button id="start" class="enable-camera" type="button" hidden>Enable camera</button>
         <div class="preview-zone" id="preview" style="display:none">
           <div class="no-signal-toast" id="no-signal" role="status" hidden><span>Nothing happening?</span><button id="no-signal-help" class="text-button" type="button">Help</button><button id="no-signal-dismiss" class="text-button" type="button">Dismiss</button></div>
           <div class="preview receive-card">
             <video id="video" muted playsinline></video><canvas id="detect-overlay" class="detect-overlay" aria-hidden="true"></canvas>
-            <div class="scan-box"></div>
             <div class="transfer-hud">
               <div class="progress-status" id="progress-status" style="display:none" aria-live="polite"><strong id="progress-label">0%</strong><span id="eta-label">Estimating time…</span></div>
               <div class="progress" id="progress" style="display:none" role="progressbar" aria-label="Transfer recovery progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
@@ -81,32 +66,16 @@
         </div>
         <div id="result"></div>
         <dialog class="help-dialog" id="no-signal-dialog" aria-labelledby="no-signal-title"><h2 id="no-signal-title" tabindex="-1" autofocus>Troubleshooting</h2><ul id="no-signal-tips"></ul><button id="no-signal-close" class="secondary-button" type="button">Close</button></dialog>
-        <details class="settings diagnostics" id="diagnostics" style="display:none">
-          <summary>Progress and measured KB/s</summary>
-          <div class="metrics" id="metrics" style="display:none">
-            <div class="metric"><div class="k">capture fps</div><div class="v" id="m-cap">—</div></div><div class="metric"><div class="k">decode fps</div><div class="v" id="m-dec">—</div></div>
-            <div class="metric"><div class="k">goodput</div><div class="v" id="m-rate">—</div></div><div class="metric"><div class="k">elapsed</div><div class="v" id="m-time">—</div></div>
-            <div class="metric"><div class="k">frames new/dup</div><div class="v" id="m-frames">—</div></div><div class="metric"><div class="k">blocks K</div><div class="v" id="m-k">—</div></div>
-            <div class="metric"><div class="k">block len</div><div class="v" id="m-block">—</div></div><div class="metric"><div class="k">transfer</div><div class="v" id="m-payload">—</div></div>
-          </div>
-        </details>
-        <details class="settings" id="settings">
-          <summary>Receive settings</summary>
-          <div class="row">
-            <label>capture width<select id="cfg-width"><option selected>960</option><option>1280</option><option>1920</option><option>2560</option></select></label>
-            <label>capture fps<select id="cfg-capfps"><option selected>30</option><option>60</option></select></label>
-            <label>decode workers<select id="cfg-workers"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
-          </div>
-          <p class="hint settings-actual" id="camera-actual">Applied when the camera starts.</p>
-        </details>
+        <div class="metrics live-metrics" id="metrics" style="display:none">
+          <div class="metric"><div class="k">capture</div><div class="v" id="m-cap">— fps</div></div>
+          <div class="metric"><div class="k">decode</div><div class="v" id="m-dec">— fps</div></div>
+          <div class="metric"><div class="k">speed</div><div class="v" id="m-rate">— KB/s</div></div>
+          <div class="metric"><div class="k">ETA</div><div class="v" id="m-eta">—</div></div>
+        </div>
       </section>
     </section>
   </main>
 
-  <footer class="app-footer">
-    <button class="legal-link" id="legal-button" type="button">Legal / Source</button>
-    <span>v%APP_VERSION%</span>
-  </footer>
 </div>
 
 <dialog class="legal-dialog" id="legal-dialog" aria-labelledby="legal-title">
