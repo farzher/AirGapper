@@ -121,9 +121,9 @@ function updateFilePicker(): void {
       : selectedFile.files[0]!.name;
     names.title = names.textContent;
     const originalTotal = selectedFile.files.reduce((sum, file) => sum + file.size, 0);
-    total.textContent = formatBytes(
-      selectedFile.compression === "gzip" ? selectedFile.transmittedSize : originalTotal,
-    );
+    total.textContent = selectedFile.compression === "gzip"
+      ? `${formatBytes(originalTotal)} original · ${formatBytes(selectedFile.transmittedSize)} gzip`
+      : formatBytes(originalTotal);
     selectionSummary.replaceChildren(names, total);
   } else selectionSummary.replaceChildren();
 }
@@ -300,8 +300,10 @@ async function main() {
   window.addEventListener("resize", () => resizeDisplay?.());
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
-    const bytes = FRAME_BYTES_OPTIONS[Number(cfgSize.value)] ?? FRAME_BYTES_OPTIONS[0]!;
-    sizeValue.textContent = `${formatBytes(bytes)}/frame`;
+    const level = Number(cfgSize.value);
+    const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
+    const codes = [1, 1, 1, 1, 1, 1, 2, 4, 6][level] ?? 1;
+    sizeValue.textContent = `${formatBytes(bytes)} · ${codes} QR${codes === 1 ? "" : "s"}`;
   };
   for (const el of [cfgFps, cfgSize]) {
     el.addEventListener("input", updateControlLabels);
@@ -333,12 +335,12 @@ async function startStream(revealStage = false) {
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);
   const sizeLevel = Number(cfgSize.value);
-  const frameBytes = FRAME_BYTES_OPTIONS[sizeLevel] ?? FRAME_BYTES_OPTIONS[0]!;
+  const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
-  // Size is optical payload, not CSS geometry. Fill one QR to its standard
-  // maximum before considering parallel symbols; every current slider level
-  // fits in one QR, so the default stays a single large, camera-friendly code.
-  const gridCodes = 1;
+  // Fill one standard QR from 500 B through its 2,953 B maximum, then add
+  // parallel maximum-density symbols. Each remains an ordinary independent
+  // fountain frame, so this does not change the wire protocol.
+  const gridCodes = [1, 1, 1, 1, 1, 1, 2, 4, 6][sizeLevel] ?? 1;
   const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
