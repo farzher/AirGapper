@@ -1,10 +1,16 @@
 # AirGrid engineering plan
 
-## Current state
+## AirGrid X1 milestone (current)
+
+Profile 3 is frozen as failed historical channel evidence. The former instruction to gate protocol work on more Profile 3 phone tests is obsolete. v35a adds the QR-free AirGrid X1 acquisition/modulation laboratory in `airgrid-x1.js`, the precise format and capacity gates in `AIRGRID_NEXT.md`, and a separate deterministic production-worker benchmark. X1 has no file-transfer path and makes no physical capacity claim.
+
+The X1 worker detects a shared ring-fiducial lattice on a bounded detector raster, reads only full-resolution candidate tile ROIs, BCH/CRC-checks a 128-bit local header, scores binary/M1/M2/M3 block hypotheses into soft bit values, and runs a typed-array cyclic LDPC/CRC payload check. `?airgridLab=1` exposes deterministic pitch/profile/page-rate patterns and live camera metrics. Physical old-phone characterization remains the next gate.
+
+## Historical Profile 3 state
 
 Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups. v34e samples five points inside each logical dot instead of relying on one camera pixel. v34f switches the sender to a black optical field with white QR/fiducials and bright payload colors; the receiver detects polarity per group so committed white-field captures remain decodable. v34g reduces physical scale to 1.3× so a 2560×1440 optical surface fits two complete group rows, and retries CRC-failed black-field tiles with a tighter cross-shaped five-point neighborhood. v34h makes the complete receiver diagnostics panel scrollable so live throughput losses can be separated into acquisition, payload, duplicate-page, and worker bottlenecks. v34i caps the QR detector by the camera frame's long side: the measured 1080×1920 portrait feed now uses a 540×960 detector instead of 960×1707, and diagnostics report canvas, QR, and payload stage times separately.
 
-The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34i** is required for the next hardware test.
+The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or downloaded offline copy showing **v34i** was required for the historical Profile 3 hardware test. Current X1 laboratory builds show **v35a**.
 
 A real-phone test at 1 page per second remained unusable, so sender page rate is not the primary failure. v34b adds a zero-rate frozen-page diagnostic for obtaining stable profile 3 captures.
 
@@ -22,9 +28,9 @@ The application theme and optical background are separate decisions. A dark appl
 
 v34f introduced the black-field hardware experiment. It uses a pure black field, white QR modules and fiducials, and bright similar-luminance colors. The receiver detects black versus white field from each group's calibration samples and enables inverted QR detection, preserving the existing white-field fixture baseline. The first frozen black capture verifies 5/7 tiles before decoder changes versus 2/6 for the committed white capture, so black remains enabled. Live captures must still confirm that this advantage persists under motion and page transitions.
 
-## Profile 3 hardware gate
+## Historical Profile 3 hardware gate (superseded)
 
-Before changing the protocol again:
+This gate is retained only to explain the archived fixtures; it no longer blocks X1 work:
 
 1. Verify the sender says `v34i`.
 2. Capture still frames from both phones at normal use distance.
@@ -32,9 +38,9 @@ Before changing the protocol again:
 4. Complete a small transfer on each phone.
 5. Add the captures to the benchmark as profile 3 acceptance fixtures.
 
-## Profile 4: QR-free, crop-local AirGrid
+## Profile 4 proposal (superseded by AirGrid X1)
 
-The target design removes QR entirely. Every repeating cell must be independently discoverable and decodable, so a camera crop does not need the fullscreen grid origin.
+This proposal led to the more precise `AIRGRID_NEXT.md` format. The target design removes QR entirely. Every repeating cell must be independently discoverable and decodable, so a camera crop does not need the fullscreen grid origin.
 
 Each cell will contain:
 
@@ -46,4 +52,4 @@ Each cell will contain:
 
 The detector will find fiducial components, form candidate quadrilaterals, decode the local header, and reject candidates by CRC. Session metadata is repeated in every cell. Fountain ESI is derived from the local frame and tile identifiers. Any crop containing one complete cell can therefore contribute data; larger crops contribute cells in parallel.
 
-Profile 4 should only replace profile 3 after the benchmark can compare verified bytes per frame under the two real-phone channel models. QR removal is expected to recover substantial area, but bootstrap robustness remains the first requirement.
+X1 does not replace Profile 3 with a production transfer mode. It first requires the acquisition, physical channel, vetted QC-LDPC, and measured capacity gates in `AIRGRID_NEXT.md`.

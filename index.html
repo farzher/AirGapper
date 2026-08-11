@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v34i: orientation-bounded QR detector -->
+<!-- AirGapper v35a: AirGrid X1 acquisition/modulation laboratory -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -140,7 +140,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v34i</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v35a</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -207,6 +207,7 @@
 </div>
 <div class="toast" id="toast"></div>
 
+<script data-airgrid-x1 src="airgrid-x1.js"></script>
 <script data-vendor="qrcode" src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script data-vendor="zxing" src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/iife/reader/index.js"></script>
 <script data-vendor="fflate" src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
@@ -214,7 +215,9 @@
 (() => {
 'use strict';
 
-const BUILD='v34i';
+if(new URLSearchParams(location.search).get('airgridLab')==='1')return;
+
+const BUILD='v35a';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $=s=>document.querySelector(s);
@@ -459,7 +462,7 @@ if(new URLSearchParams(location.search).get('airgapperTest')==='1')setTimeout(()
 function bytesToBase64(bytes){let out='';const step=0x8000;for(let i=0;i<bytes.length;i+=step)out+=String.fromCharCode(...bytes.subarray(i,Math.min(bytes.length,i+step)));return btoa(out);}
 async function fetchWasmBase64(url){const r=await fetch(url,{cache:'force-cache'});if(!r.ok)throw new Error('Could not download WASM');return bytesToBase64(new Uint8Array(await r.arrayBuffer()));}
 const offlineBtn=$('#offlineBtn');
-if(offlineBtn)offlineBtn.onclick=async()=>{const btn=$('#offlineBtn'),old=btn.textContent;btn.textContent='Preparing…';btn.disabled=true;try{const clone=document.documentElement.cloneNode(true);clone.querySelector('#offlineBtn')?.remove();clone.querySelector('body')?.classList.remove('sending');clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');clone.querySelector('.receiveCard')?.classList.remove('debug');const dbg=clone.querySelector('#debugBtn');if(dbg)dbg.textContent='Debug';const fileInput=clone.querySelector('#fileInput');if(fileInput)fileInput.value='';const textInput=clone.querySelector('#textInput');if(textInput){textInput.value='';textInput.textContent='';}const textSend=clone.querySelector('#textSendBtn');if(textSend)textSend.disabled=true;const live=[...document.querySelectorAll('script[data-vendor]')],copies=[...clone.querySelectorAll('script[data-vendor]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}const tag=document.createElement('script');tag.type='text/plain';tag.setAttribute('data-wasm','zxing-reader');tag.textContent=await fetchWasmBase64('https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/reader/zxing_reader.wasm');clone.querySelector('body').appendChild(tag);downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),`AirGapper-${BUILD}-offline.html`);toast('Offline copy downloaded');}catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}};
+if(offlineBtn)offlineBtn.onclick=async()=>{const btn=$('#offlineBtn'),old=btn.textContent;btn.textContent='Preparing…';btn.disabled=true;try{const clone=document.documentElement.cloneNode(true);clone.querySelector('#offlineBtn')?.remove();clone.querySelector('body')?.classList.remove('sending');clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');clone.querySelector('.receiveCard')?.classList.remove('debug');const dbg=clone.querySelector('#debugBtn');if(dbg)dbg.textContent='Debug';const fileInput=clone.querySelector('#fileInput');if(fileInput)fileInput.value='';const textInput=clone.querySelector('#textInput');if(textInput){textInput.value='';textInput.textContent='';}const textSend=clone.querySelector('#textSendBtn');if(textSend)textSend.disabled=true;const live=[...document.querySelectorAll('script[data-vendor],script[data-airgrid-x1]')],copies=[...clone.querySelectorAll('script[data-vendor],script[data-airgrid-x1]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}const tag=document.createElement('script');tag.type='text/plain';tag.setAttribute('data-wasm','zxing-reader');tag.textContent=await fetchWasmBase64('https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/reader/zxing_reader.wasm');clone.querySelector('body').appendChild(tag);downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),`AirGapper-${BUILD}-offline.html`);toast('Offline copy downloaded');}catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}};
 window.addEventListener('resize',()=>{if(state.transfer){state.transfer.layout=null;renderAirFrame(false);}drawDebugOverlay();});
 })();
 
