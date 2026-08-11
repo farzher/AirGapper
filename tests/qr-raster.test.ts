@@ -44,28 +44,28 @@ test("every offered layout gets an as-square-as-possible grid, taller first", ()
   assert.deepEqual(gridDims(12), { cols: 3, rows: 4 });
 });
 
-test("a 2×2 grid tiles four matrices, each inside its own quiet zone", () => {
-  // Single-module codes with margin 1: cells are 3×3, dark centers at
-  // (1,1), (4,1), (1,4), (4,4) for the codes that have a dark module.
+test("a 2×2 grid tiles four matrices with shared quiet zones", () => {
+  // Single-module codes with margin 1: the internal one-module gutter is
+  // shared, so dark centers are at (1,1), (3,1), (1,3), and (3,3).
   const { width, height, pixels } = rasterizeQrGrid(1, [[1], [0], [0], [1]], 1);
-  assert.equal(width, 6);
-  assert.equal(height, 6);
+  assert.equal(width, 5);
+  assert.equal(height, 5);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const dark = (x === 1 && y === 1) || (x === 4 && y === 4);
+      const dark = (x === 1 && y === 1) || (x === 3 && y === 3);
       assert.equal(pixels[y * width + x], dark ? BLACK : WHITE, `pixel (${x},${y})`);
     }
   }
 });
 
 test("a 2-code grid stacks in a single column", () => {
-  // Cells are 3×3: dark centers at (1,1) and (1,4), nothing beside them.
+  // The one-module quiet zone is shared: centers sit at (1,1) and (1,3).
   const { width, height, pixels } = rasterizeQrGrid(1, [[1], [1]], 1);
   assert.equal(width, 3);
-  assert.equal(height, 6);
+  assert.equal(height, 5);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const dark = x === 1 && (y === 1 || y === 4);
+      const dark = x === 1 && (y === 1 || y === 3);
       assert.equal(pixels[y * width + x], dark ? BLACK : WHITE, `pixel (${x},${y})`);
     }
   }

@@ -37,7 +37,7 @@ export function rasterizeQr(
 }
 
 export interface QrGridRaster {
-  /** Pixels across / down: cols (rows) × (moduleCount + 2 × margin). */
+  /** Pixels across/down, with one outer margin and one shared margin between symbols. */
   width: number;
   height: number;
   pixels: Uint32Array<ArrayBuffer>;
@@ -58,9 +58,10 @@ export function gridDims(count: number): { cols: number; rows: number } {
 }
 
 /**
- * Same-version module matrices tiled into a grid (shape per gridDims), each
- * code keeping its own quiet zone (adjacent zones merge into 2×margin of
- * white). A grid of one is exactly rasterizeQr.
+ * Same-version module matrices tiled into a grid (shape per gridDims).
+ * Adjacent symbols share one quiet zone: each still has `margin` clear modules
+ * before another symbol begins, without doubling every internal gutter.
+ * A grid of one is exactly rasterizeQr.
  */
 export function rasterizeQrGrid(
   moduleCount: number,
@@ -68,14 +69,14 @@ export function rasterizeQrGrid(
   margin: number,
 ): QrGridRaster {
   const { cols, rows } = gridDims(matrices.length);
-  const cell = moduleCount + 2 * margin;
-  const width = cols * cell;
-  const height = rows * cell;
+  const stride = moduleCount + margin;
+  const width = cols * moduleCount + (cols + 1) * margin;
+  const height = rows * moduleCount + (rows + 1) * margin;
   const pixels = new Uint32Array(width * height);
   pixels.fill(WHITE);
   matrices.forEach((modules, i) => {
-    const ox = (i % cols) * cell + margin;
-    const oy = Math.floor(i / cols) * cell + margin;
+    const ox = (i % cols) * stride + margin;
+    const oy = Math.floor(i / cols) * stride + margin;
     for (let y = 0; y < moduleCount; y++) {
       const row = (y + oy) * width + ox;
       const src = y * moduleCount;

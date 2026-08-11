@@ -39,10 +39,10 @@ import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
-// Dense levels keep maximum-capacity standard QRs and add parallel cells.
-// Twelve fills a portrait 3×4 frame, matching the receiver camera's 4:3
-// sensor shape when the phone is held upright.
-const GRID_CODE_OPTIONS: readonly number[] = [1, 1, 1, 1, 1, 1, 2, 4, 6, 12];
+// Every density uses the same portrait 3×4 frame. The Size control changes
+// only the bytes (and therefore QR version) in each of the twelve cells, so
+// optical comparisons keep the camera-filling layout constant.
+const GRID_CODES = 12;
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
@@ -349,8 +349,7 @@ async function main() {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    const codes = GRID_CODE_OPTIONS[level] ?? 1;
-    sizeValue.textContent = `${formatBytes(bytes)} · ${codes} QR${codes === 1 ? "" : "s"}`;
+    sizeValue.textContent = `${formatBytes(bytes)} · ${GRID_CODES} QRs`;
   };
   for (const el of [cfgFps, cfgSize]) {
     el.addEventListener("input", updateControlLabels);
@@ -387,7 +386,7 @@ async function startStream(revealStage = false) {
   // Fill one standard QR from 500 B through its 2,953 B maximum, then add
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
-  const gridCodes = GRID_CODE_OPTIONS[sizeLevel] ?? 1;
+  const gridCodes = GRID_CODES;
   const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
@@ -429,9 +428,11 @@ async function startStream(revealStage = false) {
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    const cell = modules + 2 * MARGIN;
-    const totalW = cell * gridCols;
-    const totalH = cell * gridRows;
+    // Adjacent symbols share one four-module quiet zone. Giving each cell a
+    // separate quiet zone produced an unnecessary eight-module gutter.
+    const stride = modules + MARGIN;
+    const totalW = modules * gridCols + MARGIN * (gridCols + 1);
+    const totalH = modules * gridRows + MARGIN * (gridRows + 1);
     let budgetW: number;
     let budgetH: number;
     if (document.body.classList.contains("qr-full")) {
@@ -469,7 +470,7 @@ async function startStream(revealStage = false) {
     // cell the stream has shown so far, so a resize never blanks the grid.
     const stagingCtx = staging.getContext("2d")!;
     cells.forEach((img, i) => {
-      if (img) stagingCtx.putImageData(img, (i % gridCols) * cell, Math.floor(i / gridCols) * cell);
+      if (img) stagingCtx.putImageData(img, (i % gridCols) * stride, Math.floor(i / gridCols) * stride);
     });
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
@@ -630,8 +631,9 @@ async function startStream(revealStage = false) {
         break;
       }
       const cell = modules + 2 * MARGIN;
-      const cx = (cellCursor % gridCols) * cell;
-      const cy = Math.floor(cellCursor / gridCols) * cell;
+      const stride = modules + MARGIN;
+      const cx = (cellCursor % gridCols) * stride;
+      const cy = Math.floor(cellCursor / gridCols) * stride;
       cells[cellCursor] = img;
       staging.getContext("2d")!.putImageData(img, cx, cy);
       const ctx = canvas.getContext("2d")!;
