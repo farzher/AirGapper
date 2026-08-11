@@ -45,6 +45,7 @@ const LOOKAHEAD = 3;
 // only the bytes (and therefore QR version) in each of the twelve cells, so
 // optical comparisons keep the camera-filling layout constant.
 const GRID_CODES = 12;
+const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
@@ -328,6 +329,38 @@ async function selectSnippet(): Promise<void> {
   });
 }
 
+function restoreSendSettings(): void {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SEND_SETTINGS_KEY) ?? "null") as {
+      fps?: unknown;
+      sizeLevel?: unknown;
+      scaling?: unknown;
+    } | null;
+    if (!saved) return;
+    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 60) {
+      cfgFps.value = String(saved.fps);
+    }
+    if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
+      cfgSize.value = String(saved.sizeLevel);
+    }
+    if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
+  } catch {
+    // Storage can be disabled, especially for local files. Defaults still work.
+  }
+}
+
+function saveSendSettings(): void {
+  try {
+    localStorage.setItem(SEND_SETTINGS_KEY, JSON.stringify({
+      fps: Number(cfgFps.value),
+      sizeLevel: Number(cfgSize.value),
+      scaling: cfgScaling.value,
+    }));
+  } catch {
+    // A blocked or full store must never prevent a transfer.
+  }
+}
+
 async function main() {
   // Both bounds come from MAX_SNIPPET_BYTES so they can't drift apart. maxLength
   // counts UTF-16 units and the real check counts UTF-8 bytes, which are never
@@ -358,6 +391,7 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
+  restoreSendSettings();
   window.addEventListener("resize", () => resizeDisplay?.());
   sendControls.addEventListener("toggle", () => requestAnimationFrame(() => resizeDisplay?.()));
   const updateControlLabels = () => {
@@ -368,7 +402,10 @@ async function main() {
   };
   for (const el of [cfgFps, cfgSize, cfgScaling]) {
     el.addEventListener("input", updateControlLabels);
-    el.addEventListener("change", () => void startStream());
+    el.addEventListener("change", () => {
+      saveSendSettings();
+      void startStream();
+    });
   }
   updateControlLabels();
   await requestScreenWakeLock();
