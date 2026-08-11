@@ -427,7 +427,7 @@ function stopReceiver(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
-  transferSizeLabel.textContent = "Waiting for transfer";
+  transferSizeLabel.textContent = "—";
   etaLabel.textContent = "Waiting for QR";
   bar.style.width = "0";
   bar.classList.remove("error");
@@ -775,12 +775,14 @@ function updateProgressEstimate() {
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
   progressLabel.textContent = `${shownPercent}%`;
   const receivedBytes = Math.min(decoder.totalLen, usefulFrames * decoder.blockLen);
-  transferSizeLabel.textContent =
-    `${formatBytes(receivedBytes)} received · ${formatBytes(decoder.totalLen - receivedBytes)} remaining`;
-  const eta = estimate.etaSeconds === undefined
-    ? estimate.phase === "decoding" ? "Decoding…" : "Estimating…"
-    : `About ${formatDuration(estimate.etaSeconds)} left`;
-  etaLabel.textContent = eta;
+  const remainingBytes = decoder.totalLen - receivedBytes;
+  transferSizeLabel.textContent = `${formatBytes(receivedBytes)} of ${formatBytes(decoder.totalLen)}`;
+  const liveKbs = liveGoodputKbs(performance.now());
+  etaLabel.textContent = remainingBytes === 0
+    ? "Decoding…"
+    : liveKbs > 0 && usefulFrames >= 3
+      ? `${formatDuration(remainingBytes / (liveKbs * 1024))} left`
+      : "Estimating…";
 }
 
 /** One-second information goodput for live aiming feedback. The completed
@@ -878,7 +880,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
-  transferSizeLabel.textContent = `${formatBytes(container.length)} received · 0 B remaining`;
+  transferSizeLabel.textContent = `${formatBytes(container.length)} of ${formatBytes(container.length)}`;
   etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
@@ -886,7 +888,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
     seconds = (performance.now() - startTs) / 1000;
     document.body.classList.add("receive-complete");
-    transferSizeLabel.textContent = `${formatBytes(file.bytes.length)} received · 0 B remaining`;
+    transferSizeLabel.textContent = `${formatBytes(file.bytes.length)} of ${formatBytes(file.bytes.length)}`;
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
