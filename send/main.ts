@@ -176,10 +176,29 @@ function stopTransfer(): void {
  *  still there for the heuristic to track. A flow layout that reflows on
  *  exit leaves nothing behind. Tap again (or Esc) to shrink back. */
 let scrollBeforeFullscreen = 0;
+let cursorIdleTimer: ReturnType<typeof setTimeout> | undefined;
+const CURSOR_IDLE_MS = 1200;
+
+function armFullscreenCursor(): void {
+  clearTimeout(cursorIdleTimer);
+  document.body.classList.remove("qr-cursor-hidden");
+  if (!document.body.classList.contains("qr-full")) return;
+  cursorIdleTimer = setTimeout(() => {
+    if (document.body.classList.contains("qr-full")) document.body.classList.add("qr-cursor-hidden");
+  }, CURSOR_IDLE_MS);
+}
+
+window.addEventListener("mousemove", armFullscreenCursor, { passive: true });
+
 function setStageFullscreen(on: boolean): void {
   if (on === document.body.classList.contains("qr-full")) return;
   if (on) scrollBeforeFullscreen = window.scrollY;
   document.body.classList.toggle("qr-full", on);
+  if (on) armFullscreenCursor();
+  else {
+    clearTimeout(cursorIdleTimer);
+    document.body.classList.remove("qr-cursor-hidden");
+  }
   if (!on && document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
   resizeDisplay?.();
   // Entering: the stage IS the page now, start at its top. Leaving: put the
