@@ -16,6 +16,7 @@ export function expectedFountainOverhead(sourceBlocks: number): number {
 export interface TransferProgressEstimate {
   fraction: number;
   expectedFrames: number;
+  remainingFrames: number;
   etaSeconds?: number;
   phase: "collecting" | "decoding";
 }
@@ -24,29 +25,27 @@ export function estimateTransferProgress(
   sourceBlocks: number,
   uniqueFrames: number,
   elapsedSeconds: number,
-  _solvedBlocks = 0,
+  _solvedBlocks = uniqueFrames,
 ): TransferProgressEstimate {
   const minimumFrames = Math.max(1, sourceBlocks);
+  // An aligned clean systematic sweep finishes at k, while a mid-cycle join or
+  // dropped symbols consumes repair frames. Reserve 20% for that carousel time:
+  // enough to avoid camping at 99%, but not the old solved-block estimate that
+  // could sit near 70% until one peeling cascade completed everything.
   const expectedFrames = Math.max(
     minimumFrames + 1,
-    Math.ceil(minimumFrames * expectedFountainOverhead(minimumFrames)),
+    Math.ceil(minimumFrames * 1.2),
   );
   const expectedRedundancy = expectedFrames - minimumFrames;
 
-  // Every useful frame contributes one block-sized equation. Solved blocks are
-  // deliberately NOT used here: fountain peeling is back-loaded and can solve
-  // a large pending graph in one cascade. The first k equations fill 97% of the
-  // bar, expected repair reaches 98%, then extra repair approaches 99%. This
-  // keeps moving under loss without ever showing 0 bytes left before decode and
-  // verification actually finish.
+  // Fill 97% over the currently predicted completion time, then keep creeping
+  // toward 99% if this run needs more repair. Only verified completion is 100%.
   let fraction: number;
-  if (uniqueFrames <= minimumFrames) {
-    fraction = 0.97 * (uniqueFrames / minimumFrames);
-  } else if (uniqueFrames <= expectedFrames) {
-    fraction = 0.97 + 0.01 * ((uniqueFrames - minimumFrames) / expectedRedundancy);
+  if (uniqueFrames <= expectedFrames) {
+    fraction = 0.97 * (uniqueFrames / expectedFrames);
   } else {
     const repairStep = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));
-    fraction = 0.98 + 0.01 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
+    fraction = 0.97 + 0.02 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
   }
   const phase = uniqueFrames < minimumFrames ? "collecting" : "decoding";
   const rate = elapsedSeconds > 0 ? uniqueFrames / elapsedSeconds : 0;
@@ -63,11 +62,12 @@ export function estimateTransferProgress(
     overshoot < 0
       ? expectedFrames
       : expectedFrames + step * (Math.floor(overshoot / step) + 1);
+  const remainingFrames = Math.max(0, target - uniqueFrames);
   const etaSeconds =
     uniqueFrames >= 3 && elapsedSeconds >= 1 && rate > 0
-      ? (target - uniqueFrames) / rate
+      ? remainingFrames / rate
       : undefined;
-  return { fraction, expectedFrames, etaSeconds, phase };
+  return { fraction, expectedFrames, remainingFrames, etaSeconds, phase };
 }
 
 export function formatDuration(seconds: number): string {

@@ -775,11 +775,12 @@ function updateProgressEstimate() {
   const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
   transferSizeLabel.textContent = `${formatBytes(remainingBytes)} remaining`;
   const liveKbs = liveGoodputKbs(performance.now());
-  etaLabel.textContent = remainingBytes === 0
-    ? "Decoding…"
-    : liveKbs > 0 && usefulFrames >= 3
-      ? `${formatDuration(remainingBytes / (liveKbs * 1024))} left`
-      : "Estimating…";
+  const liveUsefulFps = liveKbs > 0
+    ? liveKbs * 1024 * expectedFountainOverhead(decoder.k) / decoder.blockLen
+    : 0;
+  etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3
+    ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
+    : "Estimating…";
 }
 
 /** One-second information goodput for live aiming feedback. The completed
