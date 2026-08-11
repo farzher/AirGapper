@@ -135,6 +135,9 @@ interface Region extends SymbolBox {
   /** Last successful byte decode. Failed detector sightings keep the crop
    * alive but must not make the success outline flash. */
   decodedSeen?: number;
+  /** Recent detector outcomes. Color communicates this success ratio instead
+   * of assigning an arbitrary identity color to each code. */
+  outcomes: boolean[];
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
   drift?: number;
@@ -194,6 +197,8 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
         // overwriting a decode-proven box aims every following crop at
         // garbage — a measured 6× throughput collapse on a 4-code grid.
         r.seen = now;
+        r.outcomes.push(false);
+        if (r.outcomes.length > 20) r.outcomes.shift();
         return;
       }
       // Half-life blend of per-decode displacement: steady hands decay it to
@@ -202,6 +207,8 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
+      r.outcomes.push(true);
+      if (r.outcomes.length > 20) r.outcomes.shift();
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -223,6 +230,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     seen: now,
     decoded,
     decodedSeen: decoded ? now : undefined,
+    outcomes: [decoded],
     quad: info?.quad,
     dim: info?.modules,
   });
@@ -253,21 +261,14 @@ video.addEventListener("resize", syncPreviewAspect);
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
 const overlayCtx = overlay.getContext("2d")!;
-// One vivid color per code so a multi-code stream reads at a glance — "the
-// amber one isn't decoding" beats counting brackets. Assigned by layout order
-// (top-to-bottom, left-to-right), so a code keeps its color across dropouts
-// and reacquisitions instead of shuffling on every region churn.
-const INDICATOR_COLORS = [
-  "#42e8ff", // cyan
-  "#54ff7e", // green
-  "#ffd94a", // amber
-  "#ff6ad5", // pink
-  "#c08bff", // violet
-  "#ff9a4d", // orange
-  "#8dff4a", // lime
-  "#ff5f5f", // coral
-  "#ffffff", // white
-];
+function captureQualityColor(region: Region): string {
+  const successes = region.outcomes.reduce((sum, ok) => sum + Number(ok), 0);
+  const rate = successes / region.outcomes.length;
+  if (rate >= 0.9) return "#35d66f"; // strong lock
+  if (rate >= 0.65) return "#a9c93d";
+  if (rate >= 0.35) return "#ffb23e";
+  return "#ff665c"; // detected, but rarely decoded
+}
 
 /** Grid-layout reading order: rows first, columns within a row. Two boxes are
  *  the same row when their vertical centers are within half a code of each
@@ -304,16 +305,13 @@ function drawOverlay(now: number) {
   // this makes distance/focus/cropping trouble visible without covering the
   // camera image or adding instructions over it.
   const ordered = [...regions].sort(layoutOrder);
-  for (const [slot, r] of ordered.entries()) {
+  for (const r of ordered) {
     const decodedAge = now - (r.decodedSeen ?? -Infinity);
     const sightingAge = now - r.seen;
     const successful = decodedAge <= INDICATOR_FADE_MS;
     if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
 
-    const nearEdge = r.x < vw * 0.015 || r.y < vh * 0.015 ||
-      r.x + r.w > vw * 0.985 || r.y + r.h > vh * 0.985;
-    const slotColor = INDICATOR_COLORS[slot % INDICATOR_COLORS.length]!;
-    const color = !successful && nearEdge ? "#ff665c" : slotColor;
+    const color = captureQualityColor(r);
     overlayCtx.strokeStyle = color;
     overlayCtx.shadowColor = color;
     overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
