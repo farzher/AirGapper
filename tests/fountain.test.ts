@@ -5,8 +5,8 @@
 // frameIndices are the v1 soliton stream, no longer emitted since the v2
 // carousel, but still pinned below: the vectors were expensive to derive
 // and a future format may want the machinery back.) That matters
-// more here than in most projects: standalone sender/receiver HTML files are
-// attached to releases, and people keep them and re-use them months later.
+// more here than in most projects: downloaded standalone HTML copies are
+// kept and re-used for months, and must remain wire-compatible.
 //
 // So these are golden vectors, not behavioural tests. If one fails you have
 // changed the wire format. That may be fine — but it is a breaking change and

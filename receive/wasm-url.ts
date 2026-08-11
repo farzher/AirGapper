@@ -1,7 +1,5 @@
-// Served builds fetch the decoder wasm (decimen-codec — QR-only plus the
-// tracked fast path, see ../vendor/decimen-codec) as a
-// separate asset, which the service worker precaches. Standalone builds swap
-// this for wasm-url.inline.ts.
-import wasmUrl from "../vendor/decimen-codec/decimen_codec.wasm?url";
+// The audited decimen-codec WASM is embedded as a data URL by the build. This
+// keeps the exact same decoder in direct-file and hosted PWA use.
+import dataUrl from "virtual:codec-wasm-data-url";
 
-export default wasmUrl;
+export default dataUrl;

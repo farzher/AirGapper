@@ -86,7 +86,7 @@ let done = false;
 let settingsWired = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 
-const noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
+let noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
   (bytes, box, info) => onDecoded(bytes, box, info),
@@ -330,11 +330,6 @@ function drawOverlay(now: number) {
 }
 startBtn.onclick = () => void start();
 
-// The header nav markup is shared verbatim between both tool pages; each page
-// marks its own link. Optional because the standalone build swaps the nav for
-// a badge. Same story on the sender.
-document.querySelector('.mode-nav a[href="../receive/"]')?.setAttribute("aria-current", "page");
-
 // More decode workers than the device has cores just adds contention —
 // counts the device can't use are removed outright rather than grayed out:
 // a dead option is noise here, not information.
@@ -398,20 +393,87 @@ function restartButton(label: string): HTMLButtonElement {
 function offerRetry(message: string) {
   startBtn.disabled = false;
   startBtn.style.display = "";
-  startBtn.textContent = "Start camera";
+  startBtn.textContent = "Enable camera";
   preview.style.display = "none";
   metricsEl.style.display = "none";
   if (diagnosticsEl) diagnosticsEl.style.display = "none";
   showError(message);
 }
 
+/** Stop every hot-path resource before this in-page view is hidden. */
+function stopReceiver(): void {
+  captureGen++;
+  stream?.getTracks().forEach((track) => track.stop());
+  stream = null;
+  clearInterval(statsTimer);
+  statsTimer = undefined;
+  pool.resize(0);
+  decoder = null;
+  streamKey = "";
+  reportSessionId = 0;
+  startTs = 0;
+  done = false;
+  regions.length = 0;
+  expectedRegions = 0;
+  expectedRegionsAt = 0;
+  lastFullScan = 0;
+  cropRotate = 0;
+  captureTimes.length = 0;
+  decodeTimes.length = 0;
+  totalCaptures = 0;
+  totalDecodes = 0;
+  fullScans = 0;
+  peakRegions = 0;
+  capturesDropped = 0;
+  cropsSubmitted = 0;
+  trackedDecodes = 0;
+  trackedAttempts = 0;
+  cameraStartedTs = 0;
+  zeroRegionMs = 0;
+  degradedMs = 0;
+  minSeq = Infinity;
+  maxSeq = -1;
+  timeline.length = 0;
+  noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
+  result.replaceChildren();
+  preview.style.display = "none";
+  progressEl.style.display = "none";
+  progressEl.setAttribute("aria-valuenow", "0");
+  progressStatus.style.display = "none";
+  progressLabel.textContent = "0%";
+  etaLabel.textContent = "Estimating time…";
+  bar.style.width = "0";
+  bar.classList.remove("error");
+  metricsEl.style.display = "none";
+  settingsEl.style.display = "";
+  if (diagnosticsEl) {
+    diagnosticsEl.style.display = "none";
+    diagnosticsEl.open = false;
+    const label = diagnosticsEl.querySelector("summary");
+    if (label) label.textContent = "Progress and measured KB/s";
+  }
+  noSignalToast.hidden = true;
+  if (noSignalDialog.open) noSignalDialog.close();
+  startBtn.disabled = false;
+  startBtn.style.display = "";
+  startBtn.textContent = "Enable camera";
+  cameraActual.textContent = "Applied when the camera starts.";
+  setStatus("Ready to scan a file or text stream");
+}
+window.addEventListener("airgapper:leave-mode", () => {
+  if (document.getElementById("receiveView")?.classList.contains("active")) stopReceiver();
+});
+
+const localCameraMessage =
+  "This browser does not allow camera access from a local file. Use the installed offline PWA for receiving.";
+
 async function start() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    // On insecure origins the API doesn't exist AT ALL — this is the plain-
-    // http-over-LAN case. localhost is exempt; other hosts need https.
+    // Mobile browsers commonly omit the API entirely for file:// origins.
     showError(
-      "camera needs a secure context — this page must be served over https to " +
-        "use the camera from another device. `npm run dev` already is.",
+      location.protocol === "file:"
+        ? localCameraMessage
+        : "Camera access needs HTTPS. Open the hosted app or its installed offline PWA.",
     );
     return;
   }
@@ -442,8 +504,10 @@ async function start() {
     const denied = err instanceof DOMException && err.name === "NotAllowedError";
     offerRetry(
       denied
-        ? "camera permission denied — allow it, then tap Start camera again."
-        : `camera: ${err instanceof Error ? err.message : String(err)}`,
+        ? location.protocol === "file:"
+          ? localCameraMessage
+          : "Camera permission denied — allow it, then tap Enable camera again."
+        : `Camera: ${err instanceof Error ? err.message : String(err)}`,
     );
     return;
   }

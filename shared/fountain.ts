@@ -88,8 +88,8 @@ function frameSeed(sessionId: number, seq: number): number {
  *
  * Exported for the golden-vector tests. Sender and receiver derive this
  * independently and never compare notes, so any change here is a breaking
- * wire-format change: an `airgapper-sender.html` saved months ago has to
- * keep agreeing with a current receiver.
+ * wire-format change: an `airgapper.html` copy saved months ago has to keep
+ * agreeing with a current receiver.
  */
 export function frameIndices(
   k: number,

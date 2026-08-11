@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "types": ["vite/client"]
   },
-  "include": ["shared", "send", "receive", "home", "src-env.d.ts"]
+  "include": ["app", "shared", "send", "receive", "src-env.d.ts"]
 }

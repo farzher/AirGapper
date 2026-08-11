@@ -1,5 +1,5 @@
-// The sender's transmit tuning, in one place. The dropdowns in send/index.html
-// are rendered from these lists via the %TX_FPS_OPTIONS% / %FRAME_BYTES_OPTIONS%
+// The sender's transmit tuning, in one place. The dropdowns in app.html are
+// rendered from these lists via the %TX_FPS_OPTIONS% / %FRAME_BYTES_OPTIONS%
 // tokens (see htmlTokens() in vite.config.ts), and the receiver's no-signal
 // hint names its fallback values from here too — so the advice can never point
 // at a setting the sender doesn't offer.

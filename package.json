@@ -6,13 +6,14 @@
   "description": "Offline file and text transfer using fountain-coded animated QR codes.",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --open /app.html",
     "serve": "npm run build && vite preview",
-    "diagnostics": "vite --mode diagnostics",
+    "diagnostics": "vite --mode diagnostics --open /app.html",
     "build": "tsc && tsc -p tsconfig.node.json && vite build",
-    "build:standalone": "node -e \"require('node:fs').rmSync('dist-standalone',{recursive:true,force:true})\" && tsc && vite build --mode standalone-send && vite build --mode standalone-receive",
-    "build:all": "npm run build && npm run build:standalone",
+    "build:standalone": "npm run build && node scripts/copy-standalone.mjs",
+    "build:all": "npm run build:standalone",
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:browser": "node scripts/browser-smoke.mjs && node scripts/pwa-smoke.mjs",
     "test:codec": "node scripts/test-codec.mjs",
     "verify:build": "node scripts/verify-build.mjs",
     "build:codec": "bash vendor/decimen-codec-source/build.sh"

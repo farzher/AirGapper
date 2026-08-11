@@ -40,7 +40,6 @@ import { requestScreenWakeLock } from "../shared/wake-lock";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
-const SINGLE_PAGE = document.body.classList.contains("single-page");
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
@@ -55,7 +54,6 @@ const snippetLabel = document.getElementById("snippet-label")!;
 const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElement;
 const paneFile = document.getElementById("pane-file")!;
 const paneSnippet = document.getElementById("pane-snippet")!;
-const modeInputs = [...document.querySelectorAll<HTMLInputElement>('input[name="send-mode"]')];
 const streamSpecs = document.getElementById("stream-specs")!;
 const footerHint = document.getElementById("footer-hint")!;
 const spec = (id: string) => document.getElementById(id)!;
@@ -102,13 +100,13 @@ function showError(message: string): void {
   specsLine.showError(message);
 }
 
+let selectedMode: "file" | "snippet" = "file";
 function currentMode(): "file" | "snippet" {
-  return modeInputs.find((input) => input.checked)?.value === "snippet" ? "snippet" : "file";
+  return selectedMode;
 }
 
 function selectMode(mode: "file" | "snippet"): void {
-  const input = modeInputs.find((candidate) => candidate.value === mode);
-  if (input) input.checked = true;
+  selectedMode = mode;
 }
 
 /** The picker reads as state — which file is armed — and the button offers
@@ -173,15 +171,13 @@ function applyMode(): void {
   if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
 
-  const mode = currentMode();
-  paneFile.hidden = !SINGLE_PAGE && mode !== "file";
-  paneSnippet.hidden = !SINGLE_PAGE && mode !== "snippet";
-  toolTitle.textContent = SINGLE_PAGE ? "Send" : mode === "snippet" ? "Send text" : "Send a file";
-  setStatus(SINGLE_PAGE ? "Choose a file or enter text" : mode === "snippet" ? "Paste or type some text to begin" : "Choose a file to begin");
+  // The single-page sender keeps file and text entry side by side. Selecting
+  // either one simply chooses the payload type for the stream.
+  paneFile.hidden = false;
+  paneSnippet.hidden = false;
+  toolTitle.textContent = "Send";
+  setStatus("Choose a file or enter text");
   updateFilePicker();
-  // A file left in the picker survives the switch, so re-arm it rather than
-  // leaving a filename on screen next to "choose a file to begin".
-  if (!SINGLE_PAGE && mode === "file" && cfgFile.files?.[0]) void selectFile();
 }
 
 /**
@@ -252,7 +248,6 @@ async function main() {
   snippetText.maxLength = MAX_SNIPPET_BYTES;
   snippetLabel.textContent = `Text to send · up to ${MAX_SNIPPET_LABEL}`;
 
-  document.querySelector('.mode-nav a[href="../send/"]')?.setAttribute("aria-current", "page");
   cfgFile.addEventListener("change", () => void selectFile());
   // While a file is armed the picker label must NOT open the file dialog:
   // preventDefault cancels the label→input forwarding, and only the button
@@ -265,9 +260,6 @@ async function main() {
     if (target && (target.closest(".file-picker-button") || target === cfgFile)) stopTransfer();
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
-  if (!SINGLE_PAGE) {
-    for (const input of modeInputs) input.addEventListener("change", applyMode);
-  }
   applyMode();
   window.addEventListener("resize", () => resizeDisplay?.());
   for (const el of [cfgFps, cfgBytes, cfgEcc, cfgGrid, cfgSize]) {
@@ -589,5 +581,10 @@ async function startStream(revealStage = false) {
   };
   requestAnimationFrame(tick);
 }
+
+window.addEventListener("airgapper:leave-mode", () => {
+  if (!document.getElementById("sendView")?.classList.contains("active")) return;
+  stopTransfer();
+});
 
 void main();

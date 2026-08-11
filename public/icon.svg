@@ -1,4 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AirGapper">
-  <rect width="512" height="512" rx="96" fill="#f7f7f5"/>
-  <path fill="#171717" d="M96 96h128v128H96zm24 24v80h80v-80zm168-24h128v128H288zm24 24v80h80v-80zM96 288h128v128H96zm24 24v80h80v-80zm168-24h32v32h-32zm64 0h64v32h-64zm-64 64h64v64h-64zm96 0h32v64h-32z"/>
-</svg>
