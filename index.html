@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v27: uncropped landscape camera viewport -->
+<!-- AirGapper v28: adaptive visible-tile decoding -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -141,7 +141,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v27</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v28</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -218,7 +218,7 @@
 (() => {
 'use strict';
 
-const BUILD='v27';
+const BUILD='v28';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -252,7 +252,7 @@ const state = {
   qrSuccesses:0, failedQrAttempts:0, duplicateSymbols:0, uselessSymbols:0, usefulRecoveredBytes:0, verifiedBytes:0, verifiedMs:0,
   cameraSkippedFrames:0, workerBusyWindowMs:0, workerUtil:0, metricsWindowAt:0,
   nativeDetectBusy:false, nativeDetectHits:0, scanDispatchMisses:0, scanDispatches:0, scanWorkerLimit:1, scanRegionCursor:0, nativeProbeAt:0, cameraWidth:0, cameraHeight:0,
-  opticalTrack:null, opticalRotation:0, qrModules:0, debug:false, tileHits:[], tileAttempts:[], lastRescueAt:0, lastOverlayAt:0,
+  opticalTrack:null, opticalRotation:0, qrModules:0, debug:false, tileHits:[], tileAttempts:[], tileScores:[], tileLastScan:[], tilePickSeq:0, lastRescueAt:0, lastOverlayAt:0,
   sendBuilds:new Map(), sendQrJobs:[], sendFrameSeq:0,
 };
 
@@ -630,7 +630,7 @@ function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state
 $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>flipCamera();$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();drawDebugOverlay();};
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraRequestedWidth=0;state.cameraRequestedHeight=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
-  state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.rxIngressSamples=[];state.lastUiAt=0;state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.opticalRotation=0;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.lastRescueAt=0;state.lastOverlayAt=0;
+  state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.rxIngressSamples=[];state.lastUiAt=0;state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.opticalRotation=0;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.tileScores=[];state.tileLastScan=[];state.tilePickSeq=0;state.lastRescueAt=0;state.lastOverlayAt=0;
   state.decodeMs=0;state.decodeSamples=0;state.decodeTimes=[];state.sampledFrames=0;state.sampledWindowCount=0;state.sampledRate=0;state.decodeJobs=0;state.decodeJobWindow=0;state.decodeJobRate=0;state.qrSuccesses=0;state.failedQrAttempts=0;state.duplicateSymbols=0;state.uselessSymbols=0;state.usefulRecoveredBytes=0;state.verifiedBytes=0;state.verifiedMs=0;state.cameraSkippedFrames=0;state.workerBusyWindowMs=0;state.workerUtil=0;state.metricsWindowAt=performance.now();
   $('#progressFill').style.width='0%';$('#qualityFill').style.width='0%';$('#qualityFill').style.background='#f26c6c';$('#qualityText').textContent='Waiting for QR…';$('#progressText').textContent='0%';$('#rateText').textContent='— KB/s';$('#etaText').textContent='— ETA';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
 }
@@ -719,7 +719,7 @@ function updateOpticalTrack(p,det){
 function ingest(raw,det=null){
   const p=parsePacket(raw);if(!p||p.K<1||p.symbolBytes<1||p.symbolBytes>MAX_SYMBOL_BYTES)return false;
   if(det){det.raw=raw;const m=qrModulesForRaw(raw,det.version);if(m)state.qrModules=m;}
-  let rx=state.rx;if(!rx||rx.protocol!==p.protocol||rx.id!==p.id||rx.K!==p.K||rx.symbolBytes!==p.symbolBytes){rx=state.rx=newRx(p);state.tileHits=new Array(p.qrs).fill(0);state.tileAttempts=new Array(p.qrs).fill(0);}
+  let rx=state.rx;if(!rx||rx.protocol!==p.protocol||rx.id!==p.id||rx.K!==p.K||rx.symbolBytes!==p.symbolBytes){rx=state.rx=newRx(p);state.tileHits=new Array(p.qrs).fill(0);state.tileAttempts=new Array(p.qrs).fill(0);state.tileScores=new Array(p.qrs);state.tileLastScan=new Array(p.qrs).fill(0);state.tilePickSeq=0;}
   if(!sameBytes(rx.hash,p.hash)||rx.totalBytes!==p.totalBytes)return false;
   state.qrSuccesses++;if(det)updateOpticalTrack(p,det);
   state.lastDecodeAt=performance.now();rx.targetFps=p.fps;rx.expectedQrs=p.qrs;if(state.qrModules)rx.moduleCount=state.qrModules;
@@ -866,7 +866,7 @@ self.onmessage=async e=>{
         if(d.error){state.wasmFailures++;if(state.wasmFailures>=4){console.warn('AirGapper WASM scanner unavailable, falling back:',d.error);stopScanWorkers();state.scanEngine='jsQR fallback';legacyScanLoop(token);return;}}else state.wasmFailures=0;
         const detections=d.detections||[];let hits=0;
         for(const det of detections){let bbox=det.bbox;if(bbox&&d.meta){bbox={x:d.meta.x+bbox.x*d.meta.w,y:d.meta.y+bbox.y*d.meta.h,w:bbox.w*d.meta.w,h:bbox.h*d.meta.h};}if(ingest(det.text,{bbox,version:det.version,orientation:det.orientation,source:d.mode}))hits++;}
-        if(d.mode==='tile'&&d.slot>=0){state.tileAttempts[d.slot]=(state.tileAttempts[d.slot]||0)+1;if(hits)state.tileHits[d.slot]=(state.tileHits[d.slot]||0)+1;}
+        if(d.mode==='tile'&&d.slot>=0){state.tileAttempts[d.slot]=(state.tileAttempts[d.slot]||0)+1;if(hits)state.tileHits[d.slot]=(state.tileHits[d.slot]||0)+1;const prev=Number.isFinite(state.tileScores[d.slot])?state.tileScores[d.slot]:.5,alpha=hits ? .35 : .22;state.tileScores[d.slot]=prev*(1-alpha)+(hits?1:0)*alpha;}
         recordCompletedScan(hits,1);if(!hits&&performance.now()-state.lastDecodeAt>1300)updateRxUi();else updateDebug();
       };
       worker.onerror=e=>{if(slotObj.startedAt)state.workerBusyWindowMs+=performance.now()-slotObj.startedAt;slotObj.startedAt=0;slotObj.busy=false;console.warn('AirGapper WASM scan worker:',e.message||e);};state.scanWorkers.push(slotObj);
@@ -891,6 +891,17 @@ function cameraQrRegion(video,count,index,forceDefault=false){
   let x=Math.round(cx-side/2),y=Math.round(cy-side/2),x2=Math.round(cx+side/2),y2=Math.round(cy+side/2);x=Math.max(0,x);y=Math.max(0,y);x2=Math.min(vw,x2);y2=Math.min(vh,y2);
   return{x,y,w:Math.max(8,x2-x),h:Math.max(8,y2-y),norm:{x:x/vw,y:y/vh,w:(x2-x)/vw,h:(y2-y)/vh}};
 }
+function chooseTrackedTile(count,now,excluded){
+  const explore=state.tilePickSeq++%6===0;let best=-1,bestPriority=-Infinity;
+  for(let i=0;i<count;i++){
+    if(excluded.has(i))continue;const last=state.tileLastScan[i]||0,age=last?now-last:Infinity,score=Number.isFinite(state.tileScores[i])?state.tileScores[i]:.8;
+    // Spend one in six jobs checking the stalest region so camera movement is
+    // discovered, while the other jobs stay on proven readable QR positions.
+    const priority=explore?age:score+(Number.isFinite(age)?Math.min(.28,age/5000*.28):.3);
+    if(priority>bestPriority){bestPriority=priority;best=i;}
+  }
+  if(best<0)best=state.scanRegionCursor++%count;state.tileLastScan[best]=now;return best;
+}
 function nativeDetectionMeta(c,video){const b=c?.boundingBox;if(!b)return null;const w=video.videoWidth||state.cameraWidth||1,h=video.videoHeight||state.cameraHeight||1,p=c.cornerPoints||[],a=p[0],z=p[1],orientation=a&&z?Math.atan2(z.y-a.y,z.x-a.x)*180/Math.PI:0;return{bbox:{x:b.x/w,y:b.y/h,w:b.width/w,h:b.height/h},orientation,source:'native'};}
 async function dispatchWorkerFrame(video,token){
   if(state.scanCaptureBusy||token!==state.scanToken||state.mode!=='receive'||video.readyState<2)return;const workerLimit=state.decodeMs>100?1:state.scanWorkerLimit,idle=state.scanWorkers.filter(w=>!w.busy).slice(0,workerLimit);if(!idle.length){state.scanDispatchMisses++;return;}state.scanCaptureBusy=true;state.scanDispatches++;state.sampledFrames++;state.sampledWindowCount++;
@@ -899,8 +910,11 @@ async function dispatchWorkerFrame(video,token){
     // Native detection gets the untouched camera frame and is an inexpensive
     // way to recover immediately after rotation or tracking drift.
     if(!fresh&&state.barcodeDetector&&!state.nativeDetectBusy&&now-state.nativeProbeAt>600){state.nativeProbeAt=now;state.nativeDetectBusy=true;state.barcodeDetector.detect(video).then(codes=>{for(const c of codes||[])if(c?.rawValue)ingest(c.rawValue,nativeDetectionMeta(c,video));}).catch(()=>{}).finally(()=>state.nativeDetectBusy=false);}
-    const jobs=[],search=[];
+    const jobs=[],search=[],picked=new Set();
     if(!fresh){
+      // Forget visibility preferences after tracking is lost. The next lock
+      // quickly samples every slot before selecting the newly visible ones.
+      state.tileScores.fill(undefined);state.tileLastScan.fill(0);state.tilePickSeq=0;
       // Search actual sender tile geometry at full tile detail. The old rescue
       // path shrank an entire portrait 4K frame to 1200 px, leaving dense QRs
       // with too few pixels/module and permanently locking onto stale regions.
@@ -909,7 +923,7 @@ async function dispatchWorkerFrame(video,token){
     }
     for(const slot of idle){
       let count,index,mode,forceDefault=false;
-      if(fresh){count=knownQrs;index=state.scanRegionCursor++%count;mode='tile';}
+      if(fresh){count=knownQrs;index=chooseTrackedTile(count,now,picked);picked.add(index);mode='tile';}
       else{const candidate=search[state.scanRegionCursor++%search.length];count=candidate.count;index=candidate.index;mode='search';forceDefault=true;}
       const reg=cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm,rotate:((fresh?state.opticalTrack?.rotation:inferredOpticalRotation())||0)%180!==0},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
     }
