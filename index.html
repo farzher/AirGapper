@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v15: high-bandwidth camera negotiation -->
+<!-- AirGapper v16: rotation-aware optical tracking -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -125,7 +125,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v15</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v16</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -201,7 +201,7 @@
 (() => {
 'use strict';
 
-const BUILD='v15';
+const BUILD='v16';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -234,7 +234,7 @@ const state = {
   qrSuccesses:0, failedQrAttempts:0, duplicateSymbols:0, uselessSymbols:0, usefulRecoveredBytes:0, verifiedBytes:0, verifiedMs:0,
   cameraSkippedFrames:0, workerBusyWindowMs:0, workerUtil:0, metricsWindowAt:0,
   nativeDetectBusy:false, nativeDetectHits:0, scanDispatchMisses:0, scanDispatches:0, scanWorkerLimit:1, scanRegionCursor:0, nativeProbeAt:0, cameraWidth:0, cameraHeight:0,
-  opticalTrack:null, qrModules:0, debug:false, tileHits:[], tileAttempts:[], lastRescueAt:0,
+  opticalTrack:null, opticalRotation:0, qrModules:0, debug:false, tileHits:[], tileAttempts:[], lastRescueAt:0,
   sendBuilds:new Map(), sendQrJobs:[], sendFrameSeq:0,
 };
 
@@ -565,14 +565,14 @@ async function startCamera(){
     try{state.barcodeDetector='BarcodeDetector'in window?new BarcodeDetector({formats:['qr_code']}):null;}catch{state.barcodeDetector=null;}
     const track=state.stream.getVideoTracks()[0],caps=await tuneCameraTrack(track);
     try{if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))await track.applyConstraints({advanced:[{focusMode:'continuous'}]});}catch{}
-    const settings=track?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;state.cameraWidth=+settings.width||video.videoWidth||0;state.cameraHeight=+settings.height||video.videoHeight||0;state.cameraSettings=settings;state.cameraCaps=caps;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
+    const settings=track?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;state.cameraWidth=video.videoWidth||+settings.width||0;state.cameraHeight=video.videoHeight||+settings.height||0;state.cameraSettings=settings;state.cameraCaps=caps;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
   }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
 }
 function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
 $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();else{const c=$('#debugOverlay');c?.getContext('2d')?.clearRect(0,0,c.width,c.height);}};
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraRequestedWidth=0;state.cameraRequestedHeight=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
-  state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.lastRescueAt=0;
+  state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.opticalRotation=0;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.lastRescueAt=0;
   state.decodeMs=0;state.decodeSamples=0;state.decodeTimes=[];state.sampledFrames=0;state.sampledWindowCount=0;state.sampledRate=0;state.decodeJobs=0;state.decodeJobWindow=0;state.decodeJobRate=0;state.qrSuccesses=0;state.failedQrAttempts=0;state.duplicateSymbols=0;state.uselessSymbols=0;state.usefulRecoveredBytes=0;state.verifiedBytes=0;state.verifiedMs=0;state.cameraSkippedFrames=0;state.workerBusyWindowMs=0;state.workerUtil=0;state.metricsWindowAt=performance.now();
   $('#progressFill').style.width='0%';$('#progressText').textContent='0%';$('#rateText').textContent='— KB/s';$('#etaText').textContent='— ETA';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
 }
@@ -620,26 +620,35 @@ function qrModulesForRaw(raw,version){
   try{if(window.qrcode){const qr=qrcode(0,'L');qr.addData(raw,'Alphanumeric');qr.make();return qr.getModuleCount();}}catch{}
   return 0;
 }
-function expectedQrRect(count,slot,moduleCount){
-  const vw=1600,vh=vw/OPTICAL_ASPECT,rects=gridRects(count,vw,vh,moduleCount||0),r=rects[Math.max(0,Math.min(rects.length-1,slot|0))];
-  return{x:r[0],y:r[1],w:r[2],h:r[2],vw,vh};
+function expectedQrRect(count,slot,moduleCount,rotation=0){
+  const vw=1600,vh=vw/OPTICAL_ASPECT,rects=gridRects(count,vw,vh,moduleCount||0),r=rects[Math.max(0,Math.min(rects.length-1,slot|0))],x=r[0],y=r[1],s=r[2];
+  rotation=((rotation%360)+360)%360;
+  if(rotation===90)return{x:vh-y-s,y:x,w:s,h:s,vw:vh,vh:vw};
+  if(rotation===180)return{x:vw-x-s,y:vh-y-s,w:s,h:s,vw,vh};
+  if(rotation===270)return{x:y,y:vw-x-s,w:s,h:s,vw:vh,vh:vw};
+  return{x,y,w:s,h:s,vw,vh};
 }
-function defaultOpticalTrack(){
-  const w=state.cameraWidth||$('#video').videoWidth||1920,h=state.cameraHeight||$('#video').videoHeight||1080,a=w/h;
-  if(a>OPTICAL_ASPECT){const rw=OPTICAL_ASPECT/a;return{x:(1-rw)/2,y:0,w:rw,h:1,confidence:0,lastAt:0};}
-  const rh=a/OPTICAL_ASPECT;return{x:0,y:(1-rh)/2,w:1,h:rh,confidence:0,lastAt:0};
+function detectionRotation(value,fallback=0){
+  const n=Number(value);if(!Number.isFinite(n))return fallback;return((Math.round(n/90)*90%360)+360)%360;
+}
+function defaultOpticalTrack(rotation=state.opticalRotation||0){
+  const aspect=rotation===90||rotation===270?1/OPTICAL_ASPECT:OPTICAL_ASPECT;
+  const w=$('#video').videoWidth||state.cameraWidth||1920,h=$('#video').videoHeight||state.cameraHeight||1080,a=w/h;
+  if(a>aspect){const rw=aspect/a;return{x:(1-rw)/2,y:0,w:rw,h:1,confidence:0,lastAt:0,rotation};}
+  const rh=a/aspect;return{x:0,y:(1-rh)/2,w:1,h:rh,confidence:0,lastAt:0,rotation};
 }
 function updateOpticalTrack(p,det){
-  if(!det?.bbox)return;const cw=state.cameraWidth||$('#video').videoWidth||0,ch=state.cameraHeight||$('#video').videoHeight||0;if(!cw||!ch)return;
+  if(!det?.bbox)return;const cw=$('#video').videoWidth||state.cameraWidth||0,ch=$('#video').videoHeight||state.cameraHeight||0;if(!cw||!ch)return;
   const modules=qrModulesForRaw(det.raw||'',det.version)||state.qrModules||0;if(modules){state.qrModules=modules;if(state.rx)state.rx.moduleCount=modules;}
-  const e=expectedQrRect(p.qrs,p.slot,state.qrModules),b=det.bbox;
+  const prev=state.opticalTrack,rotation=detectionRotation(det.orientation,prev?.rotation??state.opticalRotation??0),e=expectedQrRect(p.qrs,p.slot,state.qrModules,rotation),b=det.bbox;
   const bw=b.w*cw,bh=b.h*ch;if(bw<12||bh<12)return;
   const scale=((bw+bh)*.5)/e.w,cx=(b.x+b.w*.5)*cw,cy=(b.y+b.h*.5)*ch;
-  let t={x:(cx-(e.x+e.w*.5)*scale)/cw,y:(cy-(e.y+e.h*.5)*scale)/ch,w:e.vw*scale/cw,h:e.vh*scale/ch,confidence:1,lastAt:performance.now()};
-  if(!(t.w>.12&&t.w<1.45&&t.h>.08&&t.h<1.45))return;
-  const prev=state.opticalTrack;
-  if(prev?.confidence){const a=.22;t={x:prev.x*(1-a)+t.x*a,y:prev.y*(1-a)+t.y*a,w:prev.w*(1-a)+t.w*a,h:prev.h*(1-a)+t.h*a,confidence:Math.min(1,prev.confidence+.08),lastAt:t.lastAt};}
-  state.opticalTrack=t;drawDebugOverlay();
+  let t={x:(cx-(e.x+e.w*.5)*scale)/cw,y:(cy-(e.y+e.h*.5)*scale)/ch,w:e.vw*scale/cw,h:e.vh*scale/ch,confidence:1,lastAt:performance.now(),rotation};
+  if(!(t.w>.08&&t.w<1.45&&t.h>.08&&t.h<1.45))return;
+  // Never average tracks from different orientations: that creates capture boxes
+  // between the old and new grids when the phone is turned sideways.
+  if(prev?.confidence&&prev.rotation===rotation){const a=.28;t={x:prev.x*(1-a)+t.x*a,y:prev.y*(1-a)+t.y*a,w:prev.w*(1-a)+t.w*a,h:prev.h*(1-a)+t.h*a,confidence:Math.min(1,prev.confidence+.08),lastAt:t.lastAt,rotation};}
+  state.opticalRotation=rotation;state.opticalTrack=t;drawDebugOverlay();
 }
 function ingest(raw,det=null){
   const p=parsePacket(raw);if(!p||p.K<1||p.symbolBytes<1||p.symbolBytes>MAX_SYMBOL_BYTES)return false;
@@ -657,7 +666,7 @@ function videoContentRect(){
   return{x:(cw-vw*scale)/2,y:(ch-vh*scale)/2,w:vw*scale,h:vh*scale,cw,ch};
 }
 function cameraQrRectNorm(count,slot){
-  const t=state.opticalTrack?.confidence?state.opticalTrack:defaultOpticalTrack(),e=expectedQrRect(count,slot,state.qrModules||state.rx?.moduleCount||0);
+  const t=state.opticalTrack?.confidence?state.opticalTrack:defaultOpticalTrack(),e=expectedQrRect(count,slot,state.qrModules||state.rx?.moduleCount||0,t.rotation||0);
   return{x:t.x+(e.x/e.vw)*t.w,y:t.y+(e.y/e.vh)*t.h,w:(e.w/e.vw)*t.w,h:(e.h/e.vh)*t.h};
 }
 function drawDebugOverlay(){
@@ -669,7 +678,7 @@ function drawDebugOverlay(){
 }
 function updateDebug(){
   const el=$('#debugPanel');if(!el||!state.debug)return;rollMetrics();const rx=state.rx,workers=state.scanWorkers.length,busy=state.scanWorkers.filter(x=>x.busy).length,total=state.scanDispatches+state.scanDispatchMisses,skip=total?Math.round(state.scanDispatchMisses/total*100):0,last=state.lastDecodeAt?Math.round(performance.now()-state.lastDecodeAt):0,track=state.opticalTrack;
-  const focus=state.cameraSettings?.focusMode||'—',layout=rx?`${rx.expectedQrs} QR · ${rx.symbolBytes} B/QR`:'acquiring',elapsed=rx?Math.max(1,performance.now()-rx.startedAt):0,usefulRate=state.verifiedBytes?state.verifiedBytes*1000/state.verifiedMs:elapsed?state.usefulRecoveredBytes*1000/elapsed:0;
+  const focus=state.cameraSettings?.focusMode||'—',layout=rx?`${rx.expectedQrs} QR · ${rx.symbolBytes} B/QR · rot ${track?.rotation||0}°`:'acquiring',elapsed=rx?Math.max(1,performance.now()-rx.startedAt):0,usefulRate=state.verifiedBytes?state.verifiedBytes*1000/state.verifiedMs:elapsed?state.usefulRecoveredBytes*1000/elapsed:0;
   const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95),fpsCap=state.cameraCaps?.frameRate,capText=fpsCap?`${Math.round(fpsCap.min)}–${Math.round(fpsCap.max)}`:'?';
   el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented\nrequested ${state.cameraRequestedWidth||MAX_CAMERA_WIDTH}×${state.cameraRequestedHeight||MAX_CAMERA_HEIGHT} @ ${Math.round(state.cameraRequestedFps||MAX_CAMERA_FPS)} · FPS cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames}\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
   drawDebugOverlay();
@@ -682,7 +691,7 @@ function updateRxUi(){
     state.rxRateBytes=0;state.rxRateAt=now;
   }
   $('#progressText').textContent=pct+'%';$('#progressFill').style.width=pct+'%';$('#dropText').textContent=rx&&rx.packets>8?`${Math.round(loss*100)}% loss`:'— loss';
-  const cw=state.cameraWidth||$('#video').videoWidth||0,ch=state.cameraHeight||$('#video').videoHeight||0;
+  const cw=$('#video').videoWidth||state.cameraWidth||0,ch=$('#video').videoHeight||state.cameraHeight||0;
   $('#cameraText').textContent=cam?`${cam.toFixed(0)} camera fps${cw&&ch?` · ${cw}×${ch}`:''}`:'— camera';$('#scanText').textContent=state.scanRate?`${state.scanRate.toFixed(0)} tile/s · ${state.symbolRate.toFixed(0)} QR/s${state.decodeMs?` · ${Math.round(state.decodeMs)} ms`:''}`:'— scan';
   $('#rateText').textContent=humanRate(state.rxByteRate);
   if(rx&&state.rxByteRate>64&&pct<100){
@@ -693,7 +702,7 @@ function updateRxUi(){
   let msg='Receiving',kind='good',since=performance.now()-state.lastDecodeAt;
   if(since>1800){msg='Hold steady or lower speed';kind='warn';}
   else if(cam&&rx.targetFps>cam*1.15){msg=`Lower speed · camera ${cam.toFixed(0)} fps`;kind='warn';}
-  else if((state.cameraWidth||$('#video').videoWidth)<(state.cameraHeight||$('#video').videoHeight)&&rx.expectedQrs>=4){msg='Rotate phone for more detail';kind='warn';}
+  else if(($('#video').videoWidth||state.cameraWidth)<($('#video').videoHeight||state.cameraHeight)&&rx.expectedQrs>=4){msg='Rotate phone for more detail';kind='warn';}
   else if(state.decodeMs>180&&state.scanRate>0){msg='Processing limited · lower speed';kind='warn';}
   else if(rx.packets>20&&state.scanHitRate>.65&&cam>rx.targetFps*1.25){msg='Good · room to go faster';kind='good';}
   if(pct===100){msg='Complete';kind='good';}setStatus(msg,kind);updateDebug();
@@ -711,14 +720,17 @@ function renderResult(data){
 }
 function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1500);}
 
-function normalizedRegions(count,w,h){
-  const rects=gridRects(count,w,h,state.qrModules||state.rx?.moduleCount||0),regions=[];
-  for(const r of rects){const pad=r[2]*.18,x=Math.max(0,r[0]-pad),y=Math.max(0,r[1]-pad),x2=Math.min(w,r[0]+r[2]+pad),y2=Math.min(h,r[1]+r[2]+pad);regions.push([x/w,y/h,(x2-x)/w,(y2-y)/h]);}
-  return regions;
+function normalizedRegions(count){
+  if(!state.rx?.expectedQrs||!state.opticalTrack?.confidence)return[[0,0,1,1]];
+  const regions=[];for(let i=0;i<count;i++){const r=cameraQrRectNorm(count,i),pad=Math.max(r.w,r.h)*.18,x=Math.max(0,r.x-pad),y=Math.max(0,r.y-pad),x2=Math.min(1,r.x+r.w+pad),y2=Math.min(1,r.y+r.h+pad);regions.push([x,y,x2-x,y2-y]);}return regions;
 }
 function jsQrDecodeRegion(ctx,canvas,region){
   if(!window.jsQR)return null;const [x,y,w,h]=region,ix=Math.round(x*canvas.width),iy=Math.round(y*canvas.height),iw=Math.max(8,Math.round(w*canvas.width)),ih=Math.max(8,Math.round(h*canvas.height));
-  try{const img=ctx.getImageData(ix,iy,Math.min(iw,canvas.width-ix),Math.min(ih,canvas.height-iy)),r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});return r?.data||null;}catch{return null;}
+  try{
+    const img=ctx.getImageData(ix,iy,Math.min(iw,canvas.width-ix),Math.min(ih,canvas.height-iy)),r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});if(!r?.data)return null;
+    const pts=Object.values(r.location||{}).filter(p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y));let bbox=null;if(pts.length){const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),x1=Math.min(...xs),y1=Math.min(...ys),x2=Math.max(...xs),y2=Math.max(...ys);bbox={x:(ix+x1)/canvas.width,y:(iy+y1)/canvas.height,w:(x2-x1)/canvas.width,h:(y2-y1)/canvas.height};}
+    const a=r.location?.topLeftCorner,z=r.location?.topRightCorner,orientation=a&&z?Math.atan2(z.y-a.y,z.x-a.x)*180/Math.PI:0;return{raw:r.data,bbox,orientation};
+  }catch{return null;}
 }
 function cameraMeterLoop(token){
   const video=$('#video');if(!video.requestVideoFrameCallback)return;
@@ -766,7 +778,7 @@ self.onmessage=async e=>{
   const {id,bitmap,target=680,mode='tile',slot=-1,meta=null}=e.data,t0=performance.now(),detections=[];
   try{
     const ratio=bitmap.height/bitmap.width,w=Math.max(300,Math.min(target,bitmap.width)),h=mode==='tile'?w:Math.max(240,Math.round(w*ratio));ensureCanvas(w,h);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(bitmap,0,0,bitmap.width,bitmap.height,0,0,w,h);bitmap.close();
-    const img=ctx.getImageData(0,0,w,h),results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:1,tryHarder:false,tryRotate:false,tryInvert:false,tryDownscale:mode==='full',tryDenoise:false});
+    const img=ctx.getImageData(0,0,w,h),results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:1,tryHarder:false,tryRotate:mode==='full',tryInvert:false,tryDownscale:mode==='full',tryDenoise:false});
     for(const r of results||[]){if(r?.text)detections.push({text:r.text,bbox:boxFor(r,w,h),version:r.version||'',orientation:r.orientation||0});}
     self.postMessage({id,detections,ms:performance.now()-t0,mode,slot,meta,engine:'ZXing-C++ WASM · tracked tiles'});
   }catch(err){try{bitmap.close();}catch{}self.postMessage({id,detections:[],ms:performance.now()-t0,mode,slot,meta,error:String(err?.message||err),engine:'ZXing-C++ WASM · tracked tiles'});}
@@ -780,7 +792,7 @@ self.onmessage=async e=>{
         recordDecodeTiming(d.ms);
         if(d.error){state.wasmFailures++;if(state.wasmFailures>=4){console.warn('AirGapper WASM scanner unavailable, falling back:',d.error);stopScanWorkers();state.scanEngine='jsQR fallback';legacyScanLoop(token);return;}}else state.wasmFailures=0;
         const detections=d.detections||[];let hits=0;
-        for(const det of detections){let bbox=det.bbox;if(bbox&&d.meta){bbox={x:d.meta.x+bbox.x*d.meta.w,y:d.meta.y+bbox.y*d.meta.h,w:bbox.w*d.meta.w,h:bbox.h*d.meta.h};}if(ingest(det.text,{bbox,version:det.version,source:d.mode}))hits++;}
+        for(const det of detections){let bbox=det.bbox;if(bbox&&d.meta){bbox={x:d.meta.x+bbox.x*d.meta.w,y:d.meta.y+bbox.y*d.meta.h,w:bbox.w*d.meta.w,h:bbox.h*d.meta.h};}if(ingest(det.text,{bbox,version:det.version,orientation:det.orientation,source:d.mode}))hits++;}
         if(d.mode==='tile'&&d.slot>=0){state.tileAttempts[d.slot]=(state.tileAttempts[d.slot]||0)+1;if(hits)state.tileHits[d.slot]=(state.tileHits[d.slot]||0)+1;}
         recordCompletedScan(hits,1);if(!hits&&performance.now()-state.lastDecodeAt>1300)updateRxUi();else updateDebug();
       };
@@ -792,6 +804,9 @@ self.onmessage=async e=>{
 function scanTileTarget(){
   const m=state.qrModules||state.rx?.moduleCount||0,ms=state.decodeMs||0;let target=m>=157?760:m>=125?700:640;if(ms>130)target-=100;else if(ms>90)target-=50;return Math.max(520,target);
 }
+function scanWidthFor(qrs){
+  const base=qrs>=12?1920:qrs>=8?1760:qrs>=6?1600:qrs>=4?1440:qrs>=2?1320:1280,ms=state.decodeMs||0;return ms>300?Math.round(base*.60):ms>210?Math.round(base*.72):ms>140?Math.round(base*.86):base;
+}
 function cameraQrRegion(video,count,index){
   const n=cameraQrRectNorm(count,index),vw=video.videoWidth||state.cameraWidth||1920,vh=video.videoHeight||state.cameraHeight||1080;
   // Finder patterns must never be clipped. The v11 regression used equal-cell
@@ -800,7 +815,7 @@ function cameraQrRegion(video,count,index){
   let x=Math.round(cx-side/2),y=Math.round(cy-side/2),x2=Math.round(cx+side/2),y2=Math.round(cy+side/2);x=Math.max(0,x);y=Math.max(0,y);x2=Math.min(vw,x2);y2=Math.min(vh,y2);
   return{x,y,w:Math.max(8,x2-x),h:Math.max(8,y2-y),norm:{x:x/vw,y:y/vh,w:(x2-x)/vw,h:(y2-y)/vh}};
 }
-function nativeDetectionMeta(c,video){const b=c?.boundingBox;if(!b)return null;const w=video.videoWidth||state.cameraWidth||1,h=video.videoHeight||state.cameraHeight||1;return{bbox:{x:b.x/w,y:b.y/h,w:b.width/w,h:b.height/h},source:'native'};}
+function nativeDetectionMeta(c,video){const b=c?.boundingBox;if(!b)return null;const w=video.videoWidth||state.cameraWidth||1,h=video.videoHeight||state.cameraHeight||1,p=c.cornerPoints||[],a=p[0],z=p[1],orientation=a&&z?Math.atan2(z.y-a.y,z.x-a.x)*180/Math.PI:0;return{bbox:{x:b.x/w,y:b.y/h,w:b.width/w,h:b.height/h},orientation,source:'native'};}
 async function dispatchWorkerFrame(video,token){
   if(state.scanCaptureBusy||token!==state.scanToken||state.mode!=='receive'||video.readyState<2)return;const idle=state.scanWorkers.filter(w=>!w.busy).slice(0,state.scanWorkerLimit);if(!idle.length){state.scanDispatchMisses++;return;}state.scanCaptureBusy=true;state.scanDispatches++;state.sampledFrames++;state.sampledWindowCount++;
   try{
@@ -830,8 +845,8 @@ async function decodeFrameLegacy(video){
   if(!window.jsQR)return;
   const qrs=state.rx?.expectedQrs||QR_COUNTS[state.probeIndex++%QR_COUNTS.length],maxW=scanWidthFor(qrs),ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16,canvas=$('#scanCanvas');
   canvas.width=Math.min(maxW,video.videoWidth||maxW);canvas.height=Math.max(360,Math.round(canvas.width*ratio));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,0,0,canvas.width,canvas.height);
-  let hit=false,hits=0;for(const region of normalizedRegions(qrs,canvas.width,canvas.height)){const raw=jsQrDecodeRegion(ctx,canvas,region);if(raw){hits++;hit=ingest(raw)||hit;}}
-  recordCompletedScan(hits,qrs);if(!hit&&state.barcodeDetector){try{const codes=await state.barcodeDetector.detect(video);for(const c of codes)hit=ingest(c.rawValue)||hit;}catch{}}
+  let hit=false,hits=0;for(const region of normalizedRegions(qrs)){const det=jsQrDecodeRegion(ctx,canvas,region);if(det){hits++;hit=ingest(det.raw,det)||hit;}}
+  recordCompletedScan(hits,qrs);if(!hit&&state.barcodeDetector){try{const codes=await state.barcodeDetector.detect(video);for(const c of codes)hit=ingest(c.rawValue,nativeDetectionMeta(c,video))||hit;}catch{}}
   if(!hit&&performance.now()-state.lastDecodeAt>1800)updateRxUi();
 }
 function legacyScanLoop(token){
