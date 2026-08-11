@@ -1,0 +1,1110 @@
+{
+  "format": "AirGrid X1 hardware sounder",
+  "schema": 2,
+  "startedAt": "2026-08-11T12:34:34.498Z",
+  "build": "v35e",
+  "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36",
+  "devicePixelRatio": 3,
+  "conditions": {
+    "M1-p3-f0": {
+      "key": "M1-p3-f0",
+      "profile": "M1",
+      "pitch": 3,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 240,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "completeTiles": 5,
+      "payloadOkTiles": 0,
+      "rawErrors": 2574,
+      "rawBits": 9600,
+      "modulationBlocks": 2400,
+      "occupancyErrors": 0,
+      "colorErrors": 1762,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 2,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 505,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 526,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 508,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 551,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 484,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          2
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          12,
+          155
+        ],
+        [
+          13,
+          1
+        ],
+        [
+          14,
+          4
+        ],
+        [
+          28,
+          3
+        ],
+        [
+          29,
+          130
+        ],
+        [
+          31,
+          1
+        ],
+        [
+          34,
+          3
+        ],
+        [
+          44,
+          1
+        ],
+        [
+          46,
+          136
+        ],
+        [
+          47,
+          1
+        ],
+        [
+          60,
+          2
+        ],
+        [
+          61,
+          1
+        ],
+        [
+          63,
+          134
+        ],
+        [
+          68,
+          6
+        ],
+        [
+          69,
+          1
+        ],
+        [
+          76,
+          155
+        ],
+        [
+          78,
+          1
+        ],
+        [
+          85,
+          3
+        ],
+        [
+          93,
+          145
+        ],
+        [
+          95,
+          1
+        ],
+        [
+          102,
+          9
+        ],
+        [
+          106,
+          1
+        ],
+        [
+          110,
+          143
+        ],
+        [
+          111,
+          3
+        ],
+        [
+          119,
+          1
+        ],
+        [
+          125,
+          1
+        ],
+        [
+          127,
+          150
+        ],
+        [
+          132,
+          65
+        ],
+        [
+          133,
+          1
+        ],
+        [
+          136,
+          7
+        ],
+        [
+          140,
+          88
+        ],
+        [
+          141,
+          1
+        ],
+        [
+          149,
+          52
+        ],
+        [
+          153,
+          4
+        ],
+        [
+          156,
+          2
+        ],
+        [
+          157,
+          94
+        ],
+        [
+          158,
+          1
+        ],
+        [
+          166,
+          52
+        ],
+        [
+          167,
+          1
+        ],
+        [
+          170,
+          16
+        ],
+        [
+          174,
+          84
+        ],
+        [
+          175,
+          2
+        ],
+        [
+          183,
+          40
+        ],
+        [
+          187,
+          8
+        ],
+        [
+          191,
+          97
+        ],
+        [
+          204,
+          119
+        ],
+        [
+          205,
+          5
+        ],
+        [
+          206,
+          2
+        ],
+        [
+          221,
+          155
+        ],
+        [
+          223,
+          3
+        ],
+        [
+          238,
+          147
+        ],
+        [
+          239,
+          1
+        ],
+        [
+          255,
+          158
+        ]
+      ],
+      "timingSums": {
+        "capture": 341.10000002384186,
+        "detectorRaster": 12163.900000035763,
+        "fiducialDetection": 48403.799999952316,
+        "roiRaster": 50.30000001192093,
+        "header": 1139.0999997854233,
+        "modulation": 25.100000023841858,
+        "ecc": 27.900000005960464,
+        "total": 61861.69999989867
+      },
+      "timingMax": {
+        "capture": 11.5,
+        "detectorRaster": 80.40000000596046,
+        "fiducialDetection": 781.8000000119209,
+        "roiRaster": 42.30000001192093,
+        "header": 12.199999988079071,
+        "modulation": 24.80000001192093,
+        "ecc": 25.80000001192093,
+        "total": 857.9000000059605
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.008333333333333333,
+        "completeTilesPerFrame": 0.020833333333333332,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.268125,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.7341666666666666,
+        "mutualInformationPerBlock": 2.083125287891886,
+        "mutualInformationPerChip": 0.5207813219729714,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 1.421250000099341,
+          "detectorRaster": 50.68291666681568,
+          "fiducialDetection": 201.6824999998013,
+          "roiRaster": 0.20958333338300386,
+          "header": 4.74624999910593,
+          "modulation": 0.10458333343267441,
+          "ecc": 0.11625000002483526,
+          "total": 257.7570833329111
+        }
+      }
+    },
+    "M1-p4-f0": {
+      "key": "M1-p4-f0",
+      "profile": "M1",
+      "pitch": 4,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 11,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "completeTiles": 13,
+      "payloadOkTiles": 1,
+      "rawErrors": 6458,
+      "rawBits": 24960,
+      "modulationBlocks": 6240,
+      "occupancyErrors": 0,
+      "colorErrors": 4356,
+      "validatedChannelBytes": 116,
+      "projectedFullGridBytes": 474.5454545454545,
+      "uniqueSymbols": 1,
+      "positions": [
+        {
+          "x": 2,
+          "y": 2,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 877,
+          "rawBits": 3840
+        },
+        {
+          "x": 1,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 533,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 485,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 2,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 934,
+          "rawBits": 3840
+        },
+        {
+          "x": 2,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 521,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 466,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 505,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 543,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 4,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 520,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 4,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 539,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 4,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 535,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          37
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          12,
+          323
+        ],
+        [
+          13,
+          2
+        ],
+        [
+          14,
+          2
+        ],
+        [
+          17,
+          17
+        ],
+        [
+          19,
+          1
+        ],
+        [
+          28,
+          2
+        ],
+        [
+          29,
+          341
+        ],
+        [
+          31,
+          6
+        ],
+        [
+          34,
+          18
+        ],
+        [
+          44,
+          2
+        ],
+        [
+          45,
+          1
+        ],
+        [
+          46,
+          364
+        ],
+        [
+          51,
+          10
+        ],
+        [
+          52,
+          2
+        ],
+        [
+          60,
+          2
+        ],
+        [
+          61,
+          1
+        ],
+        [
+          63,
+          367
+        ],
+        [
+          68,
+          33
+        ],
+        [
+          76,
+          363
+        ],
+        [
+          78,
+          2
+        ],
+        [
+          85,
+          10
+        ],
+        [
+          93,
+          416
+        ],
+        [
+          102,
+          33
+        ],
+        [
+          108,
+          1
+        ],
+        [
+          110,
+          355
+        ],
+        [
+          119,
+          9
+        ],
+        [
+          127,
+          384
+        ],
+        [
+          132,
+          146
+        ],
+        [
+          134,
+          3
+        ],
+        [
+          136,
+          45
+        ],
+        [
+          140,
+          164
+        ],
+        [
+          142,
+          1
+        ],
+        [
+          149,
+          159
+        ],
+        [
+          151,
+          1
+        ],
+        [
+          153,
+          26
+        ],
+        [
+          156,
+          2
+        ],
+        [
+          157,
+          201
+        ],
+        [
+          166,
+          176
+        ],
+        [
+          170,
+          54
+        ],
+        [
+          174,
+          186
+        ],
+        [
+          183,
+          167
+        ],
+        [
+          187,
+          17
+        ],
+        [
+          189,
+          2
+        ],
+        [
+          191,
+          205
+        ],
+        [
+          204,
+          409
+        ],
+        [
+          206,
+          1
+        ],
+        [
+          221,
+          377
+        ],
+        [
+          223,
+          2
+        ],
+        [
+          236,
+          1
+        ],
+        [
+          238,
+          390
+        ],
+        [
+          239,
+          1
+        ],
+        [
+          255,
+          399
+        ]
+      ],
+      "timingSums": {
+        "capture": 13.300000041723251,
+        "detectorRaster": 628.9999999701977,
+        "fiducialDetection": 598.6000000238419,
+        "roiRaster": 301.80000004172325,
+        "header": 54.79999992251396,
+        "modulation": 36.00000002980232,
+        "ecc": 126.19999998807907,
+        "total": 1759.2000000476837
+      },
+      "timingMax": {
+        "capture": 1.5,
+        "detectorRaster": 60.39999997615814,
+        "fiducialDetection": 85.80000001192093,
+        "roiRaster": 258.5000000298023,
+        "header": 7.39999994635582,
+        "modulation": 34.60000002384186,
+        "ecc": 115.39999997615814,
+        "total": 548.6999999880791
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.18181818181818182,
+        "completeTilesPerFrame": 1.1818181818181819,
+        "payloadOkTilesPerFrame": 0.09090909090909091,
+        "rawBer": 0.2587339743589744,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.698076923076923,
+        "mutualInformationPerBlock": 2.2403644489024472,
+        "mutualInformationPerChip": 0.5600911122256118,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 10.545454545454545,
+        "projectedFullGridBytesPerFrame": 43.14049586776859,
+        "projectedBytesPerSecond20Fps": 862.8099173553719,
+        "estimatedBytesPerSecond20Fps": 210.9090909090909,
+        "averageTimings": {
+          "capture": 1.209090912883932,
+          "detectorRaster": 57.18181817910888,
+          "fiducialDetection": 54.41818182034926,
+          "roiRaster": 27.43636364015666,
+          "header": 4.981818174773997,
+          "modulation": 3.2727272754365746,
+          "ecc": 11.472727271643551,
+          "total": 159.92727273160762
+        }
+      }
+    },
+    "M1-p4-f5": {
+      "key": "M1-p4-f5",
+      "profile": "M1",
+      "pitch": 4,
+      "pageFps": 5,
+      "symbolStates": 16,
+      "scanFrames": 143,
+      "acquiredFrames": 3,
+      "transitionFrames": 0,
+      "completeTiles": 6,
+      "payloadOkTiles": 0,
+      "rawErrors": 3137,
+      "rawBits": 11520,
+      "modulationBlocks": 2880,
+      "occupancyErrors": 0,
+      "colorErrors": 2057,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 1,
+          "y": 2,
+          "headers": 3,
+          "payloadOk": 0,
+          "rawErrors": 1569,
+          "rawBits": 5760
+        },
+        {
+          "x": 1,
+          "y": 3,
+          "headers": 3,
+          "payloadOk": 0,
+          "rawErrors": 1568,
+          "rawBits": 5760
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          12
+        ],
+        [
+          12,
+          179
+        ],
+        [
+          14,
+          1
+        ],
+        [
+          17,
+          4
+        ],
+        [
+          29,
+          182
+        ],
+        [
+          31,
+          1
+        ],
+        [
+          34,
+          5
+        ],
+        [
+          44,
+          1
+        ],
+        [
+          46,
+          172
+        ],
+        [
+          60,
+          1
+        ],
+        [
+          63,
+          176
+        ],
+        [
+          68,
+          21
+        ],
+        [
+          69,
+          1
+        ],
+        [
+          76,
+          133
+        ],
+        [
+          77,
+          1
+        ],
+        [
+          85,
+          7
+        ],
+        [
+          93,
+          181
+        ],
+        [
+          102,
+          21
+        ],
+        [
+          103,
+          1
+        ],
+        [
+          110,
+          166
+        ],
+        [
+          111,
+          1
+        ],
+        [
+          119,
+          3
+        ],
+        [
+          127,
+          151
+        ],
+        [
+          132,
+          86
+        ],
+        [
+          133,
+          2
+        ],
+        [
+          136,
+          12
+        ],
+        [
+          140,
+          90
+        ],
+        [
+          142,
+          2
+        ],
+        [
+          149,
+          77
+        ],
+        [
+          153,
+          6
+        ],
+        [
+          156,
+          1
+        ],
+        [
+          157,
+          87
+        ],
+        [
+          158,
+          1
+        ],
+        [
+          166,
+          98
+        ],
+        [
+          170,
+          4
+        ],
+        [
+          174,
+          78
+        ],
+        [
+          183,
+          89
+        ],
+        [
+          189,
+          1
+        ],
+        [
+          191,
+          97
+        ],
+        [
+          204,
+          176
+        ],
+        [
+          221,
+          186
+        ],
+        [
+          238,
+          203
+        ],
+        [
+          255,
+          163
+        ]
+      ],
+      "timingSums": {
+        "capture": 196.00000023841858,
+        "detectorRaster": 8270.899999827147,
+        "fiducialDetection": 17508.00000011921,
+        "roiRaster": 130.2999999821186,
+        "header": 770.0999999046326,
+        "modulation": 29.299999982118607,
+        "ecc": 33.39999997615814,
+        "total": 26776.499999970198
+      },
+      "timingMax": {
+        "capture": 5.5999999940395355,
+        "detectorRaster": 85.7000000178814,
+        "fiducialDetection": 201,
+        "roiRaster": 45.30000001192093,
+        "header": 9.099999994039536,
+        "modulation": 19.80000001192093,
+        "ecc": 12.300000011920929,
+        "total": 268.90000000596046
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.02097902097902098,
+        "completeTilesPerFrame": 0.04195804195804196,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.27230902777777777,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.7142361111111111,
+        "mutualInformationPerBlock": 2.236718481652654,
+        "mutualInformationPerChip": 0.5591796204131635,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 1.3706293722966334,
+          "detectorRaster": 57.838461537252776,
+          "fiducialDetection": 122.43356643440006,
+          "roiRaster": 0.9111888110637665,
+          "header": 5.38531468464778,
+          "modulation": 0.20489510477006018,
+          "ecc": 0.23356643339970729,
+          "total": 187.24825174804334
+        }
+      }
+    }
+  },
+  "camera": {
+    "aspectRatio": 0.5625,
+    "colorTemperature": 0,
+    "exposureCompensation": 0,
+    "exposureMode": "continuous",
+    "exposureTime": 299.85831,
+    "facingMode": "environment",
+    "focusDistance": 0.28999999165534973,
+    "focusMode": "continuous",
+    "frameRate": 30,
+    "height": 1920,
+    "iso": 100,
+    "resizeMode": "none",
+    "torch": false,
+    "whiteBalanceMode": "continuous",
+    "width": 1080,
+    "zoom": 1
+  },
+  "cameraCapabilities": {
+    "aspectRatio": {
+      "max": 3216,
+      "min": 0.0004166666666666667
+    },
+    "colorTemperature": {
+      "max": 7000,
+      "min": 2850,
+      "step": 50
+    },
+    "exposureCompensation": {
+      "max": 3,
+      "min": -3,
+      "step": 0.1666666716337204
+    },
+    "exposureMode": [
+      "continuous",
+      "manual"
+    ],
+    "exposureTime": {
+      "max": 8000.06134,
+      "min": 0.72716,
+      "step": 0.1
+    },
+    "facingMode": [
+      "environment"
+    ],
+    "focusDistance": {
+      "max": 0.5727272033691406,
+      "min": 0,
+      "step": 0.009999999776482582
+    },
+    "focusMode": [
+      "manual"
+    ],
+    "frameRate": {
+      "max": 30,
+      "min": 0
+    },
+    "height": {
+      "max": 2400,
+      "min": 1
+    },
+    "iso": {
+      "max": 1600,
+      "min": 100,
+      "step": 1
+    },
+    "resizeMode": [
+      "none",
+      "crop-and-scale"
+    ],
+    "torch": true,
+    "whiteBalanceMode": [
+      "continuous",
+      "manual"
+    ],
+    "width": {
+      "max": 3216,
+      "min": 1
+    },
+    "zoom": {
+      "max": 10,
+      "min": 1,
+      "step": 0.1
+    }
+  },
+  "completedAt": "2026-08-11T12:36:22.625Z",
+  "expectedSweep": "quick",
+  "expectedConditions": [
+    "M1-p2-f0",
+    "M1-p2-f5",
+    "M1-p2-f15",
+    "M1-p2-f30",
+    "M2-p2-f0",
+    "M2-p2-f5",
+    "M2-p2-f15",
+    "M2-p2-f30",
+    "M1-p3-f0",
+    "M1-p3-f5",
+    "M1-p3-f15",
+    "M1-p3-f30",
+    "M2-p3-f0",
+    "M2-p3-f5",
+    "M2-p3-f15",
+    "M2-p3-f30",
+    "M1-p4-f0",
+    "M1-p4-f5",
+    "M1-p4-f15",
+    "M1-p4-f30",
+    "M2-p4-f0",
+    "M2-p4-f5",
+    "M2-p4-f15",
+    "M2-p4-f30"
+  ],
+  "missingConditions": [
+    "M1-p2-f0",
+    "M1-p2-f5",
+    "M1-p2-f15",
+    "M1-p2-f30",
+    "M2-p2-f0",
+    "M2-p2-f5",
+    "M2-p2-f15",
+    "M2-p2-f30",
+    "M1-p3-f5",
+    "M1-p3-f15",
+    "M1-p3-f30",
+    "M2-p3-f0",
+    "M2-p3-f5",
+    "M2-p3-f15",
+    "M2-p3-f30",
+    "M1-p4-f15",
+    "M1-p4-f30",
+    "M2-p4-f0",
+    "M2-p4-f5",
+    "M2-p4-f15",
+    "M2-p4-f30"
+  ],
+  "scanSummary": {
+    "frames": 395,
+    "usefulFps": 3.8589518891276913,
+    "workerUtilization": 0.8942041473476061
+  }
+}

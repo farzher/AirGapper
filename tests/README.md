@@ -31,3 +31,5 @@ The benchmark's BER, mutual information, verified bytes, and stage timings are s
 See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sweep procedure, fixed-device controls, JSON/CSV exports, and acceptance gates.
 
 `fixtures/airgrid-x1/phone-v35b-quick-a.json` is the first physical X1 report. It identified full-resolution false-candidate ROI reads as the dominant 455–798 ms/frame bottleneck; v35c rejects headers on the detector raster first, so the report is retained as a diagnostic baseline rather than an acceptance result.
+
+`fixtures/airgrid-x1/phone-v35e-quick-a.json` is the fresh post-prefilter phone export. It is v35e rather than the requested v35d because the intervening build cache-busted the same worker. The sanitized fixture confirms that ROI prefiltering worked, but acquisition remains slow and unreliable. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the full comparison and next-step decision.
