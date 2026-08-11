@@ -34,4 +34,6 @@ See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sw
 
 `fixtures/airgrid-x1/phone-v35e-quick-a.json` is the fresh post-prefilter phone export. It is v35e rather than the requested v35d because the intervening build cache-busted the same worker. The sanitized fixture confirms that ROI prefiltering worked, but acquisition remains slow and unreliable.
 
-`fixtures/airgrid-x1/phone-v35f-quick-a.json` measures the optimized acquisition worker. It is substantially faster and finds many more complete tiles, but no color payload passes CRC. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
+`fixtures/airgrid-x1/phone-v35f-quick-a.json` measures the optimized acquisition worker. It is substantially faster and finds many more complete tiles, but no color payload passes CRC.
+
+`fixtures/airgrid-x1/phone-v35h-quick-a.json` validates matched-scale M1 calibration on the phone: 49/64 M1 tiles pass CRC, but the receiver remains limited to 7.51 useful FPS and binary exposes a separate dense-occupancy blur failure. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
