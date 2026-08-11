@@ -53,7 +53,6 @@ const etaLabel = document.getElementById("eta-label")!;
 const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
-const speedQuality = document.getElementById("speed-quality")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
@@ -427,7 +426,7 @@ function stopReceiver(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
-  transferSizeLabel.textContent = "—";
+  transferSizeLabel.textContent = "";
   etaLabel.textContent = "Waiting for QR";
   bar.style.width = "0";
   bar.classList.remove("error");
@@ -435,7 +434,6 @@ function stopReceiver(): void {
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— fps";
   metric("m-rate").textContent = "— KB/s";
-  speedQuality.textContent = "Waiting";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
   if (diagnosticsEl) {
@@ -897,8 +895,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = (file.bytes.length / 1024 / seconds).toFixed(1);
     metric("m-rate").textContent = `${rate} KB/s`;
-    speedQuality.textContent = "Complete";
-    speedFeedback.className = "speed-feedback speed-high";
+    speedFeedback.className = "speed-feedback speed-good";
     if (isSnippet(file)) {
       progressLabel.textContent = "100%";
       setStatus("");
@@ -951,7 +948,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // page dead with nothing but an error string on it.
     bar.classList.add("error");
     etaLabel.textContent = "Transfer failed";
-    speedQuality.textContent = "Signal lost";
     speedFeedback.className = "speed-feedback speed-low";
     showError(error instanceof Error ? error.message : String(error));
     const heading = document.createElement("div");
@@ -1060,14 +1056,13 @@ function updateStats() {
   updateProgressEstimate();
   const liveRate = liveGoodputKbs(now);
   metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;
-  const quality = liveRate < 5
-    ? ["Weak signal", "speed-low"]
+  const qualityClass = liveRate < 5
+    ? "speed-low"
     : liveRate < 25
-      ? ["Steady", "speed-mid"]
+      ? "speed-mid"
       : liveRate < 75
-        ? ["Good", "speed-good"]
-        : ["Flying", "speed-high"];
-  speedQuality.textContent = quality[0]!;
-  speedFeedback.className = `speed-feedback ${quality[1]}`;
+        ? "speed-good"
+        : "speed-high";
+  speedFeedback.className = `speed-feedback ${qualityClass}`;
 
 }
