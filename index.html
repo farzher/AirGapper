@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v26: responsive tracking for portrait-locked rotation -->
+<!-- AirGapper v27: uncropped landscape camera viewport -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -59,15 +59,12 @@
   .sendInfo { margin-top:9px; color:var(--ink); font-size:16px; font-weight:750; text-align:center; font-variant-numeric:tabular-nums; }
   .receiveCard { border:1px solid var(--line); background:#111; border-radius:20px; overflow:hidden; position:relative; min-height:520px; }
   #video { width:100%; height:520px; object-fit:contain; display:block; background:#111; }
-  .scanShade { position:absolute; inset:0; pointer-events:none; background:linear-gradient(#0002,#0000 22%,#0000 78%,#0002); }
-  .scanBox { position:absolute; inset:50% auto auto 50%; transform:translate(-50%,-50%); width:min(94%,900px); aspect-ratio:16/9; border:1px solid #ffffff66; border-radius:24px; box-shadow:0 0 0 999px #00000018; pointer-events:none; }
+
   .debugOverlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; display:block; }
   .receiveCard.debug .debugPanel { display:block; }
   .debugPanel { display:none; position:absolute; right:10px; top:10px; z-index:2; width:min(58%,270px); max-height:32%; overflow:auto; background:#111b; color:#fff; border:1px solid #ffffff25; border-radius:9px; padding:6px 7px; font:9px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre-wrap; backdrop-filter:blur(6px); pointer-events:none; }
   .cameraActions { display:flex; gap:7px; }
-  .scanBox:before,.scanBox:after { content:""; position:absolute; width:48px; height:48px; border-color:white; border-style:solid; }
-  .scanBox:before { left:-1px; top:-1px; border-width:3px 0 0 3px; border-radius:20px 0 0 0; }
-  .scanBox:after { right:-1px; bottom:-1px; border-width:0 3px 3px 0; border-radius:0 0 20px 0; }
+
   .receiveHud { position:absolute; left:12px; right:12px; bottom:12px; display:flex; align-items:end; justify-content:space-between; gap:10px; }
   .statusCard { min-width:220px; background:#111d; color:white; border:1px solid #ffffff25; backdrop-filter:blur(10px); border-radius:14px; padding:10px 11px; }
   .statusTop { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:650; }
@@ -125,12 +122,26 @@
     .receiveCard,#video { height:calc(100dvh - 175px); min-height:430px; }
     .statusCard { min-width:0; flex:1; }
   }
+  @media(orientation:landscape) and (max-height:700px){
+    body.receiving { overflow:hidden; }
+    body.receiving .app { height:100vh; height:100dvh; min-height:0; }
+    body.receiving header,body.receiving #receiveView .topline { display:none; }
+    body.receiving main { width:100%; height:100%; min-height:0; margin:0; padding:0; }
+    body.receiving #receiveView.active { display:block; width:100%; height:100%; min-height:0; }
+    body.receiving .receiveCard { width:100%; height:100%; min-height:0; border:0; border-radius:0; }
+    body.receiving #video { width:100%; height:100%; min-height:0; object-fit:contain; }
+    body.receiving .receiveHud { left:6px; right:6px; bottom:6px; }
+    body.receiving .statusCard { min-width:0; max-width:270px; background:#111a; padding:7px 9px; }
+    body.receiving .liveRate strong { font-size:19px; }
+    body.receiving .stats { margin-top:4px; }
+    body.receiving .result.active { display:block; position:fixed; left:8px; right:8px; bottom:8px; z-index:6; max-height:70dvh; overflow:auto; }
+  }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v26</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v27</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -180,7 +191,6 @@
         <video id="video" playsinline muted></video>
         <canvas class="debugOverlay" id="debugOverlay"></canvas><div class="debugPanel" id="debugPanel"></div>
         <div class="cameraGate" id="cameraGate"><button class="enableCamera" id="enableCameraBtn">Enable camera</button></div>
-        <div class="scanShade"></div><div class="scanBox"></div>
         <div class="receiveHud">
           <div class="statusCard">
             <div class="statusTop"><span id="statusDot" class="dot"></span><span id="statusText">Starting camera…</span></div>
@@ -208,7 +218,7 @@
 (() => {
 'use strict';
 
-const BUILD='v26';
+const BUILD='v27';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -319,7 +329,7 @@ function resetSend(){
   $('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;
 }
 function showView(name){
-  const prev=state.mode;state.mode=name;$$('.view').forEach(v=>v.classList.remove('active'));$('#'+name+'View').classList.add('active');
+  const prev=state.mode;state.mode=name;document.body.classList.toggle('receiving',name==='receive');$$('.view').forEach(v=>v.classList.remove('active'));$('#'+name+'View').classList.add('active');
   if(name!=='receive')stopCamera();
   if(name!=='send'&&prev==='send')resetSend();else if(name!=='send')stopSender();
   if(name==='receive'){prepareCamera();startCamera();}
