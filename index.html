@@ -15,6 +15,7 @@
   header { width:min(920px,calc(100% - 32px)); margin:0 auto; padding:22px 0 10px; display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
   .brand { font-weight:750; font-size:18px; letter-spacing:-.02em; }
   .tag { color:var(--muted); font-size:12px; margin-top:2px; }
+  .version { display:inline-block; margin-left:6px; color:#aaa; font-size:10px; font-weight:650; vertical-align:1px; }
   .ghost { border:1px solid var(--line); background:transparent; border-radius:10px; padding:8px 11px; cursor:pointer; }
   .ghost:hover { background:var(--card); }
   main { width:min(920px,calc(100% - 32px)); margin:auto; padding:24px 0 42px; }
@@ -69,7 +70,7 @@
   .dot.good { background:#57d985; }
   .dot.warn { background:#f4bd59; }
   .dot.bad { background:#f26c6c; }
-  .stats { margin-top:7px; display:flex; gap:12px; color:#ffffffb0; font-size:11px; font-variant-numeric:tabular-nums; }
+  .stats { margin-top:7px; display:flex; flex-wrap:wrap; gap:4px 12px; color:#ffffffb0; font-size:11px; font-variant-numeric:tabular-nums; }
   .progressBar { height:3px; background:#ffffff25; margin-top:9px; overflow:hidden; border-radius:9px; }
   .progressBar i { display:block; height:100%; width:0; background:white; transition:width .15s linear; }
   .cameraBtn { border:1px solid #ffffff35; background:#111c; color:white; border-radius:11px; padding:9px 11px; cursor:pointer; backdrop-filter:blur(8px); }
@@ -102,7 +103,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper</div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v4</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -138,8 +139,8 @@
             <input id="fpsRange" type="range" min="1" max="60" step="1" value="10">
           </div>
           <div class="control">
-            <div class="controlHead"><b>Size</b><span class="value" id="sizeValue">900 B/frame</span></div>
-            <input id="sizeRange" type="range" min="128" max="1900" step="64" value="900">
+            <div class="controlHead"><b>Size</b><span class="value" id="sizeValue">2.8 KB/frame · 1 QR</span></div>
+            <input id="sizeRange" type="range" min="300" max="16800" step="100" value="2800">
           </div>
         </div>
         <div class="sendInfo" id="sendInfo"></div>
@@ -155,7 +156,7 @@
         <div class="receiveHud">
           <div class="statusCard">
             <div class="statusTop"><span id="statusDot" class="dot"></span><span id="statusText">Starting camera…</span></div>
-            <div class="stats"><span id="progressText">0%</span><span id="cameraText">— fps</span><span id="dropText">— drop</span></div>
+            <div class="stats"><span id="progressText">0%</span><span id="cameraText">— camera</span><span id="scanText">— scan</span><span id="dropText">— loss</span></div>
             <div class="progressBar"><i id="progressFill"></i></div>
           </div>
           <button class="cameraBtn" id="flipBtn">Flip</button>
@@ -175,379 +176,372 @@
 (() => {
 'use strict';
 
+const BUILD='v4';
+document.documentElement.dataset.airgapperBuild=BUILD;
+
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const MAX_QR_RAW = 1900;
-const MAX_FRAME_BYTES = MAX_QR_RAW;
+
+// QR Version 40-L has 4296 alphanumeric chars. Base45 lets binary use that mode
+// efficiently; 2750 data bytes + our binary header stays comfortably below it.
+const MAX_SYMBOL_BYTES = 2800;
+const QR_COUNTS = [1, 2, 4, 6];
+const PACKET_HEADER = 37;
+const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+const B45_REV = (() => { const a = new Int16Array(128); a.fill(-1); for (let i=0;i<B45.length;i++) a[B45.charCodeAt(i)] = i; return a; })();
 
 const state = {
-  mode: 'home', stream: null, facing: 'environment', scanToken: 0,
-  transfer: null, sendTimer: null, serial: 0,
-  rx: null, barcodeDetector: null,
-  cameraFrames: 0, cameraFps: 0, cameraWindowAt: performance.now(),
-  decodeHits: 0, decodeAttempts: 0, lastDecodeAt: 0,
+  mode:'home', stream:null, facing:'environment', scanToken:0,
+  transfer:null, sendTimer:null, esi:0, displaySeq:0,
+  rx:null, barcodeDetector:null,
+  cameraFps:0, cameraMeasuredFps:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
+  scanRate:0, scanCount:0, scanWindowAt:0, lastDecodeAt:0,
+  probeIndex:0, senderActualFps:0, senderFrameCount:0, senderWindowAt:0,
 };
 
 function toast(msg) {
-  const el = $('#toast'); el.textContent = msg; el.classList.add('show');
-  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 1700);
+  const el=$('#toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toast.t); toast.t=setTimeout(()=>el.classList.remove('show'),1700);
 }
 function humanBytes(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n/1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
-  return (n/1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(n<10240?1:0)+' KB';
+  return (n/1048576).toFixed(n<10485760?1:0)+' MB';
 }
 function concatBytes(arrays) {
-  let n = 0; for (const a of arrays) n += a.length;
-  const out = new Uint8Array(n); let p = 0;
-  for (const a of arrays) { out.set(a,p); p += a.length; }
+  let n=0; for(const a of arrays)n+=a.length;
+  const out=new Uint8Array(n); let p=0;
+  for(const a of arrays){out.set(a,p);p+=a.length;} return out;
+}
+function u32(n){return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]);}
+function readU32(a,o){return (((a[o]<<24)>>>0)|(a[o+1]<<16)|(a[o+2]<<8)|a[o+3])>>>0;}
+function writeU32(v,o,n){v.setUint32(o,n>>>0,false);}
+function randomU32(){const a=new Uint32Array(1);crypto.getRandomValues(a);return a[0]>>>0;}
+async function shortHashBytes(bytes){
+  const h=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)); return h.slice(0,8);
+}
+function sameBytes(a,b){if(!a||!b||a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(a[i]!==b[i])return false;return true;}
+function xorInto(dst,src){for(let i=0;i<src.length;i++)dst[i]^=src[i];}
+
+// RFC 9285 Base45, ideal for QR alphanumeric mode.
+function base45Encode(bytes){
+  let out='';
+  for(let i=0;i<bytes.length;i+=2){
+    if(i+1<bytes.length){
+      let x=bytes[i]*256+bytes[i+1];
+      const e=x%45; x=(x-e)/45; const d=x%45; const c=(x-d)/45;
+      out+=B45[e]+B45[d]+B45[c];
+    }else{
+      const x=bytes[i]; out+=B45[x%45]+B45[Math.floor(x/45)];
+    }
+  }
   return out;
 }
-function u32(n) { return new Uint8Array([(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]); }
-function readU32(a,o) { return ((a[o]<<24)>>>0) + (a[o+1]<<16) + (a[o+2]<<8) + a[o+3]; }
-function bytesToB64(bytes) {
-  let s = ''; const step = 0x8000;
-  for (let i=0;i<bytes.length;i+=step) s += String.fromCharCode(...bytes.subarray(i,i+step));
-  return btoa(s);
-}
-function b64ToBytes(s) {
-  const bin = atob(s), out = new Uint8Array(bin.length);
-  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-async function shortHash(bytes) {
-  try {
-    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    return [...h.subarray(0,8)].map(x=>x.toString(16).padStart(2,'0')).join('');
-  } catch { return 'nohash'; }
-}
-function randomId() {
-  const a = new Uint8Array(5); (crypto.getRandomValues ? crypto.getRandomValues(a) : a.fill(Math.random()*255));
-  return [...a].map(x=>x.toString(36).padStart(2,'0')).join('').slice(0,8);
+function base45Decode(s){
+  if(s.length%3===1)throw new Error('bad base45');
+  const out=new Uint8Array(Math.floor(s.length*2/3)+(s.length%3===2?1:0)); let p=0;
+  for(let i=0;i<s.length;){
+    const remain=s.length-i, n=remain>=3?3:2;
+    const a=B45_REV[s.charCodeAt(i++)]??-1,b=B45_REV[s.charCodeAt(i++)]??-1;
+    if(a<0||b<0)throw new Error('bad base45');
+    if(n===3){
+      const c=B45_REV[s.charCodeAt(i++)]??-1;if(c<0)throw new Error('bad base45');
+      const x=a+b*45+c*2025;if(x>65535)throw new Error('bad base45');out[p++]=x>>8;out[p++]=x&255;
+    }else{
+      const x=a+b*45;if(x>255)throw new Error('bad base45');out[p++]=x;
+    }
+  }
+  return out.subarray(0,p);
 }
 
-function resetSend() {
-  stopSender(); state.transfer = null; state.serial = 0;
-  $('#sender').classList.remove('active'); $('#sendStart').style.display = 'grid';
-  $('#fileInput').value = ''; $('#textInput').value = '';
+function resetSend(){
+  stopSender();state.transfer=null;state.esi=0;state.displaySeq=0;
+  $('#sender').classList.remove('active');$('#sendStart').style.display='grid';
+  $('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;
 }
-function showView(name) {
-  const prev = state.mode;
-  state.mode = name;
-  $$('.view').forEach(v => v.classList.remove('active'));
-  $('#' + name + 'View').classList.add('active');
-  if (name !== 'receive') stopCamera();
-  if (name !== 'send' && prev === 'send') resetSend();
-  else if (name !== 'send') stopSender();
-  if (name === 'receive') prepareCamera();
+function showView(name){
+  const prev=state.mode;state.mode=name;$$('.view').forEach(v=>v.classList.remove('active'));$('#'+name+'View').classList.add('active');
+  if(name!=='receive')stopCamera();
+  if(name!=='send'&&prev==='send')resetSend();else if(name!=='send')stopSender();
+  if(name==='receive')prepareCamera();
 }
-$$('.mode').forEach(b => b.onclick = () => showView(b.dataset.mode));
-$$('.back').forEach(b => b.onclick = () => showView('home'));
+$$('.mode').forEach(b=>b.onclick=()=>showView(b.dataset.mode));
+$$('.back').forEach(b=>b.onclick=()=>showView('home'));
 
 // ---------- Pack / unpack ----------
-async function packFiles(files) {
-  const meta = { kind:'files', files: files.map(f => ({name:f.name, type:f.type || 'application/octet-stream', size:f.size})) };
-  const header = enc.encode(JSON.stringify(meta));
-  const parts = [enc.encode('AGC1'), u32(header.length), header];
-  for (const f of files) parts.push(new Uint8Array(await f.arrayBuffer()));
-  return concatBytes(parts);
+async function packFiles(files){
+  const meta={kind:'files',files:files.map(f=>({name:f.name,type:f.type||'application/octet-stream',size:f.size}))};
+  const header=enc.encode(JSON.stringify(meta));const parts=[enc.encode('AGC1'),u32(header.length),header];
+  for(const f of files)parts.push(new Uint8Array(await f.arrayBuffer()));return concatBytes(parts);
 }
-function packText(text) {
-  const body = enc.encode(text);
-  const header = enc.encode(JSON.stringify({kind:'text', size:body.length}));
-  return concatBytes([enc.encode('AGC1'),u32(header.length),header,body]);
-}
-function unpackContainer(bytes) {
-  if (dec.decode(bytes.subarray(0,4)) !== 'AGC1') throw new Error('Unknown AirGapper data');
-  const hlen = readU32(bytes,4), meta = JSON.parse(dec.decode(bytes.subarray(8,8+hlen)));
-  let p = 8 + hlen;
-  if (meta.kind === 'text') return {kind:'text', text:dec.decode(bytes.subarray(p,p+meta.size))};
-  const files = meta.files.map(f => { const data = bytes.slice(p,p+f.size); p += f.size; return {...f,data}; });
-  return {kind:'files', files};
+function packText(text){const body=enc.encode(text),header=enc.encode(JSON.stringify({kind:'text',size:body.length}));return concatBytes([enc.encode('AGC1'),u32(header.length),header,body]);}
+function unpackContainer(bytes){
+  if(dec.decode(bytes.subarray(0,4))!=='AGC1')throw new Error('Unknown AirGapper data');
+  const hlen=readU32(bytes,4),meta=JSON.parse(dec.decode(bytes.subarray(8,8+hlen)));let p=8+hlen;
+  if(meta.kind==='text')return{kind:'text',text:dec.decode(bytes.subarray(p,p+meta.size))};
+  const files=meta.files.map(f=>{const data=bytes.slice(p,p+f.size);p+=f.size;return{...f,data};});return{kind:'files',files};
 }
 
-async function prepareTransfer(raw, label) {
-  if (!window.fflate || !window.qrcode) { toast('QR libraries are still loading'); return; }
-  stopSender();
-  const compressed = fflate.gzipSync(raw, {level:6});
-  const hash = await shortHash(compressed);
-  state.transfer = { id:randomId(), raw, compressed, hash, label, frameBytes:+$('#sizeRange').value, frames:[], total:0 };
-  rebuildFrames();
-  $('#sendStart').style.display = 'none';
-  $('#sender').classList.add('active');
-  state.serial = 0;
-  startSender();
-  const ratio = raw.length ? Math.round((1 - compressed.length/raw.length)*100) : 0;
-  $('#sendInfo').textContent = `${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0 ? ` · ${ratio}% smaller` : ''}`;
+// ---------- Fountain code ----------
+function mix32(x){
+  x=(x+0x9e3779b9)>>>0;x=Math.imul(x^(x>>>16),0x21f0aaad);x=Math.imul(x^(x>>>15),0x735a2d97);return(x^(x>>>15))>>>0;
 }
-function rebuildFrames() {
-  const t = state.transfer; if (!t) return;
-  t.frameBytes = Math.min(MAX_FRAME_BYTES, +$('#sizeRange').value);
-  t.frames = [];
-  for (let i=0;i<t.compressed.length;i+=t.frameBytes) t.frames.push(t.compressed.subarray(i,i+t.frameBytes));
-  t.total = t.frames.length || 1;
-  if (!t.frames.length) t.frames = [new Uint8Array()];
-  updateSendLabels();
+function rng32(seed){let x=mix32(seed)||1;return()=>{x^=x<<13;x^=x>>>17;x^=x<<5;return x>>>0;};}
+function robustSolitonCDF(K){
+  if(K<=1)return new Float64Array([0,1]);
+  const c=.1,delta=.1,R=c*Math.log(K/delta)*Math.sqrt(K),m=Math.max(1,Math.min(K,Math.floor(K/Math.max(R,1e-9))));
+  const w=new Float64Array(K+1);let sum=0;
+  for(let d=1;d<=K;d++){
+    const rho=d===1?1/K:1/(d*(d-1));let tau=0;
+    if(d<m)tau=R/(d*K);else if(d===m)tau=R*Math.log(Math.max(R/delta,1.000001))/K;
+    w[d]=rho+tau;sum+=w[d];
+  }
+  const cdf=new Float64Array(K+1);let acc=0;for(let d=1;d<=K;d++){acc+=w[d]/sum;cdf[d]=acc;}cdf[K]=1;return cdf;
 }
-function updateSendLabels() {
-  $('#fpsValue').textContent = $('#fpsRange').value + ' FPS';
-  const b = +$('#sizeRange').value;
-  $('#sizeValue').textContent = `${b} B/frame`;
+function sampleDegree(cdf,r){let lo=1,hi=cdf.length-1;const x=r/4294967296;while(lo<hi){const mid=(lo+hi)>>1;if(x<=cdf[mid])hi=mid;else lo=mid+1;}return lo;}
+function fountainIndices(K,id,esi,cdf){
+  if(esi<K)return[esi];
+  const rnd=rng32((id^Math.imul(esi,0x85ebca6b))>>>0);const degree=Math.min(K,sampleDegree(cdf,rnd()));
+  if(degree>=K)return Array.from({length:K},(_,i)=>i);
+  const set=new Set();for(let j=K-degree;j<K;j++){const t=rnd()%(j+1);set.add(set.has(t)?j:t);}return[...set];
 }
-$('#fpsRange').oninput = () => { updateSendLabels(); if (state.transfer) startSender(); };
-$('#sizeRange').oninput = () => { updateSendLabels(); if (state.transfer) { rebuildFrames(); state.transfer.id = randomId(); state.serial = 0; } };
+function makeSymbol(t,esi){
+  const idxs=fountainIndices(t.K,t.id,esi,t.cdf);
+  if(idxs.length===1){const src=t.sources[idxs[0]];if(src.length===t.symbolBytes)return src;const out=new Uint8Array(t.symbolBytes);out.set(src);return out;}
+  const out=new Uint8Array(t.symbolBytes);for(const i of idxs)xorInto(out,t.sources[i]);return out;
+}
+function chooseLayout(target){
+  const qrs=QR_COUNTS.find(n=>Math.ceil(target/n)<=MAX_SYMBOL_BYTES)||6;
+  const symbolBytes=Math.min(MAX_SYMBOL_BYTES,Math.max(64,Math.ceil(target/qrs)));
+  return{qrs,symbolBytes,frameBytes:qrs*symbolBytes};
+}
+function buildFountain(t){
+  const layout=chooseLayout(+$('#sizeRange').value);t.qrCount=layout.qrs;t.symbolBytes=layout.symbolBytes;t.frameBytes=layout.frameBytes;
+  t.K=Math.max(1,Math.ceil(t.compressed.length/t.symbolBytes));t.sources=[];
+  for(let i=0;i<t.K;i++)t.sources.push(t.compressed.subarray(i*t.symbolBytes,Math.min(t.compressed.length,(i+1)*t.symbolBytes)));
+  t.cdf=robustSolitonCDF(t.K);state.esi=0;state.displaySeq=0;t.id=randomU32();updateSendLabels();
+}
+
+async function prepareTransfer(raw,label){
+  if(!window.fflate||!window.qrcode){toast('QR libraries are still loading');return;}
+  stopSender();const compressed=fflate.gzipSync(raw,{level:6}),hash=await shortHashBytes(compressed);
+  state.transfer={raw,compressed,hash,label,id:randomU32(),sources:[],cdf:null,K:0,symbolBytes:0,qrCount:1,frameBytes:0};buildFountain(state.transfer);
+  $('#sendStart').style.display='none';$('#sender').classList.add('active');startSender();
+  const ratio=raw.length?Math.round((1-compressed.length/raw.length)*100):0;
+  $('#sendInfo').textContent=`${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0?` · ${ratio}% smaller`:''} · fountain FEC`;
+}
+function updateSendLabels(){
+  $('#fpsValue').textContent=$('#fpsRange').value+' FPS';
+  const l=chooseLayout(+$('#sizeRange').value);$('#sizeValue').textContent=`${humanBytes(l.frameBytes)}/frame · ${l.qrs} QR${l.qrs===1?'':'s'}`;
+}
+$('#fpsRange').oninput=()=>{updateSendLabels();if(state.transfer)startSender();};
+$('#sizeRange').oninput=()=>{updateSendLabels();if(state.transfer){buildFountain(state.transfer);renderSendFrame();}};
 updateSendLabels();
 
-function encodePayload(t, serial, frameIndex, part, parts, bytes) {
-  const fps = +$('#fpsRange').value;
-  return ['AG1',t.id,serial,frameIndex,t.total,part,parts,fps,t.frameBytes,t.compressed.length,t.hash,bytesToB64(bytes)].join('|');
+function buildPacket(t,esi,displaySeq,slot,payload){
+  const out=new Uint8Array(PACKET_HEADER+payload.length),v=new DataView(out.buffer);
+  out[0]=65;out[1]=71;out[2]=50;out[3]=1;writeU32(v,4,t.id);writeU32(v,8,esi);writeU32(v,12,t.K);v.setUint16(16,t.symbolBytes,false);writeU32(v,18,t.compressed.length);out.set(t.hash,22);
+  out[30]=Math.min(255,+$('#fpsRange').value);out[31]=t.qrCount;writeU32(v,32,displaySeq);out[36]=slot;out.set(payload,PACKET_HEADER);return out;
 }
-function makeQrMatrix(text) {
-  const qr = qrcode(0,'L'); qr.addData(text); qr.make();
-  const n = qr.getModuleCount(), matrix = new Array(n);
-  for (let y=0;y<n;y++) { matrix[y] = new Uint8Array(n); for (let x=0;x<n;x++) matrix[y][x] = qr.isDark(y,x) ? 1 : 0; }
-  return matrix;
+function parsePacket(raw){
+  let b;try{b=base45Decode(raw);}catch{return null;}if(b.length<PACKET_HEADER||b[0]!==65||b[1]!==71||b[2]!==50||b[3]!==1)return null;
+  const v=new DataView(b.buffer,b.byteOffset,b.byteLength),symbolBytes=v.getUint16(16,false);if(b.length!==PACKET_HEADER+symbolBytes)return null;
+  return{id:v.getUint32(4,false),esi:v.getUint32(8,false),K:v.getUint32(12,false),symbolBytes,totalBytes:v.getUint32(18,false),hash:b.slice(22,30),fps:b[30],qrs:b[31],displaySeq:v.getUint32(32,false),slot:b[36],data:b.slice(PACKET_HEADER)};
 }
-function drawMatrix(ctx, matrix, x,y,w,h) {
-  const quiet=4, n=matrix.length, total=n+quiet*2, cell=Math.floor(Math.min(w,h)/total);
-  const size=cell*total, ox=Math.round(x+(w-size)/2), oy=Math.round(y+(h-size)/2);
-  ctx.fillStyle='#fff'; ctx.fillRect(x,y,w,h);
-  ctx.fillStyle='#000';
-  for (let r=0;r<n;r++) for (let c=0;c<n;c++) if (matrix[r][c]) ctx.fillRect(ox+(c+quiet)*cell,oy+(r+quiet)*cell,cell,cell);
+function makeQrMatrix(packet){
+  const text=base45Encode(packet),qr=qrcode(0,'L');qr.addData(text,'Alphanumeric');qr.make();const n=qr.getModuleCount(),m=new Array(n);
+  for(let y=0;y<n;y++){m[y]=new Uint8Array(n);for(let x=0;x<n;x++)m[y][x]=qr.isDark(y,x)?1:0;}return m;
 }
-function fitCanvas(canvas) {
-  const rect=canvas.getBoundingClientRect(), dpr=Math.min(devicePixelRatio||1,2);
-  const w=Math.max(320,Math.round(rect.width*dpr)), h=Math.max(320,Math.round(rect.height*dpr));
-  if (canvas.width!==w || canvas.height!==h) { canvas.width=w; canvas.height=h; }
+function gridShape(count,w,h){
+  const pairs=count===1?[[1,1]]:count===2?[[2,1],[1,2]]:count===4?[[2,2]]:[[3,2],[2,3]];
+  let best=pairs[0],bestSide=-1;for(const [cols,rows] of pairs){const s=Math.min(w/cols,h/rows);if(s>bestSide){bestSide=s;best=[cols,rows];}}return{cols:best[0],rows:best[1]};
 }
-function renderSendFrame() {
-  const t=state.transfer; if (!t || state.mode!=='send') return;
-  const serial=state.serial++, frameIndex=serial%t.total, frame=t.frames[frameIndex];
-  let matrix;
-  try { matrix=makeQrMatrix(encodePayload(t,serial,frameIndex,0,1,frame)); }
-  catch (e) {
-    setStatus('Size too large','bad');
-    return;
+function gridRects(count,w,h){
+  const outer=Math.max(2,Math.round(Math.min(w,h)*.018)),gap=Math.max(2,Math.round(Math.min(w,h)*.012));
+  const {cols,rows}=gridShape(count,w-outer*2,h-outer*2),cellW=(w-outer*2-gap*(cols-1))/cols,cellH=(h-outer*2-gap*(rows-1))/rows,side=Math.min(cellW,cellH);
+  const totalW=cols*side+(cols-1)*gap,totalH=rows*side+(rows-1)*gap,x0=(w-totalW)/2,y0=(h-totalH)/2,rects=[];
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)rects.push([x0+c*(side+gap),y0+r*(side+gap),side,side]);return rects;
+}
+function drawMatrix(ctx,matrix,x,y,side){
+  const quiet=4,n=matrix.length,total=n+quiet*2;
+  ctx.fillStyle='#fff';ctx.fillRect(Math.floor(x),Math.floor(y),Math.ceil(side),Math.ceil(side));ctx.fillStyle='#000';
+  // Map module boundaries directly to the full square. Density never changes displayed QR size.
+  for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(matrix[r][c]){
+    const x1=Math.floor(x+(c+quiet)*side/total),x2=Math.ceil(x+(c+quiet+1)*side/total),y1=Math.floor(y+(r+quiet)*side/total),y2=Math.ceil(y+(r+quiet+1)*side/total);
+    ctx.fillRect(x1,y1,Math.max(1,x2-x1),Math.max(1,y2-y1));
   }
-  const canvas=$('#qrCanvas'); fitCanvas(canvas); const ctx=canvas.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  const pad=Math.round(Math.min(canvas.width,canvas.height)*.035), W=canvas.width-2*pad,H=canvas.height-2*pad;
-  drawMatrix(ctx,matrix,pad,pad,W,H);
-  $('#qrMeta').textContent = `${frameIndex+1}/${t.total} · ${$('#fpsRange').value} FPS · ${t.frameBytes} B`;
 }
-function startSender() {
-  stopSender(); if (!state.transfer) return;
-  const loop=()=>{ if(state.mode!=='send'||!state.transfer)return; renderSendFrame(); state.sendTimer=setTimeout(loop,1000/(+$('#fpsRange').value)); };
-  loop();
+function fitCanvas(canvas){const rect=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2),w=Math.max(320,Math.round(rect.width*dpr)),h=Math.max(320,Math.round(rect.height*dpr));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}}
+function renderSendFrame(){
+  const t=state.transfer;if(!t||state.mode!=='send')return;const canvas=$('#qrCanvas');fitCanvas(canvas);const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  const rects=gridRects(t.qrCount,canvas.width,canvas.height),displaySeq=state.displaySeq++;
+  try{
+    for(let slot=0;slot<t.qrCount;slot++){
+      const esi=state.esi++,symbol=makeSymbol(t,esi),packet=buildPacket(t,esi,displaySeq,slot,symbol),matrix=makeQrMatrix(packet),r=rects[slot];drawMatrix(ctx,matrix,r[0],r[1],r[2]);
+    }
+  }catch(e){console.warn(e);toast('Size too large for QR');return;}
+  const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}
+  $('#qrMeta').textContent=`${$('#fpsRange').value} FPS · ${humanBytes(t.frameBytes)}/frame · ${t.qrCount} QR${t.qrCount===1?'':'s'}`;
 }
-function stopSender(){ clearTimeout(state.sendTimer); state.sendTimer=null; }
-$('#fullscreenBtn').onclick=()=>{ const el=$('#qrStage'); if(!document.fullscreenElement) el.requestFullscreen?.(); else document.exitFullscreen?.(); };
+function startSender(){
+  stopSender();if(!state.transfer)return;const interval=1000/(+$('#fpsRange').value);let next=performance.now();
+  const loop=()=>{if(state.mode!=='send'||!state.transfer)return;const now=performance.now();if(now>=next){renderSendFrame();next=Math.max(next+interval,now);}state.sendTimer=requestAnimationFrame(loop);};loop();
+}
+function stopSender(){if(state.sendTimer)cancelAnimationFrame(state.sendTimer);state.sendTimer=null;}
+$('#fullscreenBtn').onclick=()=>{const el=$('#qrStage');if(!document.fullscreenElement)el.requestFullscreen?.();else document.exitFullscreen?.();};
 
 // inputs
-const dz=$('#dropZone'), fi=$('#fileInput');
-fi.onchange=async()=>{ if(fi.files.length) prepareTransfer(await packFiles([...fi.files]), fi.files.length===1?fi.files[0].name:`${fi.files.length} files`); };
-['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));
-['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));
-dz.addEventListener('drop',async e=>{ const files=[...e.dataTransfer.files]; if(files.length) prepareTransfer(await packFiles(files),files.length===1?files[0].name:`${files.length} files`); });
-const textInput=$('#textInput'), textSendBtn=$('#textSendBtn');
-textInput.addEventListener('input',()=>{ textSendBtn.disabled=!textInput.value.trim(); });
-textSendBtn.onclick=()=>{ const text=textInput.value; if(text.trim()) prepareTransfer(packText(text),'Text'); };
+const dz=$('#dropZone'),fi=$('#fileInput');
+fi.onchange=async()=>{if(fi.files.length)prepareTransfer(await packFiles([...fi.files]),fi.files.length===1?fi.files[0].name:`${fi.files.length} files`);};
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
+dz.addEventListener('drop',async e=>{const files=[...e.dataTransfer.files];if(files.length)prepareTransfer(await packFiles(files),files.length===1?files[0].name:`${files.length} files`);});
+const textInput=$('#textInput'),textSendBtn=$('#textSendBtn');textInput.addEventListener('input',()=>{textSendBtn.disabled=!textInput.value.trim();});textSendBtn.onclick=()=>{const text=textInput.value;if(text.trim())prepareTransfer(packText(text),'Text');};
 
 // ---------- Receive ----------
-function isIOS() {
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function isIOS(){return /iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);}
+function cameraPolicyBlocked(){try{const p=document.permissionsPolicy||document.featurePolicy;return!!(p?.allowsFeature&&!p.allowsFeature('camera'));}catch{return false;}}
+function prepareCamera(){stopCamera();resetRx();const gate=$('#cameraGate');gate.classList.add('active');if(!navigator.mediaDevices?.getUserMedia)setStatus('Camera unavailable here','bad');else if(!window.isSecureContext)setStatus('Camera needs HTTPS','bad');else if(cameraPolicyBlocked())setStatus('Open in browser to use camera','bad');else if(location.protocol==='file:'&&isIOS())setStatus('Local file · camera unavailable','bad');else setStatus('Tap Enable camera','');}
+function cameraErrorText(e){if(!window.isSecureContext)return'Camera needs HTTPS';if(cameraPolicyBlocked())return'Open in browser to use camera';if(window.top!==window.self&&e?.name==='NotAllowedError')return'Open in browser to use camera';if(e?.name==='NotAllowedError'||e?.name==='SecurityError')return'Camera permission denied';if(e?.name==='NotFoundError')return'No camera found';if(e?.name==='NotReadableError')return'Camera is busy';if(e?.name==='OverconstrainedError')return'Camera mode unsupported';return`Camera error${e?.name?' · '+e.name:''}`;}
+async function requestCamera(){
+  try{return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:60,min:15}},audio:false});}
+  catch(e){if(e?.name==='OverconstrainedError'||e?.name==='NotFoundError')return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing}},audio:false});throw e;}
 }
-function cameraPolicyBlocked() {
-  try {
-    const p = document.permissionsPolicy || document.featurePolicy;
-    return !!(p?.allowsFeature && !p.allowsFeature('camera'));
-  } catch { return false; }
+async function startCamera(){
+  stopCamera();resetRx();const gate=$('#cameraGate');if(!navigator.mediaDevices?.getUserMedia||!window.isSecureContext||cameraPolicyBlocked()){prepareCamera();return;}
+  try{
+    state.stream=await requestCamera();const video=$('#video');video.srcObject=state.stream;video.setAttribute('playsinline','');video.muted=true;await video.play();gate.classList.remove('active');
+    try{state.barcodeDetector='BarcodeDetector'in window?new BarcodeDetector({formats:['qr_code']}):null;}catch{state.barcodeDetector=null;}
+    const settings=state.stream.getVideoTracks()[0]?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;setStatus('Point at sender','');state.scanToken++;cameraMeterLoop(state.scanToken);scanLoop(state.scanToken);
+  }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
 }
-function prepareCamera() {
-  stopCamera(); resetRx();
-  const gate=$('#cameraGate');
-  gate.classList.add('active');
-  if (!navigator.mediaDevices?.getUserMedia) setStatus('Camera unavailable here','bad');
-  else if (!window.isSecureContext) setStatus('Camera needs HTTPS','bad');
-  else if (cameraPolicyBlocked()) setStatus('Open in browser to use camera','bad');
-  else if (location.protocol === 'file:' && isIOS()) setStatus('Local file · camera unavailable on iPhone','bad');
-  else setStatus('Tap Enable camera','');
+function stopCamera(){state.scanToken++;if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
+$('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};
+function resetRx(){
+  state.rx=null;state.cameraMeasuredFps=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
+  $('#progressFill').style.width='0%';$('#progressText').textContent='0%';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
 }
-function cameraErrorText(e) {
-  if (!window.isSecureContext) return 'Camera needs HTTPS';
-  if (cameraPolicyBlocked()) return 'Open in browser to use camera';
-  if (location.protocol === 'file:' && isIOS()) return 'Local file · camera unavailable on iPhone';
-  if (window.top !== window.self && e?.name === 'NotAllowedError') return 'Open in browser to use camera';
-  if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') return 'Camera permission denied';
-  if (e?.name === 'NotFoundError') return 'No camera found';
-  if (e?.name === 'NotReadableError') return 'Camera is busy';
-  if (e?.name === 'OverconstrainedError') return 'Camera mode unsupported';
-  return `Camera error${e?.name ? ' · ' + e.name : ''}`;
+function newRx(p){
+  return{id:p.id,K:p.K,symbolBytes:p.symbolBytes,totalBytes:p.totalBytes,hash:p.hash,targetFps:p.fps,expectedQrs:p.qrs,cdf:robustSolitonCDF(p.K),source:new Array(p.K),solved:0,equations:new Map(),adj:new Array(p.K),nextEq:1,seen:new Set(),minEsi:null,maxEsi:null,packets:0,done:false,startedAt:performance.now()};
 }
-async function requestCamera() {
-  try {
-    return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing}},audio:false});
-  } catch(e) {
-    if (e?.name === 'OverconstrainedError' || e?.name === 'NotFoundError') {
-      return navigator.mediaDevices.getUserMedia({video:true,audio:false});
+function setStatus(text,kind=''){ $('#statusText').textContent=text;$('#statusDot').className='dot'+(kind?' '+kind:'');}
+function solveBlock(rx,index,data){
+  const queue=[[index,data]];
+  while(queue.length){
+    const [idx,block]=queue.shift();if(rx.source[idx])continue;rx.source[idx]=block.slice();rx.solved++;
+    const list=rx.adj[idx];if(!list)continue;
+    for(const eqId of list){const eq=rx.equations.get(eqId);if(!eq||!eq.active||!eq.idxs.has(idx))continue;eq.idxs.delete(idx);xorInto(eq.data,block);
+      if(eq.idxs.size===0){eq.active=false;rx.equations.delete(eqId);}
+      else if(eq.idxs.size===1){const only=eq.idxs.values().next().value;eq.active=false;rx.equations.delete(eqId);queue.push([only,eq.data]);}
     }
-    throw e;
+    rx.adj[idx]=null;
   }
 }
-async function startCamera() {
-  stopCamera(); resetRx();
-  const gate=$('#cameraGate');
-  if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext || cameraPolicyBlocked() || (location.protocol === 'file:' && isIOS())) {
-    prepareCamera();
-    return;
-  }
-  try {
-    state.stream=await requestCamera();
-    const video=$('#video'); video.srcObject=state.stream; video.setAttribute('playsinline',''); video.muted=true;
-    await video.play();
-    gate.classList.remove('active');
-    if ('BarcodeDetector' in window) { try { state.barcodeDetector=new BarcodeDetector({formats:['qr_code']}); } catch{} }
-    setStatus('Point at sender','');
-    state.scanToken++; scanLoop(state.scanToken);
-  } catch(e) {
-    console.warn('AirGapper camera:', e?.name, e?.message, {secure:isSecureContext, protocol:location.protocol, embedded:window.top!==window.self, policyBlocked:cameraPolicyBlocked()});
-    gate.classList.add('active');
-    setStatus(cameraErrorText(e),'bad');
-  }
+function addFountainPacket(rx,p){
+  if(rx.seen.has(p.esi))return false;rx.seen.add(p.esi);rx.packets++;
+  if(rx.minEsi===null||p.esi<rx.minEsi)rx.minEsi=p.esi;if(rx.maxEsi===null||p.esi>rx.maxEsi)rx.maxEsi=p.esi;
+  const idxs=fountainIndices(rx.K,rx.id,p.esi,rx.cdf),data=p.data.slice(),remaining=new Set();
+  for(const i of idxs){if(rx.source[i])xorInto(data,rx.source[i]);else remaining.add(i);}
+  if(remaining.size===0)return true;if(remaining.size===1){solveBlock(rx,remaining.values().next().value,data);return true;}
+  const id=rx.nextEq++,eq={id,idxs:remaining,data,active:true};rx.equations.set(id,eq);for(const i of remaining)(rx.adj[i]||(rx.adj[i]=[])).push(id);return true;
 }
-function stopCamera(){ state.scanToken++; if(state.stream){ state.stream.getTracks().forEach(t=>t.stop()); state.stream=null; } $('#video').srcObject=null; }
-$('#enableCameraBtn').onclick=()=>startCamera();
-$('#flipBtn').onclick=()=>{ state.facing=state.facing==='environment'?'user':'environment'; startCamera(); };
-function resetRx() {
-  state.rx={id:null,total:0,totalBytes:0,hash:null,frameBytes:0,targetFps:0,frames:new Map(), partsBySerial:new Map(), completeSerials:new Set(), maxSerial:null, missed:0, observed:0, startedAt:performance.now(), expectedParts:1, done:false};
-  state.cameraFrames=0; state.cameraFps=0; state.cameraWindowAt=performance.now(); state.decodeHits=0; state.decodeAttempts=0; state.lastDecodeAt=0;
-  $('#progressFill').style.width='0%'; $('#progressText').textContent='0%'; $('#dropText').textContent='— drop'; $('#cameraText').textContent='— fps'; $('#result').classList.remove('active'); $('#result').innerHTML='';
+function ingest(raw){
+  const p=parsePacket(raw);if(!p||p.K<1||p.symbolBytes<1||p.symbolBytes>MAX_SYMBOL_BYTES)return false;
+  let rx=state.rx;if(!rx||rx.id!==p.id||rx.K!==p.K||rx.symbolBytes!==p.symbolBytes){rx=state.rx=newRx(p);}
+  if(!sameBytes(rx.hash,p.hash)||rx.totalBytes!==p.totalBytes)return false;
+  state.lastDecodeAt=performance.now();rx.targetFps=p.fps;rx.expectedQrs=p.qrs;
+  const fresh=addFountainPacket(rx,p);if(fresh)updateRxUi();if(rx.solved===rx.K&&!rx.done){rx.done=true;finishReceive();}return true;
 }
-function setStatus(text,kind=''){ $('#statusText').textContent=text; $('#statusDot').className='dot'+(kind?' '+kind:''); }
-function parsePayload(raw) {
-  if (!raw?.startsWith('AG1|')) return null;
-  const a=raw.split('|'); if(a.length<12)return null;
-  return {id:a[1],serial:+a[2],frame:+a[3],total:+a[4],part:+a[5],parts:+a[6],fps:+a[7],frameBytes:+a[8],totalBytes:+a[9],hash:a[10],data:b64ToBytes(a[11])};
-}
-function ingest(raw) {
-  const p=parsePayload(raw); if(!p)return false;
-  let rx=state.rx;
-  if(rx.id!==p.id){ resetRx(); rx=state.rx; rx.id=p.id; rx.total=p.total; rx.totalBytes=p.totalBytes; rx.hash=p.hash; rx.frameBytes=p.frameBytes; rx.targetFps=p.fps; rx.expectedParts=p.parts; }
-  state.lastDecodeAt=performance.now(); state.decodeHits++;
-  rx.targetFps=p.fps; rx.expectedParts=p.parts;
-  const key=p.serial;
-  let group=rx.partsBySerial.get(key); if(!group){group={frame:p.frame,parts:p.parts,got:new Map()};rx.partsBySerial.set(key,group);} group.got.set(p.part,p.data);
-  if(group.got.size===group.parts && !rx.completeSerials.has(key)){
-    const data=concatBytes([...Array(group.parts)].map((_,i)=>group.got.get(i)));
-    rx.completeSerials.add(key); rx.frames.set(group.frame,data); rx.observed++;
-    if(rx.maxSerial==null)rx.maxSerial=key; else if(key>rx.maxSerial){ if(key>rx.maxSerial+1)rx.missed+=key-rx.maxSerial-1; rx.maxSerial=key; }
-    for(const s of rx.partsBySerial.keys()) if(s<key-8)rx.partsBySerial.delete(s);
-    updateRxUi();
-    if(rx.frames.size===rx.total&&!rx.done){rx.done=true; finishReceive();}
-  }
-  return true;
-}
+function lossRate(rx){if(!rx||rx.minEsi===null||rx.maxEsi===null)return 0;const span=rx.maxEsi-rx.minEsi+1;return span>0?Math.max(0,(span-rx.seen.size)/span):0;}
+function effectiveCameraFps(){return state.cameraFps||state.cameraMeasuredFps||0;}
 function updateRxUi(){
-  const rx=state.rx, pct=rx.total?Math.min(100,Math.round(rx.frames.size/rx.total*100)):0;
-  $('#progressText').textContent=pct+'%'; $('#progressFill').style.width=pct+'%';
-  const denom=rx.observed+rx.missed, drop=denom?rx.missed/denom:0;
-  $('#dropText').textContent=denom>4?`${Math.round(drop*100)}% drop`:'— drop';
-  $('#cameraText').textContent=state.cameraFps?`${state.cameraFps.toFixed(0)} fps`:'— fps';
-  let msg='Receiving',kind='good';
-  if(performance.now()-state.lastDecodeAt>1800){msg='Move closer or lower size';kind='warn';}
-  else if(state.cameraFps&&rx.targetFps>state.cameraFps*.9){msg=`Lower speed · camera ${state.cameraFps.toFixed(0)} fps`;kind='warn';}
-  else if(denom>8&&drop>.15){msg = rx.targetFps>state.cameraFps*.65 ? 'Lower speed' : 'Lower size'; kind='warn';}
-  else if(denom>12&&drop<.03&&state.cameraFps>rx.targetFps*1.5){msg='Good · room to go faster';kind='good';}
-  else if(pct===100){msg='Complete';kind='good';}
-  setStatus(msg,kind);
+  const rx=state.rx,pct=rx?Math.min(100,Math.round(rx.solved/rx.K*100)):0,loss=rx?lossRate(rx):0,cam=effectiveCameraFps();
+  $('#progressText').textContent=pct+'%';$('#progressFill').style.width=pct+'%';$('#dropText').textContent=rx&&rx.packets>8?`${Math.round(loss*100)}% loss`:'— loss';
+  $('#cameraText').textContent=cam?`${cam.toFixed(0)} camera fps`:'— camera';$('#scanText').textContent=state.scanRate?`${state.scanRate.toFixed(0)} scan/s`:'— scan';
+  if(!rx){setStatus('Point at sender','');return;}
+  let msg='Receiving',kind='good',since=performance.now()-state.lastDecodeAt;
+  if(since>1800){msg='Move closer or lower size';kind='warn';}
+  else if(cam&&rx.targetFps>cam*.9){msg=`Lower speed · camera ${cam.toFixed(0)} fps`;kind='warn';}
+  else if(state.scanRate&&rx.targetFps>state.scanRate*1.15){msg=`Lower speed · scanner ${state.scanRate.toFixed(0)}/s`;kind='warn';}
+  else if(rx.packets>12&&loss>.18){msg='Lower size';kind='warn';}
+  else if(rx.packets>20&&loss<.04&&cam>rx.targetFps*1.5&&state.scanRate>rx.targetFps*1.25){msg='Good · room to go faster';kind='good';}
+  if(pct===100){msg='Complete';kind='good';}setStatus(msg,kind);
 }
 async function finishReceive(){
   try{
-    const rx=state.rx, chunks=[]; for(let i=0;i<rx.total;i++){const c=rx.frames.get(i);if(!c)throw new Error('Missing frame');chunks.push(c);} const compressed=concatBytes(chunks).subarray(0,rx.totalBytes);
-    const hash=await shortHash(compressed); if(rx.hash!=='nohash'&&hash!==rx.hash)throw new Error('Integrity check failed');
-    if(!window.fflate)throw new Error('gzip unavailable');
-    const unpacked=unpackContainer(fflate.gunzipSync(compressed)); renderResult(unpacked); setStatus('Complete','good');
-  }catch(e){setStatus(e.message||'Could not decode','bad'); state.rx.done=false;}
+    const rx=state.rx,compressed=new Uint8Array(rx.K*rx.symbolBytes);for(let i=0;i<rx.K;i++){if(!rx.source[i])throw new Error('Need more symbols');compressed.set(rx.source[i],i*rx.symbolBytes);}const exact=compressed.subarray(0,rx.totalBytes);
+    const hash=await shortHashBytes(exact);if(!sameBytes(hash,rx.hash))throw new Error('Integrity check failed');if(!window.fflate)throw new Error('gzip unavailable');renderResult(unpackContainer(fflate.gunzipSync(exact)));setStatus('Complete','good');
+  }catch(e){setStatus(e.message||'Could not decode','bad');if(state.rx)state.rx.done=false;}
 }
 function renderResult(data){
-  const el=$('#result'); el.classList.add('active'); el.textContent='';
-  const head=document.createElement('div'); head.className='resultHead';
-  const title=document.createElement('div'); title.className='resultTitle'; title.textContent=data.kind==='text'?'Text received':`${data.files.length} file${data.files.length===1?'':'s'} received`; head.appendChild(title);
-  el.appendChild(head);
-  if(data.kind==='text'){
-    const copy=document.createElement('button');copy.className='smallBtn';copy.textContent='Copy';copy.onclick=async()=>{await navigator.clipboard?.writeText(data.text);toast('Copied')};head.appendChild(copy);
-    const t=document.createElement('div');t.className='textResult';t.textContent=data.text;el.appendChild(t);
-  }else{
-    const list=document.createElement('div');list.className='files';
-    for(const f of data.files){const row=document.createElement('div');row.className='fileRow';const name=document.createElement('div');name.className='fileName';name.textContent=`${f.name} · ${humanBytes(f.size)}`;const b=document.createElement('button');b.className='smallBtn';b.textContent='Download';b.onclick=()=>downloadBlob(new Blob([f.data],{type:f.type}),f.name);row.append(name,b);list.appendChild(row);}el.appendChild(list);
-  }
+  const el=$('#result');el.classList.add('active');el.textContent='';const head=document.createElement('div');head.className='resultHead';const title=document.createElement('div');title.className='resultTitle';title.textContent=data.kind==='text'?'Text received':`${data.files.length} file${data.files.length===1?'':'s'} received`;head.appendChild(title);el.appendChild(head);
+  if(data.kind==='text'){const copy=document.createElement('button');copy.className='smallBtn';copy.textContent='Copy';copy.onclick=async()=>{await navigator.clipboard?.writeText(data.text);toast('Copied');};head.appendChild(copy);const t=document.createElement('div');t.className='textResult';t.textContent=data.text;el.appendChild(t);}
+  else{const list=document.createElement('div');list.className='files';for(const f of data.files){const row=document.createElement('div');row.className='fileRow',name=document.createElement('div');name.className='fileName';name.textContent=`${f.name} · ${humanBytes(f.size)}`;const b=document.createElement('button');b.className='smallBtn';b.textContent='Download';b.onclick=()=>downloadBlob(new Blob([f.data],{type:f.type}),f.name);row.append(name,b);list.appendChild(row);}el.appendChild(list);}
 }
 function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1500);}
 
-function cropData(ctx,canvas,region){
-  const [x,y,w,h]=region, img=ctx.getImageData(Math.round(x*canvas.width),Math.round(y*canvas.height),Math.round(w*canvas.width),Math.round(h*canvas.height)); return img;
+function normalizedRegions(count,w,h){
+  const shape=gridShape(count,w,h),cols=shape.cols,rows=shape.rows,regions=[];
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+    const pad=.08,x=Math.max(0,c/cols-pad/cols),y=Math.max(0,r/rows-pad/rows),x2=Math.min(1,(c+1)/cols+pad/cols),y2=Math.min(1,(r+1)/rows+pad/rows);regions.push([x,y,x2-x,y2-y]);
+  }
+  return regions;
 }
 function jsQrDecodeRegion(ctx,canvas,region){
-  if(!window.jsQR)return null; const img=cropData(ctx,canvas,region); state.decodeAttempts++;
-  try { const r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'}); return r?.data||null; } catch{return null;}
+  if(!window.jsQR)return null;const [x,y,w,h]=region,ix=Math.round(x*canvas.width),iy=Math.round(y*canvas.height),iw=Math.max(8,Math.round(w*canvas.width)),ih=Math.max(8,Math.round(h*canvas.height));
+  try{const img=ctx.getImageData(ix,iy,Math.min(iw,canvas.width-ix),Math.min(ih,canvas.height-iy)),r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});return r?.data||null;}catch{return null;}
+}
+function cameraMeterLoop(token){
+  const video=$('#video');if(!video.requestVideoFrameCallback)return;
+  const tick=(now,meta)=>{
+    if(token!==state.scanToken||state.mode!=='receive')return;
+    const presented=Number.isFinite(meta?.presentedFrames)?meta.presentedFrames:null;
+    if(presented!==null){
+      if(state.lastPresentedFrames!==null)state.cameraFrameCount+=Math.max(0,presented-state.lastPresentedFrames);
+      state.lastPresentedFrames=presented;
+    }else state.cameraFrameCount++;
+    if(now-state.cameraWindowAt>=1000){
+      state.cameraMeasuredFps=state.cameraFrameCount*1000/(now-state.cameraWindowAt);
+      state.cameraFrameCount=0;state.cameraWindowAt=now;updateRxUi();
+    }
+    video.requestVideoFrameCallback(tick);
+  };
+  video.requestVideoFrameCallback(tick);
 }
 async function decodeFrame(video){
-  state.cameraFrames++;
-  const now=performance.now(); if(now-state.cameraWindowAt>=1000){state.cameraFps=state.cameraFrames*1000/(now-state.cameraWindowAt);state.cameraFrames=0;state.cameraWindowAt=now;updateRxUi();}
-  if(state.barcodeDetector){
-    try { state.decodeAttempts++; const codes=await state.barcodeDetector.detect(video); let any=false; for(const c of codes) any=ingest(c.rawValue)||any; if(any)return; } catch{}
+  const started=performance.now();state.scanCount++;const now=started;if(now-state.scanWindowAt>=1000){state.scanRate=state.scanCount*1000/(now-state.scanWindowAt);state.scanCount=0;state.scanWindowAt=now;updateRxUi();}
+  // Native detector is especially useful for 2/4/6 QR frames because it can return several codes at once.
+  const want=state.rx?.expectedQrs||1;
+  if(state.barcodeDetector&&want>1){
+    try{const codes=await state.barcodeDetector.detect(video);let any=false;for(const c of codes)any=ingest(c.rawValue)||any;if(any)return;}catch{}
   }
   if(!window.jsQR)return;
-  const canvas=$('#scanCanvas'), maxW=960, ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16; canvas.width=maxW; canvas.height=Math.max(540,Math.round(maxW*ratio));
-  const ctx=canvas.getContext('2d',{willReadFrequently:true}); ctx.drawImage(video,0,0,canvas.width,canvas.height);
-  const parts=state.rx?.expectedParts||1;
-  let regions;
-  if(parts===2) regions=[[-.02,0,.54,1],[.48,0,.54,1]];
-  else if(parts>=3) regions=[[-.02,-.02,.54,.54],[.48,-.02,.54,.54],[-.02,.48,.54,.54],[.48,.48,.54,.54]];
-  else regions=[[0,0,1,1]];
-  let hit=false;
-  for(const r of regions){ const safe=[Math.max(0,r[0]),Math.max(0,r[1]),Math.min(1-r[0],r[2]),Math.min(1-r[1],r[3])]; const raw=jsQrDecodeRegion(ctx,canvas,safe); if(raw) hit=ingest(raw)||hit; }
-  if(!hit&&parts===1){ // a multi-QR stream may not decode as a whole; probe quadrants occasionally
-    if((state.cameraFrames%3)===0){ for(const r of [[0,0,.55,.55],[.45,0,.55,.55],[0,.45,.55,.55],[.45,.45,.55,.55]]){const raw=jsQrDecodeRegion(ctx,canvas,r);if(raw){ingest(raw);break;}} }
-  }
-  if(performance.now()-state.lastDecodeAt>2200) updateRxUi();
+  const qrs=state.rx?.expectedQrs||QR_COUNTS[state.probeIndex++%QR_COUNTS.length],maxW=qrs>=6?1440:qrs>=4?1280:qrs>=2?1100:900,ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16,canvas=$('#scanCanvas');
+  canvas.width=Math.min(maxW,video.videoWidth||maxW);canvas.height=Math.max(360,Math.round(canvas.width*ratio));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  const regions=normalizedRegions(qrs,canvas.width,canvas.height);let hit=false;for(const region of regions){const raw=jsQrDecodeRegion(ctx,canvas,region);if(raw)hit=ingest(raw)||hit;}
+  // For a single QR, native detection is a fallback rather than a mandatory bottleneck.
+  if(!hit&&state.barcodeDetector&&want===1&&performance.now()-started<90){try{const codes=await state.barcodeDetector.detect(video);for(const c of codes)if(ingest(c.rawValue))break;}catch{}}
+  if(performance.now()-state.lastDecodeAt>1800)updateRxUi();
 }
 function scanLoop(token){
-  const video=$('#video');
-  const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return; if(video.readyState>=2)await decodeFrame(video); if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(()=>tick()); else setTimeout(tick,33);};
-  tick();
+  const video=$('#video');const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return;if(video.readyState>=2)await decodeFrame(video);if(token===state.scanToken&&state.mode==='receive')setTimeout(tick,0);};tick();
 }
 
 // ---------- Offline download ----------
 $('#offlineBtn').onclick=async()=>{
-  const btn=$('#offlineBtn'), old=btn.textContent; btn.textContent='Preparing…'; btn.disabled=true;
+  const btn=$('#offlineBtn'),old=btn.textContent;btn.textContent='Preparing…';btn.disabled=true;
   try{
-    const clone=document.documentElement.cloneNode(true);
-    // Offline copies always boot cleanly on Home, regardless of where Download was clicked.
-    clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
-    clone.querySelector('#homeView')?.classList.add('active');
-    clone.querySelector('#sender')?.classList.remove('active');
-    const sendStart=clone.querySelector('#sendStart'); if(sendStart) sendStart.style.display='grid';
-    clone.querySelector('#cameraGate')?.classList.remove('active');
-    const fileInput=clone.querySelector('#fileInput'); if(fileInput) fileInput.value='';
-    const textInput=clone.querySelector('#textInput'); if(textInput) { textInput.value=''; textInput.textContent=''; }
-    const textSend=clone.querySelector('#textSendBtn'); if(textSend) textSend.disabled=true;
-    const live=[...document.querySelectorAll('script[data-vendor]')]; const copies=[...clone.querySelectorAll('script[data-vendor]')];
-    for(let i=0;i<live.length;i++){
-      const src=live[i].src;
-      if(!src)continue;
-      const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text()});
-      copies[i].removeAttribute('src'); copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');
-    }
-    const html='<!doctype html>\n'+clone.outerHTML;
-    downloadBlob(new Blob([html],{type:'text/html'}),'AirGapper.html'); toast('Offline copy downloaded');
-  }catch(e){ toast(e.message||'Could not build offline copy'); }
-  finally{btn.textContent=old;btn.disabled=false;}
+    const clone=document.documentElement.cloneNode(true);clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');
+    const fileInput=clone.querySelector('#fileInput');if(fileInput)fileInput.value='';const textInput=clone.querySelector('#textInput');if(textInput){textInput.value='';textInput.textContent='';}const textSend=clone.querySelector('#textSendBtn');if(textSend)textSend.disabled=true;
+    const live=[...document.querySelectorAll('script[data-vendor]')],copies=[...clone.querySelectorAll('script[data-vendor]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}
+    downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'AirGapper-v4-offline.html');toast('Offline copy downloaded');
+  }catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}
 };
-
-window.addEventListener('resize',()=>{if(state.transfer)renderSendFrame()});
+window.addEventListener('resize',()=>{if(state.transfer)renderSendFrame();});
 })();
+
 </script>
 </body>
 </html>
