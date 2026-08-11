@@ -54,7 +54,11 @@ const speedFeedback = document.getElementById("speed-feedback")!;
 const speedQuality = document.getElementById("speed-quality")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
-const requestedWidth = 4096;
+// Camera maximum resolution is not maximum optical throughput: a 4K video
+// frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
+// collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
+// while leaving enough CPU budget for capture and decode.
+const requestedWidth = 1280;
 const requestedFps = 60;
 const metric = (id: string) => document.getElementById(id)!;
 
