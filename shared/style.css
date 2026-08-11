@@ -243,7 +243,9 @@ input[type="range"] { accent-color: #222; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; }
 .transfer-panel { padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.transfer-summary > strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.progress-amount { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
+.progress-amount strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.progress-amount span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
 .progress > div.error { background: var(--bad); animation: none; }

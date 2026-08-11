@@ -48,6 +48,7 @@ const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
 const progressStatus = document.getElementById("progress-status")!;
 const progressLabel = document.getElementById("progress-label")!;
+const transferSizeLabel = document.getElementById("transfer-size-label")!;
 const etaLabel = document.getElementById("eta-label")!;
 const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
@@ -426,6 +427,7 @@ function stopReceiver(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
+  transferSizeLabel.textContent = "Waiting for transfer";
   etaLabel.textContent = "Waiting for QR";
   bar.style.width = "0";
   bar.classList.remove("error");
@@ -772,6 +774,9 @@ function updateProgressEstimate() {
   bar.style.width = `${percent.toFixed(1)}%`;
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
   progressLabel.textContent = `${shownPercent}%`;
+  const receivedBytes = Math.min(decoder.totalLen, decoder.solvedCount * decoder.blockLen);
+  transferSizeLabel.textContent =
+    `${formatBytes(receivedBytes)} received · ${formatBytes(decoder.totalLen - receivedBytes)} remaining`;
   const eta = estimate.etaSeconds === undefined
     ? estimate.phase === "decoding" ? "Decoding…" : "Estimating…"
     : `About ${formatDuration(estimate.etaSeconds)} left`;
@@ -873,6 +878,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
+  transferSizeLabel.textContent = `${formatBytes(container.length)} received · 0 B remaining`;
   etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
@@ -880,6 +886,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
     seconds = (performance.now() - startTs) / 1000;
     document.body.classList.add("receive-complete");
+    transferSizeLabel.textContent = `${formatBytes(file.bytes.length)} received · 0 B remaining`;
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
