@@ -105,15 +105,15 @@ At 20 useful camera frames/s, 1 MiB/s requires 52,429 verified **unique** bytes/
 1. Transfer `ImageBitmap` to the X1 worker.
 2. Draw it directly to a detector canvas whose long side is at most 900 pixels.
 3. Find neutral-white ring components with black centers.
-4. Form near-square marker quadrilaterals.
-5. Rasterize only candidate full-resolution ROIs.
-6. Try rotation/mirror orders and accept only BCH/CRC-valid local headers.
+4. Form and rank near-square marker quadrilaterals.
+5. Try rotation/mirror orders and BCH/CRC-check headers directly on the detector raster.
+6. Rasterize a full-resolution ROI only after its low-resolution local header passes.
 7. Sample local calibration references with projective coordinates.
 8. Score every legal modulation hypothesis and produce LLRs.
 9. Deinterleave, min-sum decode, and CRC32-check.
 10. Cache accepted normalized quadrilaterals and track them on following frames; reacquire after tracking failure.
 
-Reported timing fields are capture, detector raster, fiducial detection, ROI raster, header, modulation, ECC, and total worker time. The JavaScript laboratory bounds each frame to 32 full-resolution candidate ROIs and periodically rotates the candidate batch so dense fullscreen grids cover all screen positions without locking the phone on one frame. It reports both actually CRC-validated bytes and an explicitly labeled full-grid projection from the sampled tile success rate; only the former is measured work.
+Reported timing fields are capture, detector raster, fiducial detection, ROI raster, header, modulation, ECC, and total worker time. The JavaScript laboratory bounds each frame to 32 detector-header candidates and periodically rotates the candidate batch so dense fullscreen grids cover all screen positions without locking the phone on one frame. It reports both actually CRC-validated bytes and an explicitly labeled full-grid projection from the sampled tile success rate; only the former is measured work.
 
 ## Sounder metrics
 
@@ -139,4 +139,4 @@ Screen position is represented by tile coordinates in every result. Results are 
 
 ## Not yet verified
 
-No X1 physical camera capture has been committed. Acquisition rate, BER, palette separability, blur/moire tolerance, rolling-shutter behavior, exposure stability, useful camera FPS, worker utilization on the old Android phone, and post-ECC useful throughput are all unverified. Synthetic results are regression evidence, not channel-capacity evidence.
+One v35b physical quick-sweep report is committed, but no corresponding original camera frame is yet available. It established a 1.69 useful FPS / 95.5% worker-utilization bottleneck caused primarily by full-resolution rasterization of false candidate ROIs; v35c moves header rejection to the detector raster. M1 pitch 4 produced CRC-valid payloads, while pitch 3 was poor, but the sparse and incomplete run cannot select a profile or establish capacity. Palette separability across all states, blur/moire tolerance, rolling-shutter behavior, exposure stability, v35c useful FPS, complete screen-position coverage, and post-ECC unique throughput remain unverified. Synthetic results and the v35b diagnostic are regression evidence, not channel-capacity evidence.

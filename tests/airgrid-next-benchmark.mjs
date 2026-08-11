@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const testsDir=dirname(fileURLToPath(import.meta.url));
 const root=resolve(testsDir,'..');
+const hardwareBaseline=JSON.parse(await readFile(join(testsDir,'fixtures','airgrid-x1','phone-v35b-quick-a.json'),'utf8'));
 const files=new Map([
   ['/',{type:'text/html; charset=utf-8',body:await readFile(join(root,'index.html'))}],
   ['/index.html',{type:'text/html; charset=utf-8',body:await readFile(join(root,'index.html'))}],
@@ -73,13 +74,14 @@ try{
     const tw=worker(),trackA=await decode(base.canvas,tw,{track:true}),trackBFrame=await render({frame:79}),trackB=await decode(trackBFrame.canvas,tw,{track:true});
     const taggedFrame=await render({profile:'M2',pitch:4,cols:1,rows:1,frame:91,pageFps:15}),hardwareTag=compact('hardware-tag',await decode(taggedFrame.canvas));
     const st=await A.request(worker(),'selftest');
-    history.replaceState(null,'','/?airgridLab=1');await A.startLab();const labSmoke={autoSender:!!document.querySelector('#x1Auto'),autoReceiver:!!document.querySelector('#x1Camera'),exportJson:!!document.querySelector('#x1Export'),exportCsv:!!document.querySelector('#x1Csv'),canvas:[document.querySelector('#x1Canvas')?.width||0,document.querySelector('#x1Canvas')?.height||0]};
+    history.replaceState(null,'','/?airgridLab=1&role=receiver');await A.startLab();const labSmoke={autoSender:!!document.querySelector('#x1Auto'),autoReceiver:!!document.querySelector('#x1Camera'),receiverVisible:getComputedStyle(document.querySelector('#x1Camera')).display!=='none',senderHidden:getComputedStyle(document.querySelector('#x1Auto')).display==='none',exportJson:!!document.querySelector('#x1Export'),exportCsv:!!document.querySelector('#x1Csv')};
     for(const w of workers)w.terminate();renderer.terminate();
     return{format:A.format,seed:'0x6d2b79f5',results,profileResults,hardwareTag,labSmoke,tracking:{first:compact('tracking-acquire',trackA),second:compact('tracking-follow',trackB)},selftest:st.result};
   })()`;
   const evaluated=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
   if(evaluated.exceptionDetails)throw new Error(evaluated.exceptionDetails.exception?.description||evaluated.exceptionDetails.text);
-  const report=evaluated.result.value,byName=Object.fromEntries(report.results.map(x=>[x.name,x])),failures=[];
+  const report=evaluated.result.value;report.physicalBaseline={build:hardwareBaseline.build,usefulFps:hardwareBaseline.scanSummary?.usefulFps,workerUtilization:hardwareBaseline.scanSummary?.workerUtilization,conditions:Object.keys(hardwareBaseline.conditions||{}).length,m1Pitch4Frozen:hardwareBaseline.conditions?.['M1-p4-f0']?.metrics};const byName=Object.fromEntries(report.results.map(x=>[x.name,x])),failures=[];
+  if(report.physicalBaseline.build!=='v35b'||report.physicalBaseline.conditions!==6||report.physicalBaseline.usefulFps<1||report.physicalBaseline.usefulFps>2||report.physicalBaseline.workerUtilization<.9||report.physicalBaseline.m1Pitch4Frozen?.payloadOkTilesPerFrame<=0)failures.push('v35b physical diagnostic baseline changed unexpectedly');
   const need=(name,minComplete,minPayload=minComplete)=>{const r=byName[name];if(!r)failures.push(`${name}: missing result`);else{if(r.complete<minComplete)failures.push(`${name}: ${r.complete} complete tiles, expected ${minComplete}`);if(r.payloads<minPayload)failures.push(`${name}: ${r.payloads} payloads, expected ${minPayload}`);}};
   need('clean-full',6,6);
   need('arbitrary-one-tile-crop',1,1);
@@ -87,13 +89,13 @@ try{
   need('dense-hardware-grid',1,1);if((byName['dense-hardware-grid']?.projected||0)<=byName['dense-hardware-grid']?.verified)failures.push('dense-grid full-screen capacity projection was not reported');
   for(const name of['perspective','rotation-90','mirrored','blur','moire','exposure-white-balance-channel-mix'])need(name,1,1);
   const rolling=byName['rolling-shutter-composite'];if(!rolling||rolling.frames.length<2||rolling.payloads<2)failures.push('rolling-shutter composite did not accept independent frame IDs');
-  if(byName['corrupted-headers']?.complete!==0)failures.push('corrupted headers were accepted');
+  if(byName['corrupted-headers']?.complete!==0)failures.push('corrupted headers were accepted');if((byName['corrupted-headers']?.timings?.roiRaster||0)>.5)failures.push('header failures triggered full-resolution ROI reads');
   const badPayload=byName['corrupted-payloads'];if(!badPayload||badPayload.complete<1||badPayload.payloads!==0)failures.push('corrupted payloads were not independently CRC-rejected');
   if(byName['false-positive-noise']?.complete!==0)failures.push('false-positive noise was accepted');
   for(const r of report.profileResults)if(r.complete!==1||r.payloads!==1)failures.push(`${r.name}: clean profile did not round-trip`);
   if(!report.tracking.second.tracked||report.tracking.second.payloads<1)failures.push('persistent marker tracking did not decode the following frame');
   const tagged=report.hardwareTag?.tiles?.[0],expectedFlags=0x80|(2<<4)|(5<<1)|1;if(!tagged||tagged.flags!==expectedFlags||report.hardwareTag.payloads!==1)failures.push('hardware condition flags did not round-trip');
-  if(!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke.canvas[0])failures.push('automated hardware lab UI did not initialize');
+  if(!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke.receiverVisible||!report.labSmoke.senderHidden)failures.push('automated hardware lab receiver UI did not initialize');
   if(!report.selftest?.headerRecovered)failures.push('protected header reconstruction failed');
   if(!report.selftest?.eccRecovered)failures.push('LDPC soft reconstruction failed');
   if(!report.selftest?.fountainRecovered)failures.push('fountain reconstruction failed');

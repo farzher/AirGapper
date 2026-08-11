@@ -4,7 +4,7 @@ This test needs no connection between the sender computer and receiver phone. Bo
 
 ## Prepare
 
-1. Open/download an AirGapper **v35b** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
+1. Open/download an AirGapper **v35c** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
 2. Open **Hardware lab**, or append `?airgridLab=1` to the HTML URL.
 3. On the display device, disable adaptive brightness, set a recorded fixed brightness, disable night-light/color-temperature features, use 100% browser zoom, and prevent sleep.
 4. On the phone, clean the lens, disable battery saver, prevent sleep, and record the phone model/browser. Do not digitally zoom.
@@ -14,7 +14,7 @@ The sender reports canvas backing pixels and `devicePixelRatio`. A fullscreen ba
 
 ## Alignment run
 
-1. On the phone choose **Receiver** and press **Start auto receiver**. Grant camera permission.
+1. On a phone, the lab automatically selects **Receiver** and hides sender-only controls. Press **Start auto receiver**. Grant camera permission.
 2. On the computer choose **Quick sweep**, leave dwell at 4 seconds, and press **Start auto sender**. Grant fullscreen.
 3. The quick sweep covers M1/M2, pitches 2/3/4, and Frozen/5/15/30 FPS: 24 conditions.
 4. Watch the phone summary. Confirm conditions are accumulating and the camera is focused.

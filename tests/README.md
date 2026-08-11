@@ -29,3 +29,5 @@ For a stable profile 3 diagnostic capture, use a sender showing **v34i**, start 
 The benchmark's BER, mutual information, verified bytes, and stage timings are synthetic regression measurements. They are not evidence of physical screen/camera capacity. Use `?airgridLab=1` for X1 sender/receiver hardware sounding; retain captures and exported measurements before selecting a production pitch or palette.
 
 See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sweep procedure, fixed-device controls, JSON/CSV exports, and acceptance gates.
+
+`fixtures/airgrid-x1/phone-v35b-quick-a.json` is the first physical X1 report. It identified full-resolution false-candidate ROI reads as the dominant 455–798 ms/frame bottleneck; v35c rejects headers on the detector raster first, so the report is retained as a diagnostic baseline rather than an acceptance result.
