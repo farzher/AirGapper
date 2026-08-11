@@ -86,10 +86,10 @@ a { color: inherit; }
 .send-start { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .file-picker,
 .note-composer {
-  min-height: 240px;
+  min-height: 180px;
   border: 1px solid var(--line);
-  background: var(--card);
-  border-radius: 18px;
+  background: transparent;
+  border-radius: 12px;
 }
 .file-picker {
   display: flex;
@@ -101,7 +101,7 @@ a { color: inherit; }
   padding: 16px;
   transition: .14s;
 }
-.file-picker:hover, .file-picker.dragging { border-color: #999; background: #fdfdfb; }
+.file-picker:hover, .file-picker.dragging { border-color: #999; background: #00000002; }
 .file-picker input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
@@ -110,7 +110,7 @@ a { color: inherit; }
 .selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
 .selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
-.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 8px 12px; background: #f7f7f5ee; border: 1px solid var(--line); border-radius: 12px; }
+.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
 .send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
 .send-controls output { min-width: 48px; text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -140,17 +140,17 @@ a { color: inherit; }
 .stage {
   position: relative;
   margin-top: 12px;
-  height: max(420px, calc(100dvh - 130px));
+  height: calc(100dvh - 180px);
   min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: white;
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 18px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
   cursor: pointer;
 }
 .stage[hidden] { display: none; }
@@ -280,7 +280,7 @@ dialog::backdrop { background: #0004; }
   .app-main { padding-top: 12px; }
   .home, .send-start { grid-template-columns: 1fr; }
   .mode { min-height: 130px; }
-  .file-picker, .note-composer { min-height: 190px; }
+  .file-picker, .note-composer { min-height: 130px; }
   .send-controls { grid-template-columns: 1fr; gap: 12px; }
   .stage { min-height: 0; }
   .preview { min-height: 0; max-height: calc(100dvh - 150px); }

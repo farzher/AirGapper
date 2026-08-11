@@ -8,10 +8,10 @@
 export const NO_SIGNAL_HINT_FRAME_BYTES = 1465;
 export const NO_SIGNAL_HINT_TX_FPS = 24;
 
-// Conservative defaults for older Android cameras and ordinary 60 Hz
-// monitors. Higher settings remain available for device-pair benchmarks.
-export const DEFAULT_TX_FPS = 24;
-export const DEFAULT_FRAME_BYTES = 1465;
+// Current sender defaults: one maximum-capacity standard QR at a cadence that
+// stays stable on ordinary 60 Hz displays.
+export const DEFAULT_TX_FPS = 20;
+export const DEFAULT_FRAME_BYTES = 2953;
 
 // The hint values appear in these lists by construction, not by coincidence.
 // 55 sits just under the 60 Hz ceiling: on 120 Hz displays it gets a clean
@@ -21,8 +21,8 @@ export const DEFAULT_FRAME_BYTES = 1465;
 export const TX_FPS_OPTIONS: readonly number[] = [
   10,
   15,
-  20,
   DEFAULT_TX_FPS,
+  24,
   30,
   55,
   60,
@@ -30,8 +30,8 @@ export const TX_FPS_OPTIONS: readonly number[] = [
 export const FRAME_BYTES_OPTIONS: readonly number[] = [
   500,
   1000,
-  DEFAULT_FRAME_BYTES,
+  1465,
   1850,
   2331,
-  2953,
+  DEFAULT_FRAME_BYTES,
 ];

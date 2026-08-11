@@ -336,9 +336,10 @@ async function startStream(revealStage = false) {
   const sizeLevel = Number(cfgSize.value);
   const frameBytes = FRAME_BYTES_OPTIONS[sizeLevel] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
-  // Size is optical payload, not CSS geometry. Higher levels increase both QR
-  // density and parallel codes; the low end stays one sparse, easy-to-read QR.
-  const gridCodes = [1, 1, 2, 2, 4, 6][sizeLevel] ?? 1;
+  // Size is optical payload, not CSS geometry. Fill one QR to its standard
+  // maximum before considering parallel symbols; every current slider level
+  // fits in one QR, so the default stays a single large, camera-friendly code.
+  const gridCodes = 1;
   const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
