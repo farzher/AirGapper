@@ -1,0 +1,4096 @@
+{
+  "format": "AirGrid X1 hardware sounder",
+  "schema": 2,
+  "startedAt": "2026-08-11T20:18:08.170Z",
+  "build": "v35m",
+  "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36",
+  "devicePixelRatio": 3,
+  "conditions": {
+    "binary-p3-f0": {
+      "key": "binary-p3-f0",
+      "profile": "binary",
+      "pitch": 3,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 18,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "detectedMarkers": 1034,
+      "quadCandidates": 1535,
+      "markerNeighborChecks": 12104,
+      "testedHeaderCandidates": 515,
+      "headerTimingPhases": 17551,
+      "headerFullPhases": 2862,
+      "phaseRetriedTiles": 1,
+      "completeTiles": 3,
+      "payloadOkTiles": 0,
+      "rawErrors": 1843,
+      "rawBits": 5760,
+      "modulationBlocks": 1440,
+      "occupancyErrors": 1187,
+      "colorErrors": 0,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 9,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 616,
+          "rawBits": 1920
+        },
+        {
+          "x": 9,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 629,
+          "rawBits": 1920
+        },
+        {
+          "x": 10,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 598,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          15
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          16
+        ],
+        [
+          3,
+          7
+        ],
+        [
+          8,
+          13
+        ],
+        [
+          9,
+          4
+        ],
+        [
+          10,
+          14
+        ],
+        [
+          11,
+          15
+        ],
+        [
+          17,
+          14
+        ],
+        [
+          19,
+          8
+        ],
+        [
+          21,
+          12
+        ],
+        [
+          23,
+          22
+        ],
+        [
+          25,
+          5
+        ],
+        [
+          27,
+          7
+        ],
+        [
+          29,
+          7
+        ],
+        [
+          31,
+          18
+        ],
+        [
+          35,
+          9
+        ],
+        [
+          42,
+          2
+        ],
+        [
+          43,
+          54
+        ],
+        [
+          47,
+          8
+        ],
+        [
+          51,
+          8
+        ],
+        [
+          55,
+          1
+        ],
+        [
+          59,
+          19
+        ],
+        [
+          63,
+          50
+        ],
+        [
+          68,
+          10
+        ],
+        [
+          69,
+          1
+        ],
+        [
+          70,
+          24
+        ],
+        [
+          71,
+          13
+        ],
+        [
+          76,
+          17
+        ],
+        [
+          77,
+          1
+        ],
+        [
+          78,
+          23
+        ],
+        [
+          79,
+          19
+        ],
+        [
+          85,
+          20
+        ],
+        [
+          87,
+          29
+        ],
+        [
+          93,
+          11
+        ],
+        [
+          95,
+          31
+        ],
+        [
+          102,
+          1
+        ],
+        [
+          103,
+          20
+        ],
+        [
+          110,
+          2
+        ],
+        [
+          111,
+          61
+        ],
+        [
+          119,
+          21
+        ],
+        [
+          127,
+          66
+        ],
+        [
+          136,
+          5
+        ],
+        [
+          137,
+          1
+        ],
+        [
+          138,
+          1
+        ],
+        [
+          140,
+          25
+        ],
+        [
+          141,
+          6
+        ],
+        [
+          142,
+          34
+        ],
+        [
+          143,
+          18
+        ],
+        [
+          153,
+          1
+        ],
+        [
+          155,
+          1
+        ],
+        [
+          157,
+          31
+        ],
+        [
+          159,
+          62
+        ],
+        [
+          170,
+          1
+        ],
+        [
+          171,
+          2
+        ],
+        [
+          175,
+          75
+        ],
+        [
+          187,
+          3
+        ],
+        [
+          191,
+          95
+        ],
+        [
+          204,
+          28
+        ],
+        [
+          205,
+          6
+        ],
+        [
+          206,
+          37
+        ],
+        [
+          207,
+          29
+        ],
+        [
+          221,
+          37
+        ],
+        [
+          223,
+          67
+        ],
+        [
+          238,
+          2
+        ],
+        [
+          239,
+          86
+        ],
+        [
+          255,
+          87
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 262.5999999344349,
+        "fiducialDetection": 307.80000001192093,
+        "roiRaster": 323.5,
+        "header": 304.40000009536743,
+        "modulation": 44.10000002384186,
+        "ecc": 78.2999999821186,
+        "total": 1367.8000000417233
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 24,
+        "fiducialDetection": 29.099999994039536,
+        "roiRaster": 217.40000000596046,
+        "header": 50.19999998807907,
+        "modulation": 29.400000005960464,
+        "ecc": 66.59999999403954,
+        "total": 322.69999998807907
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.1111111111111111,
+        "detectedMarkersPerFrame": 57.44444444444444,
+        "quadCandidatesPerFrame": 85.27777777777777,
+        "markerNeighborChecksPerFrame": 672.4444444444445,
+        "testedHeaderCandidatesPerFrame": 28.61111111111111,
+        "headerTimingPhasesPerFrame": 975.0555555555555,
+        "headerFullPhasesPerFrame": 159,
+        "phaseRetriedTiles": 1,
+        "completeTilesPerFrame": 0.16666666666666666,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.3199652777777778,
+        "occupancyErrorRate": 0.8243055555555555,
+        "colorErrorRate": 0,
+        "mutualInformationPerBlock": 1.2491767239069564,
+        "mutualInformationPerChip": 0.3122941809767391,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 14.588888885246384,
+          "fiducialDetection": 17.100000000662273,
+          "roiRaster": 17.97222222222222,
+          "header": 16.9111111164093,
+          "modulation": 2.4500000013245478,
+          "ecc": 4.349999999006589,
+          "total": 75.98888889120684
+        }
+      }
+    },
+    "binary-p3-f5": {
+      "key": "binary-p3-f5",
+      "profile": "binary",
+      "pitch": 3,
+      "pageFps": 5,
+      "symbolStates": 16,
+      "scanFrames": 13,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "detectedMarkers": 762,
+      "quadCandidates": 1182,
+      "markerNeighborChecks": 8986,
+      "testedHeaderCandidates": 354,
+      "headerTimingPhases": 12285,
+      "headerFullPhases": 1797,
+      "phaseRetriedTiles": 2,
+      "completeTiles": 2,
+      "payloadOkTiles": 0,
+      "rawErrors": 1497,
+      "rawBits": 3840,
+      "modulationBlocks": 960,
+      "occupancyErrors": 855,
+      "colorErrors": 0,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 878,
+          "rawBits": 1920
+        },
+        {
+          "x": 9,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 619,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          2,
+          7
+        ],
+        [
+          3,
+          7
+        ],
+        [
+          7,
+          1
+        ],
+        [
+          8,
+          1
+        ],
+        [
+          10,
+          4
+        ],
+        [
+          11,
+          10
+        ],
+        [
+          12,
+          2
+        ],
+        [
+          14,
+          3
+        ],
+        [
+          15,
+          14
+        ],
+        [
+          17,
+          1
+        ],
+        [
+          19,
+          2
+        ],
+        [
+          21,
+          5
+        ],
+        [
+          23,
+          9
+        ],
+        [
+          25,
+          1
+        ],
+        [
+          27,
+          1
+        ],
+        [
+          29,
+          2
+        ],
+        [
+          31,
+          29
+        ],
+        [
+          42,
+          4
+        ],
+        [
+          43,
+          24
+        ],
+        [
+          47,
+          25
+        ],
+        [
+          51,
+          1
+        ],
+        [
+          59,
+          5
+        ],
+        [
+          63,
+          60
+        ],
+        [
+          68,
+          4
+        ],
+        [
+          69,
+          4
+        ],
+        [
+          70,
+          5
+        ],
+        [
+          71,
+          8
+        ],
+        [
+          76,
+          1
+        ],
+        [
+          77,
+          1
+        ],
+        [
+          78,
+          7
+        ],
+        [
+          79,
+          21
+        ],
+        [
+          85,
+          5
+        ],
+        [
+          87,
+          19
+        ],
+        [
+          93,
+          3
+        ],
+        [
+          95,
+          32
+        ],
+        [
+          103,
+          5
+        ],
+        [
+          110,
+          6
+        ],
+        [
+          111,
+          50
+        ],
+        [
+          119,
+          2
+        ],
+        [
+          127,
+          55
+        ],
+        [
+          136,
+          1
+        ],
+        [
+          137,
+          1
+        ],
+        [
+          138,
+          4
+        ],
+        [
+          139,
+          4
+        ],
+        [
+          140,
+          9
+        ],
+        [
+          141,
+          2
+        ],
+        [
+          142,
+          10
+        ],
+        [
+          143,
+          31
+        ],
+        [
+          157,
+          12
+        ],
+        [
+          159,
+          56
+        ],
+        [
+          170,
+          3
+        ],
+        [
+          171,
+          4
+        ],
+        [
+          174,
+          1
+        ],
+        [
+          175,
+          50
+        ],
+        [
+          191,
+          83
+        ],
+        [
+          204,
+          10
+        ],
+        [
+          205,
+          5
+        ],
+        [
+          206,
+          17
+        ],
+        [
+          207,
+          31
+        ],
+        [
+          221,
+          17
+        ],
+        [
+          223,
+          46
+        ],
+        [
+          238,
+          4
+        ],
+        [
+          239,
+          53
+        ],
+        [
+          255,
+          55
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 191.9000000357628,
+        "fiducialDetection": 190.30000004172325,
+        "roiRaster": 187.80000001192093,
+        "header": 146.69999992847443,
+        "modulation": 29.099999994039536,
+        "ecc": 8.500000029802322,
+        "total": 765.2000000178814
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 24.900000005960464,
+        "fiducialDetection": 25.900000005960464,
+        "roiRaster": 100.40000000596046,
+        "header": 39.900000005960464,
+        "modulation": 19.5,
+        "ecc": 5.100000023841858,
+        "total": 182.80000001192093
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.15384615384615385,
+        "detectedMarkersPerFrame": 58.61538461538461,
+        "quadCandidatesPerFrame": 90.92307692307692,
+        "markerNeighborChecksPerFrame": 691.2307692307693,
+        "testedHeaderCandidatesPerFrame": 27.23076923076923,
+        "headerTimingPhasesPerFrame": 945,
+        "headerFullPhasesPerFrame": 138.23076923076923,
+        "phaseRetriedTiles": 2,
+        "completeTilesPerFrame": 0.15384615384615385,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.38984375,
+        "occupancyErrorRate": 0.890625,
+        "colorErrorRate": 0,
+        "mutualInformationPerBlock": 0.6674450868279266,
+        "mutualInformationPerChip": 0.16686127170698165,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 14.761538464289446,
+          "fiducialDetection": 14.638461541671019,
+          "roiRaster": 14.44615384707084,
+          "header": 11.284615379113417,
+          "modulation": 2.2384615380030413,
+          "ecc": 0.6538461561386402,
+          "total": 58.861538462913956
+        }
+      }
+    },
+    "M1-p3-f0": {
+      "key": "M1-p3-f0",
+      "profile": "M1",
+      "pitch": 3,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 44,
+      "acquiredFrames": 1,
+      "transitionFrames": 0,
+      "detectedMarkers": 3778,
+      "quadCandidates": 4118,
+      "markerNeighborChecks": 50823,
+      "testedHeaderCandidates": 1377,
+      "headerTimingPhases": 51793,
+      "headerFullPhases": 8253,
+      "phaseRetriedTiles": 1,
+      "completeTiles": 1,
+      "payloadOkTiles": 0,
+      "rawErrors": 441,
+      "rawBits": 1920,
+      "modulationBlocks": 480,
+      "occupancyErrors": 0,
+      "colorErrors": 298,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 5,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 441,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          18
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          8,
+          5
+        ],
+        [
+          10,
+          1
+        ],
+        [
+          16,
+          1
+        ],
+        [
+          17,
+          8
+        ],
+        [
+          22,
+          1
+        ],
+        [
+          25,
+          6
+        ],
+        [
+          26,
+          1
+        ],
+        [
+          30,
+          1
+        ],
+        [
+          32,
+          1
+        ],
+        [
+          34,
+          8
+        ],
+        [
+          35,
+          3
+        ],
+        [
+          40,
+          2
+        ],
+        [
+          42,
+          12
+        ],
+        [
+          46,
+          1
+        ],
+        [
+          48,
+          1
+        ],
+        [
+          49,
+          1
+        ],
+        [
+          50,
+          5
+        ],
+        [
+          51,
+          19
+        ],
+        [
+          52,
+          1
+        ],
+        [
+          54,
+          1
+        ],
+        [
+          56,
+          1
+        ],
+        [
+          57,
+          1
+        ],
+        [
+          58,
+          1
+        ],
+        [
+          59,
+          5
+        ],
+        [
+          60,
+          2
+        ],
+        [
+          61,
+          2
+        ],
+        [
+          62,
+          2
+        ],
+        [
+          68,
+          6
+        ],
+        [
+          69,
+          2
+        ],
+        [
+          70,
+          2
+        ],
+        [
+          71,
+          1
+        ],
+        [
+          72,
+          3
+        ],
+        [
+          73,
+          1
+        ],
+        [
+          74,
+          1
+        ],
+        [
+          76,
+          8
+        ],
+        [
+          77,
+          3
+        ],
+        [
+          78,
+          5
+        ],
+        [
+          80,
+          1
+        ],
+        [
+          82,
+          1
+        ],
+        [
+          84,
+          2
+        ],
+        [
+          85,
+          11
+        ],
+        [
+          89,
+          2
+        ],
+        [
+          90,
+          1
+        ],
+        [
+          92,
+          1
+        ],
+        [
+          93,
+          9
+        ],
+        [
+          95,
+          2
+        ],
+        [
+          100,
+          1
+        ],
+        [
+          101,
+          1
+        ],
+        [
+          102,
+          6
+        ],
+        [
+          103,
+          5
+        ],
+        [
+          104,
+          1
+        ],
+        [
+          105,
+          1
+        ],
+        [
+          106,
+          3
+        ],
+        [
+          107,
+          1
+        ],
+        [
+          108,
+          4
+        ],
+        [
+          110,
+          9
+        ],
+        [
+          111,
+          4
+        ],
+        [
+          119,
+          9
+        ],
+        [
+          120,
+          2
+        ],
+        [
+          121,
+          1
+        ],
+        [
+          122,
+          1
+        ],
+        [
+          123,
+          1
+        ],
+        [
+          124,
+          1
+        ],
+        [
+          126,
+          1
+        ],
+        [
+          127,
+          10
+        ],
+        [
+          128,
+          3
+        ],
+        [
+          136,
+          12
+        ],
+        [
+          137,
+          9
+        ],
+        [
+          138,
+          2
+        ],
+        [
+          139,
+          1
+        ],
+        [
+          140,
+          5
+        ],
+        [
+          142,
+          1
+        ],
+        [
+          145,
+          6
+        ],
+        [
+          152,
+          2
+        ],
+        [
+          153,
+          17
+        ],
+        [
+          154,
+          2
+        ],
+        [
+          156,
+          1
+        ],
+        [
+          162,
+          4
+        ],
+        [
+          163,
+          2
+        ],
+        [
+          168,
+          2
+        ],
+        [
+          169,
+          1
+        ],
+        [
+          170,
+          12
+        ],
+        [
+          171,
+          6
+        ],
+        [
+          173,
+          1
+        ],
+        [
+          174,
+          5
+        ],
+        [
+          176,
+          1
+        ],
+        [
+          177,
+          3
+        ],
+        [
+          178,
+          1
+        ],
+        [
+          179,
+          6
+        ],
+        [
+          184,
+          3
+        ],
+        [
+          185,
+          1
+        ],
+        [
+          187,
+          13
+        ],
+        [
+          188,
+          2
+        ],
+        [
+          200,
+          3
+        ],
+        [
+          201,
+          2
+        ],
+        [
+          202,
+          1
+        ],
+        [
+          204,
+          4
+        ],
+        [
+          205,
+          12
+        ],
+        [
+          206,
+          6
+        ],
+        [
+          208,
+          2
+        ],
+        [
+          213,
+          1
+        ],
+        [
+          216,
+          2
+        ],
+        [
+          217,
+          8
+        ],
+        [
+          219,
+          1
+        ],
+        [
+          221,
+          16
+        ],
+        [
+          222,
+          1
+        ],
+        [
+          223,
+          3
+        ],
+        [
+          226,
+          1
+        ],
+        [
+          230,
+          1
+        ],
+        [
+          232,
+          1
+        ],
+        [
+          234,
+          6
+        ],
+        [
+          235,
+          2
+        ],
+        [
+          236,
+          3
+        ],
+        [
+          237,
+          1
+        ],
+        [
+          238,
+          9
+        ],
+        [
+          239,
+          7
+        ],
+        [
+          240,
+          1
+        ],
+        [
+          244,
+          1
+        ],
+        [
+          245,
+          1
+        ],
+        [
+          248,
+          2
+        ],
+        [
+          249,
+          1
+        ],
+        [
+          251,
+          2
+        ],
+        [
+          255,
+          14
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 752.0999999344349,
+        "fiducialDetection": 622.4000000655651,
+        "roiRaster": 105,
+        "header": 562.5999998748302,
+        "modulation": 15.800000011920929,
+        "ecc": 6,
+        "total": 2073.8000000417233
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 37.69999998807907,
+        "fiducialDetection": 25.5,
+        "roiRaster": 105,
+        "header": 38.09999996423721,
+        "modulation": 15.800000011920929,
+        "ecc": 6,
+        "total": 160.5
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.022727272727272728,
+        "detectedMarkersPerFrame": 85.86363636363636,
+        "quadCandidatesPerFrame": 93.5909090909091,
+        "markerNeighborChecksPerFrame": 1155.0681818181818,
+        "testedHeaderCandidatesPerFrame": 31.295454545454547,
+        "headerTimingPhasesPerFrame": 1177.1136363636363,
+        "headerFullPhasesPerFrame": 187.5681818181818,
+        "phaseRetriedTiles": 1,
+        "completeTilesPerFrame": 0.022727272727272728,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.2296875,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.6208333333333333,
+        "mutualInformationPerBlock": 1.5016170564091627,
+        "mutualInformationPerChip": 0.37540426410229066,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 17.0931818166917,
+          "fiducialDetection": 14.145454546944661,
+          "roiRaster": 2.3863636363636362,
+          "header": 12.786363633518869,
+          "modulation": 0.3590909093618393,
+          "ecc": 0.13636363636363635,
+          "total": 47.13181818276644
+        }
+      }
+    },
+    "binary-p4-f0": {
+      "key": "binary-p4-f0",
+      "profile": "binary",
+      "pitch": 4,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 8,
+      "acquiredFrames": 4,
+      "transitionFrames": 0,
+      "detectedMarkers": 279,
+      "quadCandidates": 295,
+      "markerNeighborChecks": 2704,
+      "testedHeaderCandidates": 172,
+      "headerTimingPhases": 5693,
+      "headerFullPhases": 1026,
+      "phaseRetriedTiles": 5,
+      "completeTiles": 18,
+      "payloadOkTiles": 0,
+      "rawErrors": 7938,
+      "rawBits": 34560,
+      "modulationBlocks": 8640,
+      "occupancyErrors": 5594,
+      "colorErrors": 0,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 2,
+          "y": 1,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 952,
+          "rawBits": 3840
+        },
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 815,
+          "rawBits": 3840
+        },
+        {
+          "x": 2,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 708,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 1,
+          "headers": 4,
+          "payloadOk": 0,
+          "rawErrors": 1564,
+          "rawBits": 7680
+        },
+        {
+          "x": 5,
+          "y": 2,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 1162,
+          "rawBits": 3840
+        },
+        {
+          "x": 5,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 87,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 509,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 421,
+          "rawBits": 1920
+        },
+        {
+          "x": 6,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 523,
+          "rawBits": 1920
+        },
+        {
+          "x": 6,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 505,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 423,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 269,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          200
+        ],
+        [
+          1,
+          50
+        ],
+        [
+          2,
+          100
+        ],
+        [
+          3,
+          70
+        ],
+        [
+          4,
+          3
+        ],
+        [
+          8,
+          48
+        ],
+        [
+          9,
+          12
+        ],
+        [
+          10,
+          63
+        ],
+        [
+          11,
+          29
+        ],
+        [
+          12,
+          1
+        ],
+        [
+          15,
+          1
+        ],
+        [
+          17,
+          132
+        ],
+        [
+          19,
+          49
+        ],
+        [
+          21,
+          123
+        ],
+        [
+          23,
+          123
+        ],
+        [
+          25,
+          34
+        ],
+        [
+          27,
+          33
+        ],
+        [
+          29,
+          25
+        ],
+        [
+          31,
+          44
+        ],
+        [
+          34,
+          71
+        ],
+        [
+          35,
+          95
+        ],
+        [
+          38,
+          3
+        ],
+        [
+          42,
+          96
+        ],
+        [
+          43,
+          205
+        ],
+        [
+          46,
+          3
+        ],
+        [
+          47,
+          18
+        ],
+        [
+          51,
+          183
+        ],
+        [
+          55,
+          23
+        ],
+        [
+          59,
+          89
+        ],
+        [
+          63,
+          293
+        ],
+        [
+          68,
+          189
+        ],
+        [
+          69,
+          61
+        ],
+        [
+          70,
+          91
+        ],
+        [
+          71,
+          55
+        ],
+        [
+          76,
+          42
+        ],
+        [
+          77,
+          13
+        ],
+        [
+          78,
+          55
+        ],
+        [
+          79,
+          30
+        ],
+        [
+          85,
+          227
+        ],
+        [
+          87,
+          150
+        ],
+        [
+          93,
+          65
+        ],
+        [
+          95,
+          77
+        ],
+        [
+          102,
+          87
+        ],
+        [
+          103,
+          107
+        ],
+        [
+          110,
+          91
+        ],
+        [
+          111,
+          245
+        ],
+        [
+          119,
+          191
+        ],
+        [
+          127,
+          326
+        ],
+        [
+          136,
+          114
+        ],
+        [
+          137,
+          34
+        ],
+        [
+          138,
+          61
+        ],
+        [
+          139,
+          46
+        ],
+        [
+          140,
+          106
+        ],
+        [
+          141,
+          27
+        ],
+        [
+          142,
+          101
+        ],
+        [
+          143,
+          47
+        ],
+        [
+          153,
+          117
+        ],
+        [
+          155,
+          23
+        ],
+        [
+          157,
+          207
+        ],
+        [
+          159,
+          209
+        ],
+        [
+          170,
+          172
+        ],
+        [
+          171,
+          104
+        ],
+        [
+          174,
+          13
+        ],
+        [
+          175,
+          261
+        ],
+        [
+          187,
+          121
+        ],
+        [
+          191,
+          431
+        ],
+        [
+          204,
+          205
+        ],
+        [
+          205,
+          44
+        ],
+        [
+          206,
+          181
+        ],
+        [
+          207,
+          88
+        ],
+        [
+          221,
+          271
+        ],
+        [
+          223,
+          235
+        ],
+        [
+          238,
+          195
+        ],
+        [
+          239,
+          335
+        ],
+        [
+          255,
+          571
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 115.10000002384186,
+        "fiducialDetection": 68.5,
+        "roiRaster": 1948.099999934435,
+        "header": 84.80000007152557,
+        "modulation": 59.800000071525574,
+        "ecc": 119.59999999403954,
+        "total": 2425.300000011921
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 20,
+        "fiducialDetection": 17.099999994039536,
+        "roiRaster": 725.5999999642372,
+        "header": 22,
+        "modulation": 22.000000059604645,
+        "ecc": 43.69999995827675,
+        "total": 845.4000000059605
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.5,
+        "detectedMarkersPerFrame": 34.875,
+        "quadCandidatesPerFrame": 36.875,
+        "markerNeighborChecksPerFrame": 338,
+        "testedHeaderCandidatesPerFrame": 21.5,
+        "headerTimingPhasesPerFrame": 711.625,
+        "headerFullPhasesPerFrame": 128.25,
+        "phaseRetriedTiles": 5,
+        "completeTilesPerFrame": 2.25,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.2296875,
+        "occupancyErrorRate": 0.6474537037037037,
+        "colorErrorRate": 0,
+        "mutualInformationPerBlock": 1.5877547487507813,
+        "mutualInformationPerChip": 0.3969386871876953,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 14.387500002980232,
+          "fiducialDetection": 8.5625,
+          "roiRaster": 243.51249999180436,
+          "header": 10.600000008940697,
+          "modulation": 7.475000008940697,
+          "ecc": 14.949999999254942,
+          "total": 303.1625000014901
+        }
+      }
+    },
+    "binary-p4-f5": {
+      "key": "binary-p4-f5",
+      "profile": "binary",
+      "pitch": 4,
+      "pageFps": 5,
+      "symbolStates": 16,
+      "scanFrames": 4,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "detectedMarkers": 130,
+      "quadCandidates": 151,
+      "markerNeighborChecks": 1446,
+      "testedHeaderCandidates": 86,
+      "headerTimingPhases": 2587,
+      "headerFullPhases": 566,
+      "phaseRetriedTiles": 14,
+      "completeTiles": 22,
+      "payloadOkTiles": 0,
+      "rawErrors": 9903,
+      "rawBits": 42240,
+      "modulationBlocks": 10560,
+      "occupancyErrors": 6833,
+      "colorErrors": 28,
+      "validatedChannelBytes": 0,
+      "projectedFullGridBytes": 0,
+      "uniqueSymbols": 0,
+      "positions": [
+        {
+          "x": 6,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 539,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 3,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 775,
+          "rawBits": 3840
+        },
+        {
+          "x": 4,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 454,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 411,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 537,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 0,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 733,
+          "rawBits": 3840
+        },
+        {
+          "x": 1,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 527,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 2,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 1415,
+          "rawBits": 3840
+        },
+        {
+          "x": 6,
+          "y": 3,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 1008,
+          "rawBits": 3840
+        },
+        {
+          "x": 3,
+          "y": 0,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 770,
+          "rawBits": 3840
+        },
+        {
+          "x": 0,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 603,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 186,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 385,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 320,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 343,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 398,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 499,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          219
+        ],
+        [
+          1,
+          37
+        ],
+        [
+          2,
+          120
+        ],
+        [
+          3,
+          48
+        ],
+        [
+          4,
+          6
+        ],
+        [
+          5,
+          4
+        ],
+        [
+          6,
+          2
+        ],
+        [
+          7,
+          3
+        ],
+        [
+          8,
+          80
+        ],
+        [
+          9,
+          11
+        ],
+        [
+          10,
+          76
+        ],
+        [
+          11,
+          34
+        ],
+        [
+          12,
+          16
+        ],
+        [
+          14,
+          11
+        ],
+        [
+          17,
+          202
+        ],
+        [
+          19,
+          70
+        ],
+        [
+          21,
+          78
+        ],
+        [
+          23,
+          121
+        ],
+        [
+          24,
+          1
+        ],
+        [
+          25,
+          79
+        ],
+        [
+          26,
+          1
+        ],
+        [
+          27,
+          55
+        ],
+        [
+          28,
+          1
+        ],
+        [
+          29,
+          41
+        ],
+        [
+          31,
+          70
+        ],
+        [
+          34,
+          99
+        ],
+        [
+          35,
+          160
+        ],
+        [
+          38,
+          7
+        ],
+        [
+          39,
+          4
+        ],
+        [
+          40,
+          1
+        ],
+        [
+          42,
+          76
+        ],
+        [
+          43,
+          263
+        ],
+        [
+          44,
+          1
+        ],
+        [
+          46,
+          13
+        ],
+        [
+          47,
+          43
+        ],
+        [
+          51,
+          234
+        ],
+        [
+          53,
+          1
+        ],
+        [
+          55,
+          28
+        ],
+        [
+          59,
+          123
+        ],
+        [
+          61,
+          1
+        ],
+        [
+          62,
+          1
+        ],
+        [
+          63,
+          212
+        ],
+        [
+          68,
+          229
+        ],
+        [
+          69,
+          47
+        ],
+        [
+          70,
+          116
+        ],
+        [
+          71,
+          41
+        ],
+        [
+          75,
+          1
+        ],
+        [
+          76,
+          87
+        ],
+        [
+          77,
+          30
+        ],
+        [
+          78,
+          86
+        ],
+        [
+          79,
+          51
+        ],
+        [
+          85,
+          269
+        ],
+        [
+          87,
+          139
+        ],
+        [
+          93,
+          92
+        ],
+        [
+          95,
+          143
+        ],
+        [
+          99,
+          1
+        ],
+        [
+          101,
+          1
+        ],
+        [
+          102,
+          121
+        ],
+        [
+          103,
+          181
+        ],
+        [
+          110,
+          87
+        ],
+        [
+          111,
+          287
+        ],
+        [
+          117,
+          3
+        ],
+        [
+          119,
+          244
+        ],
+        [
+          125,
+          1
+        ],
+        [
+          127,
+          359
+        ],
+        [
+          136,
+          121
+        ],
+        [
+          137,
+          31
+        ],
+        [
+          138,
+          45
+        ],
+        [
+          139,
+          27
+        ],
+        [
+          140,
+          183
+        ],
+        [
+          141,
+          16
+        ],
+        [
+          142,
+          161
+        ],
+        [
+          143,
+          64
+        ],
+        [
+          153,
+          105
+        ],
+        [
+          155,
+          49
+        ],
+        [
+          157,
+          225
+        ],
+        [
+          159,
+          304
+        ],
+        [
+          162,
+          1
+        ],
+        [
+          167,
+          1
+        ],
+        [
+          170,
+          179
+        ],
+        [
+          171,
+          73
+        ],
+        [
+          174,
+          25
+        ],
+        [
+          175,
+          401
+        ],
+        [
+          179,
+          1
+        ],
+        [
+          187,
+          182
+        ],
+        [
+          191,
+          492
+        ],
+        [
+          195,
+          1
+        ],
+        [
+          203,
+          1
+        ],
+        [
+          204,
+          315
+        ],
+        [
+          205,
+          59
+        ],
+        [
+          206,
+          193
+        ],
+        [
+          207,
+          114
+        ],
+        [
+          211,
+          1
+        ],
+        [
+          215,
+          2
+        ],
+        [
+          221,
+          343
+        ],
+        [
+          223,
+          295
+        ],
+        [
+          231,
+          1
+        ],
+        [
+          238,
+          213
+        ],
+        [
+          239,
+          424
+        ],
+        [
+          243,
+          1
+        ],
+        [
+          255,
+          642
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 53.69999998807907,
+        "fiducialDetection": 56.49999997019768,
+        "roiRaster": 2216.100000053644,
+        "header": 55.80000001192093,
+        "modulation": 69.7999999821186,
+        "ecc": 134.70000004768372,
+        "total": 2610.899999976158
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 19.799999982118607,
+        "fiducialDetection": 32.29999998211861,
+        "roiRaster": 1238.1000000834465,
+        "header": 26.000000029802322,
+        "modulation": 35.90000003576279,
+        "ecc": 67.90000003576279,
+        "total": 1428.8999999761581
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.5,
+        "detectedMarkersPerFrame": 32.5,
+        "quadCandidatesPerFrame": 37.75,
+        "markerNeighborChecksPerFrame": 361.5,
+        "testedHeaderCandidatesPerFrame": 21.5,
+        "headerTimingPhasesPerFrame": 646.75,
+        "headerFullPhasesPerFrame": 141.5,
+        "phaseRetriedTiles": 14,
+        "completeTilesPerFrame": 5.5,
+        "payloadOkTilesPerFrame": 0,
+        "rawBer": 0.23444602272727272,
+        "occupancyErrorRate": 0.647064393939394,
+        "colorErrorRate": 0.0026515151515151517,
+        "mutualInformationPerBlock": 1.5294647246229753,
+        "mutualInformationPerChip": 0.38236618115574383,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 0,
+        "projectedFullGridBytesPerFrame": 0,
+        "projectedBytesPerSecond20Fps": 0,
+        "estimatedBytesPerSecond20Fps": 0,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 13.424999997019768,
+          "fiducialDetection": 14.12499999254942,
+          "roiRaster": 554.025000013411,
+          "header": 13.950000002980232,
+          "modulation": 17.44999999552965,
+          "ecc": 33.67500001192093,
+          "total": 652.7249999940395
+        }
+      }
+    },
+    "M1-p4-f0": {
+      "key": "M1-p4-f0",
+      "profile": "M1",
+      "pitch": 4,
+      "pageFps": 0,
+      "symbolStates": 16,
+      "scanFrames": 3,
+      "acquiredFrames": 2,
+      "transitionFrames": 0,
+      "detectedMarkers": 138,
+      "quadCandidates": 126,
+      "markerNeighborChecks": 1621,
+      "testedHeaderCandidates": 71,
+      "headerTimingPhases": 2206,
+      "headerFullPhases": 570,
+      "phaseRetriedTiles": 8,
+      "completeTiles": 12,
+      "payloadOkTiles": 9,
+      "rawErrors": 1735,
+      "rawBits": 23040,
+      "modulationBlocks": 5760,
+      "occupancyErrors": 0,
+      "colorErrors": 1640,
+      "validatedChannelBytes": 1044,
+      "projectedFullGridBytes": 7308,
+      "uniqueSymbols": 9,
+      "positions": [
+        {
+          "x": 0,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 150,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 149,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 138,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 163,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 99,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 154,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 104,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 156,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 140,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 138,
+          "rawBits": 1920
+        },
+        {
+          "x": 5,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 220,
+          "rawBits": 1920
+        },
+        {
+          "x": 6,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 124,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          242
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          4,
+          2
+        ],
+        [
+          8,
+          101
+        ],
+        [
+          11,
+          2
+        ],
+        [
+          12,
+          14
+        ],
+        [
+          16,
+          1
+        ],
+        [
+          17,
+          284
+        ],
+        [
+          19,
+          1
+        ],
+        [
+          21,
+          1
+        ],
+        [
+          25,
+          62
+        ],
+        [
+          26,
+          1
+        ],
+        [
+          29,
+          5
+        ],
+        [
+          31,
+          1
+        ],
+        [
+          32,
+          2
+        ],
+        [
+          34,
+          223
+        ],
+        [
+          35,
+          2
+        ],
+        [
+          42,
+          100
+        ],
+        [
+          46,
+          9
+        ],
+        [
+          49,
+          2
+        ],
+        [
+          51,
+          254
+        ],
+        [
+          59,
+          111
+        ],
+        [
+          62,
+          1
+        ],
+        [
+          63,
+          8
+        ],
+        [
+          64,
+          3
+        ],
+        [
+          68,
+          249
+        ],
+        [
+          70,
+          1
+        ],
+        [
+          71,
+          1
+        ],
+        [
+          72,
+          1
+        ],
+        [
+          75,
+          1
+        ],
+        [
+          76,
+          108
+        ],
+        [
+          79,
+          3
+        ],
+        [
+          81,
+          2
+        ],
+        [
+          85,
+          260
+        ],
+        [
+          90,
+          3
+        ],
+        [
+          93,
+          133
+        ],
+        [
+          94,
+          2
+        ],
+        [
+          95,
+          1
+        ],
+        [
+          98,
+          1
+        ],
+        [
+          100,
+          1
+        ],
+        [
+          102,
+          224
+        ],
+        [
+          103,
+          1
+        ],
+        [
+          106,
+          2
+        ],
+        [
+          107,
+          2
+        ],
+        [
+          109,
+          1
+        ],
+        [
+          110,
+          100
+        ],
+        [
+          111,
+          1
+        ],
+        [
+          115,
+          2
+        ],
+        [
+          117,
+          3
+        ],
+        [
+          119,
+          231
+        ],
+        [
+          120,
+          1
+        ],
+        [
+          126,
+          1
+        ],
+        [
+          127,
+          115
+        ],
+        [
+          128,
+          5
+        ],
+        [
+          134,
+          1
+        ],
+        [
+          136,
+          358
+        ],
+        [
+          140,
+          25
+        ],
+        [
+          145,
+          6
+        ],
+        [
+          153,
+          323
+        ],
+        [
+          154,
+          1
+        ],
+        [
+          157,
+          16
+        ],
+        [
+          161,
+          1
+        ],
+        [
+          162,
+          2
+        ],
+        [
+          168,
+          5
+        ],
+        [
+          170,
+          367
+        ],
+        [
+          174,
+          28
+        ],
+        [
+          179,
+          4
+        ],
+        [
+          183,
+          1
+        ],
+        [
+          185,
+          1
+        ],
+        [
+          187,
+          320
+        ],
+        [
+          191,
+          15
+        ],
+        [
+          196,
+          12
+        ],
+        [
+          200,
+          139
+        ],
+        [
+          202,
+          1
+        ],
+        [
+          204,
+          192
+        ],
+        [
+          205,
+          1
+        ],
+        [
+          213,
+          10
+        ],
+        [
+          214,
+          1
+        ],
+        [
+          217,
+          132
+        ],
+        [
+          221,
+          204
+        ],
+        [
+          230,
+          10
+        ],
+        [
+          232,
+          1
+        ],
+        [
+          234,
+          133
+        ],
+        [
+          238,
+          205
+        ],
+        [
+          247,
+          8
+        ],
+        [
+          249,
+          1
+        ],
+        [
+          251,
+          160
+        ],
+        [
+          253,
+          2
+        ],
+        [
+          254,
+          1
+        ],
+        [
+          255,
+          184
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 31.80000001192093,
+        "fiducialDetection": 67.59999999403954,
+        "roiRaster": 1260.200000077486,
+        "header": 42.99999991059303,
+        "modulation": 41.000000059604645,
+        "ecc": 29.599999964237213,
+        "total": 1487.7999999821186
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 13.5,
+        "fiducialDetection": 46.400000005960464,
+        "roiRaster": 747.0000000596046,
+        "header": 24.499999940395355,
+        "modulation": 30.700000047683716,
+        "ecc": 17.199999928474426,
+        "total": 890.5999999940395
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.6666666666666666,
+        "detectedMarkersPerFrame": 46,
+        "quadCandidatesPerFrame": 42,
+        "markerNeighborChecksPerFrame": 540.3333333333334,
+        "testedHeaderCandidatesPerFrame": 23.666666666666668,
+        "headerTimingPhasesPerFrame": 735.3333333333334,
+        "headerFullPhasesPerFrame": 190,
+        "phaseRetriedTiles": 8,
+        "completeTilesPerFrame": 4,
+        "payloadOkTilesPerFrame": 3,
+        "rawBer": 0.07530381944444445,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.2847222222222222,
+        "mutualInformationPerBlock": 2.955394350398133,
+        "mutualInformationPerChip": 0.7388485875995332,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 348,
+        "projectedFullGridBytesPerFrame": 2436,
+        "projectedBytesPerSecond20Fps": 48720,
+        "estimatedBytesPerSecond20Fps": 6960,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 10.600000003973642,
+          "fiducialDetection": 22.533333331346512,
+          "roiRaster": 420.06666669249535,
+          "header": 14.333333303531012,
+          "modulation": 13.666666686534882,
+          "ecc": 9.866666654745737,
+          "total": 495.93333332737285
+        }
+      }
+    },
+    "M1-p4-f5": {
+      "key": "M1-p4-f5",
+      "profile": "M1",
+      "pitch": 4,
+      "pageFps": 5,
+      "symbolStates": 16,
+      "scanFrames": 36,
+      "acquiredFrames": 6,
+      "transitionFrames": 0,
+      "detectedMarkers": 443,
+      "quadCandidates": 257,
+      "markerNeighborChecks": 4165,
+      "testedHeaderCandidates": 193,
+      "headerTimingPhases": 6836,
+      "headerFullPhases": 1213,
+      "phaseRetriedTiles": 15,
+      "completeTiles": 22,
+      "payloadOkTiles": 8,
+      "rawErrors": 3588,
+      "rawBits": 42240,
+      "modulationBlocks": 10560,
+      "occupancyErrors": 0,
+      "colorErrors": 3172,
+      "validatedChannelBytes": 928,
+      "projectedFullGridBytes": 9197.142857142857,
+      "uniqueSymbols": 8,
+      "positions": [
+        {
+          "x": 4,
+          "y": 0,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 394,
+          "rawBits": 3840
+        },
+        {
+          "x": 4,
+          "y": 2,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 344,
+          "rawBits": 3840
+        },
+        {
+          "x": 3,
+          "y": 0,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 270,
+          "rawBits": 3840
+        },
+        {
+          "x": 5,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 156,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 1,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 346,
+          "rawBits": 3840
+        },
+        {
+          "x": 5,
+          "y": 1,
+          "headers": 2,
+          "payloadOk": 0,
+          "rawErrors": 655,
+          "rawBits": 3840
+        },
+        {
+          "x": 6,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 200,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 3,
+          "headers": 2,
+          "payloadOk": 1,
+          "rawErrors": 273,
+          "rawBits": 3840
+        },
+        {
+          "x": 2,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 135,
+          "rawBits": 1920
+        },
+        {
+          "x": 1,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 94,
+          "rawBits": 1920
+        },
+        {
+          "x": 3,
+          "y": 2,
+          "headers": 1,
+          "payloadOk": 0,
+          "rawErrors": 118,
+          "rawBits": 1920
+        },
+        {
+          "x": 4,
+          "y": 3,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 144,
+          "rawBits": 1920
+        },
+        {
+          "x": 6,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 110,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 1,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 104,
+          "rawBits": 1920
+        },
+        {
+          "x": 0,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 116,
+          "rawBits": 1920
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "headers": 1,
+          "payloadOk": 1,
+          "rawErrors": 129,
+          "rawBits": 1920
+        }
+      ],
+      "confusion": [
+        [
+          0,
+          460
+        ],
+        [
+          1,
+          10
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          4,
+          7
+        ],
+        [
+          5,
+          1
+        ],
+        [
+          6,
+          2
+        ],
+        [
+          8,
+          177
+        ],
+        [
+          9,
+          1
+        ],
+        [
+          10,
+          2
+        ],
+        [
+          11,
+          1
+        ],
+        [
+          12,
+          19
+        ],
+        [
+          14,
+          1
+        ],
+        [
+          16,
+          5
+        ],
+        [
+          17,
+          478
+        ],
+        [
+          18,
+          4
+        ],
+        [
+          20,
+          2
+        ],
+        [
+          24,
+          5
+        ],
+        [
+          25,
+          122
+        ],
+        [
+          26,
+          5
+        ],
+        [
+          27,
+          1
+        ],
+        [
+          28,
+          1
+        ],
+        [
+          29,
+          3
+        ],
+        [
+          30,
+          1
+        ],
+        [
+          31,
+          1
+        ],
+        [
+          32,
+          5
+        ],
+        [
+          34,
+          419
+        ],
+        [
+          35,
+          15
+        ],
+        [
+          36,
+          1
+        ],
+        [
+          38,
+          4
+        ],
+        [
+          40,
+          4
+        ],
+        [
+          42,
+          160
+        ],
+        [
+          43,
+          8
+        ],
+        [
+          44,
+          1
+        ],
+        [
+          46,
+          21
+        ],
+        [
+          48,
+          3
+        ],
+        [
+          49,
+          4
+        ],
+        [
+          50,
+          6
+        ],
+        [
+          51,
+          460
+        ],
+        [
+          52,
+          3
+        ],
+        [
+          54,
+          1
+        ],
+        [
+          55,
+          1
+        ],
+        [
+          56,
+          3
+        ],
+        [
+          57,
+          1
+        ],
+        [
+          58,
+          4
+        ],
+        [
+          59,
+          199
+        ],
+        [
+          60,
+          2
+        ],
+        [
+          62,
+          2
+        ],
+        [
+          63,
+          15
+        ],
+        [
+          64,
+          17
+        ],
+        [
+          65,
+          3
+        ],
+        [
+          66,
+          1
+        ],
+        [
+          68,
+          397
+        ],
+        [
+          69,
+          29
+        ],
+        [
+          70,
+          4
+        ],
+        [
+          71,
+          1
+        ],
+        [
+          72,
+          5
+        ],
+        [
+          74,
+          4
+        ],
+        [
+          76,
+          157
+        ],
+        [
+          77,
+          1
+        ],
+        [
+          78,
+          2
+        ],
+        [
+          80,
+          3
+        ],
+        [
+          81,
+          1
+        ],
+        [
+          82,
+          2
+        ],
+        [
+          83,
+          3
+        ],
+        [
+          84,
+          4
+        ],
+        [
+          85,
+          477
+        ],
+        [
+          86,
+          2
+        ],
+        [
+          87,
+          1
+        ],
+        [
+          88,
+          1
+        ],
+        [
+          90,
+          6
+        ],
+        [
+          91,
+          2
+        ],
+        [
+          92,
+          2
+        ],
+        [
+          93,
+          151
+        ],
+        [
+          94,
+          2
+        ],
+        [
+          96,
+          3
+        ],
+        [
+          98,
+          9
+        ],
+        [
+          99,
+          1
+        ],
+        [
+          100,
+          6
+        ],
+        [
+          101,
+          1
+        ],
+        [
+          102,
+          425
+        ],
+        [
+          103,
+          17
+        ],
+        [
+          104,
+          3
+        ],
+        [
+          105,
+          1
+        ],
+        [
+          106,
+          11
+        ],
+        [
+          108,
+          11
+        ],
+        [
+          110,
+          167
+        ],
+        [
+          111,
+          12
+        ],
+        [
+          114,
+          1
+        ],
+        [
+          115,
+          7
+        ],
+        [
+          117,
+          2
+        ],
+        [
+          118,
+          5
+        ],
+        [
+          119,
+          420
+        ],
+        [
+          120,
+          3
+        ],
+        [
+          121,
+          1
+        ],
+        [
+          122,
+          6
+        ],
+        [
+          123,
+          8
+        ],
+        [
+          124,
+          4
+        ],
+        [
+          125,
+          3
+        ],
+        [
+          126,
+          2
+        ],
+        [
+          127,
+          160
+        ],
+        [
+          128,
+          18
+        ],
+        [
+          129,
+          4
+        ],
+        [
+          136,
+          522
+        ],
+        [
+          137,
+          14
+        ],
+        [
+          138,
+          2
+        ],
+        [
+          140,
+          53
+        ],
+        [
+          142,
+          1
+        ],
+        [
+          143,
+          1
+        ],
+        [
+          144,
+          2
+        ],
+        [
+          145,
+          15
+        ],
+        [
+          146,
+          1
+        ],
+        [
+          148,
+          1
+        ],
+        [
+          152,
+          4
+        ],
+        [
+          153,
+          574
+        ],
+        [
+          154,
+          3
+        ],
+        [
+          155,
+          1
+        ],
+        [
+          156,
+          4
+        ],
+        [
+          157,
+          23
+        ],
+        [
+          158,
+          2
+        ],
+        [
+          159,
+          1
+        ],
+        [
+          162,
+          21
+        ],
+        [
+          163,
+          5
+        ],
+        [
+          168,
+          11
+        ],
+        [
+          170,
+          644
+        ],
+        [
+          171,
+          19
+        ],
+        [
+          174,
+          43
+        ],
+        [
+          175,
+          1
+        ],
+        [
+          176,
+          1
+        ],
+        [
+          179,
+          13
+        ],
+        [
+          184,
+          1
+        ],
+        [
+          185,
+          5
+        ],
+        [
+          186,
+          9
+        ],
+        [
+          187,
+          570
+        ],
+        [
+          188,
+          1
+        ],
+        [
+          190,
+          1
+        ],
+        [
+          191,
+          40
+        ],
+        [
+          194,
+          2
+        ],
+        [
+          196,
+          26
+        ],
+        [
+          200,
+          221
+        ],
+        [
+          201,
+          7
+        ],
+        [
+          202,
+          1
+        ],
+        [
+          203,
+          1
+        ],
+        [
+          204,
+          395
+        ],
+        [
+          205,
+          12
+        ],
+        [
+          206,
+          1
+        ],
+        [
+          210,
+          1
+        ],
+        [
+          212,
+          1
+        ],
+        [
+          213,
+          12
+        ],
+        [
+          214,
+          1
+        ],
+        [
+          215,
+          1
+        ],
+        [
+          216,
+          2
+        ],
+        [
+          217,
+          232
+        ],
+        [
+          218,
+          6
+        ],
+        [
+          219,
+          1
+        ],
+        [
+          220,
+          3
+        ],
+        [
+          221,
+          427
+        ],
+        [
+          222,
+          5
+        ],
+        [
+          223,
+          2
+        ],
+        [
+          225,
+          1
+        ],
+        [
+          226,
+          1
+        ],
+        [
+          230,
+          35
+        ],
+        [
+          231,
+          3
+        ],
+        [
+          232,
+          12
+        ],
+        [
+          234,
+          254
+        ],
+        [
+          235,
+          9
+        ],
+        [
+          236,
+          5
+        ],
+        [
+          238,
+          348
+        ],
+        [
+          239,
+          15
+        ],
+        [
+          247,
+          20
+        ],
+        [
+          248,
+          1
+        ],
+        [
+          249,
+          1
+        ],
+        [
+          250,
+          6
+        ],
+        [
+          251,
+          249
+        ],
+        [
+          252,
+          2
+        ],
+        [
+          253,
+          6
+        ],
+        [
+          254,
+          9
+        ],
+        [
+          255,
+          372
+        ]
+      ],
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 533.1999999880791,
+        "fiducialDetection": 433.5000000298023,
+        "roiRaster": 2033.0000000298023,
+        "header": 86.40000000596046,
+        "modulation": 48.39999994635582,
+        "ecc": 72.30000004172325,
+        "total": 3228.7999999821186
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 34.19999998807907,
+        "fiducialDetection": 36.599999994039536,
+        "roiRaster": 845.9999999701977,
+        "header": 20.89999994635582,
+        "modulation": 24.900000005960464,
+        "ecc": 30.30000004172325,
+        "total": 960.5
+      },
+      "metrics": {
+        "fiducialAcquisitionRate": 0.16666666666666666,
+        "detectedMarkersPerFrame": 12.305555555555555,
+        "quadCandidatesPerFrame": 7.138888888888889,
+        "markerNeighborChecksPerFrame": 115.69444444444444,
+        "testedHeaderCandidatesPerFrame": 5.361111111111111,
+        "headerTimingPhasesPerFrame": 189.88888888888889,
+        "headerFullPhasesPerFrame": 33.69444444444444,
+        "phaseRetriedTiles": 15,
+        "completeTilesPerFrame": 0.6111111111111112,
+        "payloadOkTilesPerFrame": 0.2222222222222222,
+        "rawBer": 0.08494318181818182,
+        "occupancyErrorRate": 0,
+        "colorErrorRate": 0.30037878787878786,
+        "mutualInformationPerBlock": 2.6832874237477475,
+        "mutualInformationPerChip": 0.6708218559369369,
+        "transitionFrameRate": 0,
+        "validatedBytesPerFrame": 25.77777777777778,
+        "projectedFullGridBytesPerFrame": 255.47619047619048,
+        "projectedBytesPerSecond20Fps": 5109.523809523809,
+        "estimatedBytesPerSecond20Fps": 515.5555555555555,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 14.811111110779974,
+          "fiducialDetection": 12.041666667494509,
+          "roiRaster": 56.47222222305007,
+          "header": 2.4000000001655684,
+          "modulation": 1.3444444429543283,
+          "ecc": 2.0083333344923124,
+          "total": 89.68888888839219
+        }
+      }
+    }
+  },
+  "detectorVariants": {
+    "i420-d768": {
+      "detectorLongSide": 768,
+      "detectorPipeline": "i420",
+      "detectorFallback": "",
+      "sourceFormat": "I420",
+      "scanFrames": 227,
+      "acquiredFrames": 19,
+      "detectedMarkers": 18088,
+      "quadCandidates": 23015,
+      "markerNeighborChecks": 267004,
+      "testedHeaderCandidates": 5647,
+      "headerTimingPhases": 197776,
+      "headerFullPhases": 25256,
+      "completeTiles": 80,
+      "payloadOkTiles": 17,
+      "rawErrors": 26945,
+      "rawBits": 153600,
+      "validatedChannelBytes": 1972,
+      "projectedFullGridBytes": 16505.142857142855,
+      "timingSums": {
+        "capture": 0,
+        "detectorRaster": 3555.0999999046326,
+        "fiducialDetection": 3792.700000166893,
+        "roiRaster": 8073.700000107288,
+        "header": 2356.8999999165535,
+        "modulation": 308.00000008940697,
+        "ecc": 449.00000005960464,
+        "total": 18705.800000071526
+      },
+      "timingMax": {
+        "capture": 0,
+        "detectorRaster": 42.20000001788139,
+        "fiducialDetection": 57.099999994039536,
+        "roiRaster": 1238.1000000834465,
+        "header": 50.19999998807907,
+        "modulation": 35.90000003576279,
+        "ecc": 67.90000003576279,
+        "total": 1428.8999999761581
+      },
+      "metrics": {
+        "acquisitionRate": 0.08370044052863436,
+        "detectedMarkersPerFrame": 79.68281938325991,
+        "quadCandidatesPerFrame": 101.38766519823788,
+        "markerNeighborChecksPerFrame": 1176.229074889868,
+        "testedHeaderCandidatesPerFrame": 24.876651982378856,
+        "headerTimingPhasesPerFrame": 871.2599118942732,
+        "headerFullPhasesPerFrame": 111.25991189427313,
+        "completeTilesPerFrame": 0.3524229074889868,
+        "payloadOkTilesPerFrame": 0.07488986784140969,
+        "rawBer": 0.17542317708333333,
+        "validatedBytesPerFrame": 8.687224669603523,
+        "projectedFullGridBytesPerFrame": 72.7098804279421,
+        "averageTimings": {
+          "capture": 0,
+          "detectorRaster": 15.66123347975609,
+          "fiducialDetection": 16.707929516153715,
+          "roiRaster": 35.56696035289554,
+          "header": 10.382819382892306,
+          "modulation": 1.3568281942264624,
+          "ecc": 1.977973568544514,
+          "total": 82.4044052866587
+        }
+      }
+    }
+  },
+  "camera": {
+    "aspectRatio": 0.5625,
+    "colorTemperature": 0,
+    "exposureCompensation": 0,
+    "exposureMode": "continuous",
+    "exposureTime": 299.85831,
+    "facingMode": "environment",
+    "focusDistance": 0.28999999165534973,
+    "focusMode": "continuous",
+    "frameRate": 30,
+    "height": 1920,
+    "iso": 100,
+    "resizeMode": "none",
+    "torch": false,
+    "whiteBalanceMode": "continuous",
+    "width": 1080,
+    "zoom": 1
+  },
+  "cameraCapabilities": {
+    "aspectRatio": {
+      "max": 3216,
+      "min": 0.0004166666666666667
+    },
+    "colorTemperature": {
+      "max": 7000,
+      "min": 2850,
+      "step": 50
+    },
+    "exposureCompensation": {
+      "max": 3,
+      "min": -3,
+      "step": 0.1666666716337204
+    },
+    "exposureMode": [
+      "continuous",
+      "manual"
+    ],
+    "exposureTime": {
+      "max": 8000.06134,
+      "min": 0.72716,
+      "step": 0.1
+    },
+    "facingMode": [
+      "environment"
+    ],
+    "focusDistance": {
+      "max": 0.5727272033691406,
+      "min": 0,
+      "step": 0.009999999776482582
+    },
+    "focusMode": [
+      "manual"
+    ],
+    "frameRate": {
+      "max": 30,
+      "min": 0
+    },
+    "height": {
+      "max": 2400,
+      "min": 1
+    },
+    "iso": {
+      "max": 1600,
+      "min": 100,
+      "step": 1
+    },
+    "resizeMode": [
+      "none",
+      "crop-and-scale"
+    ],
+    "torch": true,
+    "whiteBalanceMode": [
+      "continuous",
+      "manual"
+    ],
+    "width": {
+      "max": 3216,
+      "min": 1
+    },
+    "zoom": {
+      "max": 10,
+      "min": 1,
+      "step": 0.1
+    }
+  },
+  "captureRecording": {
+    "name": "airgrid-x1-v35m-quick-2026-08-11T20-18-08-400Z.webm",
+    "mimeType": "video/webm;codecs=vp9",
+    "requestedVideoBitsPerSecond": 16000000,
+    "startedAt": "2026-08-11T20:18:08.401Z",
+    "plannedDurationMs": 40000,
+    "status": "complete",
+    "durationMs": 29885.19999998808,
+    "bytes": 30300632,
+    "completedAt": "2026-08-11T20:18:38.285Z",
+    "decoderRanConcurrently": true
+  },
+  "completedAt": "2026-08-11T20:18:43.566Z",
+  "expectedSweep": "quick",
+  "expectedConditions": [
+    "binary-p2-f0",
+    "binary-p2-f5",
+    "M1-p2-f0",
+    "M1-p2-f5",
+    "binary-p3-f0",
+    "binary-p3-f5",
+    "M1-p3-f0",
+    "M1-p3-f5",
+    "binary-p4-f0",
+    "binary-p4-f5",
+    "M1-p4-f0",
+    "M1-p4-f5"
+  ],
+  "missingConditions": [
+    "binary-p2-f0",
+    "binary-p2-f5",
+    "M1-p2-f0",
+    "M1-p2-f5",
+    "M1-p3-f5"
+  ],
+  "detectorMode": "768",
+  "pipelineMode": "i420",
+  "scanSummary": {
+    "frames": 227,
+    "usefulFps": 7.592963630709198,
+    "workerUtilization": 0.637631664332521
+  }
+}

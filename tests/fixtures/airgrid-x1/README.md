@@ -294,3 +294,15 @@ The committed 10 FPS v35m replay processes 280 deterministic target samples over
 The live M1 matrix provides a sender-format improvement too. Legacy labels red/green/blue/yellow as 00/01/10/11, making frequent red-to-yellow and green-to-blue confusions cost two bits. Exhaustively scoring the 24 label permutations selects red/blue/yellow/green for labels 00/01/10/11 and reduces projected hard color-bit error from 22.46% to 15.24%. v35m advances the X1 header version to 2 for this map while decoding version 1 with the legacy map, so this recording remains a valid acquisition/demodulation fixture. The projected gain is not physical proof of the new sender map.
 
 **Decision:** retain direct I420, the 768 detector, M1, and the measured marker-quality filter. Obtain one recorded v35m quick test to validate the filter and version-2 color map, then use an unrecorded run for the 20 useful FPS acceptance gate. In parallel, use the recording to improve M1 color demodulation or test a lower-state color alphabet. Changing optical symbols or pitch requires a new recording; decoder-only changes do not.
+
+## `phone-v35m-quick-a.json` and `.webm`
+
+This fresh capture physically validates the v35m marker filter and format-version-2 M1 map. The sanitized report identifies **v35m**, started at `2026-08-11T20:18:08.170Z`, and contains no persistent camera identifiers. The original VP9 WebM is 1080×1920, 29.494 seconds, 30,300,632 bytes, with SHA-256 `0a847b7b46fccdc3551de22397cb34fc09008de849201e537d9f44a18f685254`.
+
+The live native-I420 path observed 7/12 conditions, acquired 19/227 scans, recovered 80 complete tiles across 28 coordinates, and validated 17 tiles across 15 coordinates. M1 pitch 4 passed 17/34 tiles at 8.15% BER; binary passed 0/45 at 24.52%. Across all M1 observations, dot position was 95.82% accurate and the measured version-2 hard-bit BER was 8.58%, validating the red/blue/yellow/green label map rather than merely projecting it from version-1 data.
+
+The successful acquisition increased full-resolution work enough to expose repeated per-tile VideoFrame-to-Canvas conversion. Compared with v35l, detector raster remained in the same range (11.18 → 15.66 ms), but ROI time rose from 9.38 to 35.57 ms and total worker time from 50.46 to 82.40 ms. Rare acquired scans reached 1,238 ms of ROI work.
+
+The v35n replay samples all 295 frames at 10 FPS. Caching one lazy full-resolution source draw per accepted frame preserves the v35m baseline exactly at 243 complete and 45 CRC-valid tiles, while average ROI time falls from 2.66 to 0.78 ms and maximum ROI time from 56.4 to 5.5 ms on the benchmark computer. Total replay time falls from 16.87 to 14.58 ms/frame; desktop timing is not phone timing.
+
+**Decision:** retain the validated marker filter, version-2 M1 map, direct I420 detector, and cached accepted-frame source raster. Run v35n unrecorded to test the 20 useful FPS gate. Binary and pitch 3 remain rejected, and X1 still cannot satisfy the capacity gate.
