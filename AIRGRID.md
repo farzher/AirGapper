@@ -2,9 +2,9 @@
 
 ## Current state
 
-Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups. v34e samples five points inside each logical dot instead of relying on one camera pixel.
+Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups. v34e samples five points inside each logical dot instead of relying on one camera pixel. v34f switches the sender to a black optical field with white QR/fiducials and bright payload colors; the receiver detects polarity per group so committed white-field captures remain decodable.
 
-The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34e** is required for the next hardware test.
+The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34f** is required for the next hardware test.
 
 A real-phone test at 1 page per second remained unusable, so sender page rate is not the primary failure. v34b adds a zero-rate frozen-page diagnostic for obtaining stable profile 3 captures.
 
@@ -16,15 +16,15 @@ The first v34d frozen capture is the first positive hardware fixture: the produc
 
 ## Optical background
 
-The application theme and optical background are separate decisions. A dark application theme does not improve a fullscreen transfer. AirGrid currently keeps a white optical background because it gives the camera a stable exposure reference and avoids bright-symbol bloom and color-channel clipping.
+The application theme and optical background are separate decisions. A dark application theme alone does not improve a fullscreen transfer.
 
-Pure black may help some LCD/OLED and camera combinations, but it can also make auto-exposure amplify noise. Do not switch the optical polarity by intuition. Add black-field and white-field presets to the calibrated hardware benchmark and choose from verified tile throughput.
+v34f is the first black-field hardware experiment. It uses a pure black field, white QR modules and fiducials, and bright similar-luminance colors. The receiver detects black versus white field from each group's calibration samples and enables inverted QR detection, preserving the existing white-field fixture baseline. Black may reduce LCD glare, but it may also increase camera noise or bright-symbol bloom; keep it only if new frozen and live captures improve CRC-valid tile throughput.
 
 ## Profile 3 hardware gate
 
 Before changing the protocol again:
 
-1. Verify the sender says `v34e`.
+1. Verify the sender says `v34f`.
 2. Capture still frames from both phones at normal use distance.
 3. Require at least one CRC-valid payload tile per frame.
 4. Complete a small transfer on each phone.

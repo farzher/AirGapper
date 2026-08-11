@@ -19,4 +19,4 @@ The benchmark has two layers:
 
 The early profile 3 diagnostic fixtures reproduce the complete failure and remain the failing hardware baseline. `phone-profile3-v34d-frozen-a.webp` is the first positive acceptance fixture: v34e must recover at least one CRC-valid payload tile from it. It does not yet prove continuous live reception or a completed transfer.
 
-For a stable profile 3 diagnostic capture, use a sender showing **v34e**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.
+For a stable profile 3 diagnostic capture, use a sender showing **v34f**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.

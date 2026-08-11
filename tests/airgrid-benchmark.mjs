@@ -88,15 +88,15 @@ try{
     });}
     async function synthetic(name,{scale=1,blur=0,rotation=0,moire=0,margin=0}={}){
       const opticalScale=d.air.senderScale||1,width=Math.ceil(source.width*opticalScale*scale+margin*2),height=Math.ceil(source.height*opticalScale*scale+margin*2),canvas=document.createElement('canvas');
-      canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.translate(width/2,height/2);ctx.rotate(rotation*Math.PI/180);ctx.filter=blur?'blur('+blur+'px) saturate(.94) contrast(.97)':'none';ctx.drawImage(source,-source.width*opticalScale*scale/2,-source.height*opticalScale*scale/2,source.width*opticalScale*scale,source.height*opticalScale*scale);ctx.setTransform(1,0,0,1,0,0);ctx.filter='none';
+      canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.fillStyle=d.air.darkOptical?'#000':'#fff';ctx.fillRect(0,0,width,height);ctx.translate(width/2,height/2);ctx.rotate(rotation*Math.PI/180);ctx.filter=blur?'blur('+blur+'px) saturate(.94) contrast(.97)':'none';ctx.drawImage(source,-source.width*opticalScale*scale/2,-source.height*opticalScale*scale/2,source.width*opticalScale*scale,source.height*opticalScale*scale);ctx.setTransform(1,0,0,1,0,0);ctx.filter='none';
       if(moire){ctx.globalCompositeOperation='multiply';ctx.fillStyle='#777';ctx.globalAlpha=moire;for(let x=1;x<width;x+=3)ctx.fillRect(x,0,1,height);ctx.globalAlpha=moire*.45;for(let y=2;y<height;y+=5)ctx.fillRect(0,y,width,1);ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';}
       return{name,size:[width,height],...await decode(await createImageBitmap(canvas))};
     }
     async function inspectFixture(name){
-      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=name.includes('profile3')?await decode(await createImageBitmap(image)):null;
+      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:true,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=name.includes('profile3')?await decode(await createImageBitmap(image)):null;
       return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps})),production:current};
     }
-    return{build:d.build,profile:d.air.profile,senderModes,synthetic:[
+    return{build:d.build,profile:d.air.profile,darkOptical:d.air.darkOptical,senderModes,synthetic:[
       await synthetic('clean',{margin:20}),
       await synthetic('phone-a',{scale:.8,blur:.5,rotation:3,moire:.035,margin:60}),
       await synthetic('phone-b',{scale:.7,blur:.65,rotation:-3,moire:.05,margin:60})
@@ -107,6 +107,7 @@ try{
   const report=result.result.value;
   const failures=[];
   if(!report.selfTests?.ok)failures.push('in-page self-tests failed');
+  if(!report.darkOptical)failures.push('current sender is not using the black optical field');
   if(report.senderModes?.frozenDelta!==0||!report.senderModes?.frozenPageStable)failures.push('frozen sender advanced its page');
   if(report.senderModes?.oneFpsDelta<1||report.senderModes?.oneFpsDelta>2)failures.push(`1 fps sender advanced ${report.senderModes?.oneFpsDelta} pages`);
   for(const item of report.synthetic){
