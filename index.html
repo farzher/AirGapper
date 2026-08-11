@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v13: measured tracked-tile receiver -->
+<!-- AirGapper v14: high-frame-rate camera negotiation -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -125,7 +125,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v13</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v14</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -201,7 +201,7 @@
 (() => {
 'use strict';
 
-const BUILD='v13';
+const BUILD='v14';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -222,7 +222,7 @@ const state = {
   mode:'home', stream:null, facing:'environment', scanToken:0,
   transfer:null, sendTimer:null, esi:0, displaySeq:0,
   rx:null, barcodeDetector:null,
-  cameraFps:0, cameraMeasuredFps:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
+  cameraFps:0, cameraMeasuredFps:0, cameraRequestedFps:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
   scanRate:0, scanCount:0, scanWindowAt:0, lastDecodeAt:0,
   probeIndex:0, senderActualFps:0, senderFrameCount:0, senderWindowAt:0,
   scanWorkers:[], scanWorkerUrl:null, scanCaptureBusy:false, scanJobSeq:0,
@@ -543,18 +543,27 @@ function isIOS(){return /iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator
 function cameraPolicyBlocked(){try{const p=document.permissionsPolicy||document.featurePolicy;return!!(p?.allowsFeature&&!p.allowsFeature('camera'));}catch{return false;}}
 function prepareCamera(){stopCamera();resetRx();const gate=$('#cameraGate');gate.classList.add('active');if(!navigator.mediaDevices?.getUserMedia)setStatus('Camera unavailable here','bad');else if(!window.isSecureContext)setStatus('Camera needs HTTPS','bad');else if(cameraPolicyBlocked())setStatus('Open in browser to use camera','bad');else if(location.protocol==='file:'&&isIOS())setStatus('Local file · camera unavailable','bad');else setStatus('Tap Enable camera','');}
 function cameraErrorText(e){if(!window.isSecureContext)return'Camera needs HTTPS';if(cameraPolicyBlocked())return'Open in browser to use camera';if(window.top!==window.self&&e?.name==='NotAllowedError')return'Open in browser to use camera';if(e?.name==='NotAllowedError'||e?.name==='SecurityError')return'Camera permission denied';if(e?.name==='NotFoundError')return'No camera found';if(e?.name==='NotReadableError')return'Camera is busy';if(e?.name==='OverconstrainedError')return'Camera mode unsupported';return`Camera error${e?.name?' · '+e.name:''}`;}
+const MAX_CAMERA_FPS=120;
 async function requestCamera(){
-  // Prefer a high-detail 16:9 video mode. Sender FPS and camera FPS are independent:
-  // a fast capture stream gives us more chances to catch each stable optical frame.
-  try{return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},width:{ideal:1920},height:{ideal:1080},aspectRatio:{ideal:16/9},frameRate:{ideal:60,min:15}},audio:false});}
-  catch(e){if(e?.name==='OverconstrainedError'||e?.name==='NotFoundError')return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing}},audio:false});throw e;}
+  // Width and frame rate remain ideals so the browser can choose a high-speed
+  // lower-resolution mode when that is the only way the device exposes 60/120 FPS.
+  try{return await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},width:{ideal:1920},height:{ideal:1080},aspectRatio:{ideal:16/9},frameRate:{ideal:MAX_CAMERA_FPS,max:MAX_CAMERA_FPS}},audio:false});}
+  catch(e){if(e?.name==='OverconstrainedError'||e?.name==='NotFoundError')return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:state.facing},frameRate:{ideal:60}},audio:false});throw e;}
+}
+async function tuneCameraTrack(track){
+  const caps=track?.getCapabilities?.()||{},max=Number(caps.frameRate?.max)||0,target=Math.min(MAX_CAMERA_FPS,max||MAX_CAMERA_FPS);state.cameraRequestedFps=target;
+  if(!track?.applyConstraints||!target)return caps;
+  try{
+    await track.applyConstraints({width:{ideal:1920},height:{ideal:1080},aspectRatio:{ideal:16/9},frameRate:{ideal:target,max:target}});
+  }catch(e){console.warn('AirGapper high-FPS camera mode unavailable:',e?.message||e);}
+  return track.getCapabilities?.()||caps;
 }
 async function startCamera(){
   stopCamera();resetRx();const gate=$('#cameraGate');if(!navigator.mediaDevices?.getUserMedia||!window.isSecureContext||cameraPolicyBlocked()){prepareCamera();return;}
   try{
     state.stream=await requestCamera();const video=$('#video');video.srcObject=state.stream;video.setAttribute('playsinline','');video.muted=true;await video.play();gate.classList.remove('active');
     try{state.barcodeDetector='BarcodeDetector'in window?new BarcodeDetector({formats:['qr_code']}):null;}catch{state.barcodeDetector=null;}
-    const track=state.stream.getVideoTracks()[0],caps=track?.getCapabilities?.()||{};
+    const track=state.stream.getVideoTracks()[0],caps=await tuneCameraTrack(track);
     try{if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))await track.applyConstraints({advanced:[{focusMode:'continuous'}]});}catch{}
     const settings=track?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;state.cameraWidth=+settings.width||video.videoWidth||0;state.cameraHeight=+settings.height||video.videoHeight||0;state.cameraSettings=settings;state.cameraCaps=caps;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
   }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
@@ -562,7 +571,7 @@ async function startCamera(){
 function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
 $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();else{const c=$('#debugOverlay');c?.getContext('2d')?.clearRect(0,0,c.width,c.height);}};
 function resetRx(){
-  state.rx=null;state.cameraMeasuredFps=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
+  state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
   state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.lastRescueAt=0;
   state.decodeMs=0;state.decodeSamples=0;state.decodeTimes=[];state.sampledFrames=0;state.sampledWindowCount=0;state.sampledRate=0;state.decodeJobs=0;state.decodeJobWindow=0;state.decodeJobRate=0;state.qrSuccesses=0;state.failedQrAttempts=0;state.duplicateSymbols=0;state.uselessSymbols=0;state.usefulRecoveredBytes=0;state.verifiedBytes=0;state.verifiedMs=0;state.cameraSkippedFrames=0;state.workerBusyWindowMs=0;state.workerUtil=0;state.metricsWindowAt=performance.now();
   $('#progressFill').style.width='0%';$('#progressText').textContent='0%';$('#rateText').textContent='— KB/s';$('#etaText').textContent='— ETA';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
@@ -661,8 +670,8 @@ function drawDebugOverlay(){
 function updateDebug(){
   const el=$('#debugPanel');if(!el||!state.debug)return;rollMetrics();const rx=state.rx,workers=state.scanWorkers.length,busy=state.scanWorkers.filter(x=>x.busy).length,total=state.scanDispatches+state.scanDispatchMisses,skip=total?Math.round(state.scanDispatchMisses/total*100):0,last=state.lastDecodeAt?Math.round(performance.now()-state.lastDecodeAt):0,track=state.opticalTrack;
   const focus=state.cameraSettings?.focusMode||'—',layout=rx?`${rx.expectedQrs} QR · ${rx.symbolBytes} B/QR`:'acquiring',elapsed=rx?Math.max(1,performance.now()-rx.startedAt):0,usefulRate=state.verifiedBytes?state.verifiedBytes*1000/state.verifiedMs:elapsed?state.usefulRecoveredBytes*1000/elapsed:0;
-  const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95);
-  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented · ${state.cameraSkippedFrames} callback-skipped\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
+  const unique=rx?.packets||0,fec=rx?.solved?Math.max(0,(unique-rx.solved)/rx.solved):0,med=decodePercentile(.5),p95=decodePercentile(.95),fpsCap=state.cameraCaps?.frameRate,capText=fpsCap?`${Math.round(fpsCap.min)}–${Math.round(fpsCap.max)}`:'?';
+  el.textContent=`${state.scanEngine||'scanner'}\ncamera ${state.cameraWidth||'?'}×${state.cameraHeight||'?'} @ ${(effectiveCameraFps()||0).toFixed(1)} presented · requested ${Math.round(state.cameraRequestedFps||MAX_CAMERA_FPS)} · cap ${capText}\ncallback-skipped ${state.cameraSkippedFrames}\n${layout} · modules ${state.qrModules||'?'} · focus ${focus}\nsampled ${state.sampledRate.toFixed(1)} frames/s · decode ${state.decodeJobRate.toFixed(1)} jobs/s\nQR ${state.symbolRate.toFixed(1)}/s · ${Math.round((state.scanHitRate||0)*100)}% hit · ${state.failedQrAttempts} failed\ndecode med ${Math.round(med)} ms · p95 ${Math.round(p95)} ms · EMA ${Math.round(state.decodeMs||0)} ms\nworkers ${busy}/${workers} busy · ${Math.round(state.workerUtil*100)}% utilization\nuseful ${humanRate(usefulRate)} · ${humanBytes(state.usefulRecoveredBytes)} recovered${state.verifiedBytes?` · ${humanBytes(state.verifiedBytes)} verified`:''}\nduplicate ${state.duplicateSymbols} · useless ${state.uselessSymbols} · FEC ${Math.round(fec*100)}%\ndispatch skipped ${skip}% · last QR ${last} ms · tracking ${track?.confidence?`${Math.round(track.confidence*100)}%`:'searching'}`;
   drawDebugOverlay();
 }
 function updateRxUi(){
@@ -845,7 +854,7 @@ if(offlineBtn) offlineBtn.onclick=async()=>{
     const live=[...document.querySelectorAll('script[data-vendor]')],copies=[...clone.querySelectorAll('script[data-vendor]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}
     const wasmFiles=[['zxing-reader','https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/reader/zxing_reader.wasm'],['zxing-writer','https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/writer/zxing_writer.wasm']];
     for(const [name,url] of wasmFiles){const tag=document.createElement('script');tag.type='text/plain';tag.setAttribute('data-wasm',name);tag.textContent=await fetchWasmBase64(url);clone.querySelector('body').appendChild(tag);}
-    downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'AirGapper-v13-offline.html');toast('Offline copy downloaded');
+    downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'AirGapper-v14-offline.html');toast('Offline copy downloaded');
   }catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}
 };
 window.addEventListener('resize',()=>{if(state.transfer&&!state.sendWorkers.length)renderSendFrame();drawDebugOverlay();});
