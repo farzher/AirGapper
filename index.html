@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v22: comparable sender and receiver throughput -->
+<!-- AirGapper v23: physical camera selection and forced 60 FPS profiles -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -130,7 +130,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v22</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v23</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -208,7 +208,7 @@
 (() => {
 'use strict';
 
-const BUILD='v22';
+const BUILD='v23';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -226,7 +226,7 @@ const B45 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
 const B45_REV = (() => { const a = new Int16Array(128); a.fill(-1); for (let i=0;i<B45.length;i++) a[B45.charCodeAt(i)] = i; return a; })();
 
 const state = {
-  mode:'home', stream:null, facing:'environment', scanToken:0, cameraStartPromise:null,
+  mode:'home', stream:null, facing:'environment', cameraDeviceId:null, cameraDevices:[], scanToken:0, cameraStartPromise:null,
   transfer:null, sendTimer:null, esi:0, displaySeq:0,
   rx:null, barcodeDetector:null,
   cameraFps:0, cameraMeasuredFps:0, cameraRequestedFps:0, cameraRequestedWidth:0, cameraRequestedHeight:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
@@ -562,22 +562,38 @@ const MAX_CAMERA_FPS=60,MAX_CAMERA_WIDTH=3840,MAX_CAMERA_HEIGHT=2160;
 function cameraTargets(caps={}){
   return{fps:Math.min(MAX_CAMERA_FPS,Number(caps.frameRate?.max)||MAX_CAMERA_FPS),w:Math.min(MAX_CAMERA_WIDTH,Number(caps.width?.max)||MAX_CAMERA_WIDTH),h:Math.min(MAX_CAMERA_HEIGHT,Number(caps.height?.max)||MAX_CAMERA_HEIGHT)};
 }
-function videoConstraints(t,{strictFps=false,strictSize=false}={}){
-  return{facingMode:{ideal:state.facing},width:strictSize?{exact:t.w}:{ideal:t.w},height:strictSize?{exact:t.h}:{ideal:t.h},aspectRatio:{ideal:16/9},frameRate:strictFps?{min:t.fps,ideal:t.fps,max:t.fps}:{ideal:t.fps,max:t.fps}};
+function videoConstraints(t,{strictFps=false,strictSize=false,exactFacing=false}={}){
+  const selector=state.cameraDeviceId?{deviceId:{exact:state.cameraDeviceId}}:{facingMode:exactFacing?{exact:state.facing}:{ideal:state.facing}};
+  return{...selector,width:strictSize?{exact:t.w}:{ideal:t.w},height:strictSize?{exact:t.h}:{ideal:t.h},aspectRatio:{ideal:16/9},frameRate:strictFps?{min:t.fps,ideal:t.fps,max:t.fps}:{ideal:t.fps,max:t.fps}};
 }
 async function requestCamera(){
-  // Open the camera once. Repeated getUserMedia calls after an unsupported
-  // profile can leave Android/Chrome's camera service temporarily busy.
-  return navigator.mediaDevices.getUserMedia({video:videoConstraints(cameraTargets()),audio:false});
+  const t=cameraTargets();
+  // Android browsers sometimes ignore an ideal facingMode and silently open
+  // the selfie camera. Require the requested side first, then gracefully fall
+  // back on devices that do not implement facingMode constraints.
+  try{return await navigator.mediaDevices.getUserMedia({video:videoConstraints(t,{exactFacing:true}),audio:false});}
+  catch(e){if(e?.name!=='OverconstrainedError'&&e?.name!=='NotFoundError')throw e;state.cameraDeviceId=null;return navigator.mediaDevices.getUserMedia({video:videoConstraints(t),audio:false});}
+}
+function cameraSide(device,settings={}){
+  const facing=String(settings.facingMode||'').toLowerCase(),label=String(device?.label||'').toLowerCase();if(facing==='environment'||/back|rear|environment|world/.test(label))return'environment';if(facing==='user'||/front|user|selfie|face/.test(label))return'user';return'';
+}
+async function refreshCameraDevices(){
+  try{state.cameraDevices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput'&&d.deviceId);return state.cameraDevices;}catch{return state.cameraDevices;}
+}
+async function flipCamera(){
+  if(state.cameraStartPromise)return;const devices=await refreshCameraDevices(),track=state.stream?.getVideoTracks?.()[0],settings=track?.getSettings?.()||{},currentId=settings.deviceId||state.cameraDeviceId,current=devices.find(d=>d.deviceId===currentId),side=cameraSide(current,settings)||state.facing,wanted=side==='environment'?'user':'environment';
+  const next=devices.find(d=>d.deviceId!==currentId&&cameraSide(d)===wanted)||devices.find(d=>d.deviceId!==currentId);
+  state.facing=wanted;state.cameraDeviceId=next?.deviceId||null;await startCamera();
 }
 async function tuneCameraTrack(track){
   const caps=track?.getCapabilities?.()||{},t=cameraTargets(caps);state.cameraRequestedFps=t.fps;state.cameraRequestedWidth=t.w;state.cameraRequestedHeight=t.h;
   if(!track?.applyConstraints)return caps;
-  // First try the true maximum tuple, then retain 60 FPS while allowing the
-  // browser to choose the highest compatible resolution. Keep the open stream
-  // if neither optional tuning request is available.
-  try{await track.applyConstraints(videoConstraints(t,{strictFps:true,strictSize:true}));}
-  catch{try{await track.applyConstraints(videoConstraints(t,{strictFps:true}));}catch(e){console.warn('AirGapper maximum camera profile unavailable:',e?.message||e);}}
+  // Camera capabilities do not expose valid resolution/FPS tuples. Explicitly
+  // test useful 60 FPS profiles; merely asking for ideal 60 often returns 30.
+  const fps=t.fps,profiles=[t,{fps,w:Math.min(1920,t.w),h:Math.min(1080,t.h)},{fps,w:Math.min(1280,t.w),h:Math.min(720,t.h)}];let applied=false,lastError;
+  if(fps>30)for(const p of profiles){try{await track.applyConstraints(videoConstraints(p,{strictFps:true,strictSize:true}));const actual=+track.getSettings?.().frameRate||0;if(actual>=Math.min(50,fps)){state.cameraRequestedWidth=p.w;state.cameraRequestedHeight=p.h;applied=true;break;}}catch(e){lastError=e;}}
+  if(!applied&&fps>30)try{await track.applyConstraints(videoConstraints(t,{strictFps:true}));applied=true;}catch(e){lastError=e;}
+  if(!applied&&lastError)console.warn('AirGapper 60 FPS profiles unavailable:',lastError?.message||lastError);
   return track.getCapabilities?.()||caps;
 }
 async function startCamera(){
@@ -591,13 +607,13 @@ async function startCamera(){
       try{state.barcodeDetector='BarcodeDetector'in window?new BarcodeDetector({formats:['qr_code']}):null;}catch{state.barcodeDetector=null;}
       const track=stream.getVideoTracks()[0],caps=await tuneCameraTrack(track);if(requestToken!==state.scanToken||state.mode!=='receive')return;
       try{if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))await track.applyConstraints({advanced:[{focusMode:'continuous'}]});}catch{}
-      const settings=track?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;state.cameraWidth=video.videoWidth||+settings.width||0;state.cameraHeight=video.videoHeight||+settings.height||0;state.cameraSettings=settings;state.cameraCaps=caps;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
+      const settings=track?.getSettings?.()||{};await refreshCameraDevices();state.cameraDeviceId=settings.deviceId||state.cameraDeviceId;state.cameraFps=+settings.frameRate||0;state.cameraWidth=video.videoWidth||+settings.width||0;state.cameraHeight=video.videoHeight||+settings.height||0;state.cameraSettings=settings;state.cameraCaps=caps;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
     }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
   })();
   try{return await state.cameraStartPromise;}finally{state.cameraStartPromise=null;enableBtn.disabled=false;enableBtn.textContent='Enable camera';}
 }
 function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
-$('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();drawDebugOverlay();};
+$('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>flipCamera();$('#debugBtn').onclick=()=>{state.debug=!state.debug;$('.receiveCard').classList.toggle('debug',state.debug);$('#debugBtn').textContent=state.debug?'Hide debug':'Debug';if(state.debug)updateDebug();drawDebugOverlay();};
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraRequestedFps=0;state.cameraRequestedWidth=0;state.cameraRequestedHeight=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
   state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.rxIngressSamples=[];state.lastUiAt=0;state.scanCaptureBusy=false;state.nativeDetectBusy=false;state.nativeDetectHits=0;state.scanDispatchMisses=0;state.scanDispatches=0;state.scanWorkerLimit=1;state.scanRegionCursor=0;state.nativeProbeAt=0;state.cameraWidth=0;state.cameraHeight=0;state.opticalTrack=null;state.opticalRotation=0;state.qrModules=0;state.tileHits=[];state.tileAttempts=[];state.lastRescueAt=0;
