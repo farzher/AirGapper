@@ -55,6 +55,30 @@ const snippetLabel = document.getElementById("snippet-label")!;
 const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElement;
 const paneFile = document.getElementById("pane-file")!;
 const paneSnippet = document.getElementById("pane-snippet")!;
+const receiverLink = document.getElementById("receiver-link") as HTMLAnchorElement;
+const receiverLinkQr = document.getElementById("receiver-link-qr") as HTMLCanvasElement;
+
+/** A quiet, static handoff code lets a phone join as the receiver before the
+ * transfer starts. It deliberately points to HTTPS even in the standalone
+ * file, because mobile browsers generally deny camera access from file://. */
+function renderReceiverLink(): void {
+  const qr = QRCode.create(receiverLink.href, { errorCorrectionLevel: "L" });
+  const raster = rasterizeQr(qr.modules.size, qr.modules.data, MARGIN);
+  const scale = 3;
+  const source = document.createElement("canvas");
+  source.width = source.height = raster.size;
+  source.getContext("2d")!.putImageData(
+    new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
+    0,
+    0,
+  );
+  receiverLinkQr.width = receiverLinkQr.height = raster.size * scale;
+  const ctx = receiverLinkQr.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0, receiverLinkQr.width, receiverLinkQr.height);
+}
+renderReceiverLink();
+
 function showStreamPanels(visible: boolean): void {
   sendControls.hidden = !visible;
 }

@@ -77,7 +77,25 @@ a { color: inherit; }
 /* Sender ------------------------------------------------------------------- */
 .send-shell,
 .receiver-shell { min-width: 0; }
-.send-start { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.send-start { display: flex; flex-direction: column; gap: 12px; }
+.send-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.receiver-handoff {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  min-height: 146px;
+  padding: 12px 20px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 12px;
+}
+.receiver-handoff canvas { display: block; width: 111px; height: 111px; flex: none; }
+.receiver-handoff-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.receiver-handoff-copy strong { font-size: 18px; letter-spacing: -.02em; }
+.receiver-handoff-copy span { color: var(--muted); font-size: 13px; }
+.receiver-handoff-copy a { margin-top: 3px; color: var(--muted); font-size: 12px; text-underline-offset: 3px; }
+.receiver-handoff-copy a:hover { color: var(--ink); }
 .file-picker,
 .note-composer {
   min-height: 180px;
@@ -281,7 +299,10 @@ dialog::backdrop { background: #0004; }
 @media (max-width: 700px) {
   .app-header { padding-top: 14px; }
   .app-main { padding-top: 6px; }
-  .home, .send-start { grid-template-columns: 1fr; }
+  .home, .send-inputs { grid-template-columns: 1fr; }
+  .receiver-handoff { justify-content: flex-start; gap: 14px; min-height: 0; padding: 10px 12px; }
+  .receiver-handoff-copy span { max-width: 190px; }
+  .receiver-handoff-copy a { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 130px; }
   .send-controls { grid-template-columns: 1fr; gap: 12px; }

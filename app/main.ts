@@ -23,6 +23,11 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")
 }
 document.getElementById("home-button")!.addEventListener("click", () => showView("home"));
 
+// The phone handoff QR deep-links straight into Receive. Entering the view
+// asks for the rear camera immediately; browsers that require interaction or
+// previously denied access expose the existing camera retry button.
+if (new URLSearchParams(location.search).has("receive")) showView("receive");
+
 // Capture the untouched, fully bundled document before UI state changes. This
 // avoids a network fetch and makes Download offline work identically from
 // HTTPS, file://, and a previously downloaded copy.

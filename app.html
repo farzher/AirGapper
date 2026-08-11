@@ -31,14 +31,24 @@
 
     <section id="sendView" class="view send-shell">
       <div class="send-start">
-        <label class="file-picker drop" id="pane-file">
-          <input id="cfg-file" type="file" multiple />
-          <span><strong class="file-picker-button" id="file-picker-button">Drop files here</strong><span class="sub" id="file-picker-label">or select files</span></span>
-        </label>
-        <div class="note-composer text-wrap" id="pane-snippet">
-          <label for="snippet-text" id="snippet-label" class="sr-only">Text to send</label>
-          <textarea id="snippet-text" rows="7" placeholder="Or paste text…"></textarea>
-          <button id="send-snippet" class="text-send" type="button">Send text</button>
+        <aside class="receiver-handoff" aria-labelledby="receiver-handoff-title">
+          <canvas id="receiver-link-qr" aria-label="QR code linking to the AirGapper receiver"></canvas>
+          <div class="receiver-handoff-copy">
+            <strong id="receiver-handoff-title">Receive on your phone</strong>
+            <span>Scan to open Receive and start the camera.</span>
+            <a id="receiver-link" href="%SITE_URL%?receive">farzher.github.io/AirGapper</a>
+          </div>
+        </aside>
+        <div class="send-inputs">
+          <label class="file-picker drop" id="pane-file">
+            <input id="cfg-file" type="file" multiple />
+            <span><strong class="file-picker-button" id="file-picker-button">Drop files here</strong><span class="sub" id="file-picker-label">or select files</span></span>
+          </label>
+          <div class="note-composer text-wrap" id="pane-snippet">
+            <label for="snippet-text" id="snippet-label" class="sr-only">Text to send</label>
+            <textarea id="snippet-text" rows="7" placeholder="Or paste text…"></textarea>
+            <button id="send-snippet" class="text-send" type="button">Send text</button>
+          </div>
         </div>
       </div>
       <div class="stage" id="stage" hidden>
