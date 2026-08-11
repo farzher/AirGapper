@@ -24,7 +24,7 @@ For a stable profile 3 diagnostic capture, use a sender showing **v34i**, start 
 
 ## AirGrid X1 benchmark
 
-`airgrid-next-benchmark.mjs` is deterministic, uses no QR library, and exercises the exact worker source created by `airgrid-x1.js`. It covers full grids, arbitrary one- and multiple-tile crops, perspective, rotation, mirror, blur, moiré, exposure/white-balance/channel mixing, mixed frame IDs, header and payload corruption, false positives, clean binary/M1/M2/M3 modulation, persistent tracking, BCH header recovery, soft LDPC reconstruction, and fountain reconstruction.
+`airgrid-next-benchmark.mjs` is deterministic, uses no QR library, and exercises the exact worker source created by `airgrid-x1.js`. It covers full grids, arbitrary one- and multiple-tile crops, perspective, rotation, mirror, blur, moiré, exposure/white-balance/channel mixing, mixed frame IDs, header and payload corruption, false positives, clean binary/M1/M2/M3 modulation, persistent tracking, bounded detector rasters, direct native-I420 detector input, BCH header recovery, soft LDPC reconstruction, and fountain reconstruction.
 
 The benchmark's BER, mutual information, verified bytes, and stage timings are synthetic regression measurements. They are not evidence of physical screen/camera capacity. Use `?airgridLab=1` for X1 sender/receiver hardware sounding; retain captures and exported measurements before selecting a production pitch or palette.
 
@@ -38,4 +38,6 @@ See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sw
 
 `fixtures/airgrid-x1/phone-v35h-quick-a.json` validates matched-scale M1 calibration on the phone: 49/64 M1 tiles pass CRC, but the receiver remains limited to 7.51 useful FPS and binary exposes a separate dense-occupancy blur failure.
 
-`fixtures/airgrid-x1/phone-v35i-quick-a.json` validates timing-chip candidate rejection: header time falls to 5.6 ms and useful FPS reaches 9.14, exposing the unchanged 46.6 ms detector raster as the dominant stage. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
+`fixtures/airgrid-x1/phone-v35i-quick-a.json` validates timing-chip candidate rejection: header time falls to 5.6 ms and useful FPS reaches 9.14, exposing the unchanged 46.6 ms detector raster as the dominant stage.
+
+`fixtures/airgrid-x1/phone-v35j-quick-a.json` compares 900/768/640 detector rasters in one phone run. Lower resolutions are faster, but 640 loses the channel completely and 768 remains above the worker-time gate, motivating the v35k direct native-YUV path. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.

@@ -218,3 +218,37 @@ M1 retained a usable but weaker channel sample: 28/48 tiles (58.3%) passed CRC a
 The report measured 3,248 CRC-valid sounder bytes, or 18.67 B per attributed scan, and projected 66.75 full-grid B/frame in aggregate. `M1-p4-f0` reported 1,631 B/frame from only two attributed scans and one acquired scan, so it is a sparse outlier rather than a capacity result. The repeatable `M1-p4-f5` condition projected only 163.76 B/frame. These values can repeat sounder symbols and are not file throughput; X1 still cannot meet the 52,429 net unique B/frame gate.
 
 **Decision:** the v35i optimization succeeded, but not enough. Header sampling is cleared as the next bottleneck; detector rasterization is now the decisive measured target. v35j alternates 900, 768, and 640 detector long sides during one phone run and exports separate per-size acquisition, channel, candidate, and timing aggregates. This avoids three more fixed-build sweeps and determines whether lower raster cost preserves enough acquisition. If no size approaches the 50 ms total-worker gate with adequate M1 acquisition, the next step is direct luminance-frame access rather than more Canvas or header micro-optimization. No X2 or file transfer is justified yet.
+
+## `phone-v35j-quick-a.json`
+
+This sanitized report identifies exactly **v35j**, started at `2026-08-11T13:32:18.988Z` (9 minutes 12.677 seconds after v35i), and completed 32.134 seconds later. It declares the exact expected 12-condition quick sweep and `detectorMode: "sweep"`. The three detector variants contain 106/105/105 scans, covering all 316 receiver scans rather than only scans after condition latch.
+
+No v35i or older local-storage records survived. `M1-p4-f5`, which was present in v35i, is absent in v35j; no M2 or old-rate condition appears; and the build/start identity is new. Persistent camera `deviceId` and `groupId` values were removed from both camera sections without changing other measurements.
+
+### Detector raster experiment
+
+| Metric | 900 | 768 | 640 |
+|---|---:|---:|---:|
+| Scans | 106 | 105 | 105 |
+| Acquired scans | 6 (5.7%) | 3 (2.9%) | 2 (1.9%) |
+| Complete tiles | 61 | 38 | 7 |
+| CRC-valid tiles | 15 | 14 | 0 |
+| Mixed-profile BER | 18.24% | 14.71% | 27.25% |
+| Detected markers/scan | 282.8 | 275.6 | 210.8 |
+| Quadrilaterals/scan | 378.9 | 357.6 | 346.2 |
+| Tested candidates/scan | 26.5 | 27.9 | 26.0 |
+| Detector raster ms | 48.13 | 38.45 | 34.36 |
+| Fiducial/candidate ms | 19.53 | 15.04 | 11.76 |
+| Header ms | 4.54 | 4.49 | 4.49 |
+| ROI raster ms | 7.95 | 4.87 | 0.93 |
+| Total worker ms | 85.82 | 65.75 | 52.80 |
+| Validated sounder B/scan | 16.42 | 15.47 | 0 |
+| Projected full-grid B/frame | 71.66 | 38.67 | 0 |
+
+Lower resolution did reduce raster and marker cost, but not enough without destroying acquisition. The 768 detector saved 9.7 ms of raster work and 20.1 ms total versus 900, retained almost the same CRC-valid observations per scan, and had the best BER, making it the least-bad Canvas compromise. It remained 15.7 ms over the 50 ms gate and acquired only half as often. The 640 path approached 50 ms only because it almost never reached full-resolution work; it produced no valid payload and is rejected.
+
+Across the mixed raster run, useful FPS rose from v35i's 9.14 to 10.19 and weighted attributed-worker time fell from 85.0 to 72.3 ms. Acquisition remained only 11/187 attributed scans. M1 remained the usable separator at 27/44 CRC-valid tiles and 10.59% BER; binary produced only 2/62 valid tiles at 22.52% BER. Header-valid coverage was 28 coordinates and CRC-valid coverage 17.
+
+The report measured 3,364 CRC-valid sounder bytes (17.99 B/attributed scan) and projected 62.33 full-grid B/frame in aggregate. The per-raster projections above are sparse sounder estimates, not unique file throughput, and remain far below the 52,429 B/frame capacity gate.
+
+**Decision:** no Canvas detector size meets both speed and acquisition requirements. v35k fixes the detector at 768 and tests the planned architectural change: `MediaStreamTrackProcessor` transfers native camera `VideoFrame` objects, and the worker copies/downsamples native I420 or NV12 planes without a Canvas detector raster. The same frame still supplies full-resolution color ROIs, and unsupported formats report an explicit Canvas fallback. A deterministic native-I420 pitch-2 grid retains at least 20 complete and 15 CRC-valid tiles. If phone-native YUV does not materially beat the 38.5 ms Canvas raster while preserving acquisition, stop detector micro-optimization and reassess the browser receiver architecture. This report does not justify X2 or file transfer.

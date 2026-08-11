@@ -4,8 +4,8 @@ This test needs no connection between the sender computer and receiver phone. Bo
 
 ## Prepare
 
-1. Open/download an AirGapper **v35j** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
-2. Open **Hardware lab**, or append `?airgridLab=1` to the HTML URL. The header must visibly show **v35j · X1 hardware lab** before testing.
+1. Open/download an AirGapper **v35k** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
+2. Open **Hardware lab**, or append `?airgridLab=1` to the HTML URL. The header must visibly show **v35k · X1 hardware lab** before testing.
 3. On the display device, disable adaptive brightness, set a recorded fixed brightness, disable night-light/color-temperature features, use 100% browser zoom, and prevent sleep.
 4. On the phone, clean the lens, disable battery saver, prevent sleep, and record the phone model/browser. Do not digitally zoom.
 5. Mount or hold the phone so the complete optical display is visible. Keep distance and angle fixed during a sweep.
@@ -14,18 +14,18 @@ The sender reports canvas backing pixels and `devicePixelRatio`. A fullscreen ba
 
 ## Alignment run
 
-1. On a phone, the lab automatically selects **Receiver** and hides sender-only controls. Leave **detector** on **Auto 900/768/640 sweep**, press **Start auto receiver**, and grant camera permission.
+1. On a phone, the lab automatically selects **Receiver** and hides sender-only controls. Leave **detector** on **Fixed 768** and **pipeline** on **Direct native YUV**, press **Start auto receiver**, and grant camera permission.
 2. On the computer choose **Quick 12-condition sweep**, leave dwell at 2 seconds, and press **Start auto sender**. Grant fullscreen.
 3. The quick sweep covers binary/M1, pitches 2/3/4, and Frozen/5 FPS: 12 conditions. Its on-screen dwell is about 24 seconds plus page preparation.
 4. Watch the phone summary. Confirm conditions are accumulating and the camera is focused.
-5. Export JSON. If acquisition is poor even at pitch 4 Frozen, fix framing/focus/exposure before a full run.
+5. Export JSON. Confirm the detector variant is `i420-d768` with source format I420 or NV12 and an empty fallback reason. If it reports `canvas-fallback-d768`, retain the report—it proves the native path is unavailable on that browser. If acquisition is poor even at pitch 4 Frozen, fix framing/focus/exposure before a full run.
 6. Press **Clear saved** before the acceptance run.
 
 The sender and receiver are intentionally unsynchronized. Start the receiver first. It identifies condition changes from BCH/CRC-valid local headers and attributes temporary acquisition failures to the last accepted condition.
 
 ## Full sweep
 
-1. Select **Full 168-condition sweep** on both devices. On the receiver, select the fixed detector size chosen by the alignment run, then start the phone receiver first. Matching the receiver sweep selector makes its export list every missing condition explicitly.
+1. Select **Full 168-condition sweep** on both devices. On the receiver, retain the detector size and pipeline validated by the alignment run, then start the phone receiver first. Matching the receiver sweep selector makes its export list every missing condition explicitly.
 2. Start **Full 168-condition sweep** on the sender.
 3. Use at least 4 seconds dwell; use 8–10 seconds for acceptance captures.
 4. Start the sender and do not move either device until fullscreen exits.
@@ -56,7 +56,7 @@ The receiver JSON contains:
 - per-tile-coordinate acquisition/error totals;
 - average and maximum capture, detector, ROI, header, modulation, ECC, and total timings;
 - camera settings and capabilities exposed by the browser;
-- per-detector-size acquisition, candidate, channel, and timing aggregates when raster sweep mode is selected;
+- per detector-size/pipeline acquisition, candidate, channel, and timing aggregates, including native pixel format and explicit fallback reason;
 - useful scan FPS and worker utilization.
 
 The receiver CSV is a compact comparison table. Receiver JSON is the authoritative channel evidence; sender JSON verifies the requested sweep and actual display cadence.
