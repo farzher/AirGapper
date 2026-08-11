@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v23: physical camera selection and forced 60 FPS profiles -->
+<!-- AirGapper v24: low-latency receiver pipeline -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -130,7 +130,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v23</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v24</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -208,7 +208,7 @@
 (() => {
 'use strict';
 
-const BUILD='v23';
+const BUILD='v24';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -558,7 +558,10 @@ function isIOS(){return /iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator
 function cameraPolicyBlocked(){try{const p=document.permissionsPolicy||document.featurePolicy;return!!(p?.allowsFeature&&!p.allowsFeature('camera'));}catch{return false;}}
 function prepareCamera(){stopCamera();resetRx();const gate=$('#cameraGate');gate.classList.add('active');if(!navigator.mediaDevices?.getUserMedia)setStatus('Camera unavailable here','bad');else if(!window.isSecureContext)setStatus('Camera needs HTTPS','bad');else if(cameraPolicyBlocked())setStatus('Open in browser to use camera','bad');else if(location.protocol==='file:'&&isIOS())setStatus('Local file · camera unavailable','bad');else setStatus('Tap Enable camera','');}
 function cameraErrorText(e){if(!window.isSecureContext)return'Camera needs HTTPS';if(cameraPolicyBlocked())return'Open in browser to use camera';if(window.top!==window.self&&e?.name==='NotAllowedError')return'Open in browser to use camera';if(e?.name==='NotAllowedError'||e?.name==='SecurityError')return'Camera permission denied';if(e?.name==='NotFoundError')return'No camera found';if(e?.name==='NotReadableError')return'Camera is busy';if(e?.name==='OverconstrainedError')return'Camera mode unsupported';return`Camera error${e?.name?' · '+e.name:''}`;}
-const MAX_CAMERA_FPS=60,MAX_CAMERA_WIDTH=3840,MAX_CAMERA_HEIGHT=2160;
+// Decoding always scales tracked tiles below 800 px, so 4K capture adds heavy
+// conversion and memory traffic without adding decoder detail. 1080p60 is the
+// highest-throughput processing profile; verified optical KB/s matters more.
+const MAX_CAMERA_FPS=60,MAX_CAMERA_WIDTH=1920,MAX_CAMERA_HEIGHT=1080;
 function cameraTargets(caps={}){
   return{fps:Math.min(MAX_CAMERA_FPS,Number(caps.frameRate?.max)||MAX_CAMERA_FPS),w:Math.min(MAX_CAMERA_WIDTH,Number(caps.width?.max)||MAX_CAMERA_WIDTH),h:Math.min(MAX_CAMERA_HEIGHT,Number(caps.height?.max)||MAX_CAMERA_HEIGHT)};
 }
@@ -590,7 +593,7 @@ async function tuneCameraTrack(track){
   if(!track?.applyConstraints)return caps;
   // Camera capabilities do not expose valid resolution/FPS tuples. Explicitly
   // test useful 60 FPS profiles; merely asking for ideal 60 often returns 30.
-  const fps=t.fps,profiles=[t,{fps,w:Math.min(1920,t.w),h:Math.min(1080,t.h)},{fps,w:Math.min(1280,t.w),h:Math.min(720,t.h)}];let applied=false,lastError;
+  const fps=t.fps,profiles=[t,{fps,w:Math.min(1280,t.w),h:Math.min(720,t.h)}];let applied=false,lastError;
   if(fps>30)for(const p of profiles){try{await track.applyConstraints(videoConstraints(p,{strictFps:true,strictSize:true}));const actual=+track.getSettings?.().frameRate||0;if(actual>=Math.min(50,fps)){state.cameraRequestedWidth=p.w;state.cameraRequestedHeight=p.h;applied=true;break;}}catch(e){lastError=e;}}
   if(!applied&&fps>30)try{await track.applyConstraints(videoConstraints(t,{strictFps:true}));applied=true;}catch(e){lastError=e;}
   if(!applied&&lastError)console.warn('AirGapper 60 FPS profiles unavailable:',lastError?.message||lastError);
@@ -831,15 +834,15 @@ self.onmessage=async e=>{
   const {id,bitmap,target=680,mode='tile',slot=-1,meta=null}=e.data,t0=performance.now(),detections=[];
   try{
     const ratio=bitmap.height/bitmap.width,w=Math.max(300,Math.min(target,bitmap.width)),h=Math.max(240,Math.round(w*ratio));ensureCanvas(w,h);ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(bitmap,0,0,bitmap.width,bitmap.height,0,0,w,h);bitmap.close();
-    const img=ctx.getImageData(0,0,w,h),full=mode==='full',searching=mode==='search',results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:full||searching,tryRotate:true,tryInvert:false,tryDownscale:full,tryDenoise:false});
+    const img=ctx.getImageData(0,0,w,h),full=mode==='full',results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:full?4:1,tryHarder:false,tryRotate:false,tryInvert:false,tryDownscale:full,tryDenoise:false});
     for(const r of results||[]){if(r?.text)detections.push({text:r.text,bbox:boxFor(r,w,h),version:r.version||'',orientation:r.orientation||0});}
     self.postMessage({id,detections,ms:performance.now()-t0,mode,slot,meta,engine:'ZXing-C++ WASM · tracked tiles'});
   }catch(err){try{bitmap.close();}catch{}self.postMessage({id,detections:[],ms:performance.now()-t0,mode,slot,meta,error:String(err?.message||err),engine:'ZXing-C++ WASM · tracked tiles'});}
 };`;
     state.scanWorkerUrl=URL.createObjectURL(new Blob([zxingSource,'\n',readerPrelude,'\n',logic],{type:'text/javascript'}));
-    // Two decoders materially improve throughput on common 4-core old phones;
-    // the scheduler only dispatches when a worker is idle, preventing backlog.
-    const cores=navigator.hardwareConcurrency||4,pool=cores<=2?1:cores<=4?2:cores<=8?3:4;state.scanWorkerLimit=pool;
+    // More decoders can starve camera delivery on older phones. Keep one core
+    // free for capture/browser work and adapt down to one when decoding is slow.
+    const cores=navigator.hardwareConcurrency||4,pool=cores<=4?1:2;state.scanWorkerLimit=pool;
     for(let i=0;i<pool;i++){
       const worker=new Worker(state.scanWorkerUrl),slotObj={worker,busy:false};
       worker.onmessage=e=>{
@@ -875,12 +878,12 @@ function cameraQrRegion(video,count,index,forceDefault=false){
 }
 function nativeDetectionMeta(c,video){const b=c?.boundingBox;if(!b)return null;const w=video.videoWidth||state.cameraWidth||1,h=video.videoHeight||state.cameraHeight||1,p=c.cornerPoints||[],a=p[0],z=p[1],orientation=a&&z?Math.atan2(z.y-a.y,z.x-a.x)*180/Math.PI:0;return{bbox:{x:b.x/w,y:b.y/h,w:b.width/w,h:b.height/h},orientation,source:'native'};}
 async function dispatchWorkerFrame(video,token){
-  if(state.scanCaptureBusy||token!==state.scanToken||state.mode!=='receive'||video.readyState<2)return;const idle=state.scanWorkers.filter(w=>!w.busy).slice(0,state.scanWorkerLimit);if(!idle.length){state.scanDispatchMisses++;return;}state.scanCaptureBusy=true;state.scanDispatches++;state.sampledFrames++;state.sampledWindowCount++;
+  if(state.scanCaptureBusy||token!==state.scanToken||state.mode!=='receive'||video.readyState<2)return;const workerLimit=state.decodeMs>180?1:state.scanWorkerLimit,idle=state.scanWorkers.filter(w=>!w.busy).slice(0,workerLimit);if(!idle.length){state.scanDispatchMisses++;return;}state.scanCaptureBusy=true;state.scanDispatches++;state.sampledFrames++;state.sampledWindowCount++;
   try{
     const knownQrs=state.rx?.expectedQrs||0,now=performance.now(),fresh=knownQrs&&state.opticalTrack?.confidence&&now-state.opticalTrack.lastAt<850&&now-state.lastDecodeAt<850;
     // Native detection gets the untouched camera frame and is an inexpensive
     // way to recover immediately after rotation or tracking drift.
-    if(state.barcodeDetector&&!state.nativeDetectBusy&&now-state.nativeProbeAt>(fresh?750:220)){state.nativeProbeAt=now;state.nativeDetectBusy=true;state.barcodeDetector.detect(video).then(codes=>{for(const c of codes||[])if(c?.rawValue)ingest(c.rawValue,nativeDetectionMeta(c,video));}).catch(()=>{}).finally(()=>state.nativeDetectBusy=false);}
+    if(state.barcodeDetector&&!state.nativeDetectBusy&&now-state.nativeProbeAt>(fresh?900:500)){state.nativeProbeAt=now;state.nativeDetectBusy=true;state.barcodeDetector.detect(video).then(codes=>{for(const c of codes||[])if(c?.rawValue)ingest(c.rawValue,nativeDetectionMeta(c,video));}).catch(()=>{}).finally(()=>state.nativeDetectBusy=false);}
     const jobs=[],search=[];
     if(!fresh){
       // Search actual sender tile geometry at full tile detail. The old rescue
@@ -893,7 +896,7 @@ async function dispatchWorkerFrame(video,token){
       let count,index,mode,forceDefault=false;
       if(fresh){count=knownQrs;index=state.scanRegionCursor++%count;mode='tile';}
       else{const candidate=search[state.scanRegionCursor++%search.length];count=candidate.count;index=candidate.index;mode='search';forceDefault=true;}
-      const reg=cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
+      const reg=cameraQrRegion(video,count,index,forceDefault);slot.busy=true;slot.startedAt=performance.now();jobs.push(createImageBitmap(video,reg.x,reg.y,reg.w,reg.h).then(bitmap=>{if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;slot.startedAt=0;return;}slot.worker.postMessage({id:++state.scanJobSeq,bitmap,target:mode==='search'?Math.max(760,scanTileTarget()):scanTileTarget(),mode,slot:mode==='tile'?index:-1,meta:reg.norm},[bitmap]);}).catch(e=>{slot.busy=false;slot.startedAt=0;console.warn('AirGapper tile capture:',e);}));
     }
     await Promise.all(jobs);
   }catch(e){console.warn('AirGapper frame capture:',e);}finally{state.scanCaptureBusy=false;}
