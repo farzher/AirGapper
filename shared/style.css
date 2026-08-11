@@ -109,12 +109,14 @@ a { color: inherit; }
 .selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
 .selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
-.send-advanced { border-top: 1px solid var(--line); padding: 6px 4px 0; }
-.send-advanced summary { width: max-content; cursor: pointer; color: var(--muted); font-size: 12px; }
-.send-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; padding-top: 8px; }
+.send-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
 .send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
-.send-controls label:last-child { grid-template-columns: auto 1fr; }
 .send-controls output { min-width: 100px; text-align: right; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.send-advanced { position: relative; }
+.send-advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.advanced-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 2; width: 230px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 12px 36px #0001; }
+.advanced-menu label { grid-template-columns: 1fr; gap: 4px; }
+.advanced-menu label + label { margin-top: 10px; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 .note-composer textarea {
   resize: none;
@@ -172,6 +174,7 @@ body.qr-full .send-shell > :not(#stage) { display: none !important; }
 body.qr-full .app-main,
 body.qr-full .send-shell,
 body.qr-full #sendView { display: block; width: 100%; height: 100%; margin: 0; padding: 0; }
+body.qr-full .stage-bottom { display: none; }
 body.qr-full #stage {
   display: flex;
   left: 0;
@@ -300,7 +303,9 @@ dialog::backdrop { background: #0004; }
   .home, .send-inputs { grid-template-columns: 1fr; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 130px; }
-  .send-controls { grid-template-columns: 1fr; gap: 12px; }
+  .send-controls { grid-template-columns: 1fr auto; gap: 12px; }
+  .send-controls > label { grid-column: 1 / -1; }
+  .send-advanced { grid-column: 2; }
   .stage { min-height: 0; }
   .receiver-primary { gap: 8px; }
   .preview { min-height: 0; max-height: calc(100dvh - 255px); }

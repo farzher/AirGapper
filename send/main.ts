@@ -41,9 +41,8 @@ const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
 const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
-// Every density uses the same portrait 3×4 frame. The Size control changes
-// only the bytes (and therefore QR version) in each of the twelve cells, so
-// optical comparisons keep the camera-filling layout constant.
+// Every density uses twelve cells. The default is a portrait 3×4 grid; the
+// widescreen option rotates that geometry to 4×3 without changing the stream.
 const GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
@@ -104,6 +103,7 @@ function showStreamPanels(visible: boolean): void {
 const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
+const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
 const fpsValue = document.getElementById("fps-value")!;
 const sizeValue = document.getElementById("size-value")!;
 
@@ -335,6 +335,7 @@ function restoreSendSettings(): void {
       fps?: unknown;
       sizeLevel?: unknown;
       scaling?: unknown;
+      layout?: unknown;
     } | null;
     if (!saved) return;
     if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 60) {
@@ -344,6 +345,7 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
+    if (saved.layout === "portrait" || saved.layout === "widescreen") cfgLayout.value = saved.layout;
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
@@ -355,6 +357,7 @@ function saveSendSettings(): void {
       fps: Number(cfgFps.value),
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
+      layout: cfgLayout.value,
     }));
   } catch {
     // A blocked or full store must never prevent a transfer.
@@ -393,14 +396,13 @@ async function main() {
   applyMode();
   restoreSendSettings();
   window.addEventListener("resize", () => resizeDisplay?.());
-  sendControls.addEventListener("toggle", () => requestAnimationFrame(() => resizeDisplay?.()));
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
     sizeValue.textContent = `${formatBytes(bytes)} · ${GRID_CODES} QRs`;
   };
-  for (const el of [cfgFps, cfgSize, cfgScaling]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => {
       saveSendSettings();
@@ -440,7 +442,10 @@ async function startStream(revealStage = false) {
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
   const gridCodes = GRID_CODES;
-  const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
+  const portraitGrid = gridDims(gridCodes);
+  const widescreen = cfgLayout.value === "widescreen";
+  const gridCols = widescreen ? portraitGrid.rows : portraitGrid.cols;
+  const gridRows = widescreen ? portraitGrid.cols : portraitGrid.rows;
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = blockLength(frameBytes);
@@ -578,6 +583,7 @@ async function startStream(revealStage = false) {
               ecc,
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
+              layoutMode: widescreen ? "widescreen" : "portrait",
               sizeLevel,
               gridMargin: GRID_MARGIN,
               scaling: fitScaling ? "fit" : "integer",
