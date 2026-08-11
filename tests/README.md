@@ -36,4 +36,6 @@ See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sw
 
 `fixtures/airgrid-x1/phone-v35f-quick-a.json` measures the optimized acquisition worker. It is substantially faster and finds many more complete tiles, but no color payload passes CRC.
 
-`fixtures/airgrid-x1/phone-v35h-quick-a.json` validates matched-scale M1 calibration on the phone: 49/64 M1 tiles pass CRC, but the receiver remains limited to 7.51 useful FPS and binary exposes a separate dense-occupancy blur failure. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
+`fixtures/airgrid-x1/phone-v35h-quick-a.json` validates matched-scale M1 calibration on the phone: 49/64 M1 tiles pass CRC, but the receiver remains limited to 7.51 useful FPS and binary exposes a separate dense-occupancy blur failure.
+
+`fixtures/airgrid-x1/phone-v35i-quick-a.json` validates timing-chip candidate rejection: header time falls to 5.6 ms and useful FPS reaches 9.14, exposing the unchanged 46.6 ms detector raster as the dominant stage. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.

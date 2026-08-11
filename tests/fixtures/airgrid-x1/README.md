@@ -171,3 +171,50 @@ Binary did not act as a clean global geometry success: it had 22.34% BER, 39.2% 
 v35h measured 6,032 CRC-valid sounder bytes over 221 attributed scans (27.29 B/scan), representing 52 valid tile observations and 47 per-condition unique sounder symbols. Its aggregate full-grid projection was 158.93 B/camera frame. The best measured condition was M1 pitch 4 at 5 FPS at 112.38 B/scan; the best projection was M1 pitch 3 at 5 FPS at 695.36 B/frame, or 13.9 KB/s at an assumed 20 useful FPS. That best projection is only 1.33% of the 52,429 net unique bytes/frame gate and can count repeated sounder pages; it is not file throughput. v35f measured and projected zero because no tile passed CRC.
 
 **Decision:** keep the successful matched-scale M1 calibration and optimize acquisition, not full-resolution ROI or binary modulation. v35i uses the marker spatial index for neighbor searches as well as fourth-corner lookup, checks the 24 known alternating header timing chips before sampling all 384 BCH/CRC-protected chips, and removes a redundant detector clear. BCH/CRC rejection and crop-local full-resolution decoding remain unchanged. Deterministic regressions require dense-grid marker lookup to remain non-exhaustive and reject at least 95% of corrupted-header phases before full protected-header sampling. A fresh phone report must measure the speed/acquisition effect; this report does not justify X2 or file transfer.
+
+## `phone-v35i-quick-a.json`
+
+This sanitized report identifies exactly **v35i** and started at `2026-08-11T13:23:06.311Z`, 13 minutes 15.050 seconds after v35h. It completed 35.323 seconds later and declares the exact expected 12-condition binary/M1 × pitch 2/3/4 × Frozen/5 FPS quick sweep.
+
+No older local-storage records survived. Three conditions present in v35h (`binary-p3-f5`, `M1-p3-f0`, and `binary-p4-f0`) are absent rather than accumulated in v35i, and no M2 or old page-rate condition appears. The build/start identity is new. Persistent camera `deviceId` and `groupId` values were removed from both camera sections while preserving every other value.
+
+### v35h comparison
+
+| Metric | v35h | v35i |
+|---|---:|---:|
+| Conditions identified | 6/12 | 5/12 |
+| Attributed / all scans | 221 / 224 | 174 / 309 |
+| Acquired / attributed scans | 13/221 (5.9%) | 9/174 (5.2%) |
+| Complete tiles | 117 | 111 |
+| Header-valid coordinate union | 30 | 37 |
+| CRC-valid / complete tiles | 52/117 (44.4%) | 28/111 (25.2%) |
+| CRC-valid coordinate union | 24 | 19 |
+| Useful FPS | 7.51 | 9.14 |
+| Worker utilization | 78.5% | 75.1% |
+
+The 135 unattributed scans occurred before the first accepted condition and confirm that acquisition is still unreliable. Useful FPS nevertheless measures all 309 receiver scans and improved 21.7%.
+
+Weighted stage timings are milliseconds per attributed scan:
+
+| Stage | v35h avg / max | v35i avg / max |
+|---|---:|---:|
+| Capture | 1.30 / 5.0 | 1.32 / 6.7 |
+| Detector raster | 46.48 / 66.2 | 46.57 / 58.6 |
+| Fiducial detection | 20.88 / 81.2 | 18.23 / 35.3 |
+| Header | 22.41 / 53.3 | 5.55 / 18.6 |
+| Full-resolution ROI raster | 7.90 / 262.9 | 9.19 / 357.2 |
+| Modulation | 1.99 / 80.3 | 2.20 / 83.1 |
+| ECC | 1.43 / 76.5 | 2.50 / 100.7 |
+| Total worker | 101.80 / 526.9 | 85.03 / 600.6 |
+
+The timing-chip prefilter worked: average header cost fell 75.2%, total worker time fell 16.5%, and useful FPS rose 21.7%. The redundant detector clear had no measurable effect; detector raster time stayed at 46.6 ms and now consumes 54.8% of total worker time by itself. Full-resolution ROI/modulation/ECC work remains secondary in the weighted aggregate despite rare large acquired-frame outliers.
+
+v35i still averaged 320.5 detected markers, 424.2 quadrilaterals, and 29.3 tested candidates per attributed scan. The bounded marker lookup performed 17,694 neighbor checks/scan rather than an exhaustive roughly 102,700 checks at the average marker count. Candidate headers checked 705.4 timing phases/scan, but only 83.6 (11.8%) reached full protected-header sampling. Candidate volume remains high, but full header sampling is no longer the primary performance blocker.
+
+### Channel and capacity
+
+M1 retained a usable but weaker channel sample: 28/48 tiles (58.3%) passed CRC at 19 coordinates, with 11.70% BER versus v35h's 49/64 (76.6%) at 8.53% BER. Binary remained consistently unsuitable: 0/63 tiles passed CRC and BER was 22.77%, nearly unchanged from v35h's 22.34%. This run does not overturn the matched-scale M1 decision.
+
+The report measured 3,248 CRC-valid sounder bytes, or 18.67 B per attributed scan, and projected 66.75 full-grid B/frame in aggregate. `M1-p4-f0` reported 1,631 B/frame from only two attributed scans and one acquired scan, so it is a sparse outlier rather than a capacity result. The repeatable `M1-p4-f5` condition projected only 163.76 B/frame. These values can repeat sounder symbols and are not file throughput; X1 still cannot meet the 52,429 net unique B/frame gate.
+
+**Decision:** the v35i optimization succeeded, but not enough. Header sampling is cleared as the next bottleneck; detector rasterization is now the decisive measured target. v35j alternates 900, 768, and 640 detector long sides during one phone run and exports separate per-size acquisition, channel, candidate, and timing aggregates. This avoids three more fixed-build sweeps and determines whether lower raster cost preserves enough acquisition. If no size approaches the 50 ms total-worker gate with adequate M1 acquisition, the next step is direct luminance-frame access rather than more Canvas or header micro-optimization. No X2 or file transfer is justified yet.
