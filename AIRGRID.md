@@ -2,9 +2,9 @@
 
 ## Current state
 
-Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups. v34e samples five points inside each logical dot instead of relying on one camera pixel. v34f switches the sender to a black optical field with white QR/fiducials and bright payload colors; the receiver detects polarity per group so committed white-field captures remain decodable. v34g reduces physical scale to 1.3× so a 2560×1440 optical surface fits two complete group rows, and retries CRC-failed black-field tiles with a tighter cross-shaped five-point neighborhood.
+Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups. v34e samples five points inside each logical dot instead of relying on one camera pixel. v34f switches the sender to a black optical field with white QR/fiducials and bright payload colors; the receiver detects polarity per group so committed white-field captures remain decodable. v34g reduces physical scale to 1.3× so a 2560×1440 optical surface fits two complete group rows, and retries CRC-failed black-field tiles with a tighter cross-shaped five-point neighborhood. v34h makes the complete receiver diagnostics panel scrollable so live throughput losses can be separated into acquisition, payload, duplicate-page, and worker bottlenecks.
 
-The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34g** is required for the next hardware test.
+The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34h** is required for the next hardware test.
 
 A real-phone test at 1 page per second remained unusable, so sender page rate is not the primary failure. v34b adds a zero-rate frozen-page diagnostic for obtaining stable profile 3 captures.
 
@@ -26,7 +26,7 @@ v34f introduced the black-field hardware experiment. It uses a pure black field,
 
 Before changing the protocol again:
 
-1. Verify the sender says `v34g`.
+1. Verify the sender says `v34h`.
 2. Capture still frames from both phones at normal use distance.
 3. Require at least one CRC-valid payload tile per frame.
 4. Complete a small transfer on each phone.
