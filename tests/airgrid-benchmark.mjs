@@ -13,7 +13,7 @@ const exportNeedle='window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:
 if(!source.includes(exportNeedle))throw new Error('AirGapper diagnostics export changed; update benchmark instrumentation');
 const instrumented=source.replace(exportNeedle,'window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:GLYPH_MASKS,runSelfTests,parseBootstrap,inspectBootstrap,state,showView,prepareTransfer,packText,stopSender,renderAirFrame,initAirWorker};');
 
-const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp','phone-profile3-camera-a.png','phone-profile3-camera-b.png','phone-profile3-frozen-c.jpg','phone-profile3-v34d-frozen-a.webp'];
+const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp','phone-profile3-camera-a.png','phone-profile3-camera-b.png','phone-profile3-frozen-c.jpg','phone-profile3-v34d-frozen-a.webp','phone-profile3-v34f-black-frozen-a.jpg'];
 const server=createServer(async(req,res)=>{
   try{
     if(req.url==='/'||req.url==='/index.html'){
@@ -23,7 +23,8 @@ const server=createServer(async(req,res)=>{
     const name=decodeURIComponent((req.url||'').replace(/^\/fixtures\//,''));
     if(fixtures.includes(name)){
       const body=await readFile(join(testsDir,'fixtures',name));
-      res.writeHead(200,{'content-type':'image/webp','cache-control':'no-store'});
+      const contentType=name.endsWith('.png')?'image/png':name.endsWith('.jpg')?'image/jpeg':'image/webp';
+      res.writeHead(200,{'content-type':contentType,'cache-control':'no-store'});
       res.end(body);return;
     }
     res.writeHead(404);res.end('not found');
@@ -77,6 +78,8 @@ try{
     const oneFpsSeq=d.state.displaySeq;
     await sleep(1150);
     senderModes.oneFpsDelta=d.state.displaySeq-oneFpsSeq;
+    const physicalW=2560,physicalH=1440,logicalW=Math.max(d.air.groupPx+d.air.safeInset*2,Math.round(physicalW/d.air.senderScale)),logicalH=Math.max(d.air.groupPx+d.air.safeInset*2,Math.round(physicalH/d.air.senderScale)),groupsX=Math.max(1,Math.floor((logicalW-d.air.safeInset*2)/d.air.groupPx)),groupsY=Math.max(1,Math.floor((logicalH-d.air.safeInset*2)/d.air.groupPx));
+    senderModes.layout2560x1440={logical:[logicalW,logicalH],groupsX,groupsY,groups:groupsX*groupsY,payloadTiles:groupsX*groupsY*3};
     rate.value='15';rate.dispatchEvent(new Event('input'));d.stopSender();d.state.displaySeq=1234;d.renderAirFrame();d.stopSender();
     const source=document.querySelector('#qrCanvas');
     if(!await d.initAirWorker(1))throw new Error('AirGrid worker unavailable');
@@ -110,6 +113,7 @@ try{
   if(!report.darkOptical)failures.push('current sender is not using the black optical field');
   if(report.senderModes?.frozenDelta!==0||!report.senderModes?.frozenPageStable)failures.push('frozen sender advanced its page');
   if(report.senderModes?.oneFpsDelta<1||report.senderModes?.oneFpsDelta>2)failures.push(`1 fps sender advanced ${report.senderModes?.oneFpsDelta} pages`);
+  if(report.senderModes?.layout2560x1440?.groupsY<2||report.senderModes?.layout2560x1440?.payloadTiles<18)failures.push('2560x1440 sender does not fit two complete group rows');
   for(const item of report.synthetic){
     if(item.error)failures.push(`${item.name}: ${item.error}`);
     if(item.visible<1)failures.push(`${item.name}: no payload tiles visible`);
@@ -126,7 +130,8 @@ try{
       if(!item.production||item.production.error)failures.push(`${item.name}: production worker did not run`);
       else if(!item.production.groups||!item.production.visible)failures.push(`${item.name}: production worker did not acquire payload geometry`);
       if(item.name.includes('frozen')&&!item.bootstraps.some(x=>x.fps===0)&&!groups.some(x=>x.fps===0))failures.push(`${item.name}: expected a frozen-page bootstrap`);
-      if(item.name.includes('v34d')&&item.production?.ok<1)failures.push(`${item.name}: expected at least one CRC-valid tile`);
+      if(item.name.includes('v34d')&&item.production?.ok<2)failures.push(`${item.name}: expected at least two CRC-valid tiles`);
+      if(item.name.includes('v34f-black')&&item.production?.ok<6)failures.push(`${item.name}: expected at least six CRC-valid tiles`);
     }
   }
   console.log(JSON.stringify(report,null,2));
