@@ -15,8 +15,8 @@ Requirements:
 The benchmark has two layers:
 
 1. **Current-profile synthetic channel** — renders a real sender frame, applies scale, blur, rotation, contrast loss, and screen-door/moire filters, then sends the image through the production worker. Clean frames must decode every visible tile; phone presets may lose at most one tile.
-2. **Hardware-capture baseline** — confirms that ZXing can recover all four bootstrap anchors from each supplied phone photograph and records the encoded profile. The current fixtures are intentionally marked as profile 2: they document the broken pre-v34 geometry and are not acceptance captures for profile 3.
+2. **Hardware-capture baseline** — confirms that ZXing can recover the bootstrap anchors and records the encoded profile. Legacy profile 2 fixtures document the broken pre-v34 geometry. Profile 3 diagnostic fixtures are also sent through the exact production worker and report page values, visible tiles, local fiducials, separate known-shape/color accuracy, CRC failures, and per-tile failure reasons.
 
-The fixture presets are only a first approximation of the two supplied phones. Once profile 3 is captured on hardware, add those images as the first payload-decoding acceptance fixtures and tune the synthetic filter against them.
+The profile 3 diagnostic fixtures reproduce the current failure but are not acceptance fixtures: none contains a CRC-valid payload tile. Keep them as the failing hardware baseline. Once a reliability fix works on hardware, add its captures as acceptance fixtures and tune the synthetic filter against them.
 
-For a stable profile 3 diagnostic capture, use a sender showing **v34b**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.
+For a stable profile 3 diagnostic capture, use a sender showing **v34c**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.

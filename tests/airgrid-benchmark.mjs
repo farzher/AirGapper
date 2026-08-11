@@ -13,7 +13,7 @@ const exportNeedle='window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:
 if(!source.includes(exportNeedle))throw new Error('AirGapper diagnostics export changed; update benchmark instrumentation');
 const instrumented=source.replace(exportNeedle,'window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:GLYPH_MASKS,runSelfTests,parseBootstrap,inspectBootstrap,state,showView,prepareTransfer,packText,stopSender,renderAirFrame,initAirWorker};');
 
-const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp'];
+const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp','phone-profile3-camera-a.png','phone-profile3-camera-b.png','phone-profile3-frozen-c.jpg'];
 const server=createServer(async(req,res)=>{
   try{
     if(req.url==='/'||req.url==='/index.html'){
@@ -82,25 +82,25 @@ try{
     if(!await d.initAirWorker(1))throw new Error('AirGrid worker unavailable');
     async function decode(bitmap){return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>reject(new Error('decode timeout')),15000),worker=d.state.scanWorker;
-      worker.onmessage=event=>{clearTimeout(timer);const x=event.data;resolve({groups:x.groups,visible:x.visibleTiles,ok:x.okTiles,known:x.known?x.knownOk/x.known:0,shape:x.visibleTiles?x.shapeConf/x.visibleTiles:0,color:x.visibleTiles?x.colorConf/x.visibleTiles:0,qrCandidates:x.qrCandidates,bootstrapQrs:x.bootstrapQrs,ms:x.ms,error:x.error||''});};
+      worker.onmessage=event=>{clearTimeout(timer);const x=event.data;resolve({groups:x.groups,visible:x.visibleTiles,ok:x.okTiles,known:x.known?x.knownOk/x.known:0,knownShape:x.known?x.knownShapeOk/x.known:0,knownColor:x.known?x.knownColorOk/x.known:0,shape:x.visibleTiles?x.shapeConf/x.visibleTiles:0,color:x.visibleTiles?x.colorConf/x.visibleTiles:0,qrCandidates:x.qrCandidates,bootstrapQrs:x.bootstrapQrs,pages:x.pages,crcFailures:x.crcFailures,corrections:x.corrections,transition:x.transition,groupDiagnostics:x.groupDiagnostics,tileDiagnostics:x.tileDiagnostics,ms:x.ms,error:x.error||''});};
       worker.onerror=event=>{clearTimeout(timer);reject(new Error(event.message));};
       worker.postMessage({id:1,bitmap,target:1920},[bitmap]);
     });}
     async function synthetic(name,{scale=1,blur=0,rotation=0,moire=0,margin=0}={}){
-      const width=Math.ceil(source.width*scale+margin*2),height=Math.ceil(source.height*scale+margin*2),canvas=document.createElement('canvas');
-      canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.translate(width/2,height/2);ctx.rotate(rotation*Math.PI/180);ctx.filter=blur?'blur('+blur+'px) saturate(.94) contrast(.97)':'none';ctx.drawImage(source,-source.width*scale/2,-source.height*scale/2,source.width*scale,source.height*scale);ctx.setTransform(1,0,0,1,0,0);ctx.filter='none';
+      const opticalScale=d.air.senderScale||1,width=Math.ceil(source.width*opticalScale*scale+margin*2),height=Math.ceil(source.height*opticalScale*scale+margin*2),canvas=document.createElement('canvas');
+      canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.translate(width/2,height/2);ctx.rotate(rotation*Math.PI/180);ctx.filter=blur?'blur('+blur+'px) saturate(.94) contrast(.97)':'none';ctx.drawImage(source,-source.width*opticalScale*scale/2,-source.height*opticalScale*scale/2,source.width*opticalScale*scale,source.height*opticalScale*scale);ctx.setTransform(1,0,0,1,0,0);ctx.filter='none';
       if(moire){ctx.globalCompositeOperation='multiply';ctx.fillStyle='#777';ctx.globalAlpha=moire;for(let x=1;x<width;x+=3)ctx.fillRect(x,0,1,height);ctx.globalAlpha=moire*.45;for(let y=2;y<height;y+=5)ctx.fillRect(0,y,width,1);ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';}
       return{name,size:[width,height],...await decode(await createImageBitmap(canvas))};
     }
     async function inspectFixture(name){
-      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean);
-      return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps}))};
+      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=boots.some(x=>x.profile===d.air.profile)?await decode(await createImageBitmap(image)):null;
+      return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps})),production:current};
     }
     return{build:d.build,profile:d.air.profile,senderModes,synthetic:[
-      await synthetic('clean'),
+      await synthetic('clean',{margin:20}),
       await synthetic('phone-a',{scale:.8,blur:.5,rotation:3,moire:.035,margin:60}),
       await synthetic('phone-b',{scale:.7,blur:.65,rotation:-3,moire:.05,margin:60})
-    ],fixtures:[await inspectFixture('${fixtures[0]}'),await inspectFixture('${fixtures[1]}')],selfTests:d.runSelfTests()};
+    ],fixtures:[${fixtures.map(name=>`await inspectFixture('${name}')`).join(',')}],selfTests:d.runSelfTests()};
   })()`;
   const result=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
   if(result.exceptionDetails)throw new Error(result.exceptionDetails.exception?.description||result.exceptionDetails.text);
@@ -116,8 +116,15 @@ try{
     if(item.ok<minimum)failures.push(`${item.name}: decoded ${item.ok}/${item.visible}, expected at least ${minimum}`);
   }
   for(const item of report.fixtures){
-    if(item.qrCandidates<4)failures.push(`${item.name}: only ${item.qrCandidates}/4 legacy anchors detected`);
-    if(item.bootstraps.some(x=>x.profile!==2))failures.push(`${item.name}: expected legacy profile 2 capture`);
+    if(item.name.includes('profile2')){
+      if(item.qrCandidates<4)failures.push(`${item.name}: only ${item.qrCandidates}/4 legacy anchors detected`);
+      if(item.bootstraps.some(x=>x.profile!==2))failures.push(`${item.name}: expected legacy profile 2 capture`);
+    }else{
+      if(!item.bootstraps.some(x=>x.profile===report.profile))failures.push(`${item.name}: no current-profile bootstrap detected`);
+      if(!item.production||item.production.error)failures.push(`${item.name}: production worker did not run`);
+      else if(!item.production.groups||!item.production.visible)failures.push(`${item.name}: production worker did not acquire payload geometry`);
+      if(item.name.includes('frozen')&&!item.bootstraps.some(x=>x.fps===0))failures.push(`${item.name}: expected a frozen-page bootstrap`);
+    }
   }
   console.log(JSON.stringify(report,null,2));
   if(failures.length){console.error('\nFAILED\n- '+failures.join('\n- '));process.exitCode=1;}else console.log('\nPASS: AirGrid synthetic channel and hardware-capture baselines');
