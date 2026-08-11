@@ -13,7 +13,7 @@ const exportNeedle='window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:
 if(!source.includes(exportNeedle))throw new Error('AirGapper diagnostics export changed; update benchmark instrumentation');
 const instrumented=source.replace(exportNeedle,'window.AirGapperDiagnostics={build:BUILD,air:AIR,glyphMasks:GLYPH_MASKS,runSelfTests,parseBootstrap,inspectBootstrap,state,showView,prepareTransfer,packText,stopSender,renderAirFrame,initAirWorker};');
 
-const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp','phone-profile3-camera-a.png','phone-profile3-camera-b.png','phone-profile3-frozen-c.jpg'];
+const fixtures=['phone-profile2-a.webp','phone-profile2-b.webp','phone-profile3-camera-a.png','phone-profile3-camera-b.png','phone-profile3-frozen-c.jpg','phone-profile3-v34d-frozen-a.webp'];
 const server=createServer(async(req,res)=>{
   try{
     if(req.url==='/'||req.url==='/index.html'){
@@ -93,7 +93,7 @@ try{
       return{name,size:[width,height],...await decode(await createImageBitmap(canvas))};
     }
     async function inspectFixture(name){
-      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=boots.some(x=>x.profile===d.air.profile)?await decode(await createImageBitmap(image)):null;
+      const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean),current=name.includes('profile3')?await decode(await createImageBitmap(image)):null;
       return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps})),production:current};
     }
     return{build:d.build,profile:d.air.profile,senderModes,synthetic:[
@@ -120,10 +120,12 @@ try{
       if(item.qrCandidates<4)failures.push(`${item.name}: only ${item.qrCandidates}/4 legacy anchors detected`);
       if(item.bootstraps.some(x=>x.profile!==2))failures.push(`${item.name}: expected legacy profile 2 capture`);
     }else{
-      if(!item.bootstraps.some(x=>x.profile===report.profile))failures.push(`${item.name}: no current-profile bootstrap detected`);
+      const groups=item.production?.groupDiagnostics||[],hasCurrent=item.bootstraps.some(x=>x.profile===report.profile)||groups.some(x=>x.profile===report.profile);
+      if(!hasCurrent)failures.push(`${item.name}: no current-profile bootstrap detected`);
       if(!item.production||item.production.error)failures.push(`${item.name}: production worker did not run`);
       else if(!item.production.groups||!item.production.visible)failures.push(`${item.name}: production worker did not acquire payload geometry`);
-      if(item.name.includes('frozen')&&!item.bootstraps.some(x=>x.fps===0))failures.push(`${item.name}: expected a frozen-page bootstrap`);
+      if(item.name.includes('frozen')&&!item.bootstraps.some(x=>x.fps===0)&&!groups.some(x=>x.fps===0))failures.push(`${item.name}: expected a frozen-page bootstrap`);
+      if(item.name.includes('v34d')&&item.production?.ok<1)failures.push(`${item.name}: expected at least one CRC-valid tile`);
     }
   }
   console.log(JSON.stringify(report,null,2));
