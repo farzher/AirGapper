@@ -26,22 +26,19 @@ test("the carousel needs almost no fountain overhead, and the model says so", ()
 test("progress and ETA follow the observed unique-frame rate", () => {
   const progress = estimateTransferProgress(K, 50, 10);
   assert.equal(progress.expectedFrames, EXPECTED_FRAMES);
-  assert.equal(progress.fraction, 0.43);
+  assert.equal(progress.fraction, 0.495);
   assert.equal(progress.phase, "collecting");
   // 52 frames still wanted at the observed 5 frames/s.
   assert.equal(progress.etaSeconds, 10.4);
 });
 
-test("progress keeps moving through redundant frames", () => {
+test("progress follows useful information and reserves 100% for completion", () => {
   const at = (frames: number) => estimateTransferProgress(K, frames, 20).fraction;
 
   assert.equal(estimateTransferProgress(K, 2, 4).etaSeconds, undefined, "too early to guess");
-  assert.equal(at(K), 0.86, "the theoretical minimum is 86% of the bar");
-  assert.equal(at(K + 1), 0.91, "half the expected redundancy is 91%");
-  assert.ok(Math.abs(at(EXPECTED_FRAMES) - 0.96) < 1e-9, "expected frames lands on 96%");
-  assert.ok(at(EXPECTED_FRAMES + 18) > 0.96, "running long still creeps forward");
-  assert.ok(at(EXPECTED_FRAMES + 30) < 0.99, "and never reaches 100% on frame count alone");
-  assert.ok(at(EXPECTED_FRAMES * 4) <= 0.99);
+  assert.equal(at(50), 0.495, "half the required information is half the visible progress");
+  assert.equal(at(K), 0.99, "the theoretical minimum reaches the pre-verification ceiling");
+  assert.equal(at(EXPECTED_FRAMES + 30), 0.99, "repair frames never claim verified completion");
 });
 
 test("the ETA keeps quoting a time once a stream runs long", () => {
@@ -53,24 +50,10 @@ test("the ETA keeps quoting a time once a stream runs long", () => {
   assert.equal(overrun.phase, "decoding");
 });
 
-test("decoded blocks can advance progress and completion caps at 99%", () => {
-  assert.equal(estimateTransferProgress(K, 101, 20, 95).fraction, 0.9405);
-  assert.equal(estimateTransferProgress(K, 101, 20, 100).fraction, 0.99);
-});
-
-test("the bar cannot run far ahead of solved blocks", () => {
-  // The 22%-catch 4-code field run: a frames-only bar said 96% while under
-  // half the blocks were solved, then the transfer "finished early". Once
-  // blocks are flowing, the frame baseline may lead them by at most 12% of
-  // the stream.
-  const capped = estimateTransferProgress(K, 98, 20, 30);
-  assert.ok(Math.abs(capped.fraction - 0.86 * 0.42) < 1e-9, `got ${capped.fraction}`);
-  // The cap only restrains the frame PROMISE — blocks still lift the bar on
-  // their own, so a block-rich stream is never pushed backwards.
-  assert.equal(estimateTransferProgress(K, 101, 20, 95).fraction, 0.9405);
-  // With nothing solved yet the baseline stays uncapped: the stream has not
-  // started delivering, and early sweep frames solve on arrival anyway.
-  assert.equal(estimateTransferProgress(K, 50, 10).fraction, 0.43);
+test("a peeling cascade cannot hold back or jump the visible progress", () => {
+  assert.equal(estimateTransferProgress(K, 70, 20, 10).fraction, 0.693);
+  assert.equal(estimateTransferProgress(K, 70, 20, 69).fraction, 0.693);
+  assert.equal(estimateTransferProgress(K, 100, 20, 100).fraction, 0.99);
 });
 
 test("durations stay compact and readable", () => {

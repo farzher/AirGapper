@@ -774,7 +774,7 @@ function updateProgressEstimate() {
   bar.style.width = `${percent.toFixed(1)}%`;
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
   progressLabel.textContent = `${shownPercent}%`;
-  const receivedBytes = Math.min(decoder.totalLen, decoder.solvedCount * decoder.blockLen);
+  const receivedBytes = Math.min(decoder.totalLen, usefulFrames * decoder.blockLen);
   transferSizeLabel.textContent =
     `${formatBytes(receivedBytes)} received · ${formatBytes(decoder.totalLen - receivedBytes)} remaining`;
   const eta = estimate.etaSeconds === undefined

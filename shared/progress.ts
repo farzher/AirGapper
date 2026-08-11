@@ -24,7 +24,7 @@ export function estimateTransferProgress(
   sourceBlocks: number,
   uniqueFrames: number,
   elapsedSeconds: number,
-  solvedBlocks = 0,
+  _solvedBlocks = 0,
 ): TransferProgressEstimate {
   const minimumFrames = Math.max(1, sourceBlocks);
   const expectedFrames = Math.max(
@@ -33,40 +33,14 @@ export function estimateTransferProgress(
   );
   const expectedRedundancy = expectedFrames - minimumFrames;
 
-  // Frames drive a continuously moving baseline: 0–86% while collecting the
-  // theoretical minimum, 86–96% through the expected redundancy, then an
-  // asymptotic 96–99% if this particular stream needs more. Actual decoded
-  // blocks can move the bar further ahead at any time.
-  let frameFraction: number;
-  if (uniqueFrames < minimumFrames) {
-    frameFraction = 0.86 * (uniqueFrames / minimumFrames);
-  } else if (uniqueFrames <= expectedFrames) {
-    frameFraction =
-      0.86 + 0.1 * ((uniqueFrames - minimumFrames) / expectedRedundancy);
-  } else {
-    const extra = (uniqueFrames - expectedFrames) / expectedRedundancy;
-    frameFraction = 0.96 + 0.03 * (1 - Math.exp(-extra));
-  }
-  // Frames PROMISE; blocks DELIVER. Under loss the carousel's repair half
-  // parks arriving frames as pending without solving anything, so a frames-
-  // only bar runs to "almost done" with half the blocks outstanding (a
-  // 22%-catch 4-code field run showed 96% at 45% solved, then "finished
-  // early"). Once blocks are being solved, the frame baseline may lead them
-  // by at most 12% of the stream — enough to keep the bar moving through a
-  // repair half, never enough to lie. Solved blocks can always advance the
-  // bar on their own (below), and the final peeling cascade closes the gap
-  // at completion. With solvedBlocks still 0 the baseline stays uncapped:
-  // the stream simply hasn't started delivering, and early sweep frames
-  // solve on arrival anyway.
-  if (solvedBlocks > 0) {
-    const lead = 0.12 * minimumFrames;
-    frameFraction = Math.min(
-      frameFraction,
-      0.86 * Math.min(1, (solvedBlocks + lead) / minimumFrames),
-    );
-  }
-  const decodedFraction = 0.99 * Math.min(1, solvedBlocks / minimumFrames);
-  const fraction = Math.min(0.99, Math.max(frameFraction, decodedFraction));
+  // Every useful frame contributes one block-sized equation. Solved blocks are
+  // deliberately NOT used here: fountain peeling is back-loaded and can solve
+  // a large pending graph in one cascade, which made the old display sit near
+  // 70% and then jump straight to complete. Information arrival is linear and
+  // completion cannot happen before k useful equations, so map those equations
+  // directly across 0–99%. If loss requires repair beyond k, stay at 99% while
+  // the ETA continues to update; only verified completion may show 100%.
+  const fraction = 0.99 * Math.min(1, uniqueFrames / minimumFrames);
   const phase = uniqueFrames < minimumFrames ? "collecting" : "decoding";
   const rate = elapsedSeconds > 0 ? uniqueFrames / elapsedSeconds : 0;
 
