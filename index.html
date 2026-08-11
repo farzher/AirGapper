@@ -43,7 +43,7 @@
   .textSend:disabled { opacity:.35; cursor:default; }
   .sender { display:none; }
   .sender.active { display:block; }
-  .qrStage { position:relative; background:white; border:1px solid var(--line); border-radius:20px; overflow:hidden; min-height:470px; display:flex; align-items:center; justify-content:center; }
+  .qrStage { position:relative; background:white; border:1px solid var(--line); border-radius:20px; overflow:hidden; min-height:470px; display:flex; align-items:center; justify-content:center; cursor:pointer; }
   #qrCanvas { display:block; background:#fff; flex:none; }
   .qrOverlay { position:absolute; inset:auto 12px 12px 12px; display:flex; justify-content:space-between; align-items:end; pointer-events:none; mix-blend-mode:multiply; }
   .qrMeta { background:#ffffffdd; backdrop-filter:blur(8px); border:1px solid #ecece8; border-radius:12px; padding:7px 9px; font-size:11px; color:#555; }
@@ -338,8 +338,9 @@ function stopSender(){if(state.sendTimer)cancelAnimationFrame(state.sendTimer);s
 function resetSend(){stopSender();document.body.classList.remove('sending');state.transfer=null;state.displaySeq=0;state.airImage=null;state.airImage32=null;$('#sender').classList.remove('active');$('#sendStart').style.display='grid';$('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;}
 function updateSendLabels(){$('#fpsValue').textContent=$('#fpsRange').value+' pages/s';if(state.transfer)state.transfer.layout=null;}
 $('#fpsRange').oninput=()=>{updateSendLabels();if(state.transfer){state.transfer.layout=null;startSender();}};updateSendLabels();
-$('#fullscreenBtn').onclick=async()=>{const el=$('#qrStage');try{if(!document.fullscreenElement)await el.requestFullscreen?.();else await document.exitFullscreen?.();}catch{}};
-document.addEventListener('fullscreenchange',()=>{if(state.transfer){state.transfer.layout=null;requestAnimationFrame(renderAirFrame);}});
+async function toggleAirGridFullscreen(){const el=$('#qrStage');try{if(!document.fullscreenElement)await el.requestFullscreen?.();else await document.exitFullscreen?.();}catch{}}
+$('#qrStage').onclick=toggleAirGridFullscreen;
+document.addEventListener('fullscreenchange',()=>{$('#fullscreenBtn').textContent=document.fullscreenElement?'Exit fullscreen':'Fullscreen';if(state.transfer){state.transfer.layout=null;requestAnimationFrame(renderAirFrame);}});
 
 const dz=$('#dropZone'),fi=$('#fileInput');
 fi.onchange=async()=>{if(fi.files.length)prepareTransfer(await packFiles([...fi.files]),fi.files.length===1?fi.files[0].name:`${fi.files.length} files`);};
