@@ -77,18 +77,12 @@ a { color: inherit; }
 /* Sender ------------------------------------------------------------------- */
 .send-shell,
 .receiver-shell { min-width: 0; }
-.send-shell {
-  position: relative;
-  left: 50%;
-  width: min(1400px, calc(100vw - 24px));
-  transform: translateX(-50%);
-}
 .send-start { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .file-picker,
 .note-composer {
   min-height: 180px;
   border: 1px solid var(--line);
-  background: transparent;
+  background: var(--card);
   border-radius: 12px;
 }
 .file-picker {
@@ -101,7 +95,7 @@ a { color: inherit; }
   padding: 16px;
   transition: .14s;
 }
-.file-picker:hover, .file-picker.dragging { border-color: #999; background: #00000002; }
+.file-picker:hover, .file-picker.dragging { border-color: #999; background: var(--card); }
 .file-picker input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
@@ -139,6 +133,9 @@ a { color: inherit; }
 }
 .stage {
   position: relative;
+  left: 50%;
+  width: min(1400px, calc(100vw - 24px));
+  transform: translateX(-50%);
   margin-top: 12px;
   height: calc(100dvh - 180px);
   min-height: 0;
@@ -166,9 +163,10 @@ body.qr-full .send-shell > :not(#stage) { display: none !important; }
 body.qr-full .app-main,
 body.qr-full .send-shell,
 body.qr-full #sendView { display: block; width: 100%; height: 100%; margin: 0; padding: 0; }
-body.qr-full .send-shell { left: 0; transform: none; }
 body.qr-full #stage {
   display: flex;
+  left: 0;
+  transform: none;
   width: 100vw;
   min-height: 100vh;
   min-height: 100dvh;
