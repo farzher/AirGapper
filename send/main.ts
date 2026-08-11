@@ -62,6 +62,7 @@ const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElem
 const paneFile = document.getElementById("pane-file")!;
 const paneSnippet = document.getElementById("pane-snippet")!;
 const receiverLinkQr = document.getElementById("receiver-link-qr") as HTMLCanvasElement;
+const receiverLinkQrLarge = document.getElementById("receiver-link-qr-large") as HTMLCanvasElement;
 
 /** A quiet, static handoff code lets a phone join as the receiver before the
  * transfer starts. It deliberately points to HTTPS even in the standalone
@@ -70,26 +71,28 @@ function renderReceiverLink(): void {
   const receiverUrl = receiverLinkQr.dataset.receiverUrl;
   if (!receiverUrl) return;
   const qr = QRCode.create(receiverUrl, { errorCorrectionLevel: "L" });
-  const raster = rasterizeQr(qr.modules.size, qr.modules.data, HEADER_MARGIN);
-  // Keep every module an integer number of physical display pixels. Size the
-  // handoff code like a small logo while choosing the nearest whole-module
-  // size, avoiding gray edges from browser resampling.
-  const dpr = window.devicePixelRatio || 1;
-  const targetCssSize = 40;
-  const scale = Math.max(1, Math.round((targetCssSize * dpr) / raster.size));
-  const source = document.createElement("canvas");
-  source.width = source.height = raster.size;
-  source.getContext("2d")!.putImageData(
-    new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
-    0,
-    0,
-  );
-  receiverLinkQr.width = receiverLinkQr.height = raster.size * scale;
-  receiverLinkQr.style.width = receiverLinkQr.style.height = `${receiverLinkQr.width / dpr}px`;
-  receiverLinkQr.style.imageRendering = "pixelated";
-  const ctx = receiverLinkQr.getContext("2d")!;
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(source, 0, 0, receiverLinkQr.width, receiverLinkQr.height);
+  const render = (target: HTMLCanvasElement, targetCssSize: number, margin: number): void => {
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, margin);
+    // Keep every module an integer number of physical display pixels to avoid
+    // gray edges from browser resampling.
+    const dpr = window.devicePixelRatio || 1;
+    const scale = Math.max(1, Math.round((targetCssSize * dpr) / raster.size));
+    const source = document.createElement("canvas");
+    source.width = source.height = raster.size;
+    source.getContext("2d")!.putImageData(
+      new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
+      0,
+      0,
+    );
+    target.width = target.height = raster.size * scale;
+    target.style.width = target.style.height = `${target.width / dpr}px`;
+    target.style.imageRendering = "pixelated";
+    const ctx = target.getContext("2d")!;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(source, 0, 0, target.width, target.height);
+  };
+  render(receiverLinkQr, 40, HEADER_MARGIN);
+  render(receiverLinkQrLarge, 240, 4);
 }
 renderReceiverLink();
 
@@ -595,20 +598,11 @@ async function startStream(revealStage = false) {
     // rAF loop rather than spinning on an empty queue until a settings change.
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
-    // Stall watchdog. Browsers throttle rAF hard in occluded or unfocused
-    // windows (Firefox especially) — the stream freezes on whatever frame was
-    // up, usually mid-flip and unreadable, and the receiver burns seconds in
-    // full-scan reacquisition that LOOKS like a receiver failure. Diagnosed
-    // from a field run: 6 s of decodeFps 0 at captureFps 60, then instant
-    // recovery when the sender window came back. Nothing can un-throttle the
-    // window; what we can do is tell the user exactly what happened.
+    // Keep stalls in development diagnostics without interrupting the sender
+    // with a warning: the cadence reset below resumes cleanly on its own.
     const sinceLastTick = now - lastTickAt;
     lastTickAt = now;
     if (sinceLastTick > 1000) {
-      setStatus(
-        `Stream froze for ${(sinceLastTick / 1000).toFixed(1)} s — this window was hidden or ` +
-          `in the background. Keep it visible and focused; the receiver loses lock when it pauses.`,
-      );
       if (import.meta.env.DEV && import.meta.env.VITE_DIAGNOSTICS === "1") {
         void fetch("/__diagnostics", {
           method: "POST",

@@ -41,7 +41,9 @@ a { color: inherit; }
 }
 .app-main { margin-block: auto; padding: 12px 0 30px; }
 .brand-lockup { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.header-qr { display: block; flex: none; image-rendering: pixelated; }
+.header-qr-button { display: block; flex: none; border: 0; background: transparent; padding: 0; cursor: pointer; border-radius: 5px; }
+.header-qr-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.header-qr { display: block; image-rendering: pixelated; }
 .brand-button { border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
 .brand { display: block; color: var(--ink); font-weight: 750; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
 .tag { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -279,6 +281,12 @@ dialog { color: var(--ink); background: var(--card); border: 1px solid var(--lin
 dialog::backdrop { background: #0004; }
 .help-dialog, .legal-dialog { width: min(520px, calc(100% - 32px)); padding: 18px; }
 .help-dialog h2, .legal-dialog h2 { margin: 0; font-size: 17px; }
+.receiver-link-dialog { width: min(340px, calc(100% - 32px)); padding: 18px; text-align: center; }
+.receiver-link-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; text-align: left; }
+.receiver-link-title-row h2 { margin: 0; font-size: 17px; }
+.receiver-link-qr-large { display: block; max-width: 100%; height: auto; margin: 0 auto; image-rendering: pixelated; }
+.receiver-link-dialog p { margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
+.receiver-link-dialog a { display: block; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
 .help-dialog ul { padding-left: 20px; }
 .legal-title-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
 .legal { max-width: 760px; }
