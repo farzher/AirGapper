@@ -16,7 +16,7 @@
   <header class="app-header">
     <div class="brand-lockup">
       <button class="header-qr-button" id="receiver-link-open" type="button" aria-label="Show phone receiver link" aria-haspopup="dialog">
-        <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="%SITE_URL%?receive" aria-hidden="true"></canvas>
+        <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="%SITE_URL%?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
         <span class="brand">AirGapper</span>
@@ -94,11 +94,7 @@
 
 </div>
 
-<dialog class="receiver-link-dialog" id="receiver-link-dialog" aria-labelledby="receiver-link-title">
-  <div class="receiver-link-title-row">
-    <h2 id="receiver-link-title">Receive on your phone</h2>
-    <button class="ghost" id="receiver-link-close" type="button" aria-label="Close">Close</button>
-  </div>
+<dialog class="receiver-link-dialog" id="receiver-link-dialog" aria-label="Phone receiver link">
   <canvas id="receiver-link-qr-large" class="receiver-link-qr-large" aria-hidden="true"></canvas>
   <p>Scan to open AirGapper Receive.</p>
   <a id="receiver-link-url"></a>

@@ -285,8 +285,6 @@ dialog::backdrop { background: #0004; }
 .help-dialog, .legal-dialog { width: min(520px, calc(100% - 32px)); padding: 18px; }
 .help-dialog h2, .legal-dialog h2 { margin: 0; font-size: 17px; }
 .receiver-link-dialog { width: min(340px, calc(100% - 32px)); padding: 18px; text-align: center; }
-.receiver-link-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; text-align: left; }
-.receiver-link-title-row h2 { margin: 0; font-size: 17px; }
 .receiver-link-qr-large { display: block; max-width: 100%; height: auto; margin: 0 auto; image-rendering: pixelated; }
 .receiver-link-dialog p { margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
 .receiver-link-dialog a { display: block; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }

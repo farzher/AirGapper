@@ -15,11 +15,15 @@ const receiverLinkDialog = document.getElementById("receiver-link-dialog") as HT
 const receiverLinkUrl = document.getElementById("receiver-link-url") as HTMLAnchorElement;
 const receiverUrl = headerQr.dataset.receiverUrl ?? "";
 receiverLinkUrl.href = receiverUrl;
-receiverLinkUrl.textContent = receiverUrl;
+try {
+  const parsedReceiverUrl = new URL(receiverUrl);
+  receiverLinkUrl.textContent = `${parsedReceiverUrl.host}${parsedReceiverUrl.pathname.replace(/\/$/, "")}`;
+} catch {
+  receiverLinkUrl.textContent = receiverUrl.replace(/^https?:\/\//, "").replace(/[?#].*$/, "").replace(/\/$/, "");
+}
 receiverLinkUrl.target = "_blank";
 receiverLinkUrl.rel = "noopener";
 headerQrButton.addEventListener("click", () => receiverLinkDialog.showModal());
-document.getElementById("receiver-link-close")!.addEventListener("click", () => receiverLinkDialog.close());
 closeOnBackdropClick(receiverLinkDialog);
 
 function showView(name: ViewName): void {
@@ -48,7 +52,8 @@ const standaloneHtml = `<!doctype html>\n${standaloneDocument.outerHTML}`;
 // flag immediately: a later reload should open the normal home screen, not
 // keep trapping the phone in Receive. Other query parameters are preserved.
 const initialParams = new URLSearchParams(location.search);
-if (initialParams.has("receive")) {
+if (initialParams.has("r") || initialParams.has("receive")) {
+  initialParams.delete("r");
   initialParams.delete("receive");
   const query = initialParams.toString();
   history.replaceState(history.state, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
@@ -75,7 +80,7 @@ async function runSmoke(): Promise<void> {
   const root = document.documentElement;
   try {
     headerQrButton.click();
-    if (!receiverLinkDialog.open || receiverLinkUrl.textContent !== receiverUrl) throw new Error("receiver link dialog did not open");
+    if (!receiverLinkDialog.open || !receiverLinkUrl.textContent || receiverLinkUrl.textContent.includes("https://")) throw new Error("receiver link dialog did not open");
     receiverLinkDialog.close();
     (document.querySelector('[data-mode="send"]') as HTMLButtonElement).click();
     if (!views.send.classList.contains("active")) throw new Error("Send did not open");
