@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v21: rotation-safe QR reacquisition and tracked decoding -->
+<!-- AirGapper v22: comparable sender and receiver throughput -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -56,7 +56,7 @@
   .controlHead b { font-size:13px; }
   .value { font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
   input[type=range] { width:100%; accent-color:#222; }
-  .sendInfo { margin-top:9px; color:var(--muted); font-size:12px; text-align:center; }
+  .sendInfo { margin-top:9px; color:var(--ink); font-size:16px; font-weight:750; text-align:center; font-variant-numeric:tabular-nums; }
   .receiveCard { border:1px solid var(--line); background:#111; border-radius:20px; overflow:hidden; position:relative; min-height:520px; }
   #video { width:100%; height:520px; object-fit:contain; display:block; background:#111; }
   .scanShade { position:absolute; inset:0; pointer-events:none; background:linear-gradient(#0002,#0000 22%,#0000 78%,#0002); }
@@ -130,7 +130,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v21</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v22</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -208,7 +208,7 @@
 (() => {
 'use strict';
 
-const BUILD='v21';
+const BUILD='v22';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -394,8 +394,7 @@ async function prepareTransfer(raw,label){
   document.body.classList.add('sending');$('#sendStart').style.display='none';$('#sender').classList.add('active');$('#qrMeta').textContent='Preparing sender…';
   const threaded=await initSendWorkers();if(threaded)fillSendQueue();
   requestAnimationFrame(()=>{if(!threaded)renderSendFrame();startSender();});
-  const ratio=raw.length?Math.round((1-compressed.length/raw.length)*100):0;
-  $('#sendInfo').textContent=`${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0?` · ${ratio}% smaller`:''} · fountain FEC · WASM sender + receiver`;
+  $('#sendInfo').textContent='Starting sender…';
 }
 function updateSendLabels(){
   $('#fpsValue').textContent=$('#fpsRange').value+' FPS';
@@ -517,12 +516,16 @@ function pumpSendWorkers(){
   }
 }
 function fillSendQueue(){pumpSendWorkers();}
+function updateSenderThroughput(t,targetFps,engine=''){
+  const actualFps=state.senderActualFps||targetFps,actualRate=t.frameBytes*actualFps,targetRate=t.frameBytes*targetFps,limited=state.senderActualFps&&actualFps<targetFps*.92;
+  $('#sendInfo').textContent=limited?`${humanRate(actualRate)} sending · ${humanRate(targetRate)} target`:`${humanRate(targetRate)} target · ${targetFps} FPS`;
+  $('#qrMeta').textContent=`${actualFps.toFixed(state.senderActualFps?1:0)} FPS · ${humanRate(actualRate)} · ${humanBytes(t.frameBytes)}/frame${engine?' · '+engine:''}`;
+}
 function drawPreparedFrame(frame){
   const t=state.transfer;if(!t||!frame)return;const canvas=$('#qrCanvas');fitCanvas(canvas);const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
   const rects=gridRects(frame.qrs,canvas.width,canvas.height,frame.modules?.[0]||0);for(let i=0;i<frame.bitmaps.length;i++){const r=rects[i];ctx.drawImage(frame.bitmaps[i],Math.round(r[0]),Math.round(r[1]),Math.round(r[2]),Math.round(r[2]));}closeFrame(frame);
   const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}
-  const targetFps=+$('#fpsRange').value,actual=state.senderActualFps||targetFps,rate=t.frameBytes*actual;
-  $('#qrMeta').textContent=`${state.senderActualFps&&Math.abs(actual-targetFps)>1?actual.toFixed(0)+'/'+targetFps:targetFps} FPS · ${humanRate(rate)} · ${humanBytes(t.frameBytes)}/frame · ${t.qrCount} QR${t.qrCount===1?'':'s'} · WASM`;
+  const targetFps=+$('#fpsRange').value;updateSenderThroughput(t,targetFps,'WASM');
 }
 function renderSendFrame(){
   const t=state.transfer;if(!t||state.mode!=='send')return;const canvas=$('#qrCanvas');fitCanvas(canvas);const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -533,11 +536,10 @@ function renderSendFrame(){
     }
   }catch(e){console.warn(e);toast('Size too large for QR');return;}
   const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}
-  const targetFps=+$('#fpsRange').value,actual=state.senderActualFps||targetFps,rate=t.frameBytes*actual;
-  $('#qrMeta').textContent=`${state.senderActualFps&&Math.abs(actual-targetFps)>1?actual.toFixed(0)+'/'+targetFps:targetFps} FPS · ${humanRate(rate)} · ${humanBytes(t.frameBytes)}/frame · ${t.qrCount} QR${t.qrCount===1?'':'s'}`;
+  const targetFps=+$('#fpsRange').value;updateSenderThroughput(t,targetFps);
 }
 function startSender(){
-  stopSender();if(!state.transfer)return;const interval=1000/(+$('#fpsRange').value);let next=performance.now();
+  stopSender();if(!state.transfer)return;state.senderActualFps=0;state.senderFrameCount=0;state.senderWindowAt=performance.now();const interval=1000/(+$('#fpsRange').value);let next=performance.now();
   const loop=()=>{if(state.mode!=='send'||!state.transfer)return;const now=performance.now();if(now>=next){if(state.sendWorkers.length){const frame=state.sendQueue.shift();if(frame)drawPreparedFrame(frame);fillSendQueue();}else renderSendFrame();next=Math.max(next+interval,now);}state.sendTimer=requestAnimationFrame(loop);};loop();
 }
 function stopSender(){if(state.sendTimer)cancelAnimationFrame(state.sendTimer);state.sendTimer=null;}
