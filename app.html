@@ -18,7 +18,7 @@
       <span class="brand">AirGapper</span>
       <span class="tag">Air-gapped file transfer</span>
     </button>
-    <div class="header-actions"><button class="legal-link" id="legal-button" type="button">Legal / Source</button><button class="download-offline" id="download-offline" type="button">Download offline</button></div>
+    <div class="header-actions"><button class="download-offline" id="download-offline" type="button">Download offline</button></div>
   </header>
 
   <main class="app-main">
@@ -41,13 +41,17 @@
           <button id="send-snippet" class="text-send" type="button">Send text</button>
         </div>
       </div>
-      <div class="selection-summary" id="selection-summary" hidden></div>
-      <div class="stage" id="stage" hidden><canvas id="qr" width="16" height="16"></canvas></div>
-      <div class="hint status-line" id="specs"></div>
-      <div class="send-controls" id="send-controls" hidden>
-        <label><span>Speed</span><input id="cfg-fps" type="range" min="10" max="30" step="1" value="24" /><output id="fps-value">24 fps</output></label>
-        <label><span>QR size</span><input id="cfg-size" type="range" min="180" max="520" step="20" value="380" /><output id="size-value">380 px</output></label>
+      <div class="stage" id="stage" hidden>
+        <canvas id="qr" width="16" height="16"></canvas>
+        <div class="stage-bottom" id="stage-bottom">
+          <div class="selection-summary" id="selection-summary" hidden></div>
+          <div class="send-controls" id="send-controls" hidden>
+            <label><span>Speed</span><input id="cfg-fps" type="range" min="1" max="60" step="1" value="24" /><output id="fps-value">24 fps</output></label>
+            <label><span>Size</span><input id="cfg-size" type="range" min="0" max="5" step="1" value="2" /><output id="size-value">1.5 KB/frame</output></label>
+          </div>
+        </div>
       </div>
+      <div class="hint status-line" id="specs"></div>
     </section>
 
     <section id="receiveView" class="view receiver-shell">
@@ -55,7 +59,6 @@
         <div class="receiver-heading"><div class="hint status-line" id="stats"></div></div>
         <button id="start" class="enable-camera" type="button" hidden>Enable camera</button>
         <div class="preview-zone" id="preview" style="display:none">
-          <div class="no-signal-toast" id="no-signal" role="status" hidden><span>Nothing happening?</span><button id="no-signal-help" class="text-button" type="button">Help</button><button id="no-signal-dismiss" class="text-button" type="button">Dismiss</button></div>
           <div class="preview receive-card">
             <video id="video" muted playsinline></video><canvas id="detect-overlay" class="detect-overlay" aria-hidden="true"></canvas>
             <div class="transfer-hud">
@@ -65,7 +68,6 @@
           </div>
         </div>
         <div id="result"></div>
-        <dialog class="help-dialog" id="no-signal-dialog" aria-labelledby="no-signal-title"><h2 id="no-signal-title" tabindex="-1" autofocus>Troubleshooting</h2><ul id="no-signal-tips"></ul><button id="no-signal-close" class="secondary-button" type="button">Close</button></dialog>
         <div class="metrics live-metrics" id="metrics" style="display:none">
           <div class="metric"><div class="k">capture</div><div class="v" id="m-cap">— fps</div></div>
           <div class="metric"><div class="k">decode</div><div class="v" id="m-dec">— fps</div></div>
@@ -78,10 +80,6 @@
 
 </div>
 
-<dialog class="legal-dialog" id="legal-dialog" aria-labelledby="legal-title">
-  <div class="legal-title-row"><h2 id="legal-title">Legal / Source</h2><button id="legal-close" class="ghost" type="button">Close</button></div>
-  %LEGAL_BLOCK%
-</dialog>
 <script type="module" src="./app/main.ts"></script>
 </body>
 </html>

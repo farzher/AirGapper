@@ -8,7 +8,6 @@ function verifyArtifact(file) {
   for (const needle of [
     "AirGapper",
     "Download offline",
-    "Legal / Source",
     "AGPL-3.0-or-later",
     "NO WARRANTY",
     "modified 2026-08-11",

@@ -100,11 +100,11 @@ a { color: inherit; }
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
 .file-picker.has-file strong { color: var(--ink); }
-.selection-summary { margin: 12px 0 0; padding: 10px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
-.selection-summary > div { display: flex; justify-content: space-between; gap: 20px; padding: 4px 0; }
-.selection-summary > div span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.selection-summary > div span:last-child { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
-.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.stage-bottom { width: min(100%, 920px); flex: none; padding: 0 10px 8px; }
+.selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
+.selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+.send-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 8px 12px; background: #f7f7f5ee; border: 1px solid var(--line); border-radius: 12px; }
 .send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
 .send-controls output { min-width: 48px; text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -137,6 +137,7 @@ a { color: inherit; }
   min-height: 0;
   aspect-ratio: 4 / 3;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   overflow: hidden;
@@ -144,7 +145,7 @@ a { color: inherit; }
   border: 1px solid var(--line);
   border-radius: 20px;
   padding: 18px;
-  cursor: zoom-in;
+  cursor: pointer;
 }
 .stage[hidden] { display: none; }
 .stage canvas { display: block; max-width: 100%; }
@@ -168,7 +169,7 @@ body.qr-full #stage {
   padding: 0;
   border: 0;
   border-radius: 0;
-  cursor: zoom-out;
+  cursor: pointer;
 }
 
 /* Settings and diagnostics ------------------------------------------------- */
@@ -229,7 +230,6 @@ input[type="range"] { accent-color: #222; }
 .progress { width: 100%; height: 3px; margin-top: 9px; overflow: hidden; background: #ffffff25; border-radius: 9px; }
 .progress > div { height: 100%; width: 0; background: white; transition: width .15s linear; }
 .progress > div.error { background: #f26c6c; }
-.no-signal-toast { position: absolute; left: 50%; bottom: calc(100% + 8px); z-index: 5; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 12px; max-width: calc(100% - 20px); white-space: nowrap; background: white; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px #0001; font-size: 12px; }
 .text-button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 #result:empty { display: none; }

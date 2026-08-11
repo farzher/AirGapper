@@ -35,7 +35,7 @@ import {
 import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
-import { DEFAULT_FRAME_BYTES } from "../shared/send-settings";
+import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
@@ -49,6 +49,7 @@ const filePickerLabel = document.getElementById("file-picker-label")!;
 const filePickerButton = document.getElementById("file-picker-button")!;
 const selectionSummary = document.getElementById("selection-summary")!;
 const sendControls = document.getElementById("send-controls")!;
+const stageBottom = document.getElementById("stage-bottom")!;
 const snippetText = document.getElementById("snippet-text") as HTMLTextAreaElement;
 const snippetLabel = document.getElementById("snippet-label")!;
 const sendSnippetBtn = document.getElementById("send-snippet") as HTMLButtonElement;
@@ -113,15 +114,12 @@ function updateFilePicker(): void {
   filePickerLabel.textContent = armed ? "Select different files" : "or select files";
   selectionSummary.hidden = !armed;
   if (armed && selectedFile) {
-    selectionSummary.replaceChildren(...selectedFile.files.map((file) => {
-      const row = document.createElement("div");
-      const name = document.createElement("span");
-      const size = document.createElement("span");
-      name.textContent = file.name;
-      size.textContent = formatBytes(file.size);
-      row.append(name, size);
-      return row;
-    }));
+    const names = document.createElement("span");
+    const total = document.createElement("span");
+    names.textContent = selectedFile.files.map((file) => file.name).join(" · ");
+    names.title = names.textContent;
+    total.textContent = formatBytes(selectedFile.files.reduce((sum, file) => sum + file.size, 0));
+    selectionSummary.replaceChildren(names, total);
   } else selectionSummary.replaceChildren();
 }
 
@@ -162,6 +160,7 @@ function setStageFullscreen(on: boolean): void {
 stage.addEventListener("click", () => {
   setStageFullscreen(!document.body.classList.contains("qr-full"));
 });
+stageBottom.addEventListener("click", (event) => event.stopPropagation());
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setStageFullscreen(false);
 });
@@ -288,7 +287,8 @@ async function main() {
   window.addEventListener("resize", () => resizeDisplay?.());
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
-    sizeValue.textContent = `${cfgSize.value} px`;
+    const bytes = FRAME_BYTES_OPTIONS[Number(cfgSize.value)] ?? FRAME_BYTES_OPTIONS[0]!;
+    sizeValue.textContent = `${formatBytes(bytes)}/frame`;
   };
   for (const el of [cfgFps, cfgSize]) {
     el.addEventListener("input", updateControlLabels);
@@ -319,18 +319,12 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);
-  const frameBytes = DEFAULT_FRAME_BYTES;
+  const sizeLevel = Number(cfgSize.value);
+  const frameBytes = FRAME_BYTES_OPTIONS[sizeLevel] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
-  const displayPx = Number(cfgSize.value);
-  // Fit ordinary QR codes into a camera-shaped 4:3 stage. Moving the size
-  // slider smaller naturally adds codes; no layout knowledge is required by
-  // the receiver because every cell remains an independent fountain frame.
-  const availableWidth = Math.max(280, Math.min(920, window.innerWidth - 32) - 36);
-  const availableHeight = availableWidth * 3 / 4;
-  const gridCodes = [6, 4, 2, 1].find((count) => {
-    const dims = gridDims(count);
-    return availableWidth / dims.cols >= displayPx && availableHeight / dims.rows >= displayPx;
-  }) ?? 1;
+  // Size is optical payload, not CSS geometry. Higher levels increase both QR
+  // density and parallel codes; the low end stays one sparse, easy-to-read QR.
+  const gridCodes = [1, 1, 2, 2, 4, 6][sizeLevel] ?? 1;
   const { cols: gridCols, rows: gridRows } = gridDims(gridCodes);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
@@ -368,6 +362,8 @@ async function startStream(revealStage = false) {
   let nextSeq = 0;
   stage.hidden = false;
   if (sendStart) sendStart.hidden = true;
+  showStreamPanels(true);
+  setStageFullscreen(true);
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -382,12 +378,12 @@ async function startStream(revealStage = false) {
       // big as this device goes" — and a non-square grid gets both edges,
       // so a 1×2 stack can run the full height of a portrait phone screen.
       budgetW = window.innerWidth;
-      budgetH = window.innerHeight;
+      budgetH = window.innerHeight - stageBottom.offsetHeight;
     } else {
       const rect = stage.getBoundingClientRect();
       const stageStyle = getComputedStyle(stage);
       budgetW = rect.width - Number.parseFloat(stageStyle.paddingLeft) - Number.parseFloat(stageStyle.paddingRight);
-      budgetH = rect.height - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
+      budgetH = rect.height - stageBottom.offsetHeight - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
     }
     scale = Math.max(1, Math.floor(Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH)));
     staging.width = totalW;
@@ -442,7 +438,7 @@ async function startStream(revealStage = false) {
       // scroll target would be the wrong height.
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
-      setStatus(`Sending ${name} · ${formatBytes(fileSize)} · ${gridCodes} QR${gridCodes === 1 ? "" : "s"}`);
+      setStatus("");
       // npm run diagnostics: announce this stream's settings so the server
       // log can pair them with the receiver's end-of-run report — the
       // receiver only ever learns k and blockLen from the wire, never the
@@ -470,7 +466,7 @@ async function startStream(revealStage = false) {
               ecc,
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
-              displayPx,
+              sizeLevel,
             },
             qr: { version, modules },
             fountain: { k: encoder.k, blockLen },

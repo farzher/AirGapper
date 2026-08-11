@@ -18,7 +18,6 @@ import {
   formatDuration,
 } from "../shared/progress";
 import { createDecodeWorker } from "./worker-factory";
-import { NoSignalHintTimer } from "../shared/no-signal";
 import {
   DecodeWorkerPool,
   type SymbolBox,
@@ -34,11 +33,9 @@ import {
   verifyFile,
   type OpticalFile,
 } from "../shared/protocol";
-import { NO_SIGNAL_HINT_TX_FPS } from "../shared/send-settings";
 import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
-import { closeOnBackdropClick } from "../shared/dialog";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -57,17 +54,7 @@ const diagnosticsEl: HTMLDetailsElement | null = null;
 const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 const requestedWidth = 4096;
 const requestedFps = 60;
-const noSignalToast = document.getElementById("no-signal")!;
-const noSignalDialog = document.getElementById("no-signal-dialog") as HTMLDialogElement;
-const noSignalTips = document.getElementById("no-signal-tips")!;
 const metric = (id: string) => document.getElementById(id)!;
-
-// Nothing has decoded in this long → the sender is almost certainly too dense
-// for this camera. The first nudge comes quickly (a dead link is dead within
-// seconds); a dismissed one comes back on a longer leash, because dismissing
-// it doesn't make the transfer start working but the advice has been seen.
-const NO_SIGNAL_FIRST_MS = 8_000;
-const NO_SIGNAL_DISMISSED_MS = 15_000;
 
 // Sliding window for the capture/decode fps metrics — the per-second rates in
 // updateStats() are derived from this, so the window and the divisor can't
@@ -83,7 +70,6 @@ let captureGen = 0;
 let done = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 
-let noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
   (bytes, box, info) => onDecoded(bytes, box, info),
@@ -332,36 +318,6 @@ window.addEventListener("airgapper:enter-receive", () => {
 
 const { setStatus, showError } = statusLine(stats);
 
-// The toast asks one question; the answers live in the dialog. The tip list is
-// built here rather than in the HTML so its numbers stay tied to the shared
-// send-settings constants the sender's controls are rendered from.
-for (const line of [
-  "On the sender, move QR size to the right so fewer, larger codes are shown.",
-  `Still nothing? Lower the sender's speed to ${NO_SIGNAL_HINT_TX_FPS} fps or less.`,
-  "Fill this camera's view with the code, and prop the phone against something — autofocus hunting from hand tremor is the usual culprit.",
-  "Turn the sending screen's brightness all the way up.",
-]) {
-  const item = document.createElement("li");
-  item.textContent = line;
-  noSignalTips.append(item);
-}
-
-document.getElementById("no-signal-help")!.addEventListener("click", () => {
-  noSignalDialog.showModal();
-});
-document.getElementById("no-signal-dismiss")!.addEventListener("click", dismissNoSignal);
-document.getElementById("no-signal-close")!.addEventListener("click", () => noSignalDialog.close());
-// A tap on the backdrop closes too — geometry-tested, see shared/dialog.ts.
-closeOnBackdropClick(noSignalDialog);
-// close fires on the button, Esc, the backdrop, and the programmatic close
-// when a frame finally decodes — all of them mean the advice has been seen.
-noSignalDialog.addEventListener("close", dismissNoSignal);
-
-function dismissNoSignal() {
-  noSignalToast.hidden = true;
-  noSignal.dismiss(performance.now());
-}
-
 /** By the time a transfer ends the camera, worker pool and stats timer are all
  *  torn down and `done` is latched, so a reload is the honest way back to a
  *  live receiver — and it drops the recovered bytes from memory on the way. */
@@ -422,7 +378,6 @@ function stopReceiver(): void {
   minSeq = Infinity;
   maxSeq = -1;
   timeline.length = 0;
-  noSignal = new NoSignalHintTimer(NO_SIGNAL_FIRST_MS, NO_SIGNAL_DISMISSED_MS);
   result.replaceChildren();
   preview.style.display = "none";
   progressEl.style.display = "none";
@@ -439,8 +394,6 @@ function stopReceiver(): void {
     const label = diagnosticsEl.querySelector("summary");
     if (label) label.textContent = "Progress and measured KB/s";
   }
-  noSignalToast.hidden = true;
-  if (noSignalDialog.open) noSignalDialog.close();
   startBtn.disabled = false;
   startBtn.style.display = "";
   startBtn.textContent = "Enable camera";
@@ -511,7 +464,6 @@ async function start() {
   pool.resize(workerCount);
   void applyCameraExtras();
 
-  noSignal.cameraStarted(performance.now());
   cameraStartedTs = performance.now();
   captureGen++;
   scheduleFrame(captureGen);
@@ -720,11 +672,6 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const parsed = parseFrame(bytes);
   if (!parsed || done) return;
   const { header, block } = parsed;
-  if (noSignal.frameDecoded()) {
-    noSignalToast.hidden = true;
-    // The dialog's premise ("nothing decoded") just became false mid-read.
-    if (noSignalDialog.open) noSignalDialog.close();
-  }
   // streamIdentity() covers every header field that has to hold constant, not
   // just the session id — see the note on it in protocol.ts.
   const identity = streamIdentity(header);
@@ -1039,21 +986,6 @@ async function servableMediaUrl(file: OpticalFile, blobUrl: string): Promise<str
   }
 }
 
-/**
- * Seconds of camera and not one decoded frame.
- *
- * Both real fixes are on the SENDER, which is the non-obvious part — someone
- * staring at a blank receiver reaches for the phone. The conservative defaults
- * should work on older hardware, and the same controls can be lowered further.
- *
- * The toast itself only asks the question; the sender-side advice sits behind
- * its Help button in a modal. It stops for good on the first frame that
- * parses, which is the only thing that actually means it worked.
- */
-function showNoSignalHint() {
-  noSignalToast.hidden = false;
-}
-
 /** Nothing is persisted: the text lives here until the page is closed. The
  *  summary line mirrors the file path — run stats under the heading, not up
  *  in the camera status line. */
@@ -1101,7 +1033,6 @@ function updateStats() {
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
   metric("m-dec").textContent = `${perSecond(decodeTimes).toFixed(1)} fps`;
-  if (noSignal.tick(now)) showNoSignalHint();
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing

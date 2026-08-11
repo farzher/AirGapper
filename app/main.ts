@@ -1,6 +1,5 @@
 import "../send/main";
 import "../receive/main";
-import { closeOnBackdropClick } from "../shared/dialog";
 
 const views = {
   home: document.getElementById("homeView")!,
@@ -23,11 +22,6 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")
   button.addEventListener("click", () => showView(button.dataset.mode as "send" | "receive"));
 }
 document.getElementById("home-button")!.addEventListener("click", () => showView("home"));
-
-const legal = document.getElementById("legal-dialog") as HTMLDialogElement;
-document.getElementById("legal-button")!.addEventListener("click", () => legal.showModal());
-document.getElementById("legal-close")!.addEventListener("click", () => legal.close());
-closeOnBackdropClick(legal);
 
 // Capture the untouched, fully bundled document before UI state changes. This
 // avoids a network fetch and makes Download offline work identically from
