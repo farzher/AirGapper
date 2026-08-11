@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- AirGapper v7: ZXing-C++ WebAssembly receiver -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -88,13 +89,29 @@
   .textResult { margin-top:10px; white-space:pre-wrap; word-break:break-word; background:var(--bg); border-radius:10px; padding:12px; max-height:260px; overflow:auto; }
   .toast { position:fixed; left:50%; bottom:22px; transform:translate(-50%,15px); opacity:0; pointer-events:none; background:#111; color:#fff; padding:9px 12px; border-radius:10px; font-size:12px; transition:.18s; z-index:50; }
   .toast.show { opacity:1; transform:translate(-50%,0); }
+  /* Once a transfer starts, give the optical surface the whole viewport. */
+  body.sending { overflow:hidden; }
+  body.sending .app { height:100vh; height:100dvh; min-height:0; }
+  body.sending header { display:none; }
+  body.sending main { width:100%; flex:1; min-height:0; margin:0; padding:8px; }
+  body.sending #sendView.active { height:100%; min-height:0; display:flex; flex-direction:column; }
+  body.sending #sendView .topline { flex:none; height:34px; margin:0 4px 7px; }
+  body.sending #sender.active { flex:1; min-height:0; display:flex; flex-direction:column; }
+  body.sending .qrStage { flex:1; min-height:0; border-radius:14px; }
+  body.sending #qrCanvas { height:100%; min-height:0; }
+  body.sending .controls { flex:none; margin-top:8px; gap:8px; }
+  body.sending .control { padding:9px 12px; }
+  body.sending .controlHead { margin-bottom:5px; }
+  body.sending .sendInfo { flex:none; margin:6px 0 0; min-height:16px; }
   @media(max-width:700px){
     header { padding-top:16px; }
     main { padding-top:12px; }
     .home,.sendStart,.controls { grid-template-columns:1fr; }
+    body.sending .controls { grid-template-columns:1fr 1fr; }
     .mode { min-height:130px; }
     .drop,.textWrap { min-height:190px; }
     .qrStage,#qrCanvas { min-height:390px; }
+    body.sending .qrStage,body.sending #qrCanvas { min-height:0; }
     .receiveCard,#video { height:calc(100dvh - 175px); min-height:430px; }
     .statusCard { min-width:0; flex:1; }
   }
@@ -103,7 +120,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v4</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v7</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -139,8 +156,8 @@
             <input id="fpsRange" type="range" min="1" max="60" step="1" value="10">
           </div>
           <div class="control">
-            <div class="controlHead"><b>Size</b><span class="value" id="sizeValue">2.8 KB/frame · 1 QR</span></div>
-            <input id="sizeRange" type="range" min="300" max="16800" step="100" value="2800">
+            <div class="controlHead"><b>Size</b><span class="value" id="sizeValue">1.4 KB/frame · 1 QR</span></div>
+            <input id="sizeRange" type="range" min="300" max="16800" step="100" value="1400">
           </div>
         </div>
         <div class="sendInfo" id="sendInfo"></div>
@@ -156,7 +173,7 @@
         <div class="receiveHud">
           <div class="statusCard">
             <div class="statusTop"><span id="statusDot" class="dot"></span><span id="statusText">Starting camera…</span></div>
-            <div class="stats"><span id="progressText">0%</span><span id="cameraText">— camera</span><span id="scanText">— scan</span><span id="dropText">— loss</span></div>
+            <div class="stats"><span id="progressText">0%</span><span id="rateText">— KB/s</span><span id="etaText">— ETA</span><span id="cameraText">— camera</span><span id="scanText">— scan</span><span id="dropText">— loss</span></div>
             <div class="progressBar"><i id="progressFill"></i></div>
           </div>
           <button class="cameraBtn" id="flipBtn">Flip</button>
@@ -170,13 +187,14 @@
 <div class="toast" id="toast"></div>
 
 <script data-vendor="qrcode" src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script data-vendor="zxing" src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/iife/reader/index.js"></script>
 <script data-vendor="jsqr" src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script data-vendor="fflate" src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
 <script>
 (() => {
 'use strict';
 
-const BUILD='v4';
+const BUILD='v7';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $ = s => document.querySelector(s);
@@ -199,6 +217,9 @@ const state = {
   cameraFps:0, cameraMeasuredFps:0, cameraFrameCount:0, cameraWindowAt:0, lastPresentedFrames:null,
   scanRate:0, scanCount:0, scanWindowAt:0, lastDecodeAt:0,
   probeIndex:0, senderActualFps:0, senderFrameCount:0, senderWindowAt:0,
+  scanWorkers:[], scanWorkerUrl:null, scanCaptureBusy:false, scanJobSeq:0,
+  rxByteRate:0, rxRateBytes:0, rxRateAt:0,
+  decodeMs:0, decodeSamples:0, scanEngine:'', wasmFailures:0,
 };
 
 function toast(msg) {
@@ -209,6 +230,18 @@ function humanBytes(n) {
   if(n<1024)return n+' B';
   if(n<1048576)return (n/1024).toFixed(n<10240?1:0)+' KB';
   return (n/1048576).toFixed(n<10485760?1:0)+' MB';
+}
+function humanRate(bytesPerSec) {
+  if(!bytesPerSec||bytesPerSec<1)return '— KB/s';
+  const kb=bytesPerSec/1024;
+  return `${kb<10?kb.toFixed(1):Math.round(kb)} KB/s`;
+}
+function humanEta(seconds) {
+  if(!Number.isFinite(seconds)||seconds<0)return '— ETA';
+  if(seconds<1)return '<1s ETA';
+  if(seconds<60)return `${Math.ceil(seconds)}s ETA`;
+  const m=Math.floor(seconds/60),s=Math.ceil(seconds%60);
+  return `${m}:${String(s).padStart(2,'0')} ETA`;
 }
 function concatBytes(arrays) {
   let n=0; for(const a of arrays)n+=a.length;
@@ -257,7 +290,7 @@ function base45Decode(s){
 }
 
 function resetSend(){
-  stopSender();state.transfer=null;state.esi=0;state.displaySeq=0;
+  stopSender();document.body.classList.remove('sending');state.transfer=null;state.esi=0;state.displaySeq=0;
   $('#sender').classList.remove('active');$('#sendStart').style.display='grid';
   $('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;
 }
@@ -328,9 +361,9 @@ async function prepareTransfer(raw,label){
   if(!window.fflate||!window.qrcode){toast('QR libraries are still loading');return;}
   stopSender();const compressed=fflate.gzipSync(raw,{level:6}),hash=await shortHashBytes(compressed);
   state.transfer={raw,compressed,hash,label,id:randomU32(),sources:[],cdf:null,K:0,symbolBytes:0,qrCount:1,frameBytes:0};buildFountain(state.transfer);
-  $('#sendStart').style.display='none';$('#sender').classList.add('active');startSender();
+  document.body.classList.add('sending');$('#sendStart').style.display='none';$('#sender').classList.add('active');requestAnimationFrame(()=>{renderSendFrame();startSender();});
   const ratio=raw.length?Math.round((1-compressed.length/raw.length)*100):0;
-  $('#sendInfo').textContent=`${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0?` · ${ratio}% smaller`:''} · fountain FEC`;
+  $('#sendInfo').textContent=`${label} · ${humanBytes(raw.length)} → ${humanBytes(compressed.length)} gzip${ratio>0?` · ${ratio}% smaller`:''} · fountain FEC · WASM receiver`;
 }
 function updateSendLabels(){
   $('#fpsValue').textContent=$('#fpsRange').value+' FPS';
@@ -368,8 +401,10 @@ function drawMatrix(ctx,matrix,x,y,side){
   const quiet=4,n=matrix.length,total=n+quiet*2;
   ctx.fillStyle='#fff';ctx.fillRect(Math.floor(x),Math.floor(y),Math.ceil(side),Math.ceil(side));ctx.fillStyle='#000';
   // Map module boundaries directly to the full square. Density never changes displayed QR size.
+  // Round shared module boundaries to the same pixel. The old floor/ceil pair
+  // expanded every dark module and could make dense codes look artificially bold.
   for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(matrix[r][c]){
-    const x1=Math.floor(x+(c+quiet)*side/total),x2=Math.ceil(x+(c+quiet+1)*side/total),y1=Math.floor(y+(r+quiet)*side/total),y2=Math.ceil(y+(r+quiet+1)*side/total);
+    const x1=Math.round(x+(c+quiet)*side/total),x2=Math.round(x+(c+quiet+1)*side/total),y1=Math.round(y+(r+quiet)*side/total),y2=Math.round(y+(r+quiet+1)*side/total);
     ctx.fillRect(x1,y1,Math.max(1,x2-x1),Math.max(1,y2-y1));
   }
 }
@@ -383,7 +418,8 @@ function renderSendFrame(){
     }
   }catch(e){console.warn(e);toast('Size too large for QR');return;}
   const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}
-  $('#qrMeta').textContent=`${$('#fpsRange').value} FPS · ${humanBytes(t.frameBytes)}/frame · ${t.qrCount} QR${t.qrCount===1?'':'s'}`;
+  const targetFps=+$('#fpsRange').value,actual=state.senderActualFps||targetFps,rate=t.frameBytes*actual;
+  $('#qrMeta').textContent=`${state.senderActualFps&&Math.abs(actual-targetFps)>1?actual.toFixed(0)+'/'+targetFps:targetFps} FPS · ${humanRate(rate)} · ${humanBytes(t.frameBytes)}/frame · ${t.qrCount} QR${t.qrCount===1?'':'s'}`;
 }
 function startSender(){
   stopSender();if(!state.transfer)return;const interval=1000/(+$('#fpsRange').value);let next=performance.now();
@@ -414,14 +450,15 @@ async function startCamera(){
   try{
     state.stream=await requestCamera();const video=$('#video');video.srcObject=state.stream;video.setAttribute('playsinline','');video.muted=true;await video.play();gate.classList.remove('active');
     try{state.barcodeDetector='BarcodeDetector'in window?new BarcodeDetector({formats:['qr_code']}):null;}catch{state.barcodeDetector=null;}
-    const settings=state.stream.getVideoTracks()[0]?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;setStatus('Point at sender','');state.scanToken++;cameraMeterLoop(state.scanToken);scanLoop(state.scanToken);
+    const settings=state.stream.getVideoTracks()[0]?.getSettings?.()||{};state.cameraFps=+settings.frameRate||0;state.wasmFailures=0;state.decodeMs=0;state.decodeSamples=0;setStatus('Point at sender','');state.scanToken++;const token=state.scanToken;cameraMeterLoop(token);startScanPipeline(token);
   }catch(e){console.warn('AirGapper camera:',e?.name,e?.message);gate.classList.add('active');setStatus(cameraErrorText(e),'bad');}
 }
-function stopCamera(){state.scanToken++;if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
+function stopCamera(){state.scanToken++;stopScanWorkers();if(state.stream){state.stream.getTracks().forEach(t=>t.stop());state.stream=null;}$('#video').srcObject=null;}
 $('#enableCameraBtn').onclick=()=>startCamera();$('#flipBtn').onclick=()=>{state.facing=state.facing==='environment'?'user':'environment';startCamera();};
 function resetRx(){
   state.rx=null;state.cameraMeasuredFps=0;state.cameraFrameCount=0;state.cameraWindowAt=performance.now();state.lastPresentedFrames=null;state.scanRate=0;state.scanCount=0;state.scanWindowAt=performance.now();state.lastDecodeAt=0;state.probeIndex=0;
-  $('#progressFill').style.width='0%';$('#progressText').textContent='0%';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
+  state.rxByteRate=0;state.rxRateBytes=0;state.rxRateAt=performance.now();state.scanCaptureBusy=false;
+  $('#progressFill').style.width='0%';$('#progressText').textContent='0%';$('#rateText').textContent='— KB/s';$('#etaText').textContent='— ETA';$('#dropText').textContent='— loss';$('#cameraText').textContent='— camera';$('#scanText').textContent='— scan';$('#result').classList.remove('active');$('#result').innerHTML='';
 }
 function newRx(p){
   return{id:p.id,K:p.K,symbolBytes:p.symbolBytes,totalBytes:p.totalBytes,hash:p.hash,targetFps:p.fps,expectedQrs:p.qrs,cdf:robustSolitonCDF(p.K),source:new Array(p.K),solved:0,equations:new Map(),adj:new Array(p.K),nextEq:1,seen:new Set(),minEsi:null,maxEsi:null,packets:0,done:false,startedAt:performance.now()};
@@ -440,7 +477,7 @@ function solveBlock(rx,index,data){
   }
 }
 function addFountainPacket(rx,p){
-  if(rx.seen.has(p.esi))return false;rx.seen.add(p.esi);rx.packets++;
+  if(rx.seen.has(p.esi))return false;rx.seen.add(p.esi);rx.packets++;state.rxRateBytes+=p.data.length;
   if(rx.minEsi===null||p.esi<rx.minEsi)rx.minEsi=p.esi;if(rx.maxEsi===null||p.esi>rx.maxEsi)rx.maxEsi=p.esi;
   const idxs=fountainIndices(rx.K,rx.id,p.esi,rx.cdf),data=p.data.slice(),remaining=new Set();
   for(const i of idxs){if(rx.source[i])xorInto(data,rx.source[i]);else remaining.add(i);}
@@ -457,9 +494,19 @@ function ingest(raw){
 function lossRate(rx){if(!rx||rx.minEsi===null||rx.maxEsi===null)return 0;const span=rx.maxEsi-rx.minEsi+1;return span>0?Math.max(0,(span-rx.seen.size)/span):0;}
 function effectiveCameraFps(){return state.cameraFps||state.cameraMeasuredFps||0;}
 function updateRxUi(){
-  const rx=state.rx,pct=rx?Math.min(100,Math.round(rx.solved/rx.K*100)):0,loss=rx?lossRate(rx):0,cam=effectiveCameraFps();
+  const rx=state.rx,pct=rx?Math.min(100,Math.round(rx.solved/rx.K*100)):0,loss=rx?lossRate(rx):0,cam=effectiveCameraFps(),now=performance.now();
+  if(now-state.rxRateAt>=700){
+    const instant=state.rxRateBytes*1000/(now-state.rxRateAt);
+    state.rxByteRate=state.rxByteRate?state.rxByteRate*.58+instant*.42:instant;
+    state.rxRateBytes=0;state.rxRateAt=now;
+  }
   $('#progressText').textContent=pct+'%';$('#progressFill').style.width=pct+'%';$('#dropText').textContent=rx&&rx.packets>8?`${Math.round(loss*100)}% loss`:'— loss';
   $('#cameraText').textContent=cam?`${cam.toFixed(0)} camera fps`:'— camera';$('#scanText').textContent=state.scanRate?`${state.scanRate.toFixed(0)} scan/s`:'— scan';
+  $('#rateText').textContent=humanRate(state.rxByteRate);
+  if(rx&&state.rxByteRate>64&&pct<100){
+    const solvedBytes=Math.min(rx.totalBytes,rx.solved*rx.symbolBytes),remaining=Math.max(0,rx.totalBytes-solvedBytes);
+    $('#etaText').textContent=humanEta(remaining/state.rxByteRate);
+  }else $('#etaText').textContent=pct===100?'0s ETA':'— ETA';
   if(!rx){setStatus('Point at sender','');return;}
   let msg='Receiving',kind='good',since=performance.now()-state.lastDecodeAt;
   if(since>1800){msg='Move closer or lower size';kind='warn';}
@@ -478,7 +525,7 @@ async function finishReceive(){
 function renderResult(data){
   const el=$('#result');el.classList.add('active');el.textContent='';const head=document.createElement('div');head.className='resultHead';const title=document.createElement('div');title.className='resultTitle';title.textContent=data.kind==='text'?'Text received':`${data.files.length} file${data.files.length===1?'':'s'} received`;head.appendChild(title);el.appendChild(head);
   if(data.kind==='text'){const copy=document.createElement('button');copy.className='smallBtn';copy.textContent='Copy';copy.onclick=async()=>{await navigator.clipboard?.writeText(data.text);toast('Copied');};head.appendChild(copy);const t=document.createElement('div');t.className='textResult';t.textContent=data.text;el.appendChild(t);}
-  else{const list=document.createElement('div');list.className='files';for(const f of data.files){const row=document.createElement('div');row.className='fileRow',name=document.createElement('div');name.className='fileName';name.textContent=`${f.name} · ${humanBytes(f.size)}`;const b=document.createElement('button');b.className='smallBtn';b.textContent='Download';b.onclick=()=>downloadBlob(new Blob([f.data],{type:f.type}),f.name);row.append(name,b);list.appendChild(row);}el.appendChild(list);}
+  else{const list=document.createElement('div');list.className='files';for(const f of data.files){const row=document.createElement('div');row.className='fileRow';const nameEl=document.createElement('div');nameEl.className='fileName';nameEl.textContent=`${f.name} · ${humanBytes(f.size)}`;const b=document.createElement('button');b.className='smallBtn';b.textContent='Download';b.onclick=()=>downloadBlob(new Blob([f.data],{type:f.type}),f.name);row.append(nameEl,b);list.appendChild(row);}el.appendChild(list);}
 }
 function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1500);}
 
@@ -510,33 +557,126 @@ function cameraMeterLoop(token){
   };
   video.requestVideoFrameCallback(tick);
 }
-async function decodeFrame(video){
-  const started=performance.now();state.scanCount++;const now=started;if(now-state.scanWindowAt>=1000){state.scanRate=state.scanCount*1000/(now-state.scanWindowAt);state.scanCount=0;state.scanWindowAt=now;updateRxUi();}
-  // Native detector is especially useful for 2/4/6 QR frames because it can return several codes at once.
-  const want=state.rx?.expectedQrs||1;
-  if(state.barcodeDetector&&want>1){
-    try{const codes=await state.barcodeDetector.detect(video);let any=false;for(const c of codes)any=ingest(c.rawValue)||any;if(any)return;}catch{}
-  }
-  if(!window.jsQR)return;
-  const qrs=state.rx?.expectedQrs||QR_COUNTS[state.probeIndex++%QR_COUNTS.length],maxW=qrs>=6?1440:qrs>=4?1280:qrs>=2?1100:900,ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16,canvas=$('#scanCanvas');
-  canvas.width=Math.min(maxW,video.videoWidth||maxW);canvas.height=Math.max(360,Math.round(canvas.width*ratio));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,0,0,canvas.width,canvas.height);
-  const regions=normalizedRegions(qrs,canvas.width,canvas.height);let hit=false;for(const region of regions){const raw=jsQrDecodeRegion(ctx,canvas,region);if(raw)hit=ingest(raw)||hit;}
-  // For a single QR, native detection is a fallback rather than a mandatory bottleneck.
-  if(!hit&&state.barcodeDetector&&want===1&&performance.now()-started<90){try{const codes=await state.barcodeDetector.detect(video);for(const c of codes)if(ingest(c.rawValue))break;}catch{}}
-  if(performance.now()-state.lastDecodeAt>1800)updateRxUi();
+function recordCompletedScan(){
+  state.scanCount++;const now=performance.now();
+  if(now-state.scanWindowAt>=1000){state.scanRate=state.scanCount*1000/(now-state.scanWindowAt);state.scanCount=0;state.scanWindowAt=now;updateRxUi();}
 }
-function scanLoop(token){
-  const video=$('#video');const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return;if(video.readyState>=2)await decodeFrame(video);if(token===state.scanToken&&state.mode==='receive')setTimeout(tick,0);};tick();
+async function getVendorSource(name){
+  const tag=document.querySelector(`script[data-vendor="${name}"]`);
+  if(tag&&!tag.src&&tag.textContent.trim())return tag.textContent;
+  if(tag?.src){const r=await fetch(tag.src,{cache:'force-cache'});if(!r.ok)throw new Error(`${name} worker source unavailable`);return r.text();}
+  throw new Error(`${name} unavailable`);
+}
+function stopScanWorkers(){
+  for(const slot of state.scanWorkers){try{slot.worker.terminate();}catch{}}
+  state.scanWorkers=[];state.scanCaptureBusy=false;
+  if(state.scanWorkerUrl){URL.revokeObjectURL(state.scanWorkerUrl);state.scanWorkerUrl=null;}
+}
+async function initScanWorkers(token){
+  stopScanWorkers();
+  if(!window.Worker||!window.OffscreenCanvas||!window.createImageBitmap)return false;
+  try{
+    // Embed the ZXing IIFE in the worker. Its ~1 MB WebAssembly reader is then
+    // instantiated inside each worker, keeping all barcode work off the UI thread.
+    const zxingSource=await getVendorSource('zxing');if(token!==state.scanToken)return false;
+    const logic=String.raw`
+let canvas=null,ctx=null;
+function gridShape(count,w,h){
+  const pairs=count===1?[[1,1]]:count===2?[[2,1],[1,2]]:count===4?[[2,2]]:[[3,2],[2,3]];
+  let best=pairs[0],bestSide=-1;for(const p of pairs){const side=Math.min(w/p[0],h/p[1]);if(side>bestSide){bestSide=side;best=p;}}return{cols:best[0],rows:best[1]};
+}
+function regions(count,w,h){
+  const shape=gridShape(count,w,h),out=[];
+  for(let r=0;r<shape.rows;r++)for(let c=0;c<shape.cols;c++){
+    const pad=.055,x=Math.max(0,c/shape.cols-pad/shape.cols),y=Math.max(0,r/shape.rows-pad/shape.rows),x2=Math.min(1,(c+1)/shape.cols+pad/shape.cols),y2=Math.min(1,(r+1)/shape.rows+pad/shape.rows);out.push([x,y,x2-x,y2-y]);
+  }return out;
+}
+function ensureCanvas(w,h){if(!canvas){canvas=new OffscreenCanvas(w,h);ctx=canvas.getContext('2d',{willReadFrequently:true,alpha:false});}if(canvas.width!==w)canvas.width=w;if(canvas.height!==h)canvas.height=h;}
+self.onmessage=async e=>{
+  const {id,bitmap,qrs,maxW}=e.data,t0=performance.now(),codes=[];
+  try{
+    const ratio=bitmap.height/bitmap.width,w=Math.max(420,Math.min(maxW,bitmap.width)),h=Math.max(280,Math.round(w*ratio));ensureCanvas(w,h);ctx.drawImage(bitmap,0,0,w,h);bitmap.close();
+    // Cropping each expected lane and asking ZXing for one symbol is much cheaper
+    // on low-end phones than a full-frame multi-symbol search.
+    for(const region of regions(qrs,w,h)){
+      const x=Math.round(region[0]*w),y=Math.round(region[1]*h),rw=Math.max(8,Math.min(w-x,Math.round(region[2]*w))),rh=Math.max(8,Math.min(h-y,Math.round(region[3]*h)));
+      const img=ctx.getImageData(x,y,rw,rh);
+      const results=await ZXingWASM.readBarcodes(img,{formats:['QRCode'],maxNumberOfSymbols:1,tryHarder:false,tryRotate:false,tryInvert:false,tryDownscale:true});
+      const text=results&&results[0]&&results[0].text;if(text&&!codes.includes(text))codes.push(text);
+    }
+    self.postMessage({id,codes,ms:performance.now()-t0,engine:'ZXing-C++ WASM'});
+  }catch(err){try{bitmap.close();}catch{}self.postMessage({id,codes:[],ms:performance.now()-t0,error:String(err?.message||err),engine:'ZXing-C++ WASM'});}
+};`;
+    state.scanWorkerUrl=URL.createObjectURL(new Blob([zxingSource,'\n',logic],{type:'text/javascript'}));
+    const cores=navigator.hardwareConcurrency||4;
+    // More workers are not automatically faster on old phones: keep CPU/cache
+    // contention low and use additional workers only when the device can afford it.
+    const count=cores<=4?1:cores<=8?2:3;
+    for(let i=0;i<count;i++){
+      const worker=new Worker(state.scanWorkerUrl),slot={worker,busy:false};
+      worker.onmessage=e=>{
+        slot.busy=false;if(token!==state.scanToken||state.mode!=='receive')return;
+        state.scanEngine=e.data.engine||'WASM';
+        if(Number.isFinite(e.data.ms)){state.decodeMs=state.decodeSamples?state.decodeMs*.82+e.data.ms*.18:e.data.ms;state.decodeSamples++;}
+        if(e.data.error){
+          state.wasmFailures++;
+          if(state.wasmFailures>=3){
+            console.warn('AirGapper WASM scanner unavailable, falling back:',e.data.error);
+            stopScanWorkers();state.scanEngine='jsQR fallback';legacyScanLoop(token);return;
+          }
+        }else state.wasmFailures=0;
+        recordCompletedScan();let hit=false;for(const raw of e.data.codes||[])hit=ingest(raw)||hit;if(!hit&&performance.now()-state.lastDecodeAt>1800)updateRxUi();
+      };
+      worker.onerror=e=>{slot.busy=false;console.warn('AirGapper WASM scan worker:',e.message||e);};
+      state.scanWorkers.push(slot);
+    }
+    return state.scanWorkers.length>0;
+  }catch(e){console.warn('AirGapper WASM workers unavailable:',e);stopScanWorkers();return false;}
+}
+function scanWidthFor(qrs){const base=qrs>=6?1500:qrs>=4?1300:qrs>=2?1050:850;const ms=state.decodeMs||0;return ms>180?Math.round(base*.68):ms>100?Math.round(base*.82):base;}
+async function dispatchWorkerFrame(video,token){
+  if(state.scanCaptureBusy||token!==state.scanToken||state.mode!=='receive'||video.readyState<2)return;
+  const slot=state.scanWorkers.find(w=>!w.busy);if(!slot)return;
+  slot.busy=true;state.scanCaptureBusy=true;
+  try{
+    const bitmap=await createImageBitmap(video);if(token!==state.scanToken||state.mode!=='receive'){bitmap.close();slot.busy=false;return;}
+    const qrs=state.rx?.expectedQrs||QR_COUNTS[state.probeIndex++%QR_COUNTS.length];
+    slot.worker.postMessage({id:++state.scanJobSeq,bitmap,qrs,maxW:scanWidthFor(qrs)},[bitmap]);
+  }catch(e){slot.busy=false;console.warn('AirGapper frame capture:',e);}finally{state.scanCaptureBusy=false;}
+}
+function threadedScanLoop(token){
+  const video=$('#video');
+  if(video.requestVideoFrameCallback){
+    const tick=()=>{if(token!==state.scanToken||state.mode!=='receive')return;video.requestVideoFrameCallback(tick);dispatchWorkerFrame(video,token);};video.requestVideoFrameCallback(tick);
+  }else{
+    const tick=()=>{if(token!==state.scanToken||state.mode!=='receive')return;dispatchWorkerFrame(video,token);setTimeout(tick,16);};tick();
+  }
+}
+async function decodeFrameLegacy(video){
+  const started=performance.now();
+  if(!window.jsQR)return;
+  const qrs=state.rx?.expectedQrs||QR_COUNTS[state.probeIndex++%QR_COUNTS.length],maxW=scanWidthFor(qrs),ratio=video.videoWidth&&video.videoHeight?video.videoHeight/video.videoWidth:9/16,canvas=$('#scanCanvas');
+  canvas.width=Math.min(maxW,video.videoWidth||maxW);canvas.height=Math.max(360,Math.round(canvas.width*ratio));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  let hit=false;for(const region of normalizedRegions(qrs,canvas.width,canvas.height)){const raw=jsQrDecodeRegion(ctx,canvas,region);if(raw)hit=ingest(raw)||hit;}
+  recordCompletedScan();if(!hit&&state.barcodeDetector){try{const codes=await state.barcodeDetector.detect(video);for(const c of codes)hit=ingest(c.rawValue)||hit;}catch{}}
+  if(!hit&&performance.now()-state.lastDecodeAt>1800)updateRxUi();
+}
+function legacyScanLoop(token){
+  const video=$('#video');const tick=async()=>{if(token!==state.scanToken||state.mode!=='receive')return;if(video.readyState>=2)await decodeFrameLegacy(video);if(token===state.scanToken&&state.mode==='receive')setTimeout(tick,0);};tick();
+}
+async function startScanPipeline(token){
+  const threaded=await initScanWorkers(token);if(token!==state.scanToken)return;
+  if(threaded){state.scanEngine='ZXing-C++ WASM';threadedScanLoop(token);}else{state.scanEngine='jsQR fallback';legacyScanLoop(token);}
 }
 
 // ---------- Offline download ----------
 $('#offlineBtn').onclick=async()=>{
   const btn=$('#offlineBtn'),old=btn.textContent;btn.textContent='Preparing…';btn.disabled=true;
   try{
-    const clone=document.documentElement.cloneNode(true);clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');
+    const clone=document.documentElement.cloneNode(true);clone.querySelector('body')?.classList.remove('sending');clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');
     const fileInput=clone.querySelector('#fileInput');if(fileInput)fileInput.value='';const textInput=clone.querySelector('#textInput');if(textInput){textInput.value='';textInput.textContent='';}const textSend=clone.querySelector('#textSendBtn');if(textSend)textSend.disabled=true;
     const live=[...document.querySelectorAll('script[data-vendor]')],copies=[...clone.querySelectorAll('script[data-vendor]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}
-    downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'AirGapper-v4-offline.html');toast('Offline copy downloaded');
+    downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),'AirGapper-v7-offline.html');toast('Offline copy downloaded');
   }catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}
 };
 window.addEventListener('resize',()=>{if(state.transfer)renderSendFrame();});
