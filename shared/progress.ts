@@ -35,12 +35,19 @@ export function estimateTransferProgress(
 
   // Every useful frame contributes one block-sized equation. Solved blocks are
   // deliberately NOT used here: fountain peeling is back-loaded and can solve
-  // a large pending graph in one cascade, which made the old display sit near
-  // 70% and then jump straight to complete. Information arrival is linear and
-  // completion cannot happen before k useful equations, so map those equations
-  // directly across 0–99%. If loss requires repair beyond k, stay at 99% while
-  // the ETA continues to update; only verified completion may show 100%.
-  const fraction = 0.99 * Math.min(1, uniqueFrames / minimumFrames);
+  // a large pending graph in one cascade. The first k equations fill 97% of the
+  // bar, expected repair reaches 98%, then extra repair approaches 99%. This
+  // keeps moving under loss without ever showing 0 bytes left before decode and
+  // verification actually finish.
+  let fraction: number;
+  if (uniqueFrames <= minimumFrames) {
+    fraction = 0.97 * (uniqueFrames / minimumFrames);
+  } else if (uniqueFrames <= expectedFrames) {
+    fraction = 0.97 + 0.01 * ((uniqueFrames - minimumFrames) / expectedRedundancy);
+  } else {
+    const repairStep = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));
+    fraction = 0.98 + 0.01 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
+  }
   const phase = uniqueFrames < minimumFrames ? "collecting" : "decoding";
   const rate = elapsedSeconds > 0 ? uniqueFrames / elapsedSeconds : 0;
 

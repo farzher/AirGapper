@@ -774,9 +774,8 @@ function updateProgressEstimate() {
   bar.style.width = `${percent.toFixed(1)}%`;
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
   progressLabel.textContent = `${shownPercent}%`;
-  const receivedBytes = Math.min(decoder.totalLen, usefulFrames * decoder.blockLen);
-  const remainingBytes = decoder.totalLen - receivedBytes;
-  transferSizeLabel.textContent = `${formatBytes(receivedBytes)} of ${formatBytes(decoder.totalLen)}`;
+  const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
+  transferSizeLabel.textContent = `${formatBytes(remainingBytes)} remaining`;
   const liveKbs = liveGoodputKbs(performance.now());
   etaLabel.textContent = remainingBytes === 0
     ? "Decoding…"
@@ -880,7 +879,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
-  transferSizeLabel.textContent = `${formatBytes(container.length)} of ${formatBytes(container.length)}`;
+  transferSizeLabel.textContent = "0 B remaining";
   etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
@@ -888,7 +887,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
     seconds = (performance.now() - startTs) / 1000;
     document.body.classList.add("receive-complete");
-    transferSizeLabel.textContent = `${formatBytes(file.bytes.length)} of ${formatBytes(file.bytes.length)}`;
+    transferSizeLabel.textContent = "0 B remaining";
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);

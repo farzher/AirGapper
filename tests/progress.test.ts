@@ -26,7 +26,7 @@ test("the carousel needs almost no fountain overhead, and the model says so", ()
 test("progress and ETA follow the observed unique-frame rate", () => {
   const progress = estimateTransferProgress(K, 50, 10);
   assert.equal(progress.expectedFrames, EXPECTED_FRAMES);
-  assert.equal(progress.fraction, 0.495);
+  assert.equal(progress.fraction, 0.485);
   assert.equal(progress.phase, "collecting");
   // 52 frames still wanted at the observed 5 frames/s.
   assert.equal(progress.etaSeconds, 10.4);
@@ -36,9 +36,10 @@ test("progress follows useful information and reserves 100% for completion", () 
   const at = (frames: number) => estimateTransferProgress(K, frames, 20).fraction;
 
   assert.equal(estimateTransferProgress(K, 2, 4).etaSeconds, undefined, "too early to guess");
-  assert.equal(at(50), 0.495, "half the required information is half the visible progress");
-  assert.equal(at(K), 0.99, "the theoretical minimum reaches the pre-verification ceiling");
-  assert.equal(at(EXPECTED_FRAMES + 30), 0.99, "repair frames never claim verified completion");
+  assert.equal(at(50), 0.485, "half the required information is half the collecting range");
+  assert.equal(at(K), 0.97, "the theoretical minimum leaves room for decode and repair");
+  assert.equal(at(EXPECTED_FRAMES), 0.98, "expected repair advances the bar");
+  assert.ok(at(EXPECTED_FRAMES + 30) > 0.98 && at(EXPECTED_FRAMES + 30) < 0.99);
 });
 
 test("the ETA keeps quoting a time once a stream runs long", () => {
@@ -51,9 +52,9 @@ test("the ETA keeps quoting a time once a stream runs long", () => {
 });
 
 test("a peeling cascade cannot hold back or jump the visible progress", () => {
-  assert.equal(estimateTransferProgress(K, 70, 20, 10).fraction, 0.693);
-  assert.equal(estimateTransferProgress(K, 70, 20, 69).fraction, 0.693);
-  assert.equal(estimateTransferProgress(K, 100, 20, 100).fraction, 0.99);
+  assert.ok(Math.abs(estimateTransferProgress(K, 70, 20, 10).fraction - 0.679) < 1e-12);
+  assert.ok(Math.abs(estimateTransferProgress(K, 70, 20, 69).fraction - 0.679) < 1e-12);
+  assert.equal(estimateTransferProgress(K, 100, 20, 100).fraction, 0.97);
 });
 
 test("durations stay compact and readable", () => {
