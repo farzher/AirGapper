@@ -148,10 +148,9 @@ a { color: inherit; }
   border: 0;
   border-radius: 0;
   padding: 0;
-  cursor: pointer;
 }
 .stage[hidden] { display: none; }
-.stage canvas { display: block; max-width: 100%; }
+.stage canvas { display: block; max-width: 100%; cursor: pointer; }
 .status-line { min-height: 18px; margin-top: 9px; text-align: center; }
 .status-line.error { color: var(--bad); font-weight: 650; }
 .footer-hint { text-align: center; }
@@ -174,7 +173,6 @@ body.qr-full #stage {
   padding: 0;
   border: 0;
   border-radius: 0;
-  cursor: pointer;
 }
 
 /* Settings and diagnostics ------------------------------------------------- */

@@ -163,7 +163,7 @@ function setStageFullscreen(on: boolean): void {
   window.scrollTo(0, on ? 0 : scrollBeforeFullscreen);
 }
 
-stage.addEventListener("click", () => {
+canvas.addEventListener("click", () => {
   const entering = !document.body.classList.contains("qr-full");
   setStageFullscreen(entering);
   if (entering) void document.documentElement.requestFullscreen?.().catch(() => undefined);
@@ -171,7 +171,6 @@ stage.addEventListener("click", () => {
 document.addEventListener("fullscreenchange", () => {
   if (!document.fullscreenElement) setStageFullscreen(false);
 });
-stageBottom.addEventListener("click", (event) => event.stopPropagation());
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setStageFullscreen(false);
 });
