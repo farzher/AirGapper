@@ -18,3 +18,5 @@ The benchmark has two layers:
 2. **Hardware-capture baseline** — confirms that ZXing can recover all four bootstrap anchors from each supplied phone photograph and records the encoded profile. The current fixtures are intentionally marked as profile 2: they document the broken pre-v34 geometry and are not acceptance captures for profile 3.
 
 The fixture presets are only a first approximation of the two supplied phones. Once profile 3 is captured on hardware, add those images as the first payload-decoding acceptance fixtures and tune the synthetic filter against them.
+
+For a stable profile 3 diagnostic capture, use a sender showing **v34b**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.

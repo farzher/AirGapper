@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v34a: locally registered AirGrid profile -->
+<!-- AirGapper v34b: frozen-page AirGrid diagnostics -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -140,7 +140,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v34a</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v34b</span></div><div class="tag">Air-gapped file transfer</div></div>
     <button class="ghost" id="offlineBtn">Download offline</button>
   </header>
 
@@ -172,8 +172,8 @@
         </div>
         <div class="controls">
           <div class="control">
-            <div class="controlHead"><b>FPS</b><span class="value" id="fpsValue">15 fps</span></div>
-            <input id="fpsRange" type="range" min="5" max="30" step="1" value="15">
+            <div class="controlHead"><b>Page rate</b><span class="value" id="fpsValue">15 fps</span></div>
+            <input id="fpsRange" type="range" min="0" max="30" step="1" value="15" aria-label="AirGrid page rate; zero freezes the current page">
           </div>
           <div class="control">
             <div class="controlHead"><b class="transferName" id="transferName">File</b></div>
@@ -214,7 +214,7 @@
 (() => {
 'use strict';
 
-const BUILD='v34a';
+const BUILD='v34b';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $=s=>document.querySelector(s);
@@ -255,7 +255,7 @@ const BLACK32=0xff000000,WHITE32=0xffffffff;
 
 const state={
   mode:'home',stream:null,facing:'environment',cameraDeviceId:null,cameraDevices:[],cameraStartPromise:null,scanToken:0,
-  transfer:null,sendTimer:null,displaySeq:0,senderActualFps:0,senderFrameCount:0,senderWindowAt:0,airImage:null,airImage32:null,
+  transfer:null,sendTimer:null,displaySeq:0,displayedPage:-1,senderActualFps:0,senderFrameCount:0,senderWindowAt:0,airImage:null,airImage32:null,
   rx:null,debug:false,barcodeDetector:null,
   cameraFps:0,cameraMeasuredFps:0,cameraRequestedFps:0,cameraRequestedWidth:0,cameraRequestedHeight:0,cameraWidth:0,cameraHeight:0,cameraFrameCount:0,cameraWindowAt:0,lastPresentedFrames:null,cameraSkippedFrames:0,cameraSettings:null,cameraCaps:null,
   scanWorker:null,scanWorkerUrl:null,scanBusy:false,scanStartedAt:0,scanEngine:'',scanFrames:0,scanWindowFrames:0,scanRate:0,decodeMs:0,decodeTimes:[],captureMs:0,workerUtil:0,workerBusyWindowMs:0,metricsWindowAt:0,longTaskCount:0,longTaskMs:0,
@@ -330,17 +330,18 @@ function fitAirCanvas(canvas){const host=canvas.parentElement?.getBoundingClient
 function ensureAirLayout(t,canvas){const groupsX=Math.max(1,Math.floor(canvas.width/AIR.groupPx)),groupsY=Math.max(1,Math.floor(canvas.height/AIR.groupPx)),key=`${canvas.width}x${canvas.height}:${groupsX}x${groupsY}`;if(t.layout?.key===key)return t.layout;const fieldW=groupsX*AIR.groupPx,fieldH=groupsY*AIR.groupPx,x0=Math.floor((canvas.width-fieldW)/2),y0=Math.floor((canvas.height-fieldH)/2),groups=[];for(let gy=0;gy<groupsY;gy++)for(let gx=0;gx<groupsX;gx++){const text=base45Encode(buildBootstrapBytes(t,gx,gy)),matrix=makeQrMatrixText(text);groups.push({gx,gy,matrix,x:x0+gx*AIR.groupPx,y:y0+gy*AIR.groupPx});}t.layout={key,groupsX,groupsY,x0,y0,groups,payloadTiles:groups.length*AIR_SLOTS.length,frameBytes:groups.length*AIR_SLOTS.length*AIR.symbolBytes};return t.layout;}
 function ensureAirImage(canvas){if(!state.airImage||state.airImage.width!==canvas.width||state.airImage.height!==canvas.height){state.airImage=new ImageData(canvas.width,canvas.height);state.airImage32=new Uint32Array(state.airImage.data.buffer);}state.airImage32.fill(WHITE32);return state.airImage32;}
 
-function buildFountain(t){t.symbolBytes=AIR.symbolBytes;t.K=Math.max(1,Math.ceil(t.compressed.length/t.symbolBytes));t.sources=[];for(let i=0;i<t.K;i++)t.sources.push(t.compressed.subarray(i*t.symbolBytes,Math.min(t.compressed.length,(i+1)*t.symbolBytes)));t.cdf=robustSolitonCDF(t.K);t.id=randomU32();t.layout=null;state.displaySeq=0;}
-async function prepareTransfer(raw,label){if(!window.fflate||!window.qrcode){toast('AirGrid libraries are still loading');return;}stopSender();const compressed=fflate.gzipSync(raw,{level:6}),hash=await shortHashBytes(compressed);state.transfer={raw,compressed,hash,label,id:0,sources:[],cdf:null,K:0,symbolBytes:AIR.symbolBytes,layout:null};$('#transferName').textContent=label;$('#transferName').title=label;$('#transferSizes').textContent=`${humanBytes(raw.length)} uncompressed · ${humanBytes(compressed.length)} compressed`;buildFountain(state.transfer);document.body.classList.add('sending');$('#sendStart').style.display='none';$('#sender').classList.add('active');requestAnimationFrame(()=>{renderAirFrame();startSender();});}
-function renderAirFrame(){const t=state.transfer;if(!t||state.mode!=='send')return;const canvas=$('#qrCanvas');fitAirCanvas(canvas);const layout=ensureAirLayout(t,canvas),buf=ensureAirImage(canvas),page=state.displaySeq++&0xffff;for(const g of layout.groups){drawPilotCell(buf,canvas.width,g.x,g.y,g.matrix,page);for(let slot=0;slot<AIR_SLOTS.length;slot++){const s=AIR_SLOTS[slot],esi=airEsi(page,g.gx,g.gy,slot),symbol=makeSymbol(t,esi);drawPayloadTile(buf,canvas.width,g.x+s.dx*AIR.cellPx,g.y+s.dy*AIR.cellPx,symbol,t.id,page,g.gx,g.gy,slot);}}const ctx=canvas.getContext('2d',{alpha:false});ctx.imageSmoothingEnabled=false;ctx.putImageData(state.airImage,0,0);const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}const target=+$('#fpsRange').value,actual=state.senderActualFps||target;$('#qrMeta').textContent=`${actual.toFixed(state.senderActualFps?1:0)} fps`;}
-function startSender(){stopSender();if(!state.transfer)return;state.senderActualFps=0;state.senderFrameCount=0;state.senderWindowAt=performance.now();const interval=1000/(+$('#fpsRange').value);let next=performance.now();const loop=()=>{if(state.mode!=='send'||!state.transfer)return;const now=performance.now();if(now>=next){renderAirFrame();next=Math.max(next+interval,now);}state.sendTimer=requestAnimationFrame(loop);};loop();}
+function senderPageRate(){return Math.max(0,+$('#fpsRange').value||0);}
+function buildFountain(t){t.symbolBytes=AIR.symbolBytes;t.K=Math.max(1,Math.ceil(t.compressed.length/t.symbolBytes));t.sources=[];for(let i=0;i<t.K;i++)t.sources.push(t.compressed.subarray(i*t.symbolBytes,Math.min(t.compressed.length,(i+1)*t.symbolBytes)));t.cdf=robustSolitonCDF(t.K);t.id=randomU32();t.layout=null;state.displaySeq=0;state.displayedPage=-1;}
+async function prepareTransfer(raw,label){if(!window.fflate||!window.qrcode){toast('AirGrid libraries are still loading');return;}stopSender();const compressed=fflate.gzipSync(raw,{level:6}),hash=await shortHashBytes(compressed);state.transfer={raw,compressed,hash,label,id:0,sources:[],cdf:null,K:0,symbolBytes:AIR.symbolBytes,layout:null};$('#transferName').textContent=label;$('#transferName').title=label;$('#transferSizes').textContent=`${humanBytes(raw.length)} uncompressed · ${humanBytes(compressed.length)} compressed`;buildFountain(state.transfer);document.body.classList.add('sending');$('#sendStart').style.display='none';$('#sender').classList.add('active');requestAnimationFrame(startSender);}
+function renderAirFrame(advance=true){const t=state.transfer;if(!t||state.mode!=='send')return;const canvas=$('#qrCanvas');fitAirCanvas(canvas);const layout=ensureAirLayout(t,canvas),buf=ensureAirImage(canvas),page=advance||state.displayedPage<0?state.displaySeq++&0xffff:state.displayedPage;state.displayedPage=page;for(const g of layout.groups){drawPilotCell(buf,canvas.width,g.x,g.y,g.matrix,page);for(let slot=0;slot<AIR_SLOTS.length;slot++){const s=AIR_SLOTS[slot],esi=airEsi(page,g.gx,g.gy,slot),symbol=makeSymbol(t,esi);drawPayloadTile(buf,canvas.width,g.x+s.dx*AIR.cellPx,g.y+s.dy*AIR.cellPx,symbol,t.id,page,g.gx,g.gy,slot);}}const ctx=canvas.getContext('2d',{alpha:false});ctx.imageSmoothingEnabled=false;ctx.putImageData(state.airImage,0,0);const now=performance.now();state.senderFrameCount++;if(!state.senderWindowAt)state.senderWindowAt=now;if(now-state.senderWindowAt>=1000){state.senderActualFps=state.senderFrameCount*1000/(now-state.senderWindowAt);state.senderFrameCount=0;state.senderWindowAt=now;}const target=senderPageRate(),actual=state.senderActualFps||target;$('#qrMeta').textContent=target?`${actual.toFixed(state.senderActualFps?1:0)} fps · page ${page}`:`Frozen · page ${page}`;}
+function startSender(){stopSender();if(!state.transfer)return;state.senderActualFps=0;state.senderFrameCount=0;state.senderWindowAt=performance.now();const rate=senderPageRate();if(!rate){renderAirFrame(state.displayedPage<0);return;}const interval=1000/rate;let next=performance.now();const loop=()=>{if(state.mode!=='send'||!state.transfer)return;const now=performance.now();if(now>=next){renderAirFrame();next=Math.max(next+interval,now);}state.sendTimer=requestAnimationFrame(loop);};loop();}
 function stopSender(){if(state.sendTimer)cancelAnimationFrame(state.sendTimer);state.sendTimer=null;}
-function resetSend(){stopSender();document.body.classList.remove('sending');state.transfer=null;state.displaySeq=0;state.airImage=null;state.airImage32=null;$('#sender').classList.remove('active');$('#sendStart').style.display='grid';$('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;}
-function updateSendLabels(){$('#fpsValue').textContent=$('#fpsRange').value+' fps';if(state.transfer)state.transfer.layout=null;}
-$('#fpsRange').oninput=()=>{updateSendLabels();if(state.transfer){state.transfer.layout=null;startSender();}};updateSendLabels();
+function resetSend(){stopSender();document.body.classList.remove('sending');state.transfer=null;state.displaySeq=0;state.displayedPage=-1;state.airImage=null;state.airImage32=null;$('#sender').classList.remove('active');$('#sendStart').style.display='grid';$('#fileInput').value='';$('#textInput').value='';$('#textSendBtn').disabled=true;}
+function updateSendLabels(){const rate=senderPageRate();$('#fpsValue').textContent=rate?rate+' fps':'Frozen';if(state.transfer)state.transfer.layout=null;}
+$('#fpsRange').oninput=()=>{updateSendLabels();if(state.transfer)startSender();};updateSendLabels();
 async function toggleAirGridFullscreen(){const el=$('#qrStage');try{if(!document.fullscreenElement)await el.requestFullscreen?.();else await document.exitFullscreen?.();}catch{}}
 $('#qrStage').onclick=toggleAirGridFullscreen;
-document.addEventListener('fullscreenchange',()=>{$('#fullscreenBtn').textContent=document.fullscreenElement?'Exit fullscreen':'Fullscreen';if(state.transfer){state.transfer.layout=null;requestAnimationFrame(renderAirFrame);}});
+document.addEventListener('fullscreenchange',()=>{$('#fullscreenBtn').textContent=document.fullscreenElement?'Exit fullscreen':'Fullscreen';if(state.transfer){state.transfer.layout=null;requestAnimationFrame(()=>renderAirFrame(false));}});
 
 const dz=$('#dropZone'),fi=$('#fileInput');
 fi.onchange=async()=>{if(fi.files.length)prepareTransfer(await packFiles([...fi.files]),fi.files.length===1?fi.files[0].name:`${fi.files.length} files`);};
@@ -459,7 +460,7 @@ function bytesToBase64(bytes){let out='';const step=0x8000;for(let i=0;i<bytes.l
 async function fetchWasmBase64(url){const r=await fetch(url,{cache:'force-cache'});if(!r.ok)throw new Error('Could not download WASM');return bytesToBase64(new Uint8Array(await r.arrayBuffer()));}
 const offlineBtn=$('#offlineBtn');
 if(offlineBtn)offlineBtn.onclick=async()=>{const btn=$('#offlineBtn'),old=btn.textContent;btn.textContent='Preparing…';btn.disabled=true;try{const clone=document.documentElement.cloneNode(true);clone.querySelector('#offlineBtn')?.remove();clone.querySelector('body')?.classList.remove('sending');clone.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));clone.querySelector('#homeView')?.classList.add('active');clone.querySelector('#sender')?.classList.remove('active');const sendStart=clone.querySelector('#sendStart');if(sendStart)sendStart.style.display='grid';clone.querySelector('#cameraGate')?.classList.remove('active');clone.querySelector('.receiveCard')?.classList.remove('debug');const dbg=clone.querySelector('#debugBtn');if(dbg)dbg.textContent='Debug';const fileInput=clone.querySelector('#fileInput');if(fileInput)fileInput.value='';const textInput=clone.querySelector('#textInput');if(textInput){textInput.value='';textInput.textContent='';}const textSend=clone.querySelector('#textSendBtn');if(textSend)textSend.disabled=true;const live=[...document.querySelectorAll('script[data-vendor]')],copies=[...clone.querySelectorAll('script[data-vendor]')];for(let i=0;i<live.length;i++){const src=live[i].src;if(!src)continue;const code=await fetch(src,{cache:'force-cache'}).then(r=>{if(!r.ok)throw new Error('Could not download libraries');return r.text();});copies[i].removeAttribute('src');copies[i].textContent=code.replace(new RegExp('<'+'/script','gi'),'<\\/script');}const tag=document.createElement('script');tag.type='text/plain';tag.setAttribute('data-wasm','zxing-reader');tag.textContent=await fetchWasmBase64('https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/reader/zxing_reader.wasm');clone.querySelector('body').appendChild(tag);downloadBlob(new Blob(['<!doctype html>\n'+clone.outerHTML],{type:'text/html'}),`AirGapper-${BUILD}-offline.html`);toast('Offline copy downloaded');}catch(e){toast(e.message||'Could not build offline copy');}finally{btn.textContent=old;btn.disabled=false;}};
-window.addEventListener('resize',()=>{if(state.transfer){state.transfer.layout=null;renderAirFrame();}drawDebugOverlay();});
+window.addEventListener('resize',()=>{if(state.transfer){state.transfer.layout=null;renderAirFrame(false);}drawDebugOverlay();});
 })();
 
 </script>

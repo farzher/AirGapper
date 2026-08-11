@@ -67,7 +67,17 @@ try{
     const d=AirGapperDiagnostics;
     d.showView('send');
     await d.prepareTransfer(d.packText('AirGrid optical benchmark '.repeat(300)),'benchmark.txt');
-    await sleep(100);d.stopSender();d.state.displaySeq=1234;d.renderAirFrame();d.stopSender();
+    await sleep(100);
+    const rate=document.querySelector('#fpsRange');
+    rate.value='0';rate.dispatchEvent(new Event('input'));
+    const frozenSeq=d.state.displaySeq,frozenPage=d.state.displayedPage;
+    await sleep(300);
+    const senderModes={frozenDelta:d.state.displaySeq-frozenSeq,frozenPageStable:d.state.displayedPage===frozenPage};
+    rate.value='1';rate.dispatchEvent(new Event('input'));
+    const oneFpsSeq=d.state.displaySeq;
+    await sleep(1150);
+    senderModes.oneFpsDelta=d.state.displaySeq-oneFpsSeq;
+    rate.value='15';rate.dispatchEvent(new Event('input'));d.stopSender();d.state.displaySeq=1234;d.renderAirFrame();d.stopSender();
     const source=document.querySelector('#qrCanvas');
     if(!await d.initAirWorker(1))throw new Error('AirGrid worker unavailable');
     async function decode(bitmap){return new Promise((resolve,reject)=>{
@@ -86,7 +96,7 @@ try{
       const image=new Image();image.src='/fixtures/'+name;await image.decode();const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0);const data=ctx.getImageData(0,0,image.width,image.height),results=await ZXingWASM.readBarcodes(data,{formats:['QRCode'],maxNumberOfSymbols:16,tryHarder:false,tryRotate:true,tryInvert:false,tryDownscale:false,tryDenoise:false}),boots=results.map(result=>d.inspectBootstrap(result.text)).filter(Boolean);
       return{name,size:[image.width,image.height],qrCandidates:results.length,bootstraps:boots.map(x=>({profile:x.profile,gx:x.gx,gy:x.gy,symbolBytes:x.symbolBytes,fps:x.fps}))};
     }
-    return{build:d.build,profile:d.air.profile,synthetic:[
+    return{build:d.build,profile:d.air.profile,senderModes,synthetic:[
       await synthetic('clean'),
       await synthetic('phone-a',{scale:.8,blur:.5,rotation:3,moire:.035,margin:60}),
       await synthetic('phone-b',{scale:.7,blur:.65,rotation:-3,moire:.05,margin:60})
@@ -97,6 +107,8 @@ try{
   const report=result.result.value;
   const failures=[];
   if(!report.selfTests?.ok)failures.push('in-page self-tests failed');
+  if(report.senderModes?.frozenDelta!==0||!report.senderModes?.frozenPageStable)failures.push('frozen sender advanced its page');
+  if(report.senderModes?.oneFpsDelta<1||report.senderModes?.oneFpsDelta>2)failures.push(`1 fps sender advanced ${report.senderModes?.oneFpsDelta} pages`);
   for(const item of report.synthetic){
     if(item.error)failures.push(`${item.name}: ${item.error}`);
     if(item.visible<1)failures.push(`${item.name}: no payload tiles visible`);

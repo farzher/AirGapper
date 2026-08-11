@@ -4,7 +4,9 @@
 
 Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells.
 
-The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34a** is required for the next hardware test.
+The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34b** is required for the next hardware test.
+
+A real-phone test at 1 page per second remained unusable, so sender page rate is not the primary failure. v34b adds a zero-rate frozen-page diagnostic for obtaining stable profile 3 captures; the next investigation should use those captures to measure geometry, local fiducials, glyph sampling, blur/resampling, and color calibration through the production worker.
 
 ## Optical background
 
@@ -16,7 +18,7 @@ Pure black may help some LCD/OLED and camera combinations, but it can also make 
 
 Before changing the protocol again:
 
-1. Verify the sender says `v34a`.
+1. Verify the sender says `v34b`.
 2. Capture still frames from both phones at normal use distance.
 3. Require at least one CRC-valid payload tile per frame.
 4. Complete a small transfer on each phone.
