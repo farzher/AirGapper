@@ -40,9 +40,11 @@ import { requestScreenWakeLock } from "../shared/wake-lock";
 
 const MARGIN = 4; // quiet-zone modules
 const LOOKAHEAD = 3;
+const SINGLE_PAGE = document.body.classList.contains("single-page");
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
+const sendStart = document.querySelector<HTMLElement>(".send-start");
 const specs = document.getElementById("specs")!;
 const cfgFile = document.getElementById("cfg-file") as HTMLInputElement;
 const filePickerLabel = document.getElementById("file-picker-label")!;
@@ -95,12 +97,18 @@ const setStatus = specsLine.setStatus;
 function showError(message: string): void {
   setStageFullscreen(false);
   stage.hidden = true;
+  if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
   specsLine.showError(message);
 }
 
 function currentMode(): "file" | "snippet" {
   return modeInputs.find((input) => input.checked)?.value === "snippet" ? "snippet" : "file";
+}
+
+function selectMode(mode: "file" | "snippet"): void {
+  const input = modeInputs.find((candidate) => candidate.value === mode);
+  if (input) input.checked = true;
 }
 
 /** The picker reads as state — which file is armed — and the button offers
@@ -123,6 +131,7 @@ function stopTransfer(): void {
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
+  if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
   cfgFile.value = "";
   updateFilePicker();
@@ -161,18 +170,18 @@ function applyMode(): void {
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
+  if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
 
   const mode = currentMode();
-  paneFile.hidden = mode !== "file";
-  paneSnippet.hidden = mode !== "snippet";
-  // The heading used to say "Send a file" even with Text snippet selected.
-  toolTitle.textContent = mode === "snippet" ? "Send text" : "Send a file";
-  setStatus(mode === "snippet" ? "Paste or type some text to begin" : "Choose a file to begin");
+  paneFile.hidden = !SINGLE_PAGE && mode !== "file";
+  paneSnippet.hidden = !SINGLE_PAGE && mode !== "snippet";
+  toolTitle.textContent = SINGLE_PAGE ? "Send" : mode === "snippet" ? "Send text" : "Send a file";
+  setStatus(SINGLE_PAGE ? "Choose a file or enter text" : mode === "snippet" ? "Paste or type some text to begin" : "Choose a file to begin");
   updateFilePicker();
   // A file left in the picker survives the switch, so re-arm it rather than
   // leaving a filename on screen next to "choose a file to begin".
-  if (mode === "file" && cfgFile.files?.[0]) void selectFile();
+  if (!SINGLE_PAGE && mode === "file" && cfgFile.files?.[0]) void selectFile();
 }
 
 /**
@@ -210,6 +219,7 @@ async function startSelection(
 async function selectFile(): Promise<void> {
   const file = cfgFile.files?.[0];
   if (!file) return;
+  selectMode("file");
   await startSelection(`preparing ${file.name}…`, async () => {
     // Checked here, off File.size, rather than after reading the bytes: a file
     // well past the limit should be refused instantly instead of after the
@@ -228,6 +238,7 @@ async function selectFile(): Promise<void> {
 }
 
 async function selectSnippet(): Promise<void> {
+  selectMode("snippet");
   await startSelection("preparing text snippet…", async () => {
     const packed = await packSnippet(snippetText.value);
     return { name: "Text snippet", size: packed.originalSize, packed };
@@ -254,7 +265,9 @@ async function main() {
     if (target && (target.closest(".file-picker-button") || target === cfgFile)) stopTransfer();
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
-  for (const input of modeInputs) input.addEventListener("change", applyMode);
+  if (!SINGLE_PAGE) {
+    for (const input of modeInputs) input.addEventListener("change", applyMode);
+  }
   applyMode();
   window.addEventListener("resize", () => resizeDisplay?.());
   for (const el of [cfgFps, cfgBytes, cfgEcc, cfgGrid, cfgSize]) {
@@ -335,6 +348,7 @@ async function startStream(revealStage = false) {
   const cells: (ImageData | null)[] = new Array<ImageData | null>(gridCodes).fill(null);
   let nextSeq = 0;
   stage.hidden = false;
+  if (sendStart) sendStart.hidden = true;
 
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;

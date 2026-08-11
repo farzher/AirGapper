@@ -91,8 +91,8 @@ export default defineConfig(({ mode }) => {
           name: "AirGapper",
           short_name: "AirGapper",
           description: "Offline file and text transfer with animated QR codes.",
-          theme_color: "#070a11",
-          background_color: "#070a11",
+          theme_color: "#f7f7f5",
+          background_color: "#f7f7f5",
           display: "standalone",
           start_url: "./",
           icons: [
