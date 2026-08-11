@@ -19,4 +19,4 @@ The benchmark has two layers:
 
 The profile 3 diagnostic fixtures reproduce the current failure but are not acceptance fixtures: none contains a CRC-valid payload tile. Keep them as the failing hardware baseline. Once a reliability fix works on hardware, add its captures as acceptance fixtures and tune the synthetic filter against them.
 
-For a stable profile 3 diagnostic capture, use a sender showing **v34c**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.
+For a stable profile 3 diagnostic capture, use a sender showing **v34d**, start a transfer, and move **Page rate** to **Frozen** (zero). Keep the complete optical grid visible and capture the camera image used by the receiver rather than a screenshot of the sender.

@@ -2,15 +2,15 @@
 
 ## Current state
 
-Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format.
+Profile 3 is a recovery profile. It fixes the demonstrated profile 2 failure by giving each payload tile four local registration marks and sampling larger 3×3 logical dots. It still uses one large QR bootstrap cell for every three payload cells. v34c displays the unchanged logical cells at 1.5× physical scale to reduce screen/camera density without changing the profile 3 packet format. v34d keeps that optical format, uses a dark application theme, and guarantees a small centered safe inset around complete AirGrid groups.
 
-The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34c** is required for the next hardware test.
+The two initial phone captures in `tests/fixtures/` are profile 2 captures, not profile 3. Their QR anchors decode cleanly, but their payload geometry does not. A hard refresh or newly downloaded offline copy showing **v34d** is required for the next hardware test.
 
 A real-phone test at 1 page per second remained unusable, so sender page rate is not the primary failure. v34b adds a zero-rate frozen-page diagnostic for obtaining stable profile 3 captures.
 
 The first three profile 3 camera fixtures now reproduce the hardware failure in the production worker. The true frozen capture has 8/8 current bootstraps, one consistent page, 24 visible tiles, and four local fiducials per visible tile, but 0/24 CRC-valid tiles. Known-glyph accuracy is 92.4% for shape and 65.1% for color at the production 1920-pixel worker width. Native-width decoding raises shape accuracy to 97.1% but still produces 0/24 valid tiles. Acquisition, page identity, temporal transitions, and local fiducials are therefore ruled out for this frame; payload sampling and especially color modulation are not sufficiently resolvable under the measured screen/camera moiré.
 
-The smallest evidence-supported reliability change is therefore sender-side magnification. v34c uses 1.5× cells while retaining the same packet format and production decoder. This costs visible tiles per frame but should move each logical dot farther above the camera sampling and moiré limit. It still requires a new physical frozen-page capture and transfer test.
+The smallest evidence-supported reliability change is therefore sender-side magnification. v34c and later use 1.5× cells while retaining the same packet format and production decoder. This costs visible tiles per frame but should move each logical dot farther above the camera sampling and moiré limit. It still requires a new physical frozen-page capture and transfer test.
 
 ## Optical background
 
@@ -22,7 +22,7 @@ Pure black may help some LCD/OLED and camera combinations, but it can also make 
 
 Before changing the protocol again:
 
-1. Verify the sender says `v34c`.
+1. Verify the sender says `v34d`.
 2. Capture still frames from both phones at normal use distance.
 3. Require at least one CRC-valid payload tile per frame.
 4. Complete a small transfer on each phone.
