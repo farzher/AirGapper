@@ -122,7 +122,7 @@ function updateFilePicker(): void {
     names.title = names.textContent;
     const originalTotal = selectedFile.files.reduce((sum, file) => sum + file.size, 0);
     total.textContent = selectedFile.compression === "gzip"
-      ? `${formatBytes(originalTotal)} original · ${formatBytes(selectedFile.transmittedSize)} gzip`
+      ? `${formatBytes(originalTotal)} · ${formatBytes(selectedFile.transmittedSize)} gzip`
       : formatBytes(originalTotal);
     selectionSummary.replaceChildren(names, total);
   } else selectionSummary.replaceChildren();

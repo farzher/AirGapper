@@ -64,15 +64,14 @@
           </div>
         </div>
         <section class="transfer-panel" id="metrics" style="display:none" aria-live="polite">
-          <div class="transfer-progress" id="progress-status" style="display:none">
-            <div class="progress-status"><strong id="progress-label">0%</strong><span id="eta-label">Estimating…</span></div>
+          <div class="transfer-progress" id="progress-status">
+            <div class="transfer-summary">
+              <strong id="progress-label">0%</strong>
+              <div class="speed-feedback" id="speed-feedback"><strong id="m-rate">— KB/s</strong><span class="speed-quality" id="speed-quality">Waiting</span></div>
+            </div>
             <div class="progress" id="progress" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
+            <div class="transfer-meta"><span id="eta-label">Waiting for QR</span><div class="pipeline-metrics"><span>Capture <strong id="m-cap">— fps</strong></span><span>Decode <strong id="m-dec">— fps</strong></span></div></div>
           </div>
-          <div class="speed-feedback" id="speed-feedback">
-            <div><strong id="m-rate">— KB/s</strong><span>Live speed</span></div>
-            <div class="speed-quality" id="speed-quality">Waiting for data</div>
-          </div>
-          <div class="pipeline-metrics"><span>Capture <strong id="m-cap">— fps</strong></span><span>Decode <strong id="m-dec">— fps</strong></span></div>
         </section>
         <div id="result"></div>
       </section>

@@ -227,27 +227,26 @@ input[type="range"] { accent-color: #222; }
 }
 .preview video { width: 100%; height: 100%; display: block; object-fit: contain; background: #111; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; pointer-events: none; }
-.transfer-panel { padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
-.transfer-progress { margin-bottom: 15px; }
-.progress-status { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
-.progress-status strong { color: var(--ink); font-size: 22px; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
-.progress { width: 100%; height: 7px; margin-top: 9px; overflow: hidden; background: var(--line); border-radius: 999px; }
+.transfer-panel { padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.transfer-summary > strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
 .progress > div.error { background: var(--bad); animation: none; }
 @keyframes progress-pulse { 50% { opacity: .68; } }
-.speed-feedback { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 2px 0; }
-.speed-feedback > div:first-child { display: flex; flex-direction: column; }
-.speed-feedback strong { font-size: clamp(25px, 5vw, 36px); line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-.speed-feedback span { margin-top: 5px; color: var(--muted); font-size: 11px; }
-.speed-quality { flex: none; padding: 6px 10px; color: var(--muted); background: var(--bg); border-radius: 999px; font-size: 12px; font-weight: 700; }
-.speed-low .speed-quality { color: var(--bad); }
-.speed-good .speed-quality, .speed-high .speed-quality { color: var(--good); }
+.speed-feedback { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }
+.speed-feedback strong { color: var(--muted); font-size: clamp(20px, 5vw, 28px); line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; transition: color .2s; }
+.speed-quality { flex: none; padding: 5px 8px; color: var(--muted); background: var(--bg); border-radius: 999px; font-size: 11px; font-weight: 700; }
+.speed-low strong, .speed-low .speed-quality { color: var(--bad); }
+.speed-mid strong, .speed-mid .speed-quality { color: #9a6510; }
+.speed-good strong, .speed-good .speed-quality, .speed-high strong, .speed-high .speed-quality { color: var(--good); }
 .speed-high .speed-quality { animation: speed-breathe 1.2s ease-in-out infinite; }
 @keyframes speed-breathe { 50% { transform: scale(1.05); } }
 @media (prefers-reduced-motion: reduce) {
   .progress > div, .speed-high .speed-quality { animation: none; }
 }
-.pipeline-metrics { display: flex; gap: 18px; margin-top: 13px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.transfer-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 11px; }
+.pipeline-metrics { display: flex; gap: 14px; }
 .pipeline-metrics strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .text-button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 12px; }
@@ -279,5 +278,9 @@ dialog::backdrop { background: #0004; }
   .file-picker, .note-composer { min-height: 130px; }
   .send-controls { grid-template-columns: 1fr; gap: 12px; }
   .stage { min-height: 0; }
-  .preview { min-height: 0; max-height: calc(100dvh - 150px); }
+  .receiver-primary { gap: 8px; }
+  .preview { min-height: 0; max-height: calc(100dvh - 255px); }
+  .transfer-panel { padding: 10px 12px; }
+  .transfer-meta { margin-top: 7px; }
+  .pipeline-metrics { gap: 10px; }
 }

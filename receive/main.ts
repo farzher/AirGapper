@@ -390,14 +390,14 @@ function stopReceiver(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
-  etaLabel.textContent = "Estimating…";
+  etaLabel.textContent = "Waiting for QR";
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— fps";
   metric("m-rate").textContent = "— KB/s";
-  speedQuality.textContent = "Waiting for data";
+  speedQuality.textContent = "Waiting";
   speedFeedback.className = "speed-feedback";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
@@ -466,6 +466,8 @@ async function start() {
   // "": back to the stylesheet's flex — the zone centers the camera box.
   preview.style.display = "";
   metricsEl.style.display = "block";
+  progressStatus.style.display = "block";
+  progressEl.style.display = "block";
   if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => undefined);
