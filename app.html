@@ -50,11 +50,14 @@
         <canvas id="qr" width="16" height="16"></canvas>
         <div class="stage-bottom" id="stage-bottom">
           <div class="selection-summary" id="selection-summary" hidden></div>
-          <div class="send-controls" id="send-controls" hidden>
-            <label><span>Speed</span><input id="cfg-fps" type="range" min="1" max="60" step="1" value="20" /><output id="fps-value">20 fps</output></label>
-            <label><span>Size</span><input id="cfg-size" type="range" min="0" max="5" step="1" value="5" /><output id="size-value">2.9 KB · 12 QRs</output></label>
-            <label><span>Margin</span><input id="cfg-margin" type="range" min="0" max="16" step="1" value="4" /><output id="margin-value">4 modules</output></label>
-          </div>
+          <details class="send-advanced" id="send-controls" hidden>
+            <summary>Advanced</summary>
+            <div class="send-controls">
+              <label><span>Speed</span><input id="cfg-fps" type="range" min="1" max="60" step="1" value="20" /><output id="fps-value">20 fps</output></label>
+              <label><span>Size</span><input id="cfg-size" type="range" min="0" max="5" step="1" value="5" /><output id="size-value">2.9 KB · 12 QRs</output></label>
+              <label><span>Scaling</span><select id="cfg-scaling"><option value="integer">Integer modules</option><option value="fit">Fit screen</option></select></label>
+            </div>
+          </details>
         </div>
       </div>
       <div class="hint status-line" id="specs"></div>

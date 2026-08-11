@@ -38,6 +38,8 @@ import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
 
 const HEADER_MARGIN = 0;
+// A one-module shared quiet zone was the best-performing tested grid spacing.
+const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
 // Every density uses the same portrait 3×4 frame. The Size control changes
 // only the bytes (and therefore QR version) in each of the twelve cells, so
@@ -97,10 +99,9 @@ function showStreamPanels(visible: boolean): void {
 
 const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
-const cfgMargin = document.getElementById("cfg-margin") as HTMLInputElement;
+const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const fpsValue = document.getElementById("fps-value")!;
 const sizeValue = document.getElementById("size-value")!;
-const marginValue = document.getElementById("margin-value")!;
 
 let selectedFile: {
   name: string;
@@ -355,15 +356,14 @@ async function main() {
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
   window.addEventListener("resize", () => resizeDisplay?.());
+  sendControls.addEventListener("toggle", () => requestAnimationFrame(() => resizeDisplay?.()));
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
     sizeValue.textContent = `${formatBytes(bytes)} · ${GRID_CODES} QRs`;
-    const margin = Number(cfgMargin.value);
-    marginValue.textContent = `${margin} module${margin === 1 ? "" : "s"}`;
   };
-  for (const el of [cfgFps, cfgSize, cfgMargin]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling]) {
     el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => void startStream());
   }
@@ -393,7 +393,7 @@ async function startStream(revealStage = false) {
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);
   const sizeLevel = Number(cfgSize.value);
-  const gridMargin = Number(cfgMargin.value);
+  const fitScaling = cfgScaling.value === "fit";
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
   // Fill one standard QR from 500 B through its 2,953 B maximum, then add
@@ -443,9 +443,9 @@ async function startStream(revealStage = false) {
     const dpr = window.devicePixelRatio || 1;
     // One shared quiet margin separates adjacent symbols; the same margin is
     // retained around the outside of the grid.
-    const stride = modules + gridMargin;
-    const totalW = modules * gridCols + gridMargin * (gridCols + 1);
-    const totalH = modules * gridRows + gridMargin * (gridRows + 1);
+    const stride = modules + GRID_MARGIN;
+    const totalW = modules * gridCols + GRID_MARGIN * (gridCols + 1);
+    const totalH = modules * gridRows + GRID_MARGIN * (gridRows + 1);
     let budgetW: number;
     let budgetH: number;
     if (document.body.classList.contains("qr-full")) {
@@ -461,15 +461,15 @@ async function startStream(revealStage = false) {
       budgetW = rect.width - Number.parseFloat(stageStyle.paddingLeft) - Number.parseFloat(stageStyle.paddingRight);
       budgetH = rect.height - stageBottom.offsetHeight - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
     }
-    scale = Math.max(1, Math.floor(Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH)));
+    const availableScale = Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH);
+    scale = fitScaling ? Math.max(Number.EPSILON, availableScale) : Math.max(1, Math.floor(availableScale));
     staging.width = totalW;
     staging.height = totalH;
-    canvas.width = totalW * scale;
-    canvas.height = totalH * scale;
-    // Present the backing raster at exactly its device-pixel size. Do not
-    // stretch it to consume the last few CSS pixels in the budget: fractional
-    // resampling turns black/white module boundaries gray. The unused strip is
-    // always smaller than one module-scale step on the limiting axis.
+    canvas.width = Math.max(1, Math.round(totalW * scale));
+    canvas.height = Math.max(1, Math.round(totalH * scale));
+    // Present the backing raster at exactly its device-pixel size. Integer
+    // mode leaves the sub-module remainder unused to keep every edge sharp;
+    // Fit screen deliberately spends it by allowing fractional modules.
     const cssNativeW = (totalW * scale) / dpr;
     const cssNativeH = (totalH * scale) / dpr;
     canvas.style.width = `${cssNativeW}px`;
@@ -539,7 +539,8 @@ async function startStream(revealStage = false) {
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
               sizeLevel,
-              gridMargin,
+              gridMargin: GRID_MARGIN,
+              scaling: fitScaling ? "fit" : "integer",
             },
             qr: { version, modules },
             fountain: { k: encoder.k, blockLen },
@@ -548,7 +549,7 @@ async function startStream(revealStage = false) {
         }).catch(() => undefined);
       }
     }
-    const raster = rasterizeQr(qr.modules.size, qr.modules.data, gridMargin);
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
   };
 
@@ -640,15 +641,22 @@ async function startStream(revealStage = false) {
         nextAt = now + subInterval;
         break;
       }
-      const cell = modules + 2 * gridMargin;
-      const stride = modules + gridMargin;
+      const cell = modules + 2 * GRID_MARGIN;
+      const stride = modules + GRID_MARGIN;
       const cx = (cellCursor % gridCols) * stride;
       const cy = Math.floor(cellCursor / gridCols) * stride;
       cells[cellCursor] = img;
       staging.getContext("2d")!.putImageData(img, cx, cy);
       const ctx = canvas.getContext("2d")!;
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
+      if (fitScaling) {
+        // Fractional module scaling can put cell boundaries between device
+        // pixels. Repaint the complete grid so partial blits cannot leave
+        // seams where their rounded edges meet.
+        ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
+      }
       cellCursor = (cellCursor + 1) % gridCodes;
       nextAt += subInterval;
     }
