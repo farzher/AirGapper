@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const testsDir=dirname(fileURLToPath(import.meta.url));
 const root=resolve(testsDir,'..');
 const hardwareBaseline=JSON.parse(await readFile(join(testsDir,'fixtures','airgrid-x1','phone-v35b-quick-a.json'),'utf8'));
+const hardwareFollowup=JSON.parse(await readFile(join(testsDir,'fixtures','airgrid-x1','phone-v35f-quick-a.json'),'utf8'));
 const files=new Map([
   ['/',{type:'text/html; charset=utf-8',body:await readFile(join(root,'index.html'))}],
   ['/index.html',{type:'text/html; charset=utf-8',body:await readFile(join(root,'index.html'))}],
@@ -82,8 +83,9 @@ try{
   })()`;
   const evaluated=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});
   if(evaluated.exceptionDetails)throw new Error(evaluated.exceptionDetails.exception?.description||evaluated.exceptionDetails.text);
-  const report=evaluated.result.value;report.physicalBaseline={build:hardwareBaseline.build,usefulFps:hardwareBaseline.scanSummary?.usefulFps,workerUtilization:hardwareBaseline.scanSummary?.workerUtilization,conditions:Object.keys(hardwareBaseline.conditions||{}).length,m1Pitch4Frozen:hardwareBaseline.conditions?.['M1-p4-f0']?.metrics};const byName=Object.fromEntries(report.results.map(x=>[x.name,x])),failures=[];
+  const report=evaluated.result.value;report.physicalBaseline={build:hardwareBaseline.build,usefulFps:hardwareBaseline.scanSummary?.usefulFps,workerUtilization:hardwareBaseline.scanSummary?.workerUtilization,conditions:Object.keys(hardwareBaseline.conditions||{}).length,m1Pitch4Frozen:hardwareBaseline.conditions?.['M1-p4-f0']?.metrics};const followupConditions=Object.values(hardwareFollowup.conditions||{});report.physicalFollowup={build:hardwareFollowup.build,usefulFps:hardwareFollowup.scanSummary?.usefulFps,workerUtilization:hardwareFollowup.scanSummary?.workerUtilization,conditions:followupConditions.length,completeTiles:followupConditions.reduce((n,c)=>n+c.completeTiles,0),payloadOkTiles:followupConditions.reduce((n,c)=>n+c.payloadOkTiles,0),persistentCameraIds:!!(hardwareFollowup.camera?.deviceId||hardwareFollowup.camera?.groupId||hardwareFollowup.cameraCapabilities?.deviceId||hardwareFollowup.cameraCapabilities?.groupId)};const byName=Object.fromEntries(report.results.map(x=>[x.name,x])),failures=[];
   if(report.physicalBaseline.build!=='v35b'||report.physicalBaseline.conditions!==6||report.physicalBaseline.usefulFps<1||report.physicalBaseline.usefulFps>2||report.physicalBaseline.workerUtilization<.9||report.physicalBaseline.m1Pitch4Frozen?.payloadOkTilesPerFrame<=0)failures.push('v35b physical diagnostic baseline changed unexpectedly');
+  if(report.physicalFollowup.build!=='v35f'||report.physicalFollowup.conditions!==13||report.physicalFollowup.usefulFps<7||report.physicalFollowup.completeTiles!==436||report.physicalFollowup.payloadOkTiles!==0||report.physicalFollowup.persistentCameraIds)failures.push('v35f physical diagnostic follow-up changed unexpectedly');
   const need=(name,minComplete,minPayload=minComplete)=>{const r=byName[name];if(!r)failures.push(`${name}: missing result`);else{if(r.complete<minComplete)failures.push(`${name}: ${r.complete} complete tiles, expected ${minComplete}`);if(r.payloads<minPayload)failures.push(`${name}: ${r.payloads} payloads, expected ${minPayload}`);}};
   need('clean-full',6,6);
   need('arbitrary-one-tile-crop',1,1);
@@ -99,7 +101,7 @@ try{
   for(const r of report.profileResults)if(r.complete!==1||r.payloads!==1)failures.push(`${r.name}: clean profile did not round-trip`);
   if(!report.tracking.second.tracked||report.tracking.second.payloads<1)failures.push('persistent marker tracking did not decode the following frame');
   const tagged=report.hardwareTag?.tiles?.[0],expectedFlags=0x80|(2<<4)|(5<<1)|1;if(!tagged||tagged.flags!==expectedFlags||report.hardwareTag.payloads!==1)failures.push('hardware condition flags did not round-trip');
-  if(report.labSmoke?.workerBuild!=='v35g'||!report.labSmoke?.versionText.includes('v35g')||!report.labSmoke.versionText.includes('hardware lab')||!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke?.staleResultsCleared||!report.labSmoke?.quickSweepText.includes('12-condition')||report.labSmoke?.quickDwell!=='2'||!report.labSmoke.receiverVisible||!report.labSmoke.senderHidden)failures.push('automated hardware lab receiver UI did not initialize');
+  if(report.labSmoke?.workerBuild!=='v35h'||!report.labSmoke?.versionText.includes('v35h')||!report.labSmoke.versionText.includes('hardware lab')||!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke?.staleResultsCleared||!report.labSmoke?.quickSweepText.includes('12-condition binary/M1')||report.labSmoke?.quickDwell!=='2'||!report.labSmoke.receiverVisible||!report.labSmoke.senderHidden)failures.push('automated hardware lab receiver UI did not initialize');
   if(!report.selftest?.headerRecovered)failures.push('protected header reconstruction failed');
   if(!report.selftest?.eccRecovered)failures.push('LDPC soft reconstruction failed');
   if(!report.selftest?.fountainRecovered)failures.push('fountain reconstruction failed');
