@@ -23,17 +23,25 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")
 }
 document.getElementById("home-button")!.addEventListener("click", () => showView("home"));
 
-// The phone handoff QR deep-links straight into Receive. Entering the view
-// asks for the rear camera immediately; browsers that require interaction or
-// previously denied access expose the existing camera retry button.
-if (new URLSearchParams(location.search).has("receive")) showView("receive");
-
 // Capture the untouched, fully bundled document before UI state changes. This
 // avoids a network fetch and makes Download offline work identically from
 // HTTPS, file://, and a previously downloaded copy.
 const standaloneDocument = document.documentElement.cloneNode(true) as HTMLElement;
 standaloneDocument.querySelector('link[rel="manifest"]')?.remove();
 const standaloneHtml = `<!doctype html>\n${standaloneDocument.outerHTML}`;
+
+// The phone handoff QR deep-links straight into Receive. Consume that launch
+// flag immediately: a later reload should open the normal home screen, not
+// keep trapping the phone in Receive. Other query parameters are preserved.
+const initialParams = new URLSearchParams(location.search);
+if (initialParams.has("receive")) {
+  initialParams.delete("receive");
+  const query = initialParams.toString();
+  history.replaceState(history.state, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+  // Entering asks for the rear camera immediately; browsers that require
+  // interaction or previously denied access expose the existing retry button.
+  showView("receive");
+}
 function downloadOffline(): void {
   const url = URL.createObjectURL(new Blob([standaloneHtml], { type: "text/html;charset=utf-8" }));
   const link = document.createElement("a");

@@ -79,23 +79,20 @@ a { color: inherit; }
 .receiver-shell { min-width: 0; }
 .send-start { display: flex; flex-direction: column; gap: 12px; }
 .send-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.receiver-handoff {
-  display: flex;
+.receiver-handoff { display: flex; justify-content: center; }
+.receiver-link {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 18px;
-  min-height: 146px;
-  padding: 12px 20px;
-  border: 1px solid var(--line);
-  background: var(--card);
-  border-radius: 12px;
+  gap: 14px;
+  padding: 4px;
+  border-radius: 10px;
+  text-decoration: none;
 }
+.receiver-link:hover { background: #00000003; }
 .receiver-handoff canvas { display: block; width: 111px; height: 111px; flex: none; }
-.receiver-handoff-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
-.receiver-handoff-copy strong { font-size: 18px; letter-spacing: -.02em; }
-.receiver-handoff-copy span { color: var(--muted); font-size: 13px; }
-.receiver-handoff-copy a { margin-top: 3px; color: var(--muted); font-size: 12px; text-underline-offset: 3px; }
-.receiver-handoff-copy a:hover { color: var(--ink); }
+.receiver-handoff-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.receiver-handoff-copy strong { font-size: 15px; letter-spacing: -.015em; }
+.receiver-handoff-copy small { color: var(--muted); font-size: 12px; }
 .file-picker,
 .note-composer {
   min-height: 180px;
@@ -302,9 +299,6 @@ dialog::backdrop { background: #0004; }
   .app-header { padding-top: 14px; }
   .app-main { padding-top: 6px; }
   .home, .send-inputs { grid-template-columns: 1fr; }
-  .receiver-handoff { justify-content: flex-start; gap: 14px; min-height: 0; padding: 10px 12px; }
-  .receiver-handoff-copy span { max-width: 190px; }
-  .receiver-handoff-copy a { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 130px; }
   .send-controls { grid-template-columns: 1fr; gap: 12px; }
