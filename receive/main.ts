@@ -50,6 +50,8 @@ const progressLabel = document.getElementById("progress-label")!;
 const etaLabel = document.getElementById("eta-label")!;
 const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
+const speedFeedback = document.getElementById("speed-feedback")!;
+const speedQuality = document.getElementById("speed-quality")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 const requestedWidth = 4096;
@@ -384,10 +386,15 @@ function stopReceiver(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
-  etaLabel.textContent = "Estimating time…";
+  etaLabel.textContent = "Estimating…";
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
+  metric("m-cap").textContent = "— fps";
+  metric("m-dec").textContent = "— fps";
+  metric("m-rate").textContent = "— KB/s";
+  speedQuality.textContent = "Waiting for data";
+  speedFeedback.className = "speed-feedback";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
     diagnosticsEl.open = false;
@@ -454,7 +461,7 @@ async function start() {
   startBtn.style.display = "none";
   // "": back to the stylesheet's flex — the zone centers the camera box.
   preview.style.display = "";
-  metricsEl.style.display = "grid";
+  metricsEl.style.display = "block";
   if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => undefined);
@@ -681,7 +688,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     reportSessionId = header.sessionId;
     startTs = performance.now();
     progressEl.style.display = "block";
-    progressStatus.style.display = "flex";
+    progressStatus.style.display = "block";
   }
   minSeq = Math.min(minSeq, header.seq);
   maxSeq = Math.max(maxSeq, header.seq);
@@ -716,20 +723,11 @@ function updateProgressEstimate() {
   const shownPercent = percent < 10 ? percent.toFixed(1) : percent.toFixed(0);
   bar.style.width = `${percent.toFixed(1)}%`;
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
-  progressLabel.textContent =
-    `${shownPercent}% · ${decoder.solvedCount}/${decoder.k} blocks`;
-  // Held back for the first few frames — a two-frame sample reads wildly wrong.
-  const rate = decoder.framesNew >= 4 ? ` · ${goodputKbs(elapsed).toFixed(1)} KB/s` : "";
+  progressLabel.textContent = `${shownPercent}%`;
   const eta = estimate.etaSeconds === undefined
     ? estimate.phase === "decoding" ? "Decoding…" : "Estimating…"
-    : formatDuration(estimate.etaSeconds);
-  metric("m-eta").textContent = eta;
-  etaLabel.textContent =
-    (estimate.etaSeconds === undefined
-      ? estimate.phase === "decoding"
-        ? `${decoder.framesNew} frames · decoding`
-        : "Estimating time…"
-      : `About ${eta} · ${decoder.framesNew} frames`) + rate;
+    : `About ${formatDuration(estimate.etaSeconds)} left`;
+  etaLabel.textContent = eta;
 }
 
 /** Payload KB/s, discounting the frames the fountain spends on overhead. That
@@ -841,10 +839,12 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // told in advance whether a file or a text snippet is coming. The displayed
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = (file.bytes.length / 1024 / seconds).toFixed(1);
-    metric("m-rate").textContent = `${rate} KB/s verified`;
+    metric("m-rate").textContent = `${rate} KB/s`;
+    speedQuality.textContent = "Verified ✓";
+    speedFeedback.className = "speed-feedback speed-high";
     const gzipNote = file.compression === "gzip" ? "gzip decompressed · " : "";
     if (isSnippet(file)) {
-      progressLabel.textContent = "100% · text recovered";
+      progressLabel.textContent = "100%";
       setStatus("");
       showSnippet(
         snippetText(file),
@@ -853,7 +853,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       return;
     }
 
-    progressLabel.textContent = "100% · file recovered";
+    progressLabel.textContent = "100%";
     const kb = Math.round(file.bytes.length / 1024);
     // The run's numbers belong under the heading, not up in the camera status
     // line — which is done for good and goes quiet.
@@ -918,6 +918,8 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // page dead with nothing but an error string on it.
     bar.classList.add("error");
     etaLabel.textContent = "Transfer failed";
+    speedQuality.textContent = "Signal lost";
+    speedFeedback.className = "speed-feedback speed-low";
     showError(error instanceof Error ? error.message : String(error));
     const heading = document.createElement("div");
     heading.className = "failed";
@@ -1057,6 +1059,16 @@ function updateStats() {
     ]);
   }
   updateProgressEstimate();
-  metric("m-rate").textContent = `${goodputKbs(elapsed).toFixed(1)} KB/s`;
+  const liveRate = goodputKbs(elapsed);
+  metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;
+  const quality = liveRate < 5
+    ? ["Weak signal", "speed-low"]
+    : liveRate < 25
+      ? ["Steady", "speed-mid"]
+      : liveRate < 75
+        ? ["Good", "speed-good"]
+        : ["Flying", "speed-high"];
+  speedQuality.textContent = quality[0]!;
+  speedFeedback.className = `speed-feedback ${quality[1]}`;
 
 }
