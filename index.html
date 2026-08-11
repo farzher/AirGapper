@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v35k: X1 direct native YUV detector -->
+<!-- AirGapper v35l: recorded phone replay benchmark -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -143,7 +143,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v35k</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v35l</span></div><div class="tag">Air-gapped file transfer</div></div>
     <div><button class="ghost" id="labBtn">Hardware lab</button> <button class="ghost" id="offlineBtn">Download offline</button></div>
   </header>
 
@@ -210,7 +210,7 @@
 </div>
 <div class="toast" id="toast"></div>
 
-<script data-airgrid-x1 src="airgrid-x1.js?build=v35k"></script>
+<script data-airgrid-x1 src="airgrid-x1.js?build=v35l"></script>
 <script data-vendor="qrcode" src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script data-vendor="zxing" src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.2/dist/iife/reader/index.js"></script>
 <script data-vendor="fflate" src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
@@ -220,7 +220,7 @@
 
 if(new URLSearchParams(location.search).get('airgridLab')==='1')return;
 
-const BUILD='v35k';
+const BUILD='v35l';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $=s=>document.querySelector(s);

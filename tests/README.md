@@ -28,7 +28,7 @@ For a stable profile 3 diagnostic capture, use a sender showing **v34i**, start 
 
 The benchmark's BER, mutual information, verified bytes, and stage timings are synthetic regression measurements. They are not evidence of physical screen/camera capacity. Use `?airgridLab=1` for X1 sender/receiver hardware sounding; retain captures and exported measurements before selecting a production pitch or palette.
 
-See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sweep procedure, fixed-device controls, JSON/CSV exports, and acceptance gates.
+See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sweep procedure, recorded 40-second phone capture, JSON/CSV exports, offline video replay benchmark, fixed-device controls, and acceptance gates.
 
 `fixtures/airgrid-x1/phone-v35b-quick-a.json` is the first physical X1 report. It identified full-resolution false-candidate ROI reads as the dominant 455–798 ms/frame bottleneck; v35c rejects headers on the detector raster first, so the report is retained as a diagnostic baseline rather than an acceptance result.
 
@@ -40,4 +40,4 @@ See [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) for the automated quick/full sw
 
 `fixtures/airgrid-x1/phone-v35i-quick-a.json` validates timing-chip candidate rejection: header time falls to 5.6 ms and useful FPS reaches 9.14, exposing the unchanged 46.6 ms detector raster as the dominant stage.
 
-`fixtures/airgrid-x1/phone-v35j-quick-a.json` compares 900/768/640 detector rasters in one phone run. Lower resolutions are faster, but 640 loses the channel completely and 768 remains above the worker-time gate, motivating the v35k direct native-YUV path. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
+`fixtures/airgrid-x1/phone-v35j-quick-a.json` compares 900/768/640 detector rasters in one phone run. Lower resolutions are faster, but 640 loses the channel completely and 768 remains above the worker-time gate, motivating the v35k direct native-YUV path. v35l adds a high-bitrate recorded quick test and `airgrid-video-benchmark.mjs`, so one physical capture can be replayed against many decoder and format changes. See [`fixtures/airgrid-x1/README.md`](fixtures/airgrid-x1/README.md) for the report comparisons and evidence-driven next steps.
