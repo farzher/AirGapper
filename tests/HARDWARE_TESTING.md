@@ -4,8 +4,8 @@ This test needs no connection between the sender computer and receiver phone. Bo
 
 ## Prepare
 
-1. Open/download an AirGapper **v35d** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
-2. Open **Hardware lab**, or append `?airgridLab=1` to the HTML URL. The header must visibly show **v35d · X1 hardware lab** before testing.
+1. Open/download an AirGapper **v35e** offline copy on both devices. The offline download embeds `airgrid-x1.js` and the worker source.
+2. Open **Hardware lab**, or append `?airgridLab=1` to the HTML URL. The header must visibly show **v35e · X1 hardware lab** before testing.
 3. On the display device, disable adaptive brightness, set a recorded fixed brightness, disable night-light/color-temperature features, use 100% browser zoom, and prevent sleep.
 4. On the phone, clean the lens, disable battery saver, prevent sleep, and record the phone model/browser. Do not digitally zoom.
 5. Mount or hold the phone so the complete optical display is visible. Keep distance and angle fixed during a sweep.
