@@ -74,7 +74,7 @@ try{
     const tw=worker(),trackA=await decode(base.canvas,tw,{track:true}),trackBFrame=await render({frame:79}),trackB=await decode(trackBFrame.canvas,tw,{track:true});
     const taggedFrame=await render({profile:'M2',pitch:4,cols:1,rows:1,frame:91,pageFps:15}),hardwareTag=compact('hardware-tag',await decode(taggedFrame.canvas));
     const st=await A.request(worker(),'selftest');
-    history.replaceState(null,'','/?airgridLab=1&role=receiver');await A.startLab();const labSmoke={autoSender:!!document.querySelector('#x1Auto'),autoReceiver:!!document.querySelector('#x1Camera'),receiverVisible:getComputedStyle(document.querySelector('#x1Camera')).display!=='none',senderHidden:getComputedStyle(document.querySelector('#x1Auto')).display==='none',exportJson:!!document.querySelector('#x1Export'),exportCsv:!!document.querySelector('#x1Csv')};
+    history.replaceState(null,'','/?airgridLab=1&role=receiver');await A.startLab();const labSmoke={versionText:document.querySelector('.version')?.textContent||'',autoSender:!!document.querySelector('#x1Auto'),autoReceiver:!!document.querySelector('#x1Camera'),receiverVisible:getComputedStyle(document.querySelector('#x1Camera')).display!=='none',senderHidden:getComputedStyle(document.querySelector('#x1Auto')).display==='none',exportJson:!!document.querySelector('#x1Export'),exportCsv:!!document.querySelector('#x1Csv')};
     for(const w of workers)w.terminate();renderer.terminate();
     return{format:A.format,seed:'0x6d2b79f5',results,profileResults,hardwareTag,labSmoke,tracking:{first:compact('tracking-acquire',trackA),second:compact('tracking-follow',trackB)},selftest:st.result};
   })()`;
@@ -95,7 +95,7 @@ try{
   for(const r of report.profileResults)if(r.complete!==1||r.payloads!==1)failures.push(`${r.name}: clean profile did not round-trip`);
   if(!report.tracking.second.tracked||report.tracking.second.payloads<1)failures.push('persistent marker tracking did not decode the following frame');
   const tagged=report.hardwareTag?.tiles?.[0],expectedFlags=0x80|(2<<4)|(5<<1)|1;if(!tagged||tagged.flags!==expectedFlags||report.hardwareTag.payloads!==1)failures.push('hardware condition flags did not round-trip');
-  if(!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke.receiverVisible||!report.labSmoke.senderHidden)failures.push('automated hardware lab receiver UI did not initialize');
+  if(!report.labSmoke?.versionText.includes('v35d')||!report.labSmoke.versionText.includes('hardware lab')||!report.labSmoke?.autoSender||!report.labSmoke?.autoReceiver||!report.labSmoke?.exportJson||!report.labSmoke?.exportCsv||!report.labSmoke.receiverVisible||!report.labSmoke.senderHidden)failures.push('automated hardware lab receiver UI did not initialize');
   if(!report.selftest?.headerRecovered)failures.push('protected header reconstruction failed');
   if(!report.selftest?.eccRecovered)failures.push('LDPC soft reconstruction failed');
   if(!report.selftest?.fountainRecovered)failures.push('fountain reconstruction failed');

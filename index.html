@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- AirGapper v35c: detector-header ROI prefilter -->
+<!-- AirGapper v35d: visible hardware-lab build identity -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -140,7 +140,7 @@
 <body>
 <div class="app">
   <header>
-    <div><div class="brand">AirGapper <span class="version">v35c</span></div><div class="tag">Air-gapped file transfer</div></div>
+    <div><div class="brand">AirGapper <span class="version">v35d</span></div><div class="tag">Air-gapped file transfer</div></div>
     <div><button class="ghost" id="labBtn">Hardware lab</button> <button class="ghost" id="offlineBtn">Download offline</button></div>
   </header>
 
@@ -217,7 +217,7 @@
 
 if(new URLSearchParams(location.search).get('airgridLab')==='1')return;
 
-const BUILD='v35c';
+const BUILD='v35d';
 document.documentElement.dataset.airgapperBuild=BUILD;
 
 const $=s=>document.querySelector(s);
