@@ -12,7 +12,5 @@ Primary target:
 - High KB/s.
 - Reliable under dropped/blurred frames.
 - Keep the UI minimal.
-- Optimize the hot path aggressively: QR generation, camera capture, decoding, and fountain/FEC processing.
-- Use modern high-bandwidth device/browser features when available, with reliable fallbacks.
-- Prefer measured throughput over theoretical QR/FPS limits.
+- Optimize the hot path aggressively.
 - After changes, commit and push.
