@@ -266,6 +266,7 @@ const overlayCtx = overlay.getContext("2d")!;
 function captureQualityColor(region: Region): string {
   const successes = region.outcomes.reduce((sum, ok) => sum + Number(ok), 0);
   const rate = successes / region.outcomes.length;
+  if (rate === 1) return "#42e8ff"; // perfect lock: safe to raise sender density/speed
   if (rate >= 0.9) return "#35d66f"; // strong lock
   if (rate >= 0.65) return "#a9c93d";
   if (rate >= 0.35) return "#ffb23e";
