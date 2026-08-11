@@ -12,6 +12,7 @@
 //   the probing, so everything here is capability-gated rather than UA-gated.
 
 import { LTDecoder } from "../shared/fountain";
+import { formatBytes } from "../shared/format";
 import {
   estimateTransferProgress,
   expectedFountainOverhead,
@@ -52,6 +53,7 @@ const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const speedQuality = document.getElementById("speed-quality")!;
+const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 // Camera maximum resolution is not maximum optical throughput: a 4K video
@@ -382,6 +384,7 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
+  document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   clearInterval(statsTimer);
@@ -429,6 +432,7 @@ function stopReceiver(): void {
   metric("m-rate").textContent = "— KB/s";
   speedQuality.textContent = "Waiting";
   speedFeedback.className = "speed-feedback";
+  pipelineMetrics.style.display = "";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
     diagnosticsEl.open = false;
@@ -872,7 +876,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     const file = await unpackFile(container);
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
     seconds = (performance.now() - startTs) / 1000;
-    etaLabel.textContent = `${formatDuration(seconds)} total`;
+    document.body.classList.add("receive-complete");
+    etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
+    pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
 
     // The container carries its own media type, so the receiver never has to be
@@ -880,41 +886,24 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = (file.bytes.length / 1024 / seconds).toFixed(1);
     metric("m-rate").textContent = `${rate} KB/s`;
-    speedQuality.textContent = "Verified ✓";
+    speedQuality.textContent = "Complete";
     speedFeedback.className = "speed-feedback speed-high";
-    const gzipNote = file.compression === "gzip" ? "gzip decompressed · " : "";
     if (isSnippet(file)) {
       progressLabel.textContent = "100%";
       setStatus("");
-      showSnippet(
-        snippetText(file),
-        `text in ${seconds.toFixed(1)} s · ${rate} KB/s · ${gzipNote}SHA-256 verified ✓`,
-      );
+      showSnippet(snippetText(file));
       return;
     }
 
     progressLabel.textContent = "100%";
-    const kb = Math.round(file.bytes.length / 1024);
-    // The run's numbers belong under the heading, not up in the camera status
-    // line — which is done for good and goes quiet.
     setStatus("");
-    const summary = document.createElement("p");
-    summary.className = "hint";
-    summary.textContent =
-      `${kb} KB in ${seconds.toFixed(1)} s · ${rate} KB/s · ${gzipNote}SHA-256 verified ✓`;
-    const heading = document.createElement("div");
-    heading.className = "done";
-    heading.textContent = "Transfer Complete!";
     const url = URL.createObjectURL(new Blob([file.bytes as BlobPart], { type: file.type }));
     const download = document.createElement("a");
     download.className = "download";
     download.href = url;
     download.download = file.name;
     download.textContent = `Save ${file.name}`;
-    // Reading order of the finished page: heading, the run's numbers, the
-    // thing that arrived, Save under it, "Receive another file", and the
-    // Transfer summary panel last in its natural spot after #result.
-    result.replaceChildren(heading, summary);
+    result.replaceChildren();
     if (file.type.startsWith("image/")) {
       const image = document.createElement("img");
       image.className = "received";
@@ -943,14 +932,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     const actions = document.createElement("div");
     actions.className = "note-actions";
     actions.append(download);
-    const endActions = document.createElement("div");
-    endActions.className = "note-actions pair";
-    endActions.append(restartButton("Receive another file"));
-    // The received bytes sit in the Cache API so the media player can range
-    // over them (see servableMediaUrl) — which means they outlive the page.
-    // Offer the scrub right where the transfer ends.
-    if ("caches" in window) endActions.append(clearCacheButton());
-    result.append(actions, endActions);
+    result.append(actions);
   } catch (error) {
     sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
     // Everything is already torn down by this point, so the only way back to a
@@ -971,30 +953,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       "a partial transfer costs nothing but the time.";
     result.replaceChildren(heading, detail, restartButton("Try again"));
   }
-}
-
-/** Deletes the received-media cache — the one thing AirGapper persists (see
- *  servableMediaUrl). Handing the phone over shouldn't mean handing over the
- *  last transfer. A player still streaming from the cache falls back to its
- *  blob URL via the error listener wired in finish(). */
-function clearCacheButton(): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary-button";
-  button.textContent = "Clear AirGapper cache";
-  button.addEventListener("click", () => {
-    button.disabled = true;
-    caches.delete("received-media").then(
-      () => {
-        button.textContent = "Cache cleared";
-      },
-      () => {
-        button.textContent = "Clear failed — try again";
-        button.disabled = false;
-      },
-    );
-  });
-  return button;
 }
 
 /** A playable URL for received media. iOS Safari will not reliably play media
@@ -1028,18 +986,8 @@ async function servableMediaUrl(file: OpticalFile, blobUrl: string): Promise<str
   }
 }
 
-/** Nothing is persisted: the text lives here until the page is closed. The
- *  summary line mirrors the file path — run stats under the heading, not up
- *  in the camera status line. */
-function showSnippet(text: string, summaryLine: string) {
-  const heading = document.createElement("div");
-  heading.className = "done";
-  heading.textContent = "Text received";
-
-  const summary = document.createElement("p");
-  summary.className = "hint";
-  summary.textContent = summaryLine;
-
+/** Nothing is persisted: the text lives here until the page is closed. */
+function showSnippet(text: string) {
   const body = document.createElement("p");
   body.className = "received-note";
   body.textContent = text;
@@ -1059,9 +1007,9 @@ function showSnippet(text: string, summaryLine: string) {
       copy.textContent = "Copy failed";
     }
   });
-  actions.append(copy, restartButton("Receive another file"));
+  actions.append(copy);
 
-  result.replaceChildren(heading, summary, body, actions);
+  result.replaceChildren(body, actions);
 }
 
 function updateStats() {
