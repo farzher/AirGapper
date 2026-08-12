@@ -1447,9 +1447,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // told in advance whether a file or a text snippet is coming. The displayed
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = completedGoodputKbs(file.bytes.length, seconds);
-    metric("m-rate").textContent = `${rate.toFixed(1)} KB/s avg`;
+    metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`;
     speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
-    progressLabel.textContent = "Complete";
+    progressLabel.textContent = "✓ Complete";
     etaLabel.textContent = `${formatBytes(file.bytes.length)} in ${formatDuration(seconds)}`;
     if (isSnippet(file)) {
       setStatus("");
@@ -1544,18 +1544,14 @@ async function appendReceivedFile(
     player.src = src;
     container.append(player);
   }
-  const info = document.createElement("div");
-  info.className = "received-file-info";
-  const fileName = document.createElement("strong");
-  fileName.textContent = entry.name;
-  fileName.title = entry.name;
+  const downloadRow = document.createElement("div");
+  downloadRow.className = "received-file-download";
+  const link = downloadLink(entry.name, type, entry.bytes, entry.name);
+  link.title = entry.name;
   const fileSize = document.createElement("span");
   fileSize.textContent = formatBytes(entry.bytes.length);
-  info.append(fileName, fileSize);
-  const actions = document.createElement("div");
-  actions.className = "note-actions";
-  actions.append(downloadLink(entry.name, type, entry.bytes, "Download"));
-  container.append(info, actions);
+  downloadRow.append(link, fileSize);
+  container.append(downloadRow);
   parent.append(container);
 }
 

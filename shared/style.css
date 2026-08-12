@@ -232,10 +232,10 @@ details.settings summary { cursor: pointer; color: var(--muted); font-size: 12px
 details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; }
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .receiver-settings { flex: none; }
-.receiver-settings .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(72px, 1fr) minmax(82px, 1fr); gap: 10px; }
+.receiver-settings .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(58px, .65fr) minmax(70px, .8fr) auto; gap: 10px; align-items: end; }
 .receiver-settings label,
 .receiver-settings select { min-width: 0; width: 100%; }
-.receiver-settings .scan-capture-button { grid-column: 1 / -1; justify-self: end; padding-block: 6px; }
+.receiver-settings .scan-capture-button { padding: 6px 10px; min-height: 34px; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
 input[type="range"] { accent-color: #222; }
 .stream-specs, .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 0; }
@@ -319,15 +319,16 @@ input[type="range"] { accent-color: #222; }
 #result:empty { display: none; }
 .received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .received-file img.received, .received-file video.received, .received-file audio.received { max-width: 100%; }
-.received-file-info { width: 100%; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-.received-file-info strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.received-file-info span { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.received-file-download { width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.received-file-download .download { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.received-file-download span { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 img.received, video.received { display: block; width: auto; height: auto; max-width: 100%; max-height: 520px; border-radius: 14px; object-fit: contain; }
 .archive-actions { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); width: 100%; }
 body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
 body.receive-complete .app-main { margin-block: 0; padding: 4px 0 8px; }
 body.receive-complete .receiver-primary { gap: 8px; }
 body.receive-complete .receiver-settings { display: none; }
+body.receive-complete #progress-label { color: var(--good); letter-spacing: -.035em; }
 body.receive-complete #result { min-height: 0; }
 body.receive-complete img.received,
 body.receive-complete video.received {
@@ -367,6 +368,7 @@ dialog::backdrop { background: #0004; }
 }
 
 @media (max-width: 390px) {
-  .receiver-settings .row { grid-template-columns: minmax(0, 1.6fr) minmax(58px, .7fr) minmax(72px, .8fr); gap: 7px; }
+  .receiver-settings .row { grid-template-columns: minmax(0, 1.5fr) minmax(48px, .55fr) minmax(62px, .7fr) auto; gap: 6px; }
   .receiver-settings { padding-inline: 9px; }
+  .receiver-settings .scan-capture-button { padding-inline: 8px; }
 }
