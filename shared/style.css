@@ -266,7 +266,6 @@ input[type="range"] { accent-color: #222; }
 #transfer-size-label:not(:empty)::before { content: "·"; margin: 0 8px; }
 .pipeline-metrics { display: flex; gap: 14px; }
 .pipeline-metrics strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.text-button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 #result:empty { display: none; }
 .received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
@@ -283,8 +282,9 @@ body.receive-complete .received-note { max-height: calc(100dvh - 260px); overflo
 .done { font-size: 20px; font-weight: 700; color: var(--good); }
 .failed { font-size: 20px; font-weight: 700; color: var(--bad); }
 .received-note { width: 100%; margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.received-note .snippet-link { color: #145ea8; text-decoration: underline; text-underline-offset: 2px; }
 img.received, video.received { max-width: 100%; max-height: 520px; border-radius: 14px; }
-a.download { display: inline-block; padding: 9px 13px; color: white; background: #171717; border-radius: 10px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere; }
+.download { display: inline-block; border: 0; padding: 9px 13px; color: white; background: #171717; border-radius: 10px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere; cursor: pointer; }
 .note-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 
 /* Dialogs and legal -------------------------------------------------------- */

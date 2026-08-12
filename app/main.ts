@@ -34,6 +34,9 @@ function showView(name: ViewName): void {
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name === "receive";
   if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+  if (name === "send") {
+    (document.getElementById("snippet-text") as HTMLTextAreaElement).focus({ preventScroll: true });
+  }
   window.scrollTo(0, 0);
 }
 
@@ -86,12 +89,17 @@ async function runSmoke(): Promise<void> {
     (document.querySelector('[data-mode="send"]') as HTMLButtonElement).click();
     if (!views.send.classList.contains("active")) throw new Error("Send did not open");
     const text = document.getElementById("snippet-text") as HTMLTextAreaElement;
+    if (document.activeElement !== text) throw new Error("Send text box was not focused");
     text.value = "AirGapper browser smoke";
     (document.getElementById("send-snippet") as HTMLButtonElement).click();
     for (let tries = 0; tries < 20 && (document.getElementById("stage") as HTMLElement).hidden; tries++) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     if ((document.getElementById("stage") as HTMLElement).hidden) throw new Error("text sender did not start");
+    const qr = document.getElementById("qr") as HTMLCanvasElement;
+    const staticQr = qr.toDataURL();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (qr.toDataURL() !== staticQr) throw new Error("small text QR was not static");
     (document.getElementById("home-button") as HTMLButtonElement).click();
     if (!views.home.classList.contains("active")) throw new Error("Title did not return home");
     (document.querySelector('[data-mode="receive"]') as HTMLButtonElement).click();

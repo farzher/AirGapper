@@ -1037,17 +1037,54 @@ async function servableMediaUrl(bytes: Uint8Array, type: string, blobUrl: string
   }
 }
 
+const SNIPPET_LINK = /(?:https?:\/\/|www\.)[^\s<>]+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gi;
+const TRAILING_LINK_PUNCTUATION = /[.,;:!?\])}]+$/;
+
+/** Add only text nodes and narrowly validated anchors; received text is never
+ * interpreted as HTML. This keeps links useful without making snippets an
+ * injection path. */
+function appendLinkifiedText(parent: HTMLElement, text: string): void {
+  SNIPPET_LINK.lastIndex = 0;
+  let cursor = 0;
+  for (let match = SNIPPET_LINK.exec(text); match; match = SNIPPET_LINK.exec(text)) {
+    const candidate = match[0].replace(TRAILING_LINK_PUNCTUATION, "");
+    if (!candidate) continue;
+    parent.append(document.createTextNode(text.slice(cursor, match.index)));
+    const isEmail = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/.test(candidate);
+    const href = isEmail
+      ? `mailto:${candidate}`
+      : candidate.toLowerCase().startsWith("www.") ? `https://${candidate}` : candidate;
+    try {
+      const url = new URL(href);
+      if (!["http:", "https:", "mailto:"].includes(url.protocol)) throw new Error("unsupported link");
+      const link = document.createElement("a");
+      link.href = url.href;
+      link.textContent = candidate;
+      link.className = "snippet-link";
+      if (url.protocol !== "mailto:") {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+      parent.append(link);
+    } catch {
+      parent.append(document.createTextNode(candidate));
+    }
+    cursor = match.index + candidate.length;
+  }
+  parent.append(document.createTextNode(text.slice(cursor)));
+}
+
 /** Nothing is persisted: the text lives here until the page is closed. */
 function showSnippet(text: string) {
   const body = document.createElement("p");
   body.className = "received-note";
-  body.textContent = text;
+  appendLinkifiedText(body, text);
 
   const actions = document.createElement("div");
   actions.className = "note-actions";
   const copy = document.createElement("button");
   copy.type = "button";
-  copy.className = "text-button";
+  copy.className = "download";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
     try {

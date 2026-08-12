@@ -455,19 +455,9 @@ async function startStream(revealStage = false) {
   const fitScaling = cfgScaling.value === "fit";
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
-  // Fill one standard QR from 500 B through its 2,953 B maximum, then add
-  // parallel maximum-density symbols. Each remains an ordinary independent
-  // fountain frame, so this does not change the wire protocol.
-  const layoutMode = selectedLayout();
-  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
-
+  const configuredLayout = selectedLayout();
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const maximumBlockLen = blockLength(frameBytes);
-  // A small payload in one maximum-size block makes every grid cell carry the
-  // same mostly-zero data. Use enough compact blocks to fill the first grid
-  // with distinct source chunks. Large transfers still use the selected
-  // maximum unchanged, and single-code mode merely avoids tail padding.
-  const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
   // Keep selectedFile on this path — raising bytes/frame back up is the fix,
   // and dropping the pick would hide that.
   if (!fitsInOneStream(payload.length, frameBytes)) {
@@ -479,6 +469,15 @@ async function startStream(revealStage = false) {
     );
     return;
   }
+
+  // If the complete container fits in one configured frame, one static QR is
+  // both denser and easier to scan than an animated grid repeating the same
+  // data. Larger transfers retain the chosen multi-code layout and fountain
+  // carousel. Single-code mode also avoids padding its final/only block.
+  const staticStream = payload.length <= maximumBlockLen;
+  const layoutMode: LayoutMode = staticStream ? "single" : configuredLayout;
+  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
+  const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
   const encoder = new LTEncoder(payload, blockLen, sessionId);
   const header: FrameHeader = {
     sessionId,
@@ -608,6 +607,7 @@ async function startStream(revealStage = false) {
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
               layoutMode,
+              static: staticStream,
               sizeLevel,
               gridMargin: GRID_MARGIN,
               scaling: fitScaling ? "fit" : "integer",
@@ -633,7 +633,7 @@ async function startStream(revealStage = false) {
    * never pays for more than the single frame it just consumed.
    */
   let generatorFailed = false;
-  const lookahead = LOOKAHEAD * gridCodes;
+  const lookahead = staticStream ? 1 : LOOKAHEAD * gridCodes;
   const pump = (max = lookahead) => {
     if (generatorFailed || gen !== generation) return;
     try {
@@ -646,6 +646,32 @@ async function startStream(revealStage = false) {
   };
   pump();
 
+  let cellCursor = 0;
+  const paintCell = (img: ImageData): void => {
+    const cell = modules + 2 * GRID_MARGIN;
+    const stride = modules + GRID_MARGIN;
+    const cx = (cellCursor % gridCols) * stride;
+    const cy = Math.floor(cellCursor / gridCols) * stride;
+    cells[cellCursor] = img;
+    staging.getContext("2d")!.putImageData(img, cx, cy);
+    const ctx = canvas.getContext("2d")!;
+    ctx.imageSmoothingEnabled = false;
+    if (fitScaling) {
+      // Fractional module scaling can put cell boundaries between device
+      // pixels. Repaint the complete grid so partial blits cannot leave seams.
+      ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
+    } else {
+      ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
+    }
+    cellCursor = (cellCursor + 1) % gridCodes;
+  };
+
+  if (staticStream) {
+    const img = queue.shift();
+    if (img) paintCell(img);
+    return;
+  }
+
   // Staggered flips: every cell refreshes at txFps, but cell j flips at phase
   // j/N of the frame interval instead of all N flipping together. A camera
   // exposure that straddles a flip therefore catches at most ONE code mid-
@@ -657,7 +683,6 @@ async function startStream(revealStage = false) {
   // the old behavior, never below it. A grid of one IS the old behavior.)
   const interval = 1000 / txFps;
   const subInterval = interval / gridCodes;
-  let cellCursor = 0;
   let nextAt = performance.now();
   let lastTickAt = performance.now();
   const tick = (now: number) => {
@@ -702,23 +727,7 @@ async function startStream(revealStage = false) {
         nextAt = now + subInterval;
         break;
       }
-      const cell = modules + 2 * GRID_MARGIN;
-      const stride = modules + GRID_MARGIN;
-      const cx = (cellCursor % gridCols) * stride;
-      const cy = Math.floor(cellCursor / gridCols) * stride;
-      cells[cellCursor] = img;
-      staging.getContext("2d")!.putImageData(img, cx, cy);
-      const ctx = canvas.getContext("2d")!;
-      ctx.imageSmoothingEnabled = false;
-      if (fitScaling) {
-        // Fractional module scaling can put cell boundaries between device
-        // pixels. Repaint the complete grid so partial blits cannot leave
-        // seams where their rounded edges meet.
-        ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
-      } else {
-        ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
-      }
-      cellCursor = (cellCursor + 1) % gridCodes;
+      paintCell(img);
       nextAt += subInterval;
     }
   };
