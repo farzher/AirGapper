@@ -65,7 +65,7 @@
 
     <section id="receiveView" class="view receiver-shell">
       <section class="receiver-primary">
-        <div class="receiver-heading"><div class="hint status-line" id="stats"></div><span class="hint" id="receiver-version"></span></div>
+        <div class="receiver-heading"><div class="hint status-line" id="stats"></div></div>
         <button id="start" class="enable-camera" type="button" hidden>Enable camera</button>
         <details class="settings receiver-settings">
           <summary>Advanced camera</summary>
@@ -75,7 +75,7 @@
             <label><span>Decode workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
             <label><span>Experimental</span><select id="webgpu-mode"><option value="off" selected>WebGPU off</option><option value="on">WebGPU on</option></select></label>
           </div>
-          <p class="settings-actual" id="camera-actual"></p>
+          <p class="settings-actual" id="camera-actual"></p><p class="settings-actual" id="receiver-version"></p>
         </details>
         <div class="preview-zone" id="preview" style="display:none">
           <div class="preview receive-card">
@@ -83,9 +83,6 @@
           </div>
         </div>
         <div id="result"></div>
-        <details class="settings receiver-settings" id="gpu-debug-panel">
-          <summary>Debug pipeline</summary><pre id="gpu-debug">WebGPU: initializing</pre>
-        </details>
         <section class="transfer-panel" id="metrics" style="display:none" aria-live="polite">
           <div class="transfer-progress" id="progress-status">
             <div class="transfer-summary">

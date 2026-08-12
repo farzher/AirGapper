@@ -58,7 +58,7 @@ const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectEle
 const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
 const receiverVersion = document.getElementById("receiver-version")!;
-const APP_VERSION = "0.1.2";
+const APP_VERSION = "0.1.3";
 const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
 let webgpuRequested = false;
 try {
@@ -88,7 +88,6 @@ const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
-const gpuDebug = document.getElementById("gpu-debug")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 const autoWorkerCount = hardwareThreadCount;
@@ -262,7 +261,13 @@ let lastDecodedRegionSize = 0;
 // Crop replies retain the exact anchor they attempted, so a miss can
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
+const MAX_INFLIGHT_PER_REGION = 1;
 const bitmapCropsPending = new Map<Region, number>();
+function regionInflightCount(region: Region): number {
+  let count = bitmapCropsPending.get(region) ?? 0;
+  for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
+  return count;
+}
 function adjustBitmapPending(region: Region, delta: number): void {
   const count = (bitmapCropsPending.get(region) ?? 0) + delta;
   if (count > 0) bitmapCropsPending.set(region, count);
@@ -411,6 +416,8 @@ const ACQUISITION_SCAN_MS = 100;
 const EXPECTED_REGIONS_DECAY_MS = 10_000;
 // Keep one tracked region for every cell in the densest 3×5 layout.
 const MAX_REGIONS = 15;
+const REGION_PAD = 0.35;
+let cropRotate = 0;
 let lastFullScan = 0;
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
@@ -699,6 +706,7 @@ function stopReceiver(): void {
   poolBusyTimes.length = 0;
   cropAttempts.clear();
   bitmapCropsPending.clear();
+  cropRotate = 0;
   schedulerNoJobs = 0;
   cropMisses = 0;
   fullDetectorMisses = 0;
@@ -756,7 +764,6 @@ function stopReceiver(): void {
   metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
-  gpuDebug.textContent = "WebGPU: initializing";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
     diagnosticsEl.open = false;
@@ -932,7 +939,10 @@ const BITMAP_CAPTURE =
   new URLSearchParams(window.location.search).get("capture") === "bitmap" &&
   typeof createImageBitmap === "function" &&
   typeof OffscreenCanvas !== "undefined";
-const DIRECT_Y_CAPTURE = typeof VideoFrame !== "undefined";
+// Constructing a VideoFrame from the live <video> wedges the camera compositor
+// on affected old Android WebViews once tracked decoding starts. Keep that path
+// off there; crop readback is bounded to QR-sized regions instead.
+const DIRECT_Y_CAPTURE = typeof VideoFrame !== "undefined" && !isAndroidApp();
 
 /** Fire-and-forget submit of a GPU-cropped frame. The bitmap resolves async;
  *  by then the pool may have filled or the transfer ended — close it rather
@@ -1061,9 +1071,26 @@ function captureFrame() {
       lastFullScan = now;
       fullScans++;
       submitBitmap(createImageBitmap(video), { ox: 0, oy: 0, full: true });
-    } else {
-      submitBitmap(createImageBitmap(video), { ox: 0, oy: 0, full: false, tracks });
+      return;
     }
+    let free = pool.size - pool.busyCount;
+    for (let i = 0; i < regions.length && free > 0; i++) {
+      const r = regions[(i + cropRotate) % regions.length]!;
+      if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
+      const size = Math.max(r.w, r.h);
+      const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
+      const x = Math.max(0, Math.floor(r.x - pad));
+      const y = Math.max(0, Math.floor(r.y - pad));
+      const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
+      const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
+      if (w < 32 || h < 32) continue;
+      free--;
+      adjustBitmapPending(r, 1);
+      submitBitmap(createImageBitmap(video, x, y, w, h), {
+        ox: x, oy: y, full: false, quad: r.quad, dim: r.dim, region: r,
+      });
+    }
+    cropRotate++;
     return;
   }
 
@@ -1084,16 +1111,33 @@ function captureFrame() {
     );
     return;
   }
-  ctx.drawImage(video, 0, 0);
-  const img = ctx.getImageData(0, 0, vw, vh);
-  if (pool.submit(
-    { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: false, tracks },
-    [img.data.buffer],
-  )) {
-    cropsSubmitted += tracks.length;
-  } else {
-    poolBusyTimes.push(performance.now());
+  // Without VideoFrame, read back only individual tracked crops. A full-frame
+  // RGBA copy for every locked QR frame can freeze older Android WebViews.
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[(i + cropRotate) % regions.length]!;
+    if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
+    const size = Math.max(r.w, r.h);
+    const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
+    const x = Math.max(0, Math.floor(r.x - pad));
+    const y = Math.max(0, Math.floor(r.y - pad));
+    const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
+    const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
+    if (w < 32 || h < 32) continue;
+    ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
+    const id = frameId++;
+    cropAttempts.set(id, { region: r, quad: r.quad });
+    if (!pool.submit(
+      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
+      [img.data.buffer],
+    )) {
+      cropAttempts.delete(id);
+      poolBusyTimes.push(performance.now());
+      break;
+    }
+    cropsSubmitted++;
   }
+  cropRotate++;
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
@@ -1577,24 +1621,6 @@ function updateStats() {
     ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
     : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
   limit.classList.toggle("cpu-bound", !gpuMetrics?.submitted && busyRate >= 0.15);
-  const live = decodedCount();
-  const successes = perSecond(qrReadTimes);
-  gpuDebug.textContent = [
-    `WebGPU enabled: ${Boolean(gpuMetrics?.enabled)}`,
-    `camera: ${perSecond(captureTimes).toFixed(1)} fps · ${video.videoWidth}×${video.videoHeight}`,
-    `layout: ${Math.max(expectedRegions, live) || "acquiring"} QR · version: ${regions[0]?.dim ? (regions[0]!.dim! - 17) / 4 : "—"}`,
-    `GPU tracking: finder search ±1 px${now < gpuCooldownUntil ? " · CPU re-anchor" : ""}`,
-    `GPU sampling + packing + total: ${gpuMetrics?.lastGpuMs.toFixed(2) ?? "—"} ms`,
-    `GPU→CPU readback: ${gpuMetrics?.lastReadbackMs.toFixed(2) ?? "—"} ms`,
-    `WASM parse: ${gpuWasmFrames ? (wasmParseTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms`,
-    `RS: ${gpuWasmFrames ? (wasmRsTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms (${wasmRsFallbacks} fallbacks)`,
-    `total decode: ${gpuWasmFrames ? (wasmTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms/frame`,
-    `tracked/success: ${live}/${successes.toFixed(1)} QR/s`,
-    `QR success: ${live ? Math.min(100, successes / live / Math.max(1, perSecond(captureTimes)) * 100).toFixed(1) : "—"}%`,
-    `CPU fallback/reacquisition: ${trackedMissFallbacks}/${fullScans}`,
-    `packed: ${gpuMetrics ? (gpuMetrics.packedBytes / 1024).toFixed(1) : "0.0"} KB total`,
-    `verified: ${liveGoodputKbs(now).toFixed(1)} KB/s`,
-  ].join("\n");
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
