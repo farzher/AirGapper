@@ -21,6 +21,7 @@
     "vite-plugin-singlefile": "^2.3.3"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "jsqr": "^1.4.0"
   }
 }
