@@ -68,6 +68,7 @@ function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; code
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
+const stageError = document.getElementById("stage-error")!;
 const sendStart = document.querySelector<HTMLElement>(".send-start");
 const specs = document.getElementById("specs")!;
 const cfgFile = document.getElementById("cfg-file") as HTMLInputElement;
@@ -209,6 +210,7 @@ function showError(message: string): void {
   releaseScreenWakeLock();
   setStageFullscreen(false);
   stage.hidden = true;
+  stageError.hidden = true;
   if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
   specsLine.showError(message);
@@ -221,9 +223,11 @@ function showSettingsError(message: string): void {
   setStageFullscreen(false);
   stage.hidden = false;
   canvas.style.display = "none";
-  if (sendStart) sendStart.hidden = false;
+  stageError.textContent = message;
+  stageError.hidden = false;
+  if (sendStart) sendStart.hidden = true;
   showStreamPanels(true);
-  specsLine.showError(message);
+  setStatus("");
 }
 
 let selectedMode: "file" | "snippet" = "file";
@@ -269,6 +273,7 @@ function stopTransfer(): void {
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
+  stageError.hidden = true;
   if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
   cfgFile.value = "";
@@ -334,6 +339,7 @@ function applyMode(): void {
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
+  stageError.hidden = true;
   if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
 
@@ -524,6 +530,7 @@ async function startStream(revealStage = false) {
   const gen = ++generation;
   resizeDisplay = null;
   canvas.style.display = "";
+  stageError.hidden = true;
   // Stale until this stream's first frame locks its version and refills them.
   showStreamPanels(false);
   if (!selectedFile) {

@@ -181,6 +181,17 @@ body.receive-mode .preview { max-height: 100%; }
 }
 .stage[hidden] { display: none; }
 .stage canvas { display: block; max-width: 100%; cursor: pointer; image-rendering: pixelated; }
+.stage-error {
+  width: min(560px, calc(100% - 24px));
+  padding: 24px;
+  color: var(--bad);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--bad) 25%, var(--line));
+  border-radius: 14px;
+  font-size: 18px;
+  font-weight: 650;
+  text-align: center;
+}
 .status-line { min-height: 18px; margin-top: 9px; text-align: center; }
 .status-line.error { color: var(--bad); font-weight: 650; }
 .footer-hint { text-align: center; }
