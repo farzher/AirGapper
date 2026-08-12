@@ -1,0 +1,15 @@
+{
+  "name": "decimen-codec",
+  "version": "0.1.0",
+  "description": "QR decode engine for Decimen: QR-only, reader-only zxing-cpp build with a tracked decode path, compiled to WASM.",
+  "scripts": {
+    "test": "node bench/bench.mjs"
+  },
+  "keywords": [],
+  "author": "Evan Crawley (Bash Alarmist)",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
