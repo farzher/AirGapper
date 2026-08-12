@@ -406,7 +406,7 @@ function restoreSendSettings(): void {
     if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three") {
       cfgLayout.value = saved.layout;
     }
-    if (saved.channels === "same" || saved.channels === "dual" || saved.channels === "alternating") {
+    if (saved.channels === "normal" || saved.channels === "same" || saved.channels === "dual" || saved.channels === "alternating") {
       cfgChannels.value = saved.channels;
     }
   } catch {
@@ -506,7 +506,7 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = selectedFps();
-  const channelMode = cfgChannels.value === "same" || cfgChannels.value === "alternating"
+  const channelMode = cfgChannels.value === "normal" || cfgChannels.value === "same" || cfgChannels.value === "alternating"
     ? cfgChannels.value
     : "dual";
   const sizeLevel = Number(cfgSize.value);
@@ -707,12 +707,9 @@ async function startStream(revealStage = false) {
       else modulesA = blank;
       alternatingChannel ^= 1;
     }
-    const raster = rasterizeDualQr(
-      first.modules.size,
-      modulesA,
-      modulesB,
-      GRID_MARGIN,
-    );
+    const raster = channelMode === "normal"
+      ? rasterizeQr(first.modules.size, first.modules.data, GRID_MARGIN)
+      : rasterizeDualQr(first.modules.size, modulesA, modulesB, GRID_MARGIN);
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
   };
 
