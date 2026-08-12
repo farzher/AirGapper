@@ -81,6 +81,7 @@ async function pixelsOf(
   buf: ArrayBuffer | undefined,
   bitmap: ImageBitmap | undefined,
   frame: VideoFrame | undefined,
+  frameRect: { x: number; y: number; width: number; height: number } | undefined,
   gpuPacked: ArrayBuffer | undefined,
   tracks: BatchTrack[] | undefined,
   wordsPerMatrix: number,
@@ -107,14 +108,15 @@ async function pixelsOf(
       format: "matrix" as const, stride: GPU_ATLAS_WIDTH };
   }
   if (frame) {
-    const fw = frame.displayWidth;
-    const fh = frame.displayHeight;
+    const fw = frameRect?.width ?? frame.displayWidth;
+    const fh = frameRect?.height ?? frame.displayHeight;
     const chromaWidth = Math.ceil(fw / 2);
     const chromaHeight = Math.ceil(fh / 2);
     const yBytes = fw * fh;
     const chromaBytes = chromaWidth * chromaHeight;
     const options = {
       format: "I420" as const,
+      rect: frameRect,
       layout: [
         { offset: 0, stride: fw },
         { offset: yBytes, stride: chromaWidth },
@@ -181,7 +183,7 @@ function offsetQuad(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, bitmap, frame, gpuPacked, tracks, wordsPerMatrix = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
+  const { id, buf, bitmap, frame, frameRect, gpuPacked, tracks, wordsPerMatrix = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
     /** Readback-fallback capture: raw RGBA. */
     buf?: ArrayBuffer;
@@ -189,6 +191,8 @@ ctx.onmessage = async (e: MessageEvent) => {
     bitmap?: ImageBitmap;
     /** WebCodecs path: copied directly as I420 luma. */
     frame?: VideoFrame;
+    /** Camera-track crop copied directly into planar luma. */
+    frameRect?: { x: number; y: number; width: number; height: number };
     /** GPU-packed module matrices; no camera pixels cross to this worker. */
     gpuPacked?: ArrayBuffer;
     wordsPerMatrix?: number;
@@ -206,7 +210,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     /** The stream's QR dimension in modules — tracked path. */
     dim?: number;
   };
-  const pixels = await pixelsOf(buf, bitmap, frame, gpuPacked, tracks, wordsPerMatrix, w, h);
+  const pixels = await pixelsOf(buf, bitmap, frame, frameRect, gpuPacked, tracks, wordsPerMatrix, w, h);
   const { w: pw, h: ph } = pixels;
   let zx: DecimenModule | undefined;
   let ptr = 0;
@@ -226,12 +230,14 @@ ctx.onmessage = async (e: MessageEvent) => {
       for (let slot = 0; slot < tracks.length; slot++) {
         const track = tracks[slot]!;
         const matrixY = slot * GPU_ATLAS_WIDTH;
-        const key = pixels.format === "matrix" ? `matrix:${track.id}:${track.dim}:${Number(track.crc32)}:${slot}` : quadKey(track);
+        const key = pixels.format === "matrix"
+          ? `matrix:${track.id}:${track.dim}:${Number(track.crc32)}:${slot}`
+          : `${quadKey(track)}:${frameRect?.x ?? 0}:${frameRect?.y ?? 0}`;
         if (batchTrackKeys[slot] !== key) {
           const q = pixels.format === "matrix" ? {
             topLeft: { x: 0, y: matrixY }, topRight: { x: track.dim, y: matrixY },
             bottomRight: { x: track.dim, y: matrixY + track.dim }, bottomLeft: { x: 0, y: matrixY + track.dim },
-          } : track.quad;
+          } : frameRect ? offsetQuad(track.quad, -frameRect.x, -frameRect.y) : track.quad;
           zx._setTrackedDecoderTrack(
             batchDecoder, slot, track.id, track.dim,
             q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,

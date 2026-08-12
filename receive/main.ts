@@ -57,7 +57,7 @@ const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.9";
+const APP_VERSION = "0.1.10";
 const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
 let webgpuRequested = false;
 try {
@@ -187,6 +187,7 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
+const scanCompletionTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
@@ -335,7 +336,7 @@ function noteSequence(region: Region, seq: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
-  if (id === directFrameJobId) directFrameJobId = -1;
+  if (directFrameJobIds.delete(id)) scanCompletionTimes.push(performance.now());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -702,6 +703,7 @@ function stopReceiver(): void {
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
+  scanCompletionTimes.length = 0;
   cropAttempts.clear();
   bitmapCropsPending.clear();
   cropRotate = 0;
@@ -928,12 +930,12 @@ let frameId = 0;
 let webgpuSampler: WebGpuQrSampler | null = null;
 let cameraFrameReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
 let directCameraCapture = false;
-let directFrameJobId = -1;
+const directFrameJobIds = new Set<number>();
 
 /** Stop consuming camera-native frames without waiting for a pending read. */
 function stopDirectCameraCapture(): void {
   directCameraCapture = false;
-  directFrameJobId = -1;
+  directFrameJobIds.clear();
   const reader = cameraFrameReader;
   cameraFrameReader = null;
   if (reader) void reader.cancel().catch(() => undefined);
@@ -941,8 +943,8 @@ function stopDirectCameraCapture(): void {
 
 /**
  * Consume frames from the camera track rather than constructing them from the
- * compositor-backed <video>. Only one latest frame enters the worker pipeline;
- * stale frames are closed immediately, so decoding cannot throttle preview.
+ * compositor-backed <video>. At most one frame per free worker enters the
+ * pipeline; excess frames are closed immediately instead of being queued.
  */
 function startDirectCameraCapture(track: MediaStreamTrack, gen: number): boolean {
   const Processor = (globalThis as typeof globalThis & {
@@ -1001,17 +1003,40 @@ function submitDirectCameraFrame(frame: VideoFrame): void {
     stopDirectCameraCapture();
     return;
   }
-  if (directFrameJobId !== -1 || !tracks.length || now - lastFullScan > scanInterval) {
+  if (!tracks.length || now - lastFullScan > scanInterval || pool.busyCount === pool.size) {
+    if (pool.busyCount === pool.size) poolBusyTimes.push(now);
     frame.close();
     return;
   }
+
+  // copyTo() can crop before readback. Enclose every tracked quad with enough
+  // margin for the decoder's correction search, aligned to even I420 chroma
+  // coordinates. This avoids copying the rest of a high-resolution frame.
+  const points = tracks.flatMap((track) => [
+    track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft,
+  ]);
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  const pad = Math.max(8, Math.round(Math.max(maxX - minX, maxY - minY) * 0.08));
+  const x = Math.max(0, Math.floor((minX - pad) / 2) * 2);
+  const y = Math.max(0, Math.floor((minY - pad) / 2) * 2);
+  const right = Math.min(frame.displayWidth, Math.ceil((maxX + pad) / 2) * 2);
+  const bottom = Math.min(frame.displayHeight, Math.ceil((maxY + pad) / 2) * 2);
+  const frameRect = { x, y, width: right - x, height: bottom - y };
+  if (frameRect.width < 2 || frameRect.height < 2) {
+    frame.close();
+    return;
+  }
+
   const id = frameId++;
-  directFrameJobId = id;
-  if (pool.submit({ id, frame, full: false, tracks }, [frame])) {
+  directFrameJobIds.add(id);
+  if (pool.submit({ id, frame, frameRect, full: false, tracks }, [frame])) {
     cropsSubmitted += tracks.length;
     return;
   }
-  directFrameJobId = -1;
+  directFrameJobIds.delete(id);
   poolBusyTimes.push(now);
   frame.close();
 }
@@ -1709,6 +1734,7 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
+  prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
@@ -1717,8 +1743,10 @@ function updateStats() {
   const gpuMetrics = webgpuSampler?.metrics;
   limit.textContent = gpuMetrics?.submitted
     ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
-    : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
-  limit.classList.toggle("cpu-bound", !gpuMetrics?.submitted && busyRate >= 0.15);
+    : directCameraCapture
+      ? `Scan ${perSecond(scanCompletionTimes).toFixed(0)} fps · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
+      : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
+  limit.classList.toggle("cpu-bound", busyRate >= 0.15);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
