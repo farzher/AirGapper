@@ -318,7 +318,9 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
-        webView.onPause();
+        webView.evaluateJavascript(
+                "window.airgapperSuspend && window.airgapperSuspend()",
+                ignored -> webView.onPause());
         super.onPause();
     }
 

@@ -38,7 +38,7 @@ import {
 import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
-import { copyTextOnAndroid, saveFileOnAndroid } from "../shared/android";
+import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
@@ -485,16 +485,22 @@ async function start() {
     height: { ideal: Math.round((captureWidth * 3) / 4) },
   };
   try {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { ...base, frameRate: { exact: captureFps } },
-      });
-    } catch {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { ...base, frameRate: { ideal: captureFps } },
-      });
+    if (isAndroidApp()) {
+      // Some Android camera providers remain wedged after rejecting one
+      // getUserMedia request. Use one broadly satisfiable request in the APK.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
+    } else {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { ...base, frameRate: { exact: captureFps } },
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { ...base, frameRate: { ideal: captureFps } },
+        });
+      }
     }
   } catch (err) {
     const denied = err instanceof DOMException && err.name === "NotAllowedError";

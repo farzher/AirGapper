@@ -10,6 +10,10 @@ function bridge(): AndroidBridge | undefined {
   return (window as Window & { AirGapperAndroid?: AndroidBridge }).AirGapperAndroid;
 }
 
+export function isAndroidApp(): boolean {
+  return bridge() !== undefined;
+}
+
 export function saveFileOnAndroid(name: string, type: string, bytes: Uint8Array): boolean {
   const android = bridge();
   if (!android) return false;

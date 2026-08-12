@@ -86,6 +86,14 @@ function downloadOffline(): void {
 }
 document.getElementById("download-offline")!.addEventListener("click", downloadOffline);
 
+(window as Window & { airgapperSuspend?: () => void }).airgapperSuspend = () => {
+  if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
+};
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend?.();
+});
+
 (window as Window & { airgapperHandleBack?: () => boolean }).airgapperHandleBack = () => {
   if (receiverLinkDialog.open) {
     receiverLinkDialog.close();
