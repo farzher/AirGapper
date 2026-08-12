@@ -224,7 +224,10 @@ function noteSequence(region: Region, seq: number): void {
     region.lastSeq = seq;
     region.seqStep = step;
     region.outcomes.length = 0;
-    noteOutcome(region, true);
+    // One decode establishes that the code exists; it does not establish a
+    // 100% read rate. Start at the lowest quality color and let subsequent
+    // distinct sender sequences earn the outline upward.
+    noteOutcome(region, false);
     return;
   }
   if (seq <= region.lastSeq) return; // repeated camera read of one sender frame
