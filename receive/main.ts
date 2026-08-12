@@ -724,10 +724,6 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   if (box) noteRegion(box, performance.now(), true, info);
-  // Plain senders show exactly one static symbol. Seeing a multi-code scene is
-  // another early signal that this is a fountain grid, even before one of its
-  // binary frames has decoded successfully.
-  if (regions.length > 1) plainQrPolicy.noteFramed();
   const parsed = parseFrame(bytes);
   if (done) return;
   if (!parsed) {
@@ -737,7 +733,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      const settled = plainQrPolicy.addPlain(text);
+      const settled = plainQrPolicy.addPlain(text, info?.scanId ?? -1);
       if (settled) finishPlainQr(settled);
     } catch {
       // Non-text binary QR content is not a plain snippet or AirGapper frame.

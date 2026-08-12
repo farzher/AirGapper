@@ -232,7 +232,7 @@ test("quad, modules, and tracked flag ride along to the decode callback", () => 
       symbols: [{ bytes: new Uint8Array([1]), box: { x: 1, y: 2, w: 39, h: 39 }, quad, modules: 177, tracked: true }],
     },
   } as MessageEvent);
-  assert.deepEqual(infos, [{ quad, modules: 177, tracked: true }]);
+  assert.deepEqual(infos, [{ scanId: 0, quad, modules: 177, tracked: true }]);
 });
 
 test("an empty pool accepts nothing", () => {

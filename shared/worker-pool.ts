@@ -34,6 +34,9 @@ export interface SymbolQuad {
 
 /** Decode metadata that rides along with the bytes. */
 export interface SymbolInfo {
+  /** Worker submission that produced this symbol. Symbols sharing this id came
+   * from one camera scan and must not count as repeated observations. */
+  scanId?: number;
   quad?: SymbolQuad;
   /** QR dimension in modules; feeds the next tracked decode. */
   modules?: number;
@@ -89,7 +92,7 @@ export class DecodeWorkerPool {
         this.busy[slot] = false;
         if (trackedAttempted) this.onTrackedAttempt?.();
         for (const s of symbols)
-          this.onDecoded(s.bytes, s.box, { quad: s.quad, modules: s.modules, tracked: s.tracked });
+          this.onDecoded(s.bytes, s.box, { scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked });
         if (this.onSighted) for (const box of sightings ?? []) this.onSighted(box);
       };
       this.workers.push(worker);
