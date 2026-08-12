@@ -1446,28 +1446,28 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // The container carries its own media type, so the receiver never has to be
     // told in advance whether a file or a text snippet is coming. The displayed
     // rate is complete, unique original-file goodput through SHA verification.
-    const rate = completedGoodputKbs(file.bytes.length, seconds).toFixed(1);
-    metric("m-rate").textContent = `${rate} KB/s`;
-    speedFeedback.className = "speed-feedback speed-good";
+    const rate = completedGoodputKbs(file.bytes.length, seconds);
+    metric("m-rate").textContent = `${rate.toFixed(1)} KB/s avg`;
+    speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
+    progressLabel.textContent = "Complete";
+    etaLabel.textContent = `${formatBytes(file.bytes.length)} in ${formatDuration(seconds)}`;
     if (isSnippet(file)) {
-      progressLabel.textContent = "100%";
       setStatus("");
       showSnippet(snippetText(file));
       return;
     }
 
-    progressLabel.textContent = "100%";
     setStatus("");
     result.replaceChildren();
     if (file.type === "application/vnd.airgapper.files+zip") {
       const entries = readStoredZip(file.bytes);
-      for (const entry of entries) await appendReceivedFile(entry, result, true);
+      for (const entry of entries) await appendReceivedFile(entry, result);
       const archiveActions = document.createElement("div");
       archiveActions.className = "note-actions archive-actions";
       archiveActions.append(downloadLink(file.name, "application/zip", file.bytes, `Save ZIP · ${file.name}`));
       result.append(archiveActions);
     } else {
-      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, false, file.type);
+      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type);
     }
   } catch (error) {
     sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
@@ -1520,12 +1520,11 @@ function downloadLink(name: string, type: string, bytes: Uint8Array, label = `Sa
 async function appendReceivedFile(
   entry: ZipEntry,
   parent: HTMLElement,
-  separate: boolean,
   declaredType?: string,
 ): Promise<void> {
   const type = declaredType || inferredType(entry.name);
-  const container = separate ? document.createElement("section") : parent;
-  if (separate) container.className = "received-file";
+  const container = document.createElement("section");
+  container.className = "received-file";
   const url = URL.createObjectURL(new Blob([entry.bytes as BlobPart], { type }));
   if (type.startsWith("image/")) {
     const image = document.createElement("img");
@@ -1545,11 +1544,19 @@ async function appendReceivedFile(
     player.src = src;
     container.append(player);
   }
+  const info = document.createElement("div");
+  info.className = "received-file-info";
+  const fileName = document.createElement("strong");
+  fileName.textContent = entry.name;
+  fileName.title = entry.name;
+  const fileSize = document.createElement("span");
+  fileSize.textContent = formatBytes(entry.bytes.length);
+  info.append(fileName, fileSize);
   const actions = document.createElement("div");
   actions.className = "note-actions";
-  actions.append(downloadLink(entry.name, type, entry.bytes));
-  container.append(actions);
-  if (separate) parent.append(container);
+  actions.append(downloadLink(entry.name, type, entry.bytes, "Download"));
+  container.append(info, actions);
+  parent.append(container);
 }
 
 /** A playable URL for received media. iOS Safari will not reliably play media
@@ -1647,6 +1654,16 @@ function showSnippet(text: string) {
   result.replaceChildren(body, actions);
 }
 
+function speedQualityClass(rate: number): string {
+  return rate < 5
+    ? "speed-low"
+    : rate < 25
+      ? "speed-mid"
+      : rate < 75
+        ? "speed-good"
+        : "speed-high";
+}
+
 function updateStats() {
   if (done) return;
   const now = performance.now();
@@ -1700,13 +1717,6 @@ function updateStats() {
   updateProgressEstimate();
   const liveRate = liveGoodputKbs(now);
   metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;
-  const qualityClass = liveRate < 5
-    ? "speed-low"
-    : liveRate < 25
-      ? "speed-mid"
-      : liveRate < 75
-        ? "speed-good"
-        : "speed-high";
-  speedFeedback.className = `speed-feedback ${qualityClass}`;
+  speedFeedback.className = `speed-feedback ${speedQualityClass(liveRate)}`;
 
 }

@@ -319,6 +319,9 @@ input[type="range"] { accent-color: #222; }
 #result:empty { display: none; }
 .received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .received-file img.received, .received-file video.received, .received-file audio.received { max-width: 100%; }
+.received-file-info { width: 100%; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.received-file-info strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.received-file-info span { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 img.received, video.received { display: block; width: auto; height: auto; max-width: 100%; max-height: 520px; border-radius: 14px; object-fit: contain; }
 .archive-actions { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); width: 100%; }
 body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
