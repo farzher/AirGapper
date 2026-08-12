@@ -5,3 +5,8 @@ dist/
 dist-standalone/
 artifacts/
 scratch/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk

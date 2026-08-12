@@ -35,10 +35,9 @@ import {
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
 import { isAndroid, isIOS } from "../shared/platform";
-import { requestScreenWakeLock } from "../shared/wake-lock";
+import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
-import { readFileBytes, replaceChildren } from "../shared/dom";
 
 const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
@@ -154,6 +153,7 @@ const setStatus = specsLine.setStatus;
  * that setting back up is the fix.
  */
 function showError(message: string): void {
+  releaseScreenWakeLock();
   setStageFullscreen(false);
   stage.hidden = true;
   if (sendStart) sendStart.hidden = false;
@@ -191,8 +191,8 @@ function updateFilePicker(): void {
     total.textContent = selectedFile.compression === "gzip"
       ? `${formatBytes(originalTotal)} · ${formatBytes(selectedFile.transmittedSize)} gzip`
       : formatBytes(originalTotal);
-    replaceChildren(selectionSummary, names, total);
-  } else replaceChildren(selectionSummary);
+    selectionSummary.replaceChildren(names, total);
+  } else selectionSummary.replaceChildren();
 }
 
 /** Tear the stream down and disarm the picker. The input is cleared so the
@@ -200,6 +200,7 @@ function updateFilePicker(): void {
  *  mode switch does not silently resurrect the stopped stream. */
 function stopTransfer(): void {
   generation++;
+  releaseScreenWakeLock();
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
@@ -264,6 +265,7 @@ window.addEventListener("keydown", (event) => {
 /** Switching what we're sending kills any stream in flight and clears the stage. */
 function applyMode(): void {
   generation++;
+  releaseScreenWakeLock();
   selectedFile = null;
   setStageFullscreen(false);
   stage.hidden = true;
@@ -325,12 +327,12 @@ async function selectFiles(fileList: FileList | readonly File[]): Promise<void> 
     }
     if (files.length === 1) {
       const file = files[0]!;
-      const bytes = await readFileBytes(file);
+      const bytes = new Uint8Array(await file.arrayBuffer());
       return { name: file.name, size: file.size, packed: await packFile(file.name, file.type, bytes), files: [{ name: file.name, size: file.size }] };
     }
     const entries = await Promise.all(files.map(async (file) => ({
       name: file.name,
-      bytes: await readFileBytes(file),
+      bytes: new Uint8Array(await file.arrayBuffer()),
     })));
     const archive = makeZip(entries);
     return {
@@ -441,7 +443,6 @@ async function main() {
     });
   }
   updateControlLabels();
-  await requestScreenWakeLock();
 }
 
 /** Only on a fresh pick — a settings change restarts the stream too, and
@@ -459,9 +460,11 @@ async function startStream(revealStage = false) {
   // Stale until this stream's first frame locks its version and refills them.
   showStreamPanels(false);
   if (!selectedFile) {
+    releaseScreenWakeLock();
     setStatus("");
     return;
   }
+  await requestScreenWakeLock();
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = Number(cfgFps.value);

@@ -27,7 +27,7 @@ export interface ZipEntry {
 
 export function makeZip(entries: readonly ZipEntry[]): Uint8Array {
   const prepared = entries.map((entry) => {
-    const name = encoder.encode(entry.name.replace(/\\/g, "/").replace(/^\/+/, "") || "file");
+    const name = encoder.encode(entry.name.replaceAll("\\", "/").replace(/^\/+/, "") || "file");
     return { ...entry, name, crc: crc32(entry.bytes) };
   });
   const localSize = prepared.reduce((sum, entry) => sum + 30 + entry.name.length + entry.bytes.length, 0);

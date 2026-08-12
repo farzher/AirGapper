@@ -36,10 +36,10 @@ import {
   verifyFile,
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
-import { requestScreenWakeLock } from "../shared/wake-lock";
+import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
+import { copyTextOnAndroid, saveFileOnAndroid } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
-import { replaceChildren } from "../shared/dom";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -58,14 +58,12 @@ const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
-const firefoxVersion = /Firefox\/(\d+)/.exec(navigator.userAgent);
-const legacyFirefox = firefoxVersion !== null && Number(firefoxVersion[1]) < 78;
-const workerCount = legacyFirefox ? 2 : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 // Camera maximum resolution is not maximum optical throughput: a 4K video
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const requestedWidth = legacyFirefox ? 640 : 1280;
+const requestedWidth = 1280;
 const requestedFps = 60;
 const metric = (id: string) => document.getElementById(id)!;
 
@@ -259,10 +257,6 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
 function syncPreviewAspect() {
   if (video.videoWidth && video.videoHeight) {
     cameraBox.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
-    // Firefox 68 ignores aspect-ratio and dynamic viewport units. Give it the
-    // same bounded viewfinder with dimensions every browser understands.
-    const naturalHeight = cameraBox.clientWidth * video.videoHeight / video.videoWidth;
-    cameraBox.style.height = `${Math.min(naturalHeight, Math.max(120, window.innerHeight - 255))}px`;
   }
 }
 // Fires whenever the intrinsic size changes — device rotation, or a live
@@ -400,6 +394,7 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
+  releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
@@ -434,7 +429,7 @@ function stopReceiver(): void {
   maxSeq = -1;
   timeline.length = 0;
   plainQrPolicy.reset();
-  replaceChildren(result);
+  result.replaceChildren();
   preview.style.display = "none";
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
@@ -523,7 +518,7 @@ async function start() {
   video.srcObject = stream;
   await video.play().catch(() => undefined);
   syncPreviewAspect();
-  setStatus(legacyFirefox ? "Legacy decoder active — set the sender Layout to 1 QR." : "");
+  setStatus("");
 
   pool.resize(workerCount);
   void applyCameraExtras();
@@ -819,6 +814,7 @@ function updateProgressEstimate() {
  * AirGapper container or SHA-256; files never take this path. */
 function finishPlainQr(text: string): void {
   done = true;
+  releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
   clearInterval(statsTimer);
@@ -847,6 +843,7 @@ function liveGoodputKbs(now: number): number {
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
+  releaseScreenWakeLock();
   captureGen++;
   // Snapshot diagnostics before teardown, but do not report success until the
   // recovered output passes SHA-256. Goodput is unique original-file bytes
@@ -958,7 +955,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
 
     progressLabel.textContent = "100%";
     setStatus("");
-    replaceChildren(result);
+    result.replaceChildren();
     if (file.type === "application/vnd.airgapper.files+zip") {
       const entries = readStoredZip(file.bytes);
       for (const entry of entries) await appendReceivedFile(entry, result, true);
@@ -986,7 +983,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     detail.textContent =
       "Nothing usable came out of that stream. Restart the sender, then scan it again — " +
       "a partial transfer costs nothing but the time.";
-    replaceChildren(result, heading, detail, restartButton("Try again"));
+    result.replaceChildren(heading, detail, restartButton("Try again"));
   }
 }
 
@@ -1010,6 +1007,10 @@ function downloadLink(name: string, type: string, bytes: Uint8Array, label = `Sa
   link.href = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
   link.download = name;
   link.textContent = label;
+  link.addEventListener("click", (event) => {
+    if (!saveFileOnAndroid(name, type, bytes)) return;
+    event.preventDefault();
+  });
   return link;
 }
 
@@ -1131,7 +1132,7 @@ function showSnippet(text: string) {
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
       copy.textContent = "Copied";
       setTimeout(() => { copy.textContent = "Copy"; }, 1500);
     } catch {
@@ -1140,7 +1141,7 @@ function showSnippet(text: string) {
   });
   actions.append(copy);
 
-  replaceChildren(result, body, actions);
+  result.replaceChildren(body, actions);
 }
 
 function updateStats() {

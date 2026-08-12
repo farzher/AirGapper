@@ -8,7 +8,8 @@
     "dev": "vite --open /app.html",
     "serve": "npm run build && vite preview",
     "diagnostics": "vite --mode diagnostics --open /app.html",
-    "build": "tsc && tsc -p tsconfig.node.json && vite build"
+    "build": "tsc && tsc -p tsconfig.node.json && vite build",
+    "apk:debug": "npm run build && android\\gradlew.bat -p android assembleDebug"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
@@ -19,9 +20,5 @@
     "vite": "^6.0.0",
     "vite-plugin-pwa": "^1.3.0",
     "vite-plugin-singlefile": "^2.3.3"
-  },
-  "dependencies": {
-    "fflate": "^0.8.2",
-    "jsqr": "^1.4.0"
   }
 }

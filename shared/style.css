@@ -32,11 +32,7 @@ body.receive-mode { overflow-y: hidden; }
 body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
 .app-header,
 .app-main {
-  width: calc(100% - 32px);
-  max-width: 920px;
   width: min(920px, calc(100% - 32px));
-  margin-left: auto;
-  margin-right: auto;
   margin-inline: auto;
 }
 .app-header {
@@ -109,7 +105,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
 .file-picker.has-file strong { color: var(--ink); }
-.stage-bottom { width: 100%; max-width: 920px; width: min(100%, 920px); flex: none; padding: 0 10px 8px; }
+.stage-bottom { width: min(100%, 920px); flex: none; padding: 0 10px 8px; }
 .selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
 .selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
@@ -148,12 +144,9 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .stage {
   position: relative;
   left: 50%;
-  width: calc(100vw - 24px);
-  max-width: 1400px;
   width: min(1400px, calc(100vw - 24px));
   transform: translateX(-50%);
   margin-top: 12px;
-  height: calc(100vh - 180px);
   height: calc(100dvh - 180px);
   min-height: 0;
   display: flex;
@@ -250,13 +243,13 @@ input[type="range"] { accent-color: #222; }
 .transfer-panel { padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; white-space: nowrap; }
 .progress-amount { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
-.progress-amount strong { color: var(--ink); font-size: 32px; font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.progress-amount strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
 .progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
 .progress > div.error { background: var(--bad); animation: none; }
 @keyframes progress-pulse { 50% { opacity: .68; } }
 .speed-feedback { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }
-.speed-feedback strong { color: var(--muted); font-size: 24px; font-size: clamp(20px, 5vw, 28px); line-height: 1; letter-spacing: -.04em; white-space: nowrap; font-variant-numeric: tabular-nums; transition: color .2s; }
+.speed-feedback strong { color: var(--muted); font-size: clamp(20px, 5vw, 28px); line-height: 1; letter-spacing: -.04em; white-space: nowrap; font-variant-numeric: tabular-nums; transition: color .2s; }
 .speed-low strong { color: var(--bad); }
 .speed-mid strong { color: #9a6510; }
 .speed-good strong { color: var(--good); }
@@ -296,7 +289,7 @@ body.receive-complete .received-note { max-height: calc(100dvh - 260px); overflo
 /* Dialogs ------------------------------------------------------------------ */
 dialog { color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 20px 80px #0002; }
 dialog::backdrop { background: #0004; }
-.receiver-link-dialog { width: calc(100% - 32px); max-width: 340px; width: min(340px, calc(100% - 32px)); padding: 18px; text-align: center; }
+.receiver-link-dialog { width: min(340px, calc(100% - 32px)); padding: 18px; text-align: center; }
 .receiver-link-qr-large { display: block; max-width: 100%; height: auto; margin: 0 auto; image-rendering: pixelated; }
 .receiver-link-dialog p { margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
 .receiver-link-dialog a { display: block; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
@@ -312,7 +305,7 @@ dialog::backdrop { background: #0004; }
   .send-advanced { grid-column: 2; }
   .stage { min-height: 0; }
   .receiver-primary { gap: 8px; }
-  .preview { min-height: 0; max-height: calc(100vh - 255px); max-height: calc(100dvh - 255px); }
+  .preview { min-height: 0; max-height: calc(100dvh - 255px); }
   .transfer-panel { padding: 10px 12px; }
   .transfer-meta { margin-top: 7px; }
   .pipeline-metrics { gap: 10px; }

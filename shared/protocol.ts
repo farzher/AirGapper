@@ -1,5 +1,3 @@
-import { Gunzip } from "fflate";
-
 // Frame protocol: every QR frame is fully self-describing, so there is NO
 // handshake — the receiver locks onto a stream mid-flight, and a new session
 // id on any frame simply starts a fresh transfer.
@@ -74,28 +72,6 @@ async function gzipAsync(bytes: Uint8Array): Promise<Uint8Array> {
  * this an 80 KB stream could claim to be small and inflate to gigabytes.
  */
 async function gunzipAsync(bytes: Uint8Array, maxBytes: number): Promise<Uint8Array> {
-  if (typeof DecompressionStream === "undefined") {
-    // Firefox 68 has no DecompressionStream. Feed small chunks to a bounded
-    // pure-JS inflater so old offline receivers can still accept normal
-    // senders without requiring a special uncompressed transfer mode.
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    const gunzip = new Gunzip((chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) throw new Error("The recovered file expands past its declared length.");
-      chunks.push(chunk);
-    });
-    for (let offset = 0; offset < bytes.length; offset += 1024) {
-      gunzip.push(bytes.subarray(offset, offset + 1024), offset + 1024 >= bytes.length);
-    }
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return out;
-  }
   const inflated = new Blob([bytes as BlobPart])
     .stream()
     .pipeThrough(new DecompressionStream("gzip"));

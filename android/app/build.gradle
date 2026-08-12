@@ -1,0 +1,41 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.airgapper.app"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.airgapper.app"
+        minSdk 23
+        targetSdk 29
+        versionCode 1
+        versionName "0.1.0"
+        ndk {
+            abiFilters "armeabi-v7a"
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.assets.srcDir("$buildDir/generated/webAssets")
+    }
+}
+
+def syncWebApp = tasks.register("syncWebApp", Copy) {
+    from(rootProject.file("../index.html"))
+    into(layout.buildDirectory.dir("generated/webAssets"))
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(syncWebApp)
+}

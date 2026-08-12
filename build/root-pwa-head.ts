@@ -3,7 +3,7 @@ import type { Plugin } from "vite";
 /** Enable install and updates when hosted without probing for sibling files on file://. */
 export function rootPwaHead(): Plugin {
   const hostedSetup = `<script>
-if (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+if (location.hostname !== "appassets.androidplatform.net" && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
   const manifest = document.createElement("link");
   manifest.rel = "manifest";
   manifest.href = "./manifest.webmanifest";

@@ -2,6 +2,7 @@ import "../send/main";
 import "../receive/main";
 import { closeOnBackdropClick } from "../shared/dialog";
 import { isAndroid, isIOS } from "../shared/platform";
+import { saveFileOnAndroid } from "../shared/android";
 
 const views = {
   home: document.getElementById("homeView")!,
@@ -71,7 +72,9 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   showView("receive");
 }
 function downloadOffline(): void {
-  const url = URL.createObjectURL(new Blob([standaloneHtml], { type: "text/html;charset=utf-8" }));
+  const type = "text/html;charset=utf-8";
+  if (saveFileOnAndroid("airgapper.html", type, new TextEncoder().encode(standaloneHtml))) return;
+  const url = URL.createObjectURL(new Blob([standaloneHtml], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = "airgapper.html";
@@ -82,4 +85,20 @@ function downloadOffline(): void {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 document.getElementById("download-offline")!.addEventListener("click", downloadOffline);
+
+(window as Window & { airgapperHandleBack?: () => boolean }).airgapperHandleBack = () => {
+  if (receiverLinkDialog.open) {
+    receiverLinkDialog.close();
+    return true;
+  }
+  if (document.body.classList.contains("qr-full")) {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    return true;
+  }
+  if (active !== "home") {
+    showView("home");
+    return true;
+  }
+  return false;
+};
 
