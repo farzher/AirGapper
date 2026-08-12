@@ -878,7 +878,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
-  transferSizeLabel.textContent = "0 B";
+  transferSizeLabel.textContent = "";
   etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
@@ -889,7 +889,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // Restore the root scroller so mobile browsers can use their normal
     // pull-to-refresh gesture on the completed screen.
     document.body.classList.remove("receive-mode");
-    transferSizeLabel.textContent = "0 B";
+    transferSizeLabel.textContent = "";
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
