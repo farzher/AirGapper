@@ -672,6 +672,7 @@ function offerRetry(message: string) {
   startBtn.style.display = "";
   startBtn.textContent = "Try camera again";
   preview.style.display = "none";
+  preview.classList.remove("camera-loading");
   metricsEl.style.display = "none";
   if (diagnosticsEl) diagnosticsEl.style.display = "none";
   showError(message);
@@ -737,10 +738,11 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
+  preview.classList.remove("camera-loading");
   cameraActual.textContent = "";
   pendingScanCapture = null;
   captureNextScan = false;
-  captureScanBtn.textContent = "Capture scan";
+  captureScanBtn.textContent = "Capture";
   captureScanBtn.disabled = false;
   if (scanDialog.open) scanDialog.close();
   scanCapture.width = 0;
@@ -792,10 +794,12 @@ async function start() {
   const captureWidth = requestedWidth;
   const captureHeight = requestedHeight;
   const captureFps = requestedFps;
-  // Nothing on the page changes until the camera is actually running: the
-  // error paths below all have to leave a usable Start button behind.
+  // Reserve the final viewfinder space immediately so permission and camera
+  // startup never make the rest of the receive page jump around.
+  preview.style.display = "";
+  preview.classList.add("camera-loading");
   startBtn.disabled = true;
-  startBtn.textContent = "Starting…";
+  startBtn.style.display = "none";
   const base: MediaTrackConstraints = {
     facingMode: "environment",
     width: { ideal: captureWidth },
@@ -845,6 +849,7 @@ async function start() {
   if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => undefined);
+  preview.classList.remove("camera-loading");
   const activeCamera = stream.getVideoTracks()[0]?.getSettings();
   const activeSize = activeCamera?.width && activeCamera.height
     ? `${activeCamera.width}×${activeCamera.height}`
@@ -973,7 +978,7 @@ function captureSubmittedScan(
 function cancelScanCapture(): void {
   pendingScanCapture = null;
   captureNextScan = false;
-  captureScanBtn.textContent = "Capture scan";
+  captureScanBtn.textContent = "Capture";
   captureScanBtn.disabled = false;
 }
 
