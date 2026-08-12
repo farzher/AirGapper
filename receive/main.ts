@@ -55,7 +55,7 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.12";
+const APP_VERSION = "0.1.13";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -701,8 +701,7 @@ function stopReceiver(): void {
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
-  metric("m-cap").textContent = "Camera — fps";
-  metric("m-scan").textContent = "Scan — fps";
+  metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "— KB/s";
@@ -1427,8 +1426,7 @@ function updateStats() {
   const cameraRate = perSecond(captureTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `Camera ${cameraRate.toFixed(0)} fps`;
-  metric("m-scan").textContent = `Scan ${scanRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
@@ -1437,12 +1435,12 @@ function updateStats() {
   const senderLimited = qrRate > 0 && scanRate > qrRate * 1.4 && !saturated;
   const limit = metric("m-limit");
   limit.textContent = stalled
-    ? `Scanner stalled · ${pool.busyCount}/${pool.size} busy`
+    ? "Scanner stalled"
     : saturated
-      ? `Pool saturated ${Math.min(100, Math.round(busyRate * 100))}%`
+      ? "Receiver limited"
       : senderLimited
-        ? "Sender/display limited"
-        : "Capacity available";
+        ? "Sender limited"
+        : "";
   limit.classList.toggle("scanner-bound", stalled || saturated);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
