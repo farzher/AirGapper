@@ -144,6 +144,11 @@ restoreCameraSettings();
 let requestedWidth = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].width;
 let requestedHeight = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].height;
 let requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
+function showRequestedCameraSettings(): void {
+  const fps = requestedFps === undefined ? "auto fps" : `${requestedFps} fps`;
+  cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${fps} · v${APP_VERSION}`;
+}
+showRequestedCameraSettings();
 const metric = (id: string) => document.getElementById(id)!;
 
 // Sliding window for the capture/decode fps metrics — the per-second rates in
@@ -636,6 +641,7 @@ const changeCameraSettings = () => {
   requestedWidth = selected.width;
   requestedHeight = selected.height;
   requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
+  showRequestedCameraSettings();
   saveCameraSettings();
   if (stream && !done) {
     stopReceiver();

@@ -236,7 +236,7 @@ details.settings label { display: flex; flex-direction: column; gap: 4px; color:
 .receiver-settings label,
 .receiver-settings select { min-width: 0; width: 100%; }
 .settings-footer { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 8px; }
-.receiver-settings .settings-actual { min-width: 0; margin: 0; }
+.receiver-settings .settings-actual { min-width: 0; margin-left: 5px; }
 .receiver-settings .scan-capture-button { flex: none; margin-left: auto; padding: 5px 9px; min-height: 30px; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
 input[type="range"] { accent-color: #222; }
