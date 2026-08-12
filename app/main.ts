@@ -1,6 +1,7 @@
 import "../send/main";
 import "../receive/main";
 import { closeOnBackdropClick } from "../shared/dialog";
+import { isAndroid, isIOS } from "../shared/platform";
 
 const views = {
   home: document.getElementById("homeView")!,
@@ -34,7 +35,11 @@ function showView(name: ViewName): void {
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name === "receive";
   if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
-  if (name === "send") {
+  // Focusing from the Send tap opens the on-screen keyboard immediately on
+  // phones and hides half the chooser. Desktop users still get the convenient
+  // ready-to-type focus.
+  const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
+  if (name === "send" && !hasMobileInput) {
     (document.getElementById("snippet-text") as HTMLTextAreaElement).focus({ preventScroll: true });
   }
   window.scrollTo(0, 0);
