@@ -78,9 +78,10 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   // interaction or previously denied access expose the existing retry button.
   showView("receive", "none");
 } else {
-  const restoredView = historyView();
-  if (restoredView && restoredView !== "home") showView(restoredView, "none");
-  else history.replaceState({ ...history.state, airgapperView: "home" }, "");
+  // A reload is a fresh session: return to the chooser rather than reviving a
+  // half-finished sender or camera. History traversal still restores views via
+  // popstate below; only a document load resets the current entry to Home.
+  history.replaceState({ ...history.state, airgapperView: "home" }, "");
 }
 
 window.addEventListener("popstate", () => showView(historyView() ?? "home", "none"));
