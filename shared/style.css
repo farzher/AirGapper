@@ -269,6 +269,10 @@ input[type="range"] { accent-color: #222; }
 .text-button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 #result:empty { display: none; }
+.received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.received-file-name { width: 100%; overflow-wrap: anywhere; text-align: center; }
+.received-file img.received, .received-file video.received, .received-file audio.received { max-width: 100%; }
+.archive-actions { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); width: 100%; }
 body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
 body.receive-complete .app-main { margin-block: 0; padding: 4px 0 8px; }
 body.receive-complete .receiver-primary { gap: 8px; }

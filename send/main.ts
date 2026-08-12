@@ -42,57 +42,20 @@ const HEADER_MARGIN = 0;
 const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
 // The default camera-friendly frame carries twelve independent standard QRs.
-// Advanced layouts may reduce that to one or tile a denser grid across the
-// sender's whole screen; none of these choices changes the wire format.
+// The advanced layout can reduce that to one; neither choice changes the wire format.
 const DEFAULT_GRID_CODES = 12;
-const MAX_FILL_GRID_CODES = 48;
-const MIN_FILL_MODULE_PIXELS = 2;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
-type LayoutMode = "four-three" | "single" | "fill";
+type LayoutMode = "four-three" | "single";
 
 function selectedLayout(): LayoutMode {
-  return cfgLayout.value === "single" || cfgLayout.value === "fill" ? cfgLayout.value : "four-three";
+  return cfgLayout.value === "single" ? "single" : "four-three";
 }
 
-const moduleCountCache = new Map<number, number>();
-function moduleCountForFrame(frameBytes: number): number {
-  const cached = moduleCountCache.get(frameBytes);
-  if (cached) return cached;
-  const qr = QRCode.create([{ data: new Uint8Array(frameBytes), mode: "byte" } as unknown as QRCode.QRCodeSegment], {
-    errorCorrectionLevel: "L",
-    maskPattern: 4,
-  });
-  moduleCountCache.set(frameBytes, qr.modules.size);
-  return qr.modules.size;
-}
-
-function layoutGrid(mode = selectedLayout(), modules = 0): { cols: number; rows: number; codes: number } {
-  if (mode === "single") return { cols: 1, rows: 1, codes: 1 };
-  if (mode === "four-three") return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
-
-  // Fill with as many complete cells as the current physical display can show
-  // at two device pixels per QR module. The cap protects generation and decode
-  // throughput on high-DPI screens; denser byte settings naturally yield
-  // fewer, larger codes instead of overflowing the viewport.
-  const dpr = window.devicePixelRatio || 1;
-  const usableHeight = window.innerHeight - (document.body.classList.contains("qr-full") ? stageBottom.offsetHeight : 0);
-  const stride = Math.max(1, modules + GRID_MARGIN);
-  const widthModules = (window.innerWidth * dpr) / MIN_FILL_MODULE_PIXELS;
-  const heightModules = (Math.max(1, usableHeight) * dpr) / MIN_FILL_MODULE_PIXELS;
-  const maxCols = Math.max(1, Math.floor((widthModules - GRID_MARGIN) / stride));
-  const maxRows = Math.max(1, Math.floor((heightModules - GRID_MARGIN) / stride));
-  const aspect = window.innerWidth / Math.max(1, usableHeight);
-  let best = { cols: 1, rows: 1, codes: 1, error: Number.POSITIVE_INFINITY };
-  for (let rows = 1; rows <= maxRows; rows++) {
-    for (let cols = 1; cols <= maxCols; cols++) {
-      const codes = cols * rows;
-      if (codes > MAX_FILL_GRID_CODES) continue;
-      const error = Math.abs(Math.log((cols / rows) / aspect));
-      if (codes > best.codes || (codes === best.codes && error < best.error)) best = { cols, rows, codes, error };
-    }
-  }
-  return { cols: best.cols, rows: best.rows, codes: best.codes };
+function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
+  return mode === "single"
+    ? { cols: 1, rows: 1, codes: 1 }
+    : { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
 }
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
@@ -363,7 +326,7 @@ async function selectFiles(fileList: FileList | readonly File[]): Promise<void> 
       size: total,
       // Our ZIP entries are stored, not deflated, so unlike an uploaded ZIP
       // the archive can still benefit substantially from container gzip.
-      packed: await packFile(`${files.length}-files.zip`, "application/zip", archive, true),
+      packed: await packFile(`${files.length}-files.zip`, "application/vnd.airgapper.files+zip", archive, true),
       files: files.map(({ name, size }) => ({ name, size })),
     };
   });
@@ -394,9 +357,7 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "four-three" || saved.layout === "single" || saved.layout === "fill") {
-      cfgLayout.value = saved.layout;
-    }
+    if (saved.layout === "four-three" || saved.layout === "single") cfgLayout.value = saved.layout;
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
@@ -450,7 +411,7 @@ async function main() {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    const { codes } = layoutGrid(selectedLayout(), moduleCountForFrame(bytes));
+    const { codes } = layoutGrid(selectedLayout());
     sizeValue.textContent = `${formatBytes(bytes)} · ${codes} ${codes === 1 ? "QR" : "QRs"}`;
   };
   window.addEventListener("resize", () => {
@@ -497,8 +458,7 @@ async function startStream(revealStage = false) {
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
   const layoutMode = selectedLayout();
-  const expectedModules = moduleCountForFrame(frameBytes);
-  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode, expectedModules);
+  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = blockLength(frameBytes);
@@ -608,20 +568,7 @@ async function startStream(revealStage = false) {
       version = qr.version;
       modules = qr.modules.size;
       sizeCanvas();
-      let layoutRestartTimer: ReturnType<typeof setTimeout> | undefined;
-      resizeDisplay = () => {
-        const desired = layoutGrid(layoutMode, modules);
-        if (desired.cols !== gridCols || desired.rows !== gridRows) {
-          // Resizing/orientation/fullscreen can cross a two-pixels-per-module
-          // boundary. Debounce regeneration so a resize drag does not build a
-          // fresh fountain queue for every intermediate browser event.
-          clearTimeout(layoutRestartTimer);
-          layoutRestartTimer = setTimeout(() => {
-            if (gen === generation) void startStream();
-          }, 120);
-        }
-        sizeCanvas();
-      };
+      resizeDisplay = sizeCanvas;
       // Scroll only now: before sizeCanvas() the canvas is still 16×16, so the
       // scroll target would be the wrong height.
       if (revealStage) scrollStageIntoView();

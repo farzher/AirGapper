@@ -86,3 +86,67 @@ export function makeZip(entries: readonly ZipEntry[]): Uint8Array {
   u16(view, offset + 20, 0);
   return output;
 }
+
+/** Read the stored-entry ZIPs produced by makeZip(). Unsupported compression,
+ * encryption, malformed offsets, and changed entry bytes are rejected. */
+export function readStoredZip(bytes: Uint8Array): ZipEntry[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16at = (offset: number): number => view.getUint16(offset, true);
+  const u32at = (offset: number): number => view.getUint32(offset, true);
+  const requireRange = (offset: number, length: number): void => {
+    if (offset < 0 || length < 0 || offset + length > bytes.length) throw new Error("The received ZIP is incomplete.");
+  };
+
+  // EOCD can be followed by at most a 65,535-byte comment.
+  let eocd = -1;
+  for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65_557); offset--) {
+    if (u32at(offset) === 0x06054b50) { eocd = offset; break; }
+  }
+  if (eocd < 0) throw new Error("The received ZIP has no directory.");
+  requireRange(eocd, 22);
+  if (u16at(eocd + 4) !== 0 || u16at(eocd + 6) !== 0) throw new Error("Multi-disk ZIPs are not supported.");
+  const count = u16at(eocd + 10);
+  if (u16at(eocd + 8) !== count || count === 0) throw new Error("The received ZIP directory is invalid.");
+  const centralSize = u32at(eocd + 12);
+  const centralOffset = u32at(eocd + 16);
+  requireRange(centralOffset, centralSize);
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const entries: ZipEntry[] = [];
+  let offset = centralOffset;
+  for (let index = 0; index < count; index++) {
+    requireRange(offset, 46);
+    if (u32at(offset) !== 0x02014b50) throw new Error("The received ZIP directory is invalid.");
+    const flags = u16at(offset + 8);
+    const method = u16at(offset + 10);
+    const expectedCrc = u32at(offset + 16);
+    const compressedSize = u32at(offset + 20);
+    const size = u32at(offset + 24);
+    const nameLength = u16at(offset + 28);
+    const extraLength = u16at(offset + 30);
+    const commentLength = u16at(offset + 32);
+    const localOffset = u32at(offset + 42);
+    const recordLength = 46 + nameLength + extraLength + commentLength;
+    requireRange(offset, recordLength);
+    if ((flags & 1) !== 0 || method !== 0 || compressedSize !== size) {
+      throw new Error("The received ZIP uses an unsupported entry format.");
+    }
+    const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+    requireRange(localOffset, 30);
+    if (u32at(localOffset) !== 0x04034b50) throw new Error("The received ZIP entry is invalid.");
+    if ((u16at(localOffset + 6) & 1) !== 0 || u16at(localOffset + 8) !== method ||
+        u32at(localOffset + 18) !== compressedSize || u32at(localOffset + 22) !== size) {
+      throw new Error("The received ZIP uses an unsupported entry format.");
+    }
+    const localNameLength = u16at(localOffset + 26);
+    const localExtraLength = u16at(localOffset + 28);
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    requireRange(dataOffset, size);
+    const entryBytes = bytes.slice(dataOffset, dataOffset + size);
+    if (crc32(entryBytes) !== expectedCrc) throw new Error(`ZIP entry ${name} failed its checksum.`);
+    if (!name.endsWith("/")) entries.push({ name, bytes: entryBytes });
+    offset += recordLength;
+  }
+  if (offset !== centralOffset + centralSize) throw new Error("The received ZIP directory length is invalid.");
+  return entries;
+}

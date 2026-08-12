@@ -32,11 +32,11 @@ import {
   streamIdentity,
   unpackFile,
   verifyFile,
-  type OpticalFile,
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
+import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -909,42 +909,17 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
 
     progressLabel.textContent = "100%";
     setStatus("");
-    const url = URL.createObjectURL(new Blob([file.bytes as BlobPart], { type: file.type }));
-    const download = document.createElement("a");
-    download.className = "download";
-    download.href = url;
-    download.download = file.name;
-    download.textContent = `Save ${file.name}`;
     result.replaceChildren();
-    if (file.type.startsWith("image/")) {
-      const image = document.createElement("img");
-      image.className = "received";
-      image.alt = `Received file preview: ${file.name}`;
-      image.src = url;
-      result.append(image);
-    } else if (file.type.startsWith("video/") || file.type.startsWith("audio/")) {
-      const player = document.createElement(file.type.startsWith("video/") ? "video" : "audio");
-      player.className = "received";
-      player.controls = true;
-      player.preload = "metadata";
-      player.setAttribute("aria-label", `Received file: ${file.name}`);
-      // Inline, and never autoplay — the user taps play (which is also the
-      // gesture that lets it start with sound).
-      if (player instanceof HTMLVideoElement) player.playsInline = true;
-      const src = await servableMediaUrl(file, url);
-      if (src !== url) {
-        // AVFoundation has been seen bypassing service workers for media
-        // loads; if the cache path 404s, fall back to the blob rather than
-        // leaving a dead player.
-        player.addEventListener("error", () => { player.src = url; }, { once: true });
-      }
-      player.src = src;
-      result.append(player);
+    if (file.type === "application/vnd.airgapper.files+zip") {
+      const entries = readStoredZip(file.bytes);
+      for (const entry of entries) await appendReceivedFile(entry, result, true);
+      const archiveActions = document.createElement("div");
+      archiveActions.className = "note-actions archive-actions";
+      archiveActions.append(downloadLink(file.name, "application/zip", file.bytes, `Save ZIP · ${file.name}`));
+      result.append(archiveActions);
+    } else {
+      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, false, file.type);
     }
-    const actions = document.createElement("div");
-    actions.className = "note-actions";
-    actions.append(download);
-    result.append(actions);
   } catch (error) {
     sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
     // Everything is already torn down by this point, so the only way back to a
@@ -966,6 +941,70 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   }
 }
 
+const MIME_BY_EXTENSION: Record<string, string> = {
+  apng: "image/apng", gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg",
+  png: "image/png", svg: "image/svg+xml", webp: "image/webp",
+  mp3: "audio/mpeg", m4a: "audio/mp4", oga: "audio/ogg", ogg: "audio/ogg", wav: "audio/wav",
+  m4v: "video/mp4", mov: "video/quicktime", mp4: "video/mp4", ogv: "video/ogg", webm: "video/webm",
+  css: "text/css", csv: "text/csv", html: "text/html", json: "application/json",
+  md: "text/markdown", pdf: "application/pdf", txt: "text/plain", zip: "application/zip",
+};
+
+function inferredType(name: string): string {
+  const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  return MIME_BY_EXTENSION[extension] ?? "application/octet-stream";
+}
+
+function downloadLink(name: string, type: string, bytes: Uint8Array, label = `Save ${name}`): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "download";
+  link.href = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  link.download = name;
+  link.textContent = label;
+  return link;
+}
+
+async function appendReceivedFile(
+  entry: ZipEntry,
+  parent: HTMLElement,
+  separate: boolean,
+  declaredType?: string,
+): Promise<void> {
+  const type = declaredType || inferredType(entry.name);
+  const container = separate ? document.createElement("section") : parent;
+  if (separate) {
+    container.className = "received-file";
+    const name = document.createElement("strong");
+    name.className = "received-file-name";
+    name.textContent = entry.name;
+    container.append(name);
+  }
+  const url = URL.createObjectURL(new Blob([entry.bytes as BlobPart], { type }));
+  if (type.startsWith("image/")) {
+    const image = document.createElement("img");
+    image.className = "received";
+    image.alt = `Received file preview: ${entry.name}`;
+    image.src = url;
+    container.append(image);
+  } else if (type.startsWith("video/") || type.startsWith("audio/")) {
+    const player = document.createElement(type.startsWith("video/") ? "video" : "audio");
+    player.className = "received";
+    player.controls = true;
+    player.preload = "metadata";
+    player.setAttribute("aria-label", `Received file: ${entry.name}`);
+    if (player instanceof HTMLVideoElement) player.playsInline = true;
+    const src = await servableMediaUrl(entry.bytes, type, url);
+    if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true });
+    player.src = src;
+    container.append(player);
+  }
+  const actions = document.createElement("div");
+  actions.className = "note-actions";
+  actions.append(downloadLink(entry.name, type, entry.bytes));
+  container.append(actions);
+  if (separate) parent.append(container);
+}
+
 /** A playable URL for received media. iOS Safari will not reliably play media
  *  handed to <video>/<audio> as a blob: URL — WebKit's media loader wants real
  *  HTTP semantics, Range requests included (a lesson inherited from the
@@ -973,19 +1012,20 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
  *  come back out through the service worker's range-aware route at a real URL
  *  (see runtimeCaching in vite.config.ts). The blob URL stands in when no
  *  worker controls the page: first ever visit, or the standalone file. */
-async function servableMediaUrl(file: OpticalFile, blobUrl: string): Promise<string> {
+async function servableMediaUrl(bytes: Uint8Array, type: string, blobUrl: string): Promise<string> {
   try {
     if (!navigator.serviceWorker?.controller) return blobUrl;
     // Resolved against the page (one directory deep), landing on the site
-    // root — where the worker's route matches under any deploy subpath.
-    const target = new URL("../received-media/current", window.location.href).href;
+    // root — where the worker's route matches under any deploy subpath. Each
+    // received file gets its own path so several media players can coexist.
+    const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href;
     const cache = await caches.open("received-media");
     await cache.put(
       target,
-      new Response(new Blob([file.bytes as BlobPart]), {
+      new Response(new Blob([bytes as BlobPart]), {
         headers: {
-          "Content-Type": file.type,
-          "Content-Length": String(file.bytes.length),
+          "Content-Type": type,
+          "Content-Length": String(bytes.length),
         },
       }),
     );
