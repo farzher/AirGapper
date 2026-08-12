@@ -72,7 +72,7 @@ const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-const autoWorkerCount = Math.max(1, hardwareThreadCount - 1);
+const autoWorkerCount = hardwareThreadCount;
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount} worker${autoWorkerCount === 1 ? "" : "s"})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {

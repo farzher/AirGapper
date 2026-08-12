@@ -19,7 +19,7 @@ import {
   blockLength,
   denseBlockLength,
   fitsInOneStream,
-  minimumFrameBytes,
+  smallestSufficientFrameSize,
   sourceBlockCount,
 } from "../shared/frame-capacity";
 import { LTEncoder } from "../shared/fountain";
@@ -211,6 +211,18 @@ function showError(message: string): void {
   stage.hidden = true;
   if (sendStart) sendStart.hidden = false;
   showStreamPanels(false);
+  specsLine.showError(message);
+}
+
+/** A valid selection with incompatible stream settings stays editable. Hide
+ * only the stale QR, not the controls needed to fix the configuration. */
+function showSettingsError(message: string): void {
+  releaseScreenWakeLock();
+  setStageFullscreen(false);
+  stage.hidden = false;
+  canvas.style.display = "none";
+  if (sendStart) sendStart.hidden = false;
+  showStreamPanels(true);
   specsLine.showError(message);
 }
 
@@ -511,6 +523,7 @@ function scrollStageIntoView() {
 async function startStream(revealStage = false) {
   const gen = ++generation;
   resizeDisplay = null;
+  canvas.style.display = "";
   // Stale until this stream's first frame locks its version and refills them.
   showStreamPanels(false);
   if (!selectedFile) {
@@ -532,11 +545,12 @@ async function startStream(revealStage = false) {
   // Keep selectedFile on this path — raising bytes/frame back up is the fix,
   // and dropping the pick would hide that.
   if (!fitsInOneStream(payload.length, frameBytes)) {
-    // Name a setting that is actually in the dropdown, not the bare minimum.
-    const suggestion = minimumFrameBytes(payload.length);
-    showError(
+    const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS);
+    showSettingsError(
       `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, frameBytes).toLocaleString()} blocks. ` +
-      `This transfer needs at least ${suggestion} bytes per frame and cannot be displayed safely.`,
+      (suggestion
+        ? `Choose ${formatBytes(suggestion)} or more in Size.`
+        : "No available Size setting can carry this transfer."),
     );
     return;
   }
