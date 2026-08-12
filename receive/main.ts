@@ -486,9 +486,14 @@ async function start() {
   };
   try {
     if (isAndroidApp()) {
-      // Some Android camera providers remain wedged after rejecting one
-      // getUserMedia request. Use one broadly satisfiable request in the APK.
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
+      // Use exactly one request in the APK: some old Android camera providers
+      // wedge after either a rejected request or a live applyConstraints call.
+      // `ideal` asks for browser-equivalent throughput without making failure
+      // of 60 fps fatal.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { ...base, frameRate: { ideal: captureFps } },
+      });
     } else {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -527,7 +532,7 @@ async function start() {
   setStatus("");
 
   pool.resize(workerCount);
-  await applyCameraExtras();
+  void applyCameraExtras();
 
   cameraStartedTs = performance.now();
   captureGen++;
@@ -537,26 +542,12 @@ async function start() {
 }
 
 /** Use what this camera can actually do, probed rather than UA-sniffed.
- *  The APK starts with a deliberately broad getUserMedia request because some
- *  old Android providers wedge after rejecting a constrained request. Their
- *  default is often only 10 fps, so raise the rate on the already-live track.
- *  Continuous autofocus keeps the lens from hunting between frames. */
+ *  Continuous autofocus is applied silently — except in the APK, where old
+ *  camera providers can break the live stream on any applyConstraints call. */
 async function applyCameraExtras() {
   const track = stream?.getVideoTracks()[0];
-  if (!track) return;
+  if (!track || isAndroidApp()) return;
   const caps = probeCameraCapabilities(track);
-  if (isAndroidApp()) {
-    const reportedMax = caps.maxFrameRate;
-    const target = reportedMax && Number.isFinite(reportedMax)
-      ? Math.min(requestedFps, reportedMax)
-      : requestedFps;
-    try {
-      await track.applyConstraints({ frameRate: { ideal: target } });
-    } catch {
-      // Keep the broadly negotiated stream when this camera refuses a live
-      // frame-rate change; restarting it can wedge older providers.
-    }
-  }
   if (caps.continuousFocus) {
     await applyAdvancedConstraint(track, { focusMode: "continuous" });
   }
