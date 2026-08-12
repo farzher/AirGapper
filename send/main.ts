@@ -13,7 +13,7 @@
 //   handles erasures, and a frame is either decoded whole or discarded.
 
 import QRCode from "qrcode";
-import { gridDims, rasterizeQr } from "../shared/qr-raster";
+import { rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
   blockLength,
@@ -41,10 +41,34 @@ const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
 const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
-// Every density uses twelve cells. The default is a portrait 3×4 grid; the
-// widescreen option rotates that geometry to 4×3 without changing the stream.
-const GRID_CODES = 12;
+// The default camera-friendly frame carries twelve independent standard QRs.
+// Advanced layouts may reduce that to one or shape a similarly sized grid to
+// the sender's whole screen; none of these choices changes the wire format.
+const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
+
+type LayoutMode = "four-three" | "single" | "fill";
+
+function selectedLayout(): LayoutMode {
+  return cfgLayout.value === "single" || cfgLayout.value === "fill" ? cfgLayout.value : "four-three";
+}
+
+function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
+  if (mode === "single") return { cols: 1, rows: 1, codes: 1 };
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  if (mode === "four-three") {
+    return aspect >= 1
+      ? { cols: 4, rows: 3, codes: DEFAULT_GRID_CODES }
+      : { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
+  }
+
+  // Keep roughly the default amount of parallel work, but choose complete
+  // rows and columns whose square cells follow the actual display. This can
+  // use the space above and below a 4:3 frame without stretching any QR.
+  const rows = Math.max(1, Math.round(Math.sqrt(DEFAULT_GRID_CODES / aspect)));
+  const cols = Math.max(1, Math.round(aspect * rows));
+  return { cols, rows, codes: cols * rows };
+}
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
 const stage = document.getElementById("stage") as HTMLDivElement;
@@ -345,7 +369,9 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "portrait" || saved.layout === "widescreen") cfgLayout.value = saved.layout;
+    if (saved.layout === "four-three" || saved.layout === "single" || saved.layout === "fill") {
+      cfgLayout.value = saved.layout;
+    }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
@@ -400,7 +426,8 @@ async function main() {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    sizeValue.textContent = `${formatBytes(bytes)} · ${GRID_CODES} QRs`;
+    const { codes } = layoutGrid();
+    sizeValue.textContent = `${formatBytes(bytes)} · ${codes} ${codes === 1 ? "QR" : "QRs"}`;
   };
   for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("input", updateControlLabels);
@@ -441,11 +468,8 @@ async function startStream(revealStage = false) {
   // Fill one standard QR from 500 B through its 2,953 B maximum, then add
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
-  const gridCodes = GRID_CODES;
-  const portraitGrid = gridDims(gridCodes);
-  const widescreen = cfgLayout.value === "widescreen";
-  const gridCols = widescreen ? portraitGrid.rows : portraitGrid.cols;
-  const gridRows = widescreen ? portraitGrid.cols : portraitGrid.rows;
+  const layoutMode = selectedLayout();
+  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = blockLength(frameBytes);
@@ -583,7 +607,7 @@ async function startStream(revealStage = false) {
               ecc,
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
-              layoutMode: widescreen ? "widescreen" : "portrait",
+              layoutMode,
               sizeLevel,
               gridMargin: GRID_MARGIN,
               scaling: fitScaling ? "fit" : "integer",
