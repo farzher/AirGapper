@@ -32,7 +32,11 @@ body.receive-mode { overflow-y: hidden; }
 body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
 .app-header,
 .app-main {
+  width: calc(100% - 32px);
+  max-width: 920px;
   width: min(920px, calc(100% - 32px));
+  margin-left: auto;
+  margin-right: auto;
   margin-inline: auto;
 }
 .app-header {

@@ -34,6 +34,12 @@ android {
 def syncWebApp = tasks.register("syncWebApp", Copy) {
     from(rootProject.file("../index.html"))
     into(layout.buildDirectory.dir("generated/webAssets"))
+    doLast {
+        def app = layout.buildDirectory.file("generated/webAssets/index.html").get().asFile
+        app.setText(app.getText("UTF-8").replace(
+                "script-src 'unsafe-inline' 'wasm-unsafe-eval'",
+                "script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'"), "UTF-8")
+    }
 }
 
 tasks.named("preBuild").configure {
