@@ -171,6 +171,11 @@ interface Region extends SymbolBox {
   dim?: number;
 }
 const regions: Region[] = [];
+// Retain one trustworthy size after active regions expire. During a bad
+// camera/display phase, full acquisition may detect a QR but fail its bytes;
+// this yardstick lets that sighting seed a crop instead of leaving the receiver
+// stuck with no regions and throwing the useful position away.
+let lastDecodedRegionSize = 0;
 // Crop replies are associated with their target so failed jobs count toward
 // that code's quality. Previously only detector sightings counted as misses,
 // making a code with many silent crop failures misleadingly appear perfect.
@@ -211,6 +216,9 @@ function noteDecodeCompleted(id: number, _symbolCount: number): void {
 // suppresses the degraded rescan cadence exactly when reacquisition is
 // needed. Expiring fast and rescanning hard wins.
 const REGION_TTL_MS = 1500;
+// A probationary detector sighting has no decodedSeen timestamp; keeping it
+// through several cold full scans gives its cheap crop path time to recover.
+const SIGHTING_REGION_TTL_MS = 3000;
 const FULL_SCAN_INTERVAL_MS = 1500;
 // A grid sender shows several codes; when fewer regions are live than the
 // stream has shown simultaneously, one of them is MISSING — glare, focus, a
@@ -272,6 +280,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
+      lastDecodedRegionSize = Math.max(box.w, box.h);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -284,10 +293,12 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     // noise. With nothing decoded yet there is no yardstick — full scans own
     // acquisition then, and phantom regions would only starve them.
     const reference = regions.find((r) => r.decoded);
-    if (!reference) return;
-    const ratio = Math.max(box.w, box.h) / Math.max(reference.w, reference.h);
+    const referenceSize = reference ? Math.max(reference.w, reference.h) : lastDecodedRegionSize;
+    if (!referenceSize) return;
+    const ratio = Math.max(box.w, box.h) / referenceSize;
     if (ratio < 0.5 || ratio > 2) return;
   }
+  if (decoded) lastDecodedRegionSize = Math.max(box.w, box.h);
   regions.push({
     ...box,
     seen: now,
@@ -465,6 +476,7 @@ function stopReceiver(): void {
   startTs = 0;
   done = false;
   regions.length = 0;
+  lastDecodedRegionSize = 0;
   expectedRegions = 0;
   expectedRegionsAt = 0;
   lastFullScan = 0;
@@ -707,7 +719,9 @@ function captureFrame() {
   }
 
   for (let i = regions.length - 1; i >= 0; i--) {
-    if (now - regions[i]!.seen > REGION_TTL_MS) regions.splice(i, 1);
+    const region = regions[i]!;
+    const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
+    if (now - region.seen > ttl) regions.splice(i, 1);
   }
   // Only decode-proven regions count toward "how many codes does this stream
   // show" — phantom sighting regions once inflated the total and locked the
@@ -1265,7 +1279,7 @@ function updateStats() {
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const limit = metric("m-limit");
-  limit.textContent = busyRate >= 0.15 ? ` · CPU bound ${Math.min(100, Math.round(busyRate * 100))}%` : "";
+  limit.textContent = `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
   limit.classList.toggle("cpu-bound", busyRate >= 0.15);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
