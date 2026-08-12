@@ -737,7 +737,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      const settled = plainQrPolicy.addPlain(text, performance.now());
+      const settled = plainQrPolicy.addPlain(text);
       if (settled) finishPlainQr(settled);
     } catch {
       // Non-text binary QR content is not a plain snippet or AirGapper frame.
