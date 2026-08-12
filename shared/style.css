@@ -230,6 +230,8 @@ input[type="range"] { accent-color: #222; }
 .metric .v { margin-top: 2px; font-variant-numeric: tabular-nums; }
 .settings-actual { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
 .settings-actual:empty { display: none; }
+.scan-capture-button { align-self: end; }
+.scan-capture { display: block; max-width: 100%; max-height: 320px; margin-top: 10px; border-radius: 8px; image-rendering: auto; }
 
 /* Receiver ----------------------------------------------------------------- */
 .receiver-primary { display: flex; flex-direction: column; align-items: center; gap: 12px; }

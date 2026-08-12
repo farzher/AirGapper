@@ -55,7 +55,10 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.16";
+const decoderActual = document.getElementById("decoder-actual")!;
+const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
+const scanCapture = document.getElementById("scan-capture") as HTMLImageElement;
+const APP_VERSION = "0.1.17";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -238,6 +241,7 @@ interface Region extends SymbolBox {
   quad?: SymbolQuad;
   dim?: number;
   crc32?: boolean;
+  consecutiveMisses: number;
 }
 const regions: Region[] = [];
 let nextRegionId = 1;
@@ -333,16 +337,22 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     trackedMissFallbacks++;
   }
 
+  decoderActual.textContent = completion.error
+    ? `Decode error · ${completion.error}`
+    : `${completion.latencyMs.toFixed(0)} ms · ${completion.trackedHit ? "tracked hit" : completion.trackedAttempted ? "tracked miss" : "acquisition"}`;
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts || completion.symbolCount > 0) return;
-  // The same crop already ran stock acquisition and found nothing. Do not pay
-  // for a known-stale transform forever. Guard against an older reply clearing
-  // a newer anchor installed by a faster worker.
+  // Camera/display transitions commonly spoil one frame. Keep valid geometry
+  // through several misses; immediately dropping it forced generic detection
+  // to reacquire after every transient blur.
   for (const attempt of attempts) {
     if (attempt.region.quad !== attempt.quad) continue;
+    attempt.region.consecutiveMisses++;
+    if (attempt.region.consecutiveMisses < 4) continue;
     attempt.region.quad = undefined;
     attempt.region.dim = undefined;
+    attempt.region.consecutiveMisses = 0;
     trackingInvalidations++;
     notePipelineEvent("tracking-invalidated", trackingInvalidations);
   }
@@ -426,6 +436,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       if (info?.crc32 !== undefined) r.crc32 = info.crc32;
+      r.consecutiveMisses = 0;
       return;
     }
   }
@@ -465,6 +476,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     quad: info?.quad,
     dim: info?.modules,
     crc32: info?.crc32,
+    consecutiveMisses: 0,
   });
   regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
@@ -695,6 +707,9 @@ function stopReceiver(): void {
   result.replaceChildren();
   preview.style.display = "none";
   cameraActual.textContent = "";
+  decoderActual.textContent = "";
+  scanCapture.hidden = true;
+  scanCapture.removeAttribute("src");
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -853,6 +868,22 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 let frameId = 0;
+let captureNextScan = false;
+captureScanBtn.addEventListener("click", () => {
+  captureNextScan = true;
+  decoderActual.textContent = "Capturing next submitted scan…";
+});
+
+function showSubmittedScan(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  if (!captureNextScan) return;
+  captureNextScan = false;
+  const snapshot = document.createElement("canvas");
+  snapshot.width = w;
+  snapshot.height = h;
+  snapshot.getContext("2d")!.drawImage(ctx.canvas, 0, 0, w, h, 0, 0, w, h);
+  scanCapture.src = snapshot.toDataURL("image/png");
+  scanCapture.hidden = false;
+}
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
@@ -927,6 +958,7 @@ function captureFrame() {
     lastFullScan = now;
     fullScans++;
     ctx.drawImage(video, 0, 0);
+    showSubmittedScan(ctx, vw, vh);
     const img = ctx.getImageData(0, 0, vw, vh);
     pool.submit(
       { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
@@ -956,6 +988,7 @@ function captureFrame() {
     const h = Math.min(vh - y, Math.ceil(maxY + pad) - y);
     if (w >= 32 && h >= 32) {
       ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+      showSubmittedScan(ctx, w, h);
       const img = ctx.getImageData(0, 0, w, h);
       const id = frameId++;
       if (pool.submit(
@@ -990,6 +1023,7 @@ function captureFrame() {
     const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
     if (w < 32 || h < 32) continue;
     ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+    showSubmittedScan(ctx, w, h);
     const img = ctx.getImageData(0, 0, w, h);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
