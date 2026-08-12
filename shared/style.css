@@ -78,9 +78,6 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
   transition: .16s ease;
 }
 .mode:hover { transform: translateY(-2px); border-color: #d3d3ce; box-shadow: 0 12px 36px #00000009; }
-.legal-link { border: 0; padding: 0; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; }
-.legal-link:hover { color: var(--ink); }
-
 /* Sender ------------------------------------------------------------------- */
 .send-shell,
 .receiver-shell { min-width: 0; }
@@ -200,8 +197,7 @@ details.settings {
   border-radius: 14px;
   padding: 10px 12px;
 }
-details.settings summary,
-.legal summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details.settings summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; }
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 select, input[type="range"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
@@ -290,21 +286,13 @@ body.receive-complete .received-note { max-height: calc(100dvh - 260px); overflo
 .download { display: inline-block; border: 0; padding: 9px 13px; color: white; background: #171717; border-radius: 10px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere; cursor: pointer; }
 .note-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 
-/* Dialogs and legal -------------------------------------------------------- */
+/* Dialogs ------------------------------------------------------------------ */
 dialog { color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 20px 80px #0002; }
 dialog::backdrop { background: #0004; }
-.help-dialog, .legal-dialog { width: min(520px, calc(100% - 32px)); padding: 18px; }
-.help-dialog h2, .legal-dialog h2 { margin: 0; font-size: 17px; }
 .receiver-link-dialog { width: min(340px, calc(100% - 32px)); padding: 18px; text-align: center; }
 .receiver-link-qr-large { display: block; max-width: 100%; height: auto; margin: 0 auto; image-rendering: pixelated; }
 .receiver-link-dialog p { margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
 .receiver-link-dialog a { display: block; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
-.help-dialog ul { padding-left: 20px; }
-.legal-title-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
-.legal { max-width: 760px; }
-.legal p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.legal-dialog > .legal > summary { display: none; }
-.legal-dialog > .legal > div { display: block; }
 
 @media (max-width: 700px) {
   .app-header { padding-top: 14px; }
