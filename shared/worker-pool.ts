@@ -78,10 +78,14 @@ export interface DecodeCompletion {
   error?: string;
 }
 
+const WORKER_JOB_TIMEOUT_MS = 12_000;
+
 export class DecodeWorkerPool {
   private readonly workers: PoolWorker[] = [];
   private readonly busy: boolean[] = [];
   private readonly activeIds: (number | undefined)[] = [];
+  private readonly activeFull: boolean[] = [];
+  private readonly jobTimers: (ReturnType<typeof setTimeout> | undefined)[] = [];
 
   constructor(
     private readonly create: () => PoolWorker,
@@ -104,10 +108,17 @@ export class DecodeWorkerPool {
       if (this.workers[slot] !== worker) return;
       const message = event.data as DecodeMessage;
       if (message.id === -1) return;
+      // A reply only owns the job currently assigned to this slot. Ignoring an
+      // unexpected/duplicate id prevents it from freeing a worker that is
+      // already decoding a newer frame.
+      if (this.activeIds[slot] !== message.id) return;
       const symbols = message.symbols ?? [];
       const sightings = message.sightings ?? [];
+      clearTimeout(this.jobTimers[slot]);
+      this.jobTimers[slot] = undefined;
       this.busy[slot] = false;
       this.activeIds[slot] = undefined;
+      this.activeFull[slot] = false;
       const completion: DecodeCompletion = {
         full: Boolean(message.full),
         symbolCount: symbols.length,
@@ -139,11 +150,15 @@ export class DecodeWorkerPool {
     worker.onerror = (event: ErrorEvent) => {
       if (this.workers[slot] !== worker) return;
       const id = this.activeIds[slot];
+      const full = this.activeFull[slot] ?? false;
+      clearTimeout(this.jobTimers[slot]);
+      this.jobTimers[slot] = undefined;
       this.busy[slot] = false;
       this.activeIds[slot] = undefined;
+      this.activeFull[slot] = false;
       if (id !== undefined) {
         this.onCompleted?.(id, {
-          full: false,
+          full,
           symbolCount: 0,
           sightingCount: 0,
           trackedAttempted: false,
@@ -169,6 +184,8 @@ export class DecodeWorkerPool {
       this.workers.pop()!.terminate();
       this.busy.pop();
       this.activeIds.pop();
+      this.activeFull.pop();
+      clearTimeout(this.jobTimers.pop());
     }
     while (this.workers.length < count) {
       const slot = this.workers.length;
@@ -176,6 +193,8 @@ export class DecodeWorkerPool {
       this.workers.push(worker);
       this.busy.push(false);
       this.activeIds.push(undefined);
+      this.activeFull.push(false);
+      this.jobTimers.push(undefined);
       this.configureWorker(slot, worker);
     }
   }
@@ -189,12 +208,34 @@ export class DecodeWorkerPool {
     const id = (message as { id?: unknown }).id;
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : undefined;
+    this.activeFull[slot] = Boolean((message as { full?: unknown }).full);
     try {
       this.workers[slot]!.postMessage(message, transfer);
+      this.jobTimers[slot] = setTimeout(() => {
+        const activeId = this.activeIds[slot];
+        if (this.workers[slot] === undefined || activeId === undefined || activeId !== id) return;
+        const full = this.activeFull[slot] ?? false;
+        const failed = this.workers[slot]!;
+        this.busy[slot] = false;
+        this.activeIds[slot] = undefined;
+        this.activeFull[slot] = false;
+        this.jobTimers[slot] = undefined;
+        this.onCompleted?.(activeId, {
+          full, symbolCount: 0, sightingCount: 0,
+          trackedAttempted: false, trackedHit: false, fallbackAttempted: false,
+          latencyMs: WORKER_JOB_TIMEOUT_MS, symbols: [], sightings: [],
+          error: "Decode worker timed out",
+        });
+        failed.terminate();
+        const replacement = this.create();
+        this.workers[slot] = replacement;
+        this.configureWorker(slot, replacement);
+      }, WORKER_JOB_TIMEOUT_MS);
       return true;
     } catch {
       this.busy[slot] = false;
       this.activeIds[slot] = undefined;
+      this.activeFull[slot] = false;
       return false;
     }
   }

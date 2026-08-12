@@ -269,6 +269,9 @@ interface Region extends SymbolBox {
   decodeAttempts: number;
   decodeSuccesses: number;
   averageDecodeCostMs: number;
+  /** Highest submission id that successfully decoded this slot. Used instead
+   *  of quad object identity because a lattice refresh replaces every quad. */
+  lastHitScanId?: number;
   lastAttemptAt?: number;
 }
 const regions: Region[] = [];
@@ -390,7 +393,11 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
       : completion.latencyMs;
     const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === region);
     region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
-    if (!hit && region.quad === attempt.quad) region.consecutiveMisses++;
+    // onDecoded() runs before this completion and may rebuild every lattice
+    // quad. Scan ids, unlike object identity, distinguish a genuine newer hit
+    // from that routine geometry refresh, so missing slots actually age into
+    // expanded-crop and reacquisition states.
+    if (!hit && (region.lastHitScanId ?? -1) <= id) region.consecutiveMisses++;
   }
 }
 
@@ -473,6 +480,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       if (info?.modules) r.dim = info.modules;
       if (info?.crc32 !== undefined) r.crc32 = info.crc32;
       r.consecutiveMisses = 0;
+      if (info?.scanId !== undefined) r.lastHitScanId = info.scanId;
       return;
     }
   }
@@ -522,6 +530,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     decodeAttempts: 0,
     decodeSuccesses: 0,
     averageDecodeCostMs: 0,
+    lastHitScanId: decoded ? info?.scanId : undefined,
   });
   regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
@@ -585,6 +594,7 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
       region.decodeConfidence = 1;
       region.decodeSuccesses++;
       region.crc32 = info?.crc32 ?? true;
+      if (info?.scanId !== undefined) region.lastHitScanId = info.scanId;
       decodedRegion = region;
     }
   }
@@ -918,8 +928,11 @@ function stopReceiver(): void {
   preview.style.display = "none";
   preview.classList.remove("camera-loading");
   cameraActual.textContent = "";
+  clearTimeout(scanCaptureTimer);
+  scanCaptureTimer = undefined;
   pendingScanCapture = null;
   captureNextScan = false;
+  minimumAcceptedScanId = frameId;
   captureScanBtn.textContent = "Capture";
   captureScanBtn.disabled = false;
   if (scanDialog.open) scanDialog.close();
@@ -1088,7 +1101,12 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 let frameId = 0;
+// A transfer handover invalidates every older in-flight capture. Submission
+// ids are monotonic, so stale asynchronous replies cannot reclaim the lock.
+let minimumAcceptedScanId = 0;
 let captureNextScan = false;
+let scanCaptureTimer: ReturnType<typeof setTimeout> | undefined;
+const SCAN_CAPTURE_TIMEOUT_MS = 12_000;
 let pendingScanCapture: {
   id?: number;
   image: ImageData;
@@ -1102,10 +1120,23 @@ captureScanBtn.addEventListener("click", () => {
   captureNextScan = true;
   captureScanBtn.textContent = "Capturing…";
   captureScanBtn.disabled = true;
+  scanCapture.width = 0;
+  scanCapture.height = 0;
+  scanDialogStatus.textContent = "Capturing the next fresh camera frame…";
+  scanSightingLegend.hidden = true;
+  if (!scanDialog.open) scanDialog.showModal();
+  clearTimeout(scanCaptureTimer);
+  scanCaptureTimer = setTimeout(() => {
+    scanDialogStatus.textContent = "Capture timed out — try again.";
+    cancelScanCapture();
+  }, SCAN_CAPTURE_TIMEOUT_MS);
 });
 closeScanBtn.addEventListener("click", () => scanDialog.close());
 scanDialog.addEventListener("click", (event) => {
   if (event.target === scanDialog) scanDialog.close();
+});
+scanDialog.addEventListener("close", () => {
+  if (captureNextScan || pendingScanCapture) cancelScanCapture();
 });
 
 function trackedQuadBounds(quad: SymbolQuad): { left: number; top: number; right: number; bottom: number } | null {
@@ -1166,6 +1197,8 @@ function captureSubmittedScan(
 }
 
 function cancelScanCapture(): void {
+  clearTimeout(scanCaptureTimer);
+  scanCaptureTimer = undefined;
   pendingScanCapture = null;
   captureNextScan = false;
   captureScanBtn.textContent = "Capture";
@@ -1209,6 +1242,26 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
   if (!scanDialog.open) scanDialog.showModal();
+}
+
+function readBoundedVideoCrop(x: number, y: number, w: number, h: number): ImageData {
+  // Keep predicted symbols just outside the sensor represented inside the
+  // crop. Filling that narrow missing edge white lets the known-transform QR
+  // sampler and Reed–Solomon correction attempt it instead of rejecting
+  // negative coordinates before ECC runs.
+  if (grab.width < w) grab.width = w;
+  if (grab.height < h) grab.height = h;
+  const ctx = grab.getContext("2d", { willReadFrequently: true })!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+  const sx = Math.max(0, x);
+  const sy = Math.max(0, y);
+  const right = Math.min(video.videoWidth, x + w);
+  const bottom = Math.min(video.videoHeight, y + h);
+  if (right > sx && bottom > sy) {
+    ctx.drawImage(video, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
+  }
+  return ctx.getImageData(0, 0, w, h);
 }
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
@@ -1348,13 +1401,12 @@ function captureFrame() {
     // motion so the fallback detector can re-anchor a shaking camera without
     // turning the normal locked crop back into a full-frame readback.
     const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
-    const x = Math.max(0, Math.floor(minX - pad));
-    const y = Math.max(0, Math.floor(minY - pad));
-    const w = Math.min(vw - x, Math.ceil(maxX + pad) - x);
-    const h = Math.min(vh - y, Math.ceil(maxY + pad) - y);
+    const x = Math.floor(minX - pad);
+    const y = Math.floor(minY - pad);
+    const w = Math.ceil(maxX + pad) - x;
+    const h = Math.ceil(maxY + pad) - y;
     if (w >= 32 && h >= 32) {
-      ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-      const img = ctx.getImageData(0, 0, w, h);
+      const img = readBoundedVideoCrop(x, y, w, h);
       captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
       const id = frameId++;
       if (pool.submit(
@@ -1403,13 +1455,12 @@ function captureFrame() {
     // finder patterns can dominate this crop.
     const missPad = r.gridSlot === undefined ? 0 : Math.min(0.9, r.consecutiveMisses * 0.08);
     const pad = Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * (r.drift ?? 0)));
-    const x = Math.max(0, Math.floor(left - pad));
-    const y = Math.max(0, Math.floor(top - pad));
-    const w = Math.min(vw - x, Math.ceil(right + pad) - x);
-    const h = Math.min(vh - y, Math.ceil(bottom + pad) - y);
+    const x = Math.floor(left - pad);
+    const y = Math.floor(top - pad);
+    const w = Math.ceil(right + pad) - x;
+    const h = Math.ceil(bottom + pad) - y;
     if (w < 32 || h < 32) continue;
-    ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
+    const img = readBoundedVideoCrop(x, y, w, h);
     captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
@@ -1445,6 +1496,7 @@ function resetActiveTransfer(): void {
   expectedRegionsAt = 0;
   lastDecodedRegionSize = 0;
   cropAttempts.clear();
+  minimumAcceptedScanId = frameId;
   qrReadTimes.length = 0;
   usefulFrameTimes.length = 0;
   lastDistinctArrivalAt = 0;
@@ -1459,6 +1511,7 @@ function resetActiveTransfer(): void {
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
+  if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) return;
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   const decodedAt = performance.now();
@@ -1589,6 +1642,8 @@ function updateProgressEstimate() {
  * AirGapper container or SHA-256; files never take this path. */
 function finishPlainQr(text: string): void {
   done = true;
+  cancelScanCapture();
+  if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
@@ -1618,6 +1673,8 @@ function liveGoodputKbs(now: number): number {
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
+  cancelScanCapture();
+  if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
   captureGen++;
   // Snapshot diagnostics before teardown, but do not report success until the
