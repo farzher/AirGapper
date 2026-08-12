@@ -42,7 +42,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
   justify-content: space-between;
   gap: 16px;
 }
-.app-main { margin-block: auto; padding: 12px 0 30px; }
+.app-main { margin-block: auto; padding: 4px 0 30px; }
 .brand-lockup { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .header-qr-button { display: block; flex: none; border: 0; background: transparent; padding: 0; cursor: pointer; border-radius: 5px; }
 .header-qr-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
@@ -101,7 +101,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
   transition: .14s;
 }
 .file-picker:hover, .file-picker.dragging { border-color: #999; background: var(--card); }
-.file-picker input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
+.file-picker input { display: none; }
 .file-picker strong { display: block; font-size: 18px; margin-bottom: 5px; }
 .file-picker .sub { display: block; color: var(--muted); font-size: 12px; }
 .file-picker.has-file strong { color: var(--ink); }
@@ -296,7 +296,7 @@ dialog::backdrop { background: #0004; }
 
 @media (max-width: 700px) {
   .app-header { padding-top: 14px; }
-  .app-main { padding-top: 6px; }
+  .app-main { padding-top: 0; }
   .home, .send-inputs { grid-template-columns: 1fr; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 130px; }
