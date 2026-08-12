@@ -82,6 +82,7 @@ let startTs = 0;
 let captureGen = 0;
 let done = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
+const plainQrDecoder = new TextDecoder("utf-8", { fatal: true });
 
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
@@ -721,7 +722,16 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (info?.tracked) trackedDecodes++;
   if (box) noteRegion(box, performance.now(), true, info);
   const parsed = parseFrame(bytes);
-  if (!parsed || done) return;
+  if (done) return;
+  if (!parsed) {
+    try {
+      const text = plainQrDecoder.decode(bytes);
+      if (text) finishPlainQr(text);
+    } catch {
+      // Non-text binary QR content is not a plain snippet or AirGapper frame.
+    }
+    return;
+  }
   const { header, block } = parsed;
   // streamIdentity() covers every header field that has to hold constant, not
   // just the session id — see the note on it in protocol.ts.
@@ -782,6 +792,23 @@ function updateProgressEstimate() {
   etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3
     ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
     : "Estimating…";
+}
+
+/** Plain text is the complete standard QR payload. It deliberately has no
+ * AirGapper container or SHA-256; files never take this path. */
+function finishPlainQr(text: string): void {
+  done = true;
+  captureGen++;
+  stream?.getTracks().forEach((track) => track.stop());
+  clearInterval(statsTimer);
+  statsTimer = undefined;
+  pool.resize(0);
+  preview.style.display = "none";
+  metricsEl.style.display = "none";
+  document.body.classList.add("receive-complete");
+  document.body.classList.remove("receive-mode");
+  setStatus("");
+  showSnippet(text);
 }
 
 /** One-second information goodput for live aiming feedback. The completed

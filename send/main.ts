@@ -470,11 +470,14 @@ async function startStream(revealStage = false) {
     return;
   }
 
-  // If the complete container fits in one configured frame, one static QR is
-  // both denser and easier to scan than an animated grid repeating the same
-  // data. Larger transfers retain the chosen multi-code layout and fountain
-  // carousel. Single-code mode also avoids padding its final/only block.
-  const staticStream = payload.length <= maximumBlockLen;
+  // Short snippets use their plain UTF-8 text as the QR payload, so any normal
+  // QR reader can read them. Files retain the verified AirGapper container,
+  // even when they fit in one static code. Longer text keeps fountain framing.
+  const snippetValue = currentMode() === "snippet" ? snippetText.value : null;
+  const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= frameBytes
+    ? snippetValue
+    : null;
+  const staticStream = plainSnippet !== null || payload.length <= maximumBlockLen;
   const layoutMode: LayoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
   const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
@@ -555,6 +558,13 @@ async function startStream(revealStage = false) {
   };
 
   const makeCode = (): ReturnType<typeof QRCode.create> => {
+    if (plainSnippet !== null) {
+      return QRCode.create(plainSnippet, {
+        errorCorrectionLevel: ecc,
+        version,
+        maskPattern: 4,
+      });
+    }
     const bytes = packFrame({ ...header, seq: nextSeq }, encoder.encode(nextSeq));
     nextSeq++;
     // Every code carries the same byte length at the same ECC with the same
