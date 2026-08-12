@@ -117,6 +117,9 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .send-controls select,
 .send-controls input { width: 100%; }
 .send-controls input { margin-top: 2px; }
+.send-controls .speed-control { display: grid; grid-template-columns: minmax(0, 3fr) minmax(64px, 2fr); }
+.speed-control span { grid-column: 1 / -1; }
+.speed-control input { margin: 0; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 .note-composer textarea {
   resize: none;

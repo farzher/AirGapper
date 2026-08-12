@@ -23,7 +23,7 @@
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
-    <a class="apk-download" href="./AirGapper.apk" download>Offline .apk</a>
+    <a class="apk-download" href="./AirGapper.apk" download>Download .apk</a>
   </header>
 
   <main class="app-main">
@@ -53,10 +53,10 @@
         <div class="stage-bottom" id="stage-bottom">
           <div class="selection-summary" id="selection-summary" hidden></div>
           <div class="send-controls" id="send-controls" hidden>
-            <label><span>Speed</span><select id="cfg-fps"><option value="10">10 fps</option><option value="15" selected>15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option><option value="60">60 fps</option><option value="custom">Custom…</option></select><input id="cfg-fps-custom" type="number" min="1" max="240" step="1" value="15" aria-label="Custom frames per second" hidden /></label>
+            <label class="speed-control"><span>Speed</span><select id="cfg-fps"><option value="10">10 fps</option><option value="15" selected>15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option><option value="60">60 fps</option><option value="custom">Custom…</option></select><input id="cfg-fps-custom" type="number" min="1" max="240" step="1" value="15" aria-label="Custom frames per second" hidden /></label>
             <label><span>Size</span><select id="cfg-size"></select></label>
-            <label><span>Layout</span><select id="cfg-layout"><option value="single" selected>1 QR</option><option value="four-three">12 QRs</option></select></label>
-            <label><span>Scaling</span><select id="cfg-scaling"><option value="integer">Integer</option><option value="fit">Fit screen</option></select></label>
+            <label><span>Layout</span><select id="cfg-layout"><option value="single" selected>1:1</option><option value="four-three">3:4</option></select></label>
+            <label><span>Scaling</span><select id="cfg-scaling"><option value="integer">Pixel perfect</option><option value="fit">Fit screen</option></select></label>
           </div>
         </div>
       </div>

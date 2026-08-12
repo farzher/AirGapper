@@ -131,22 +131,37 @@ function selectFps(fps: number): void {
   cfgFpsCustom.hidden = cfgFps.value !== "custom";
 }
 
-async function addDisplayRefreshRate(): Promise<void> {
-  const timestamps: number[] = [];
-  await new Promise<void>((resolve) => {
-    const sample = (now: number) => {
-      timestamps.push(now);
-      if (timestamps.length < 90) requestAnimationFrame(sample);
-      else resolve();
-    };
-    requestAnimationFrame(sample);
-  });
-  const intervals = timestamps.slice(1).map((time, index) => time - timestamps[index]!).filter((ms) => ms > 4 && ms < 40).sort((a, b) => a - b);
-  if (!intervals.length) return;
-  const refreshRate = Math.round(1000 / intervals[Math.floor(intervals.length / 2)]!);
-  if (refreshRate <= 60 || Array.from(cfgFps.options).some((option) => Number(option.value) === refreshRate)) return;
-  const option = new Option(`${refreshRate} fps (display)`, String(refreshRate));
-  cfgFps.insertBefore(option, cfgFps.options[cfgFps.options.length - 1] ?? null);
+function monitorDisplayRefreshRate(): void {
+  const intervals: number[] = [];
+  let previous = 0;
+  const monitorStarted = performance.now();
+  let windowStarted = monitorStarted;
+  let displayOption: HTMLOptionElement | null = null;
+  const sample = (now: number) => {
+    if (previous) {
+      const interval = now - previous;
+      if (interval > 1 && interval < 40) intervals.push(interval);
+    }
+    previous = now;
+    if (now - windowStarted >= 750 && intervals.length) {
+      const sorted = intervals.slice().sort((a, b) => a - b);
+      const refreshRate = Math.round(1000 / sorted[Math.floor(sorted.length / 2)]!);
+      if (refreshRate > 60) {
+        const wasSelected = cfgFps.value === displayOption?.value;
+        if (!displayOption) {
+          displayOption = new Option();
+          cfgFps.insertBefore(displayOption, cfgFps.options[cfgFps.options.length - 1] ?? null);
+        }
+        displayOption.value = String(refreshRate);
+        displayOption.textContent = `${refreshRate} fps (display)`;
+        if (wasSelected) cfgFps.value = displayOption.value;
+      }
+      intervals.length = 0;
+      windowStarted = now;
+    }
+    if (now - monitorStarted < 5000) requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
 }
 
 let selectedFile: {
@@ -439,7 +454,7 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
-  FRAME_BYTES_OPTIONS.forEach((bytes, level) => cfgSize.add(new Option(`${formatBytes(bytes)} per QR`, String(level), false, level === FRAME_BYTES_OPTIONS.length - 1)));
+  Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
   restoreSendSettings();
   cfgFps.addEventListener("change", () => {
     cfgFpsCustom.hidden = cfgFps.value !== "custom";
@@ -454,7 +469,7 @@ async function main() {
       void startStream();
     });
   }
-  void addDisplayRefreshRate();
+  monitorDisplayRefreshRate();
 }
 
 /** Only on a fresh pick — a settings change restarts the stream too, and
