@@ -54,6 +54,12 @@ function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
 // allocator churn to the hottest path.
 let inputPtr = 0;
 let inputCapacity = 0;
+let batchDecoder = 0;
+let batchResultsPtr = 0;
+let batchOutputPtr = 0;
+let batchMetricsPtr = 0;
+let batchCapacity = 0;
+const batchTrackKeys: string[] = [];
 
 function inputBuffer(zx: DecimenModule, bytes: number): number {
   if (bytes <= inputCapacity) return inputPtr;
@@ -63,10 +69,45 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
   return inputPtr;
 }
 
+interface BatchTrack {
+  id: number;
+  quad: DecimenQuad;
+  dim: number;
+  crc32: boolean;
+}
+
+function batchBuffers(zx: DecimenModule, count: number): void {
+  if (!batchDecoder) {
+    batchDecoder = zx._createTrackedDecoder(15, 177);
+    zx._setTrackedDecoderFallbackBudget(batchDecoder, 2);
+  }
+  if (count <= batchCapacity) return;
+  if (batchResultsPtr) zx._free(batchResultsPtr);
+  if (batchOutputPtr) zx._free(batchOutputPtr);
+  batchResultsPtr = zx._malloc(count * 32);
+  batchOutputPtr = zx._malloc(count * 3000);
+  if (!batchMetricsPtr) batchMetricsPtr = zx._malloc(72);
+  batchCapacity = count;
+}
+
+function trackKey(track: BatchTrack, ox: number, oy: number): string {
+  const q = track.quad;
+  return [track.id, track.dim, Number(track.crc32), ox, oy,
+    q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+    q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
+}
+
+function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
+  const point = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  return {
+    topLeft: point(q.topLeft), topRight: point(q.topRight),
+    bottomRight: point(q.bottomRight), bottomLeft: point(q.bottomLeft),
+  };
+}
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -76,6 +117,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     full?: boolean;
     quad?: DecimenQuad;
     dim?: number;
+    tracks?: BatchTrack[];
   };
   try {
     const pixels = new Uint8Array(buf);
@@ -84,8 +126,57 @@ ctx.onmessage = async (e: MessageEvent) => {
     zx.HEAPU8.set(pixels, ptr);
     const pw = w;
     const ph = h;
-    const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean }[] = [];
+    const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
     const sightings: object[] = [];
+
+    if (!full && tracks?.length) {
+      batchBuffers(zx, tracks.length);
+      const byId = new Map(tracks.map((track) => [track.id, track]));
+      for (let slot = 0; slot < tracks.length; slot++) {
+        const track = tracks[slot]!;
+        const key = trackKey(track, ox, oy);
+        if (batchTrackKeys[slot] === key) continue;
+        const q = moved(track.quad, -ox, -oy);
+        zx._setTrackedDecoderTrack(
+          batchDecoder, slot, track.id, track.dim,
+          q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+          q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y,
+        );
+        zx._setTrackedDecoderTrackCRC32(batchDecoder, slot, Number(track.crc32));
+        batchTrackKeys[slot] = key;
+      }
+      for (let slot = tracks.length; slot < batchTrackKeys.length; slot++) {
+        zx._clearTrackedDecoderTrack(batchDecoder, slot);
+        batchTrackKeys[slot] = "";
+      }
+      const count = zx._decodeTrackedBatchRGBA(
+        batchDecoder, ptr, pw, ph, pw * 4, batchResultsPtr, tracks.length,
+        batchOutputPtr, tracks.length * 3000, batchMetricsPtr,
+      );
+      const view = new DataView(zx.HEAPU8.buffer);
+      for (let index = 0; index < count; index++) {
+        const base = batchResultsPtr + index * 32;
+        if (view.getInt32(base + 4, true) !== 1) continue;
+        const track = byId.get(view.getInt32(base, true));
+        if (!track) continue;
+        const byteOffset = view.getInt32(base + 8, true);
+        const byteLength = view.getInt32(base + 12, true);
+        const updatedQuad = moved(
+          track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true),
+        );
+        symbols.push({
+          bytes: zx.HEAPU8.slice(batchOutputPtr + byteOffset, batchOutputPtr + byteOffset + byteLength),
+          box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad, modules: track.dim,
+          tracked: true, crc32: track.crc32,
+        });
+      }
+      ctx.postMessage({
+        id, symbols, sightings: [], full: false, trackedAttempted: true,
+        trackedHit: symbols.length > 0, fallbackAttempted: false,
+        latencyMs: performance.now() - startedAt,
+      });
+      return;
+    }
 
     let trackedHit = false;
     let trackedAttempted = false;

@@ -55,7 +55,7 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.15";
+const APP_VERSION = "0.1.16";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -248,10 +248,13 @@ let nextRegionId = 1;
 let lastDecodedRegionSize = 0;
 // Crop replies retain the exact anchor they attempted, so a miss can
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
-const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
+type CropAttempt = { region: Region; quad?: SymbolQuad };
+const cropAttempts = new Map<number, CropAttempt[]>();
 function regionInflightCount(region: Region): number {
   let count = 0;
-  for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
+  for (const attempts of cropAttempts.values()) {
+    if (attempts.some((attempt) => attempt.region === region)) count++;
+  }
   return count;
 }
 
@@ -330,13 +333,14 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     trackedMissFallbacks++;
   }
 
-  const attempt = cropAttempts.get(id);
+  const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
-  if (!attempt || completion.symbolCount > 0) return;
+  if (!attempts || completion.symbolCount > 0) return;
   // The same crop already ran stock acquisition and found nothing. Do not pay
   // for a known-stale transform forever. Guard against an older reply clearing
   // a newer anchor installed by a faster worker.
-  if (attempt.region.quad === attempt.quad) {
+  for (const attempt of attempts) {
+    if (attempt.region.quad !== attempt.quad) continue;
     attempt.region.quad = undefined;
     attempt.region.dim = undefined;
     trackingInvalidations++;
@@ -353,10 +357,10 @@ const REGION_TTL_MS = 1500;
 // A probationary detector sighting has no decodedSeen timestamp; keeping it
 // through several cold full scans gives its cheap crop path time to recover.
 const SIGHTING_REGION_TTL_MS = 3000;
-// A healthy GPU track validates every finder on every frame. Generic full-frame
-// detection during that state only steals CPU and camera bandwidth; retain a
-// sparse safety scan, while degraded tracks still reacquire aggressively.
-const FULL_SCAN_INTERVAL_MS = 10_000;
+// Tracking only revisits known positions, so it cannot discover a larger grid.
+// Keep acquisition sparse enough not to disrupt preview, but frequent enough
+// that one early decode cannot masquerade as the complete layout.
+const FULL_SCAN_INTERVAL_MS = 1500;
 // A grid sender shows several codes; when fewer regions are live than the
 // stream has shown simultaneously, one of them is MISSING — glare, focus, a
 // borderline density. Crops can't find it (they only look where codes were),
@@ -930,6 +934,44 @@ function captureFrame() {
     );
     return;
   }
+  const batchRegions = regions.filter((region) => region.decoded && region.quad && region.dim);
+  const batchTracks = batchRegions.map((region) => ({
+    id: region.id, quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
+  }));
+  if (batchTracks.length > 1) {
+    // One readback and one worker message per camera frame. Four independent
+    // getImageData calls were stalling camera delivery even though the decode
+    // workers were mostly idle.
+    const points = batchTracks.flatMap((track) => [
+      track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft,
+    ]);
+    const minX = Math.min(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const maxY = Math.max(...points.map((point) => point.y));
+    const pad = Math.max(8, Math.round(Math.max(maxX - minX, maxY - minY) * 0.04));
+    const x = Math.max(0, Math.floor(minX - pad));
+    const y = Math.max(0, Math.floor(minY - pad));
+    const w = Math.min(vw - x, Math.ceil(maxX + pad) - x);
+    const h = Math.min(vh - y, Math.ceil(maxY + pad) - y);
+    if (w >= 32 && h >= 32) {
+      ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+      const img = ctx.getImageData(0, 0, w, h);
+      const id = frameId++;
+      if (pool.submit(
+        { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
+        [img.data.buffer],
+      )) {
+        cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
+        cropsSubmitted += batchTracks.length;
+      } else {
+        poolBusyTimes.push(now);
+      }
+    }
+    cropRotate++;
+    return;
+  }
+
   // Pipeline successive camera frames across the workers. The old one-job
   // limit made a single QR use only one worker, so its decode latency directly
   // capped throughput even while the rest of the pool sat idle. Due full scans
@@ -950,7 +992,7 @@ function captureFrame() {
     ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
     const img = ctx.getImageData(0, 0, w, h);
     const id = frameId++;
-    cropAttempts.set(id, { region: r, quad: r.quad });
+    cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     if (!pool.submit(
       { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
       [img.data.buffer],
