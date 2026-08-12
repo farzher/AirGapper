@@ -499,7 +499,9 @@ async function main() {
   applyMode();
   Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
   restoreSendSettings();
+  let customFpsTimer: ReturnType<typeof setTimeout> | undefined;
   cfgFps.addEventListener("change", () => {
+    clearTimeout(customFpsTimer);
     cfgFpsCustom.hidden = cfgFps.value !== "custom";
     speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
     if (!cfgFpsCustom.hidden) cfgFpsCustom.focus();
@@ -514,9 +516,12 @@ async function main() {
     });
   }
   cfgFpsCustom.addEventListener("input", () => {
+    clearTimeout(customFpsTimer);
     if (!cfgFpsCustom.value) return;
-    saveSendSettings();
-    void startStream();
+    customFpsTimer = setTimeout(() => {
+      saveSendSettings();
+      void startStream();
+    }, 100);
   });
   monitorDisplayRefreshRate();
 }
