@@ -151,6 +151,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
   width: min(1400px, calc(100vw - 24px));
   transform: translateX(-50%);
   margin-top: 12px;
+  height: calc(100vh - 180px);
   height: calc(100dvh - 180px);
   min-height: 0;
   display: flex;
@@ -309,7 +310,7 @@ dialog::backdrop { background: #0004; }
   .send-advanced { grid-column: 2; }
   .stage { min-height: 0; }
   .receiver-primary { gap: 8px; }
-  .preview { min-height: 0; max-height: calc(100dvh - 255px); }
+  .preview { min-height: 0; max-height: calc(100vh - 255px); max-height: calc(100dvh - 255px); }
   .transfer-panel { padding: 10px 12px; }
   .transfer-meta { margin-top: 7px; }
   .pipeline-metrics { gap: 10px; }

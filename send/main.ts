@@ -431,10 +431,12 @@ async function main() {
     const { codes } = layoutGrid(selectedLayout());
     sizeValue.textContent = `${formatBytes(bytes)} · ${codes} ${codes === 1 ? "QR" : "QRs"}`;
   };
-  window.addEventListener("resize", () => {
+  const resizeForViewport = () => {
     updateControlLabels();
     resizeDisplay?.();
-  });
+  };
+  window.addEventListener("resize", resizeForViewport);
+  window.visualViewport?.addEventListener("resize", resizeForViewport);
   for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => {
@@ -601,6 +603,14 @@ async function startStream(revealStage = false) {
       modules = qr.modules.size;
       sizeCanvas();
       resizeDisplay = sizeCanvas;
+      // WebView can report its pre-layout stage size during the same task that
+      // reveals it. Re-read after layout and after its visual viewport settles.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (gen === generation) sizeCanvas();
+      }));
+      setTimeout(() => {
+        if (gen === generation) sizeCanvas();
+      }, 250);
       // Scroll only now: before sizeCanvas() the canvas is still 16×16, so the
       // scroll target would be the wrong height.
       if (revealStage) scrollStageIntoView();
