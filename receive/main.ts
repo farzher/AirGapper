@@ -627,11 +627,18 @@ function classifyGridSlots(vw: number, vh: number): Region[] {
   return visible;
 }
 
+function isGridDecodeCandidate(region: Region): boolean {
+  return region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY" ||
+    // A narrow clipped edge can remain recoverable through QR error correction
+    // and the known transform. Do not spend work on substantially absent codes.
+    (region.slotState === "PARTIAL" && region.visibleFraction >= 0.85);
+}
+
 function slotUsefulness(region: Region): number {
   const success = region.decodeAttempts ? region.decodeConfidence : 0.65;
   const quality = Math.min(1.5, region.pixelsPerModule / 4);
   const cost = region.averageDecodeCostMs || 8;
-  const stateWeight = region.slotState === "ACTIVE" ? 1 : region.slotState === "LOST" ? 0.35 : region.slotState === "LOW_QUALITY" ? 0.2 : 0;
+  const stateWeight = region.slotState === "ACTIVE" ? 1 : region.slotState === "LOST" ? 0.35 : region.slotState === "LOW_QUALITY" ? 0.2 : region.slotState === "PARTIAL" ? 0.12 : 0;
   return stateWeight * region.visibleFraction * quality * (0.25 + success) / Math.sqrt(cost);
 }
 
@@ -1273,9 +1280,17 @@ function captureFrame() {
   // anchor, display transition, or missed neighbor must not suppress global
   // reacquisition forever. Degraded grids rescan quickly; a healthy grid still
   // gets a sparse scan that can correct motion and discover every visible QR.
-  // A requested diagnostic capture prefers the locked lattice crop rather
-  // than randomly landing on a due full-frame maintenance scan.
-  const fullScanDue = !captureNextScan && now - lastFullScan > scanInterval;
+  // A requested diagnostic capture prefers the locked lattice crop, but only
+  // when such a crop actually exists. The previous unconditional suppression
+  // of full scans deadlocked Capture in SEARCH: no regions meant no crop job,
+  // while captureNextScan itself prevented the full-frame job that could finish.
+  const captureHasTrackedWork = gridLattice.active
+    ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) &&
+      validTrackedQuad(region, vw, vh))
+    : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const fullScanDue = captureNextScan
+    ? !captureHasTrackedWork
+    : now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
     return;
@@ -1309,9 +1324,7 @@ function captureFrame() {
     if (region.gridSlot === undefined && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
   const batchRegions = (gridLattice.active
-    ? visibleGridSlots.filter((region) =>
-      region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY" ||
-      (region.slotState === "PARTIAL" && region.visibleFraction >= 0.92))
+    ? visibleGridSlots.filter(isGridDecodeCandidate)
     : regions.filter((region) => region.decoded))
     .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh))
     .slice(0, 15);
@@ -1330,7 +1343,11 @@ function captureFrame() {
     const maxX = Math.max(...points.map((point) => point.x));
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
-    const pad = Math.max(8, Math.round(typicalEdge * 0.16));
+    const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
+    // Padding is based on one QR, not the whole lattice. Grow it briefly under
+    // motion so the fallback detector can re-anchor a shaking camera without
+    // turning the normal locked crop back into a full-frame readback.
+    const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
     const x = Math.max(0, Math.floor(minX - pad));
     const y = Math.max(0, Math.floor(minY - pad));
     const w = Math.min(vw - x, Math.ceil(maxX + pad) - x);
@@ -1361,7 +1378,7 @@ function captureFrame() {
   // slots consume no worker time and do not count as failures.
   const eligible = gridLattice.active
     ? visibleGridSlots
-      .filter((region) => region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY")
+      .filter(isGridDecodeCandidate)
       .sort((a, b) => slotUsefulness(b) - slotUsefulness(a))
     : [...regions];
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;

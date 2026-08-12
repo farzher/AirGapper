@@ -198,10 +198,11 @@ ctx.onmessage = async (e: MessageEvent) => {
             vec.delete();
           }
         };
-        // A lattice crop can hold all 15 dense symbols. Find valid payloads
-        // before allowing error candidates to consume the result capacity.
-        appendFallback(zx.readFull(ptr, pw, ph, true, 64, false), false);
-        if (symbols.length === 0) appendFallback(zx.readFull(ptr, pw, ph, true, 64, true), true);
+        // A lattice crop can hold all 15 dense symbols. Its tracks already
+        // provide every position, so error-only detector results add no
+        // information. Avoiding that second exhaustive pass keeps a complete
+        // motion miss cheap enough for the next fresh camera frame to relock.
+        appendFallback(zx.readFull(ptr, pw, ph, true, 16, false), false);
       }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
@@ -267,7 +268,10 @@ ctx.onmessage = async (e: MessageEvent) => {
         // Decode valid symbols without error noise first. Only a total miss
         // pays for a high-capacity detector pass to seed recovery crops.
         appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
-        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 64, true), true);
+        // Acquisition only needs a plausible seed crop, not every bad finder
+        // triple in a dense frame. Bounding error output prevents a no-decode
+        // capture from monopolizing an older phone's worker for seconds.
+        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
       } else {
         // Crop fallback stays in the cheapest detector configuration.
         appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
