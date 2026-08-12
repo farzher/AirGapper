@@ -406,7 +406,9 @@ function restoreSendSettings(): void {
     if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three") {
       cfgLayout.value = saved.layout;
     }
-    if (saved.channels === "same" || saved.channels === "dual") cfgChannels.value = saved.channels;
+    if (saved.channels === "same" || saved.channels === "dual" || saved.channels === "alternating") {
+      cfgChannels.value = saved.channels;
+    }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
@@ -504,7 +506,9 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = selectedFps();
-  const channelMode = cfgChannels.value === "same" ? "same" : "dual";
+  const channelMode = cfgChannels.value === "same" || cfgChannels.value === "alternating"
+    ? cfgChannels.value
+    : "dual";
   const sizeLevel = Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
@@ -631,13 +635,14 @@ async function startStream(revealStage = false) {
     });
   };
 
+  let alternatingChannel = 0;
   const makeCell = (): ImageData => {
-    const qrA = makeCode();
-    const qrB = channelMode === "same" ? qrA : makeCode();
-    if (qrA.modules.size !== qrB.modules.size) throw new Error("The two QR channels have different dimensions.");
+    const first = makeCode();
+    const second = channelMode === "dual" ? makeCode() : first;
+    if (first.modules.size !== second.modules.size) throw new Error("The two QR channels have different dimensions.");
     if (version === undefined) {
-      version = qrA.version;
-      modules = qrA.modules.size;
+      version = first.version;
+      modules = first.modules.size;
       sizeCanvas();
       resizeDisplay = sizeCanvas;
       // WebView can report its pre-layout stage size during the same task that
@@ -694,10 +699,18 @@ async function startStream(revealStage = false) {
         }).catch(() => undefined);
       }
     }
+    let modulesA: ArrayLike<number> = first.modules.data;
+    let modulesB: ArrayLike<number> = second.modules.data;
+    if (channelMode === "alternating") {
+      const blank = new Uint8Array(first.modules.size * first.modules.size);
+      if (alternatingChannel === 0) modulesB = blank;
+      else modulesA = blank;
+      alternatingChannel ^= 1;
+    }
     const raster = rasterizeDualQr(
-      qrA.modules.size,
-      qrA.modules.data,
-      qrB.modules.data,
+      first.modules.size,
+      modulesA,
+      modulesB,
       GRID_MARGIN,
     );
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
