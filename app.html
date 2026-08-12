@@ -77,7 +77,6 @@
           </div>
           <p class="settings-actual" id="camera-actual"></p>
           <p class="settings-actual" id="decoder-actual"></p>
-          <img class="scan-capture" id="scan-capture" alt="Exact image submitted to the QR decoder" hidden />
         </details>
         <div class="preview-zone" id="preview" style="display:none">
           <div class="preview receive-card">
@@ -100,6 +99,13 @@
   </main>
 
 </div>
+
+<dialog class="scan-dialog" id="scan-dialog" aria-label="Captured decoder scan">
+  <div class="scan-dialog-header"><strong>Captured scan</strong><button class="ghost" id="close-scan" type="button">Close</button></div>
+  <p class="scan-dialog-status" id="scan-dialog-status"></p>
+  <canvas class="scan-capture" id="scan-capture" aria-label="Exact image submitted to the QR decoder with result overlays"></canvas>
+  <p class="scan-dialog-legend"><span class="scan-track">Tracked search</span><span class="scan-hit">Decoded</span><span class="scan-sighting">Detected</span></p>
+</dialog>
 
 <dialog class="receiver-link-dialog" id="receiver-link-dialog" aria-label="Phone receiver link">
   <canvas id="receiver-link-qr-large" class="receiver-link-qr-large" aria-hidden="true"></canvas>

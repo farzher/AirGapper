@@ -57,8 +57,11 @@ const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectEle
 const cameraActual = document.getElementById("camera-actual")!;
 const decoderActual = document.getElementById("decoder-actual")!;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
-const scanCapture = document.getElementById("scan-capture") as HTMLImageElement;
-const APP_VERSION = "0.1.17";
+const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
+const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
+const scanDialogStatus = document.getElementById("scan-dialog-status")!;
+const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
+const APP_VERSION = "0.1.18";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -340,6 +343,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   decoderActual.textContent = completion.error
     ? `Decode error · ${completion.error}`
     : `${completion.latencyMs.toFixed(0)} ms · ${completion.trackedHit ? "tracked hit" : completion.trackedAttempted ? "tracked miss" : "acquisition"}`;
+  finishScanCapture(id, completion);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts || completion.symbolCount > 0) return;
@@ -708,8 +712,10 @@ function stopReceiver(): void {
   preview.style.display = "none";
   cameraActual.textContent = "";
   decoderActual.textContent = "";
-  scanCapture.hidden = true;
-  scanCapture.removeAttribute("src");
+  pendingScanCapture = null;
+  if (scanDialog.open) scanDialog.close();
+  scanCapture.width = 0;
+  scanCapture.height = 0;
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -869,20 +875,68 @@ function scheduleFrame(gen: number) {
 const grab = document.createElement("canvas");
 let frameId = 0;
 let captureNextScan = false;
+let pendingScanCapture: {
+  id?: number;
+  image: ImageData;
+  ox: number;
+  oy: number;
+  full: boolean;
+  tracks: SymbolQuad[];
+} | null = null;
 captureScanBtn.addEventListener("click", () => {
   captureNextScan = true;
   decoderActual.textContent = "Capturing next submitted scan…";
 });
+closeScanBtn.addEventListener("click", () => scanDialog.close());
+scanDialog.addEventListener("click", (event) => {
+  if (event.target === scanDialog) scanDialog.close();
+});
 
-function showSubmittedScan(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+function captureSubmittedScan(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  ox: number,
+  oy: number,
+  full: boolean,
+  tracks: SymbolQuad[] = [],
+): void {
   if (!captureNextScan) return;
   captureNextScan = false;
-  const snapshot = document.createElement("canvas");
-  snapshot.width = w;
-  snapshot.height = h;
-  snapshot.getContext("2d")!.drawImage(ctx.canvas, 0, 0, w, h, 0, 0, w, h);
-  scanCapture.src = snapshot.toDataURL("image/png");
-  scanCapture.hidden = false;
+  pendingScanCapture = { image: ctx.getImageData(0, 0, w, h), ox, oy, full, tracks };
+}
+
+function finishScanCapture(id: number, completion: DecodeCompletion): void {
+  const capture = pendingScanCapture;
+  if (!capture || capture.id !== id) return;
+  pendingScanCapture = null;
+  scanCapture.width = capture.image.width;
+  scanCapture.height = capture.image.height;
+  const ctx = scanCapture.getContext("2d")!;
+  ctx.putImageData(capture.image, 0, 0);
+  const drawQuad = (quad: SymbolQuad, color: string, width: number) => {
+    const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const x = point.x - capture.ox;
+      const y = point.y - capture.oy;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  };
+  for (const quad of capture.tracks) drawQuad(quad, "#248cff", 3);
+  for (const symbol of completion.symbols) if (symbol.quad) drawQuad(symbol.quad, "#20c969", 5);
+  ctx.strokeStyle = "#f2a51a";
+  ctx.lineWidth = 4;
+  for (const box of completion.sightings) ctx.strokeRect(box.x - capture.ox, box.y - capture.oy, box.w, box.h);
+  const mode = capture.full ? "Full-frame acquisition" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
+  scanDialogStatus.textContent = completion.error
+    ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.error}`
+    : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.latencyMs.toFixed(0)} ms · ${completion.symbolCount} decoded · ${completion.sightingCount} detected`;
+  scanDialog.showModal();
 }
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
@@ -958,12 +1012,18 @@ function captureFrame() {
     lastFullScan = now;
     fullScans++;
     ctx.drawImage(video, 0, 0);
-    showSubmittedScan(ctx, vw, vh);
+    captureSubmittedScan(ctx, vw, vh, 0, 0, true);
     const img = ctx.getImageData(0, 0, vw, vh);
-    pool.submit(
-      { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+    const id = frameId++;
+    if (pool.submit(
+      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
       [img.data.buffer],
-    );
+    )) {
+      if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+    } else if (pendingScanCapture?.id === undefined) {
+      pendingScanCapture = null;
+      captureNextScan = true;
+    }
     return;
   }
   const batchRegions = regions.filter((region) => region.decoded && region.quad && region.dim);
@@ -988,7 +1048,7 @@ function captureFrame() {
     const h = Math.min(vh - y, Math.ceil(maxY + pad) - y);
     if (w >= 32 && h >= 32) {
       ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-      showSubmittedScan(ctx, w, h);
+      captureSubmittedScan(ctx, w, h, x, y, false, batchTracks.map((track) => track.quad));
       const img = ctx.getImageData(0, 0, w, h);
       const id = frameId++;
       if (pool.submit(
@@ -996,8 +1056,13 @@ function captureFrame() {
         [img.data.buffer],
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
+        if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
+        if (pendingScanCapture?.id === undefined) {
+          pendingScanCapture = null;
+          captureNextScan = true;
+        }
         poolBusyTimes.push(now);
       }
     }
@@ -1023,7 +1088,7 @@ function captureFrame() {
     const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
     if (w < 32 || h < 32) continue;
     ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-    showSubmittedScan(ctx, w, h);
+    captureSubmittedScan(ctx, w, h, x, y, false, r.quad ? [r.quad] : []);
     const img = ctx.getImageData(0, 0, w, h);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
@@ -1032,9 +1097,14 @@ function captureFrame() {
       [img.data.buffer],
     )) {
       cropAttempts.delete(id);
+      if (pendingScanCapture?.id === undefined) {
+        pendingScanCapture = null;
+        captureNextScan = true;
+      }
       poolBusyTimes.push(performance.now());
       break;
     }
+    if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
     submitted = true;
   }

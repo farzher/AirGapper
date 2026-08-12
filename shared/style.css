@@ -231,7 +231,16 @@ input[type="range"] { accent-color: #222; }
 .settings-actual { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
 .settings-actual:empty { display: none; }
 .scan-capture-button { align-self: end; }
-.scan-capture { display: block; max-width: 100%; max-height: 320px; margin-top: 10px; border-radius: 8px; image-rendering: auto; }
+.scan-dialog { width: min(920px, calc(100% - 24px)); max-height: calc(100dvh - 24px); padding: 14px; overflow: auto; }
+.scan-dialog::backdrop { background: #0008; }
+.scan-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: -14px; z-index: 1; margin: -14px -14px 0; padding: 12px 14px; background: var(--card); border-bottom: 1px solid var(--line); }
+.scan-dialog-status { margin: 12px 0 8px; color: var(--muted); font-size: 12px; }
+.scan-capture { display: block; width: 100%; height: auto; border-radius: 8px; image-rendering: auto; }
+.scan-dialog-legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 0; font-size: 12px; }
+.scan-dialog-legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; border: 2px solid currentColor; vertical-align: -1px; }
+.scan-track { color: #248cff; }
+.scan-hit { color: #15934b; }
+.scan-sighting { color: #b87500; }
 
 /* Receiver ----------------------------------------------------------------- */
 .receiver-primary { display: flex; flex-direction: column; align-items: center; gap: 12px; }

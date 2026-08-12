@@ -73,6 +73,8 @@ export interface DecodeCompletion {
   trackedHit: boolean;
   fallbackAttempted: boolean;
   latencyMs: number;
+  symbols: { box?: SymbolBox; quad?: SymbolQuad }[];
+  sightings: SymbolBox[];
   error?: string;
 }
 
@@ -114,6 +116,8 @@ export class DecodeWorkerPool {
         trackedHit: Boolean(message.trackedHit),
         fallbackAttempted: Boolean(message.fallbackAttempted),
         latencyMs: message.latencyMs ?? 0,
+        symbols,
+        sightings,
         error: message.error,
       };
       try {
@@ -146,6 +150,8 @@ export class DecodeWorkerPool {
           trackedHit: false,
           fallbackAttempted: false,
           latencyMs: 0,
+          symbols: [],
+          sightings: [],
           error: event.message || "Decode worker failed",
         });
       }
