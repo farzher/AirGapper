@@ -33,6 +33,19 @@ a { color: inherit; }
 }
 body.receive-mode { overflow-y: hidden; }
 body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+body.receive-mode .app-header { flex: none; }
+body.receive-mode .app-main {
+  flex: 1;
+  min-height: 0;
+  margin-block: 0;
+  padding-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+}
+body.receive-mode .receiver-shell.active { display: flex; flex: 1; min-height: 0; }
+body.receive-mode .receiver-primary { flex: 1; min-height: 0; }
+body.receive-mode .preview-zone { flex: 1 1 auto; min-height: 0; align-items: center; }
+body.receive-mode .preview { max-height: 100%; }
 .app-header,
 .app-main {
   width: calc(100% - 32px);
@@ -314,7 +327,7 @@ dialog::backdrop { background: #0004; }
   .send-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stage { min-height: 0; }
   .receiver-primary { gap: 8px; }
-  .preview { min-height: 0; max-height: calc(100vh - 255px); max-height: calc(100dvh - 255px); }
+  .preview { min-height: 0; }
   .transfer-panel { padding: 10px 12px; }
   .transfer-meta { margin-top: 7px; }
   .pipeline-metrics { gap: 10px; }
