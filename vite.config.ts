@@ -6,7 +6,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { htmlTokens } from "./build/html-tokens";
 import { inlineCodecWasm } from "./build/inline-codec-wasm";
-import { rootPwaHead } from "./build/root-pwa-head";
 import { diagnosticsEndpoint } from "./build/diagnostics-endpoint";
 import { appArtifact } from "./build/app-artifact";
 
@@ -22,7 +21,7 @@ export default defineConfig({
     basicSsl(),
     VitePWA({
       registerType: "autoUpdate",
-      injectRegister: false,
+      injectRegister: "inline",
       manifest: {
         name: "AirGapper",
         short_name: "AirGapper",
@@ -31,10 +30,17 @@ export default defineConfig({
         background_color: "#f7f7f5",
         display: "standalone",
         start_url: "./",
+        scope: "./",
+        icons: [
+          { src: "./icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "./icon-512.png", sizes: "512x512", type: "image/png" },
+          { src: "./icon-512-maskable.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+        ],
       },
       workbox: {
         clientsClaim: true,
-        globPatterns: ["**/*.html"],
+        inlineWorkboxRuntime: true,
+        globPatterns: ["**/*.{html,webmanifest,png}"],
         runtimeCaching: [{
           urlPattern: /\/received-media\//,
           handler: "CacheOnly" as const,
@@ -45,7 +51,6 @@ export default defineConfig({
     inlineCodecWasm(),
     viteSingleFile(),
     appArtifact(__dirname),
-    rootPwaHead(),
     diagnosticsEndpoint(pkg.version),
   ],
   worker: { format: "iife", plugins: () => [inlineCodecWasm()] },

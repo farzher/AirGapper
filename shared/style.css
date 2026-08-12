@@ -55,8 +55,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .brand { display: block; color: var(--ink); font-weight: 750; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
 .tag { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .ghost,
-.secondary-button,
-.download-offline {
+.secondary-button {
   border: 1px solid var(--line);
   background: transparent;
   border-radius: 10px;
@@ -64,9 +63,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
   cursor: pointer;
 }
 .ghost:hover,
-.secondary-button:hover,
-.download-offline:hover { background: var(--card); }
-.header-actions { display: flex; align-items: center; gap: 14px; }
+.secondary-button:hover { background: var(--card); }
 .view { display: none; }
 .view.active { display: block; }
 .home { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

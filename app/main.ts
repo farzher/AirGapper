@@ -2,7 +2,6 @@ import "../send/main";
 import "../receive/main";
 import { closeOnBackdropClick } from "../shared/dialog";
 import { isAndroid, isIOS } from "../shared/platform";
-import { saveFileOnAndroid } from "../shared/android";
 
 const views = {
   home: document.getElementById("homeView")!,
@@ -51,13 +50,6 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")
 }
 document.getElementById("home-button")!.addEventListener("click", () => showView("home"));
 
-// Capture the untouched, fully bundled document before UI state changes. This
-// avoids a network fetch and makes Download offline work identically from
-// HTTPS, file://, and a previously downloaded copy.
-const standaloneDocument = document.documentElement.cloneNode(true) as HTMLElement;
-standaloneDocument.querySelector('link[rel="manifest"]')?.remove();
-const standaloneHtml = `<!doctype html>\n${standaloneDocument.outerHTML}`;
-
 // The phone handoff QR deep-links straight into Receive. Consume that launch
 // flag immediately: a later reload should open the normal home screen, not
 // keep trapping the phone in Receive. Other query parameters are preserved.
@@ -71,21 +63,6 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   // interaction or previously denied access expose the existing retry button.
   showView("receive");
 }
-function downloadOffline(): void {
-  const type = "text/html;charset=utf-8";
-  if (saveFileOnAndroid("airgapper.html", type, new TextEncoder().encode(standaloneHtml))) return;
-  const url = URL.createObjectURL(new Blob([standaloneHtml], { type }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "airgapper.html";
-  link.style.display = "none";
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
-}
-document.getElementById("download-offline")!.addEventListener("click", downloadOffline);
-
 (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend = () => {
   // The Android document picker pauses the Activity while saving a completed
   // transfer. Preserve that result screen and its in-memory file until the

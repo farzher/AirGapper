@@ -15,8 +15,16 @@ export function appArtifact(root: string): Plugin {
       delete bundle[htmlName];
     },
     closeBundle() {
-      const built = resolve(root, "dist/index.html");
-      copyFileSync(built, resolve(root, "index.html"));
+      for (const file of [
+        "index.html",
+        "manifest.webmanifest",
+        "sw.js",
+        "icon-192.png",
+        "icon-512.png",
+        "icon-512-maskable.png",
+      ]) {
+        copyFileSync(resolve(root, "dist", file), resolve(root, file));
+      }
     },
   };
 }
