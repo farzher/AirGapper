@@ -774,6 +774,7 @@ async function startStream(revealStage = false) {
   const subInterval = interval / gridCodes;
   let nextAt = performance.now();
   let lastTickAt = performance.now();
+  let completedSweeps = 0;
   const tick = (now: number) => {
     // generatorFailed means no frame will ever be produced again, so stop the
     // rAF loop rather than spinning on an empty queue until a settings change.
@@ -818,6 +819,16 @@ async function startStream(revealStage = false) {
       }
       paintCell(img);
       nextAt += subInterval;
+      if (cellCursor === 0) {
+        completedSweeps++;
+        // A 30 fps sender and 30 fps camera can remain phase-locked: every
+        // exposure then intersects (or avoids) the same display transition,
+        // producing the observed waves of total misses despite an unchanged
+        // view. Occasionally hold one frame half an interval longer. This
+        // shifts the optical phase without introducing a dangerously short
+        // one-refresh QR, and costs only about 3% throughput at 30 fps.
+        if (txFps === 30 && completedSweeps % 15 === 0) nextAt += interval / 2;
+      }
     }
   };
   requestAnimationFrame(tick);

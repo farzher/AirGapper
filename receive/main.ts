@@ -356,6 +356,18 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     if (!referenceSize) return;
     const ratio = Math.max(box.w, box.h) / referenceSize;
     if (ratio < 0.5 || ratio > 2) return;
+    // Error-result quads wobble and split while a display transition is in
+    // flight. Never draw more probationary regions than the number of codes
+    // currently missing from the layout high-water mark; for a single sender
+    // this turns the detector's several guesses back into one error outline.
+    const missing = Math.max(1, expectedRegions - decodedCount());
+    const probationary = regions.filter((r) => !r.decoded);
+    if (probationary.length >= missing) {
+      const existing = probationary.reduce((a, b) => a.seen > b.seen ? a : b);
+      existing.seen = now;
+      existing.sightedSeen = now;
+      return;
+    }
   }
   if (decoded) lastDecodedRegionSize = Math.max(box.w, box.h);
   regions.push({
