@@ -156,8 +156,8 @@ interface Region extends SymbolBox {
   /** Last successful byte decode. Failed detector sightings keep the crop
    * alive but must not make the success outline flash. */
   decodedSeen?: number;
-  /** Recent detector outcomes. Color communicates this success ratio instead
-   * of assigning an arbitrary identity color to each code. */
+  /** Recent camera-frame opportunities. Success means this code decoded;
+   * failure includes a decode miss or no worker capacity to try it. */
   outcomes: boolean[];
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
@@ -175,6 +175,8 @@ const regions: Region[] = [];
 const cropAttempts = new Map<number, Region>();
 
 function noteOutcome(region: Region, success: boolean): void {
+  // This intentionally measures end-to-end readability. A code not submitted
+  // because another code consumed the CPU is still unread throughput.
   region.outcomes.push(success);
   if (region.outcomes.length > 20) region.outcomes.shift();
 }
@@ -653,6 +655,7 @@ function submitBitmap(
       if (!taken) {
         cropAttempts.delete(id);
         poolBusyTimes.push(performance.now());
+        if (region && regions.includes(region)) noteOutcome(region, false);
         bitmap.close();
       } else if (!meta.full) cropsSubmitted++;
     })
@@ -680,7 +683,11 @@ function captureFrame() {
   if (pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
-    return; // all busy — drop it, no harm done
+    // This camera frame was an opportunity to read every known code, but CPU
+    // pressure prevented any attempt. Count that in the overlay: its purpose
+    // is achievable read quality, not decoder accuracy in isolation.
+    for (const r of regions) noteOutcome(r, false);
+    return;
   }
 
   for (let i = regions.length - 1; i >= 0; i--) {
@@ -722,6 +729,7 @@ function captureFrame() {
     // "create no more than the free slots seen now" — submitBitmap closes
     // any bitmap that loses the race anyway.
     let free = pool.size - pool.busyCount;
+    const attempted = new Set<Region>();
     for (let i = 0; i < regions.length && free > 0; i++) {
       const r = regions[(i + cropRotate) % regions.length]!;
       const size = Math.max(r.w, r.h);
@@ -732,6 +740,7 @@ function captureFrame() {
       const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
       if (w < 32 || h < 32) continue;
       free--;
+      attempted.add(r);
       submitBitmap(createImageBitmap(video, x, y, w, h), {
         ox: x,
         oy: y,
@@ -741,6 +750,7 @@ function captureFrame() {
         region: r,
       });
     }
+    for (const r of regions) if (!attempted.has(r)) noteOutcome(r, false);
     cropRotate++;
     return;
   }
@@ -767,6 +777,7 @@ function captureFrame() {
   // canvas origin instead of copying the entire 1.2 MP video first. On old
   // Android WebViews that full-frame GPU readback was the capture bottleneck,
   // even on frames where acquisition was idle and no pixels were submitted.
+  const attempted = new Set<Region>();
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
     // The pad leads a moving target: base margin plus twice the displacement
@@ -796,8 +807,13 @@ function captureFrame() {
       poolBusyTimes.push(performance.now());
       break;
     }
+    attempted.add(r);
     cropsSubmitted++;
   }
+  // Codes skipped because all worker slots were consumed are misses from the
+  // user's perspective. Including them stops sparse successful samples from
+  // painting an underpowered multi-code run blue.
+  for (const r of regions) if (!attempted.has(r)) noteOutcome(r, false);
   cropRotate++;
 }
 
