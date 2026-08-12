@@ -18,6 +18,7 @@
 import wasmUrl from "./wasm-url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec/decimen_codec.js";
+import jsQR from "jsqr";
 
 const ready: Promise<DecimenModule> = DecimenCodec({
   locateFile: (path: string, prefix: string) => (path.endsWith(".wasm") ? wasmUrl : prefix + path),
@@ -72,6 +73,32 @@ function pixelsOf(buf: ArrayBuffer | undefined, bitmap: ImageBitmap | undefined,
   return { data: new Uint8Array(buf!), w, h };
 }
 
+function decodeLegacy(
+  pixels: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  ox: number,
+  oy: number,
+) {
+  const rgba = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+  const result = jsQR(rgba, w, h, { inversionAttempts: "dontInvert" });
+  if (!result) return [];
+  const p = result.location;
+  const quad: DecimenQuad = {
+    topLeft: { x: p.topLeftCorner.x + ox, y: p.topLeftCorner.y + oy },
+    topRight: { x: p.topRightCorner.x + ox, y: p.topRightCorner.y + oy },
+    bottomRight: { x: p.bottomRightCorner.x + ox, y: p.bottomRightCorner.y + oy },
+    bottomLeft: { x: p.bottomLeftCorner.x + ox, y: p.bottomLeftCorner.y + oy },
+  };
+  return [{
+    bytes: Uint8Array.from(result.binaryData),
+    box: boundsOf(quad, 0, 0),
+    quad,
+    modules: 17 + result.version * 4,
+    tracked: false,
+  }];
+}
+
 ctx.onmessage = async (e: MessageEvent) => {
   const { id, buf, bitmap, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
@@ -91,11 +118,13 @@ ctx.onmessage = async (e: MessageEvent) => {
     /** The stream's QR dimension in modules — tracked path. */
     dim?: number;
   };
-  const zx = await ready;
   const pixels = pixelsOf(buf, bitmap, w, h);
   const { w: pw, h: ph } = pixels;
-  const ptr = zx._malloc(pw * ph * 4);
+  let zx: DecimenModule | undefined;
+  let ptr = 0;
   try {
+    zx = await ready;
+    ptr = zx._malloc(pw * ph * 4);
     zx.HEAPU8.set(
       pixels.data instanceof Uint8Array ? pixels.data : new Uint8Array(pixels.data.buffer),
       ptr,
@@ -155,9 +184,16 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
     ctx.postMessage({ id, symbols, sightings, trackedAttempted });
   } catch {
-    ctx.postMessage({ id, symbols: [], sightings: [] });
+    // Firefox 68 predates WebAssembly's JavaScript BigInt integration, which
+    // the fast decoder uses. Keep those receivers useful with a pure-JS,
+    // single-symbol decoder; fountain framing tolerates its lower frame rate.
+    try {
+      ctx.postMessage({ id, symbols: decodeLegacy(pixels.data, pw, ph, ox, oy), sightings: [] });
+    } catch {
+      ctx.postMessage({ id, symbols: [], sightings: [] });
+    }
   } finally {
-    zx._free(ptr);
+    if (zx && ptr) zx._free(ptr);
   }
 };
 

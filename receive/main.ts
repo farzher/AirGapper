@@ -58,12 +58,14 @@ const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
-const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const firefoxVersion = /Firefox\/(\d+)/.exec(navigator.userAgent);
+const legacyFirefox = firefoxVersion !== null && Number(firefoxVersion[1]) < 78;
+const workerCount = legacyFirefox ? 2 : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 // Camera maximum resolution is not maximum optical throughput: a 4K video
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const requestedWidth = 1280;
+const requestedWidth = legacyFirefox ? 640 : 1280;
 const requestedFps = 60;
 const metric = (id: string) => document.getElementById(id)!;
 
@@ -257,11 +259,17 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
 function syncPreviewAspect() {
   if (video.videoWidth && video.videoHeight) {
     cameraBox.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+    // Firefox 68 ignores aspect-ratio and dynamic viewport units. Give it the
+    // same bounded viewfinder with dimensions every browser understands.
+    const naturalHeight = cameraBox.clientWidth * video.videoHeight / video.videoWidth;
+    cameraBox.style.height = `${Math.min(naturalHeight, Math.max(120, window.innerHeight - 255))}px`;
   }
 }
 // Fires whenever the intrinsic size changes — device rotation, or a live
 // capture-width change the camera accepted.
 video.addEventListener("resize", syncPreviewAspect);
+video.addEventListener("loadedmetadata", syncPreviewAspect);
+window.addEventListener("resize", syncPreviewAspect);
 
 // Viewfinder corner brackets around each code the decoder is tracking, fading
 // out once a region stops producing decodes. Long before REGION_TTL_MS: the
@@ -515,7 +523,7 @@ async function start() {
   video.srcObject = stream;
   await video.play().catch(() => undefined);
   syncPreviewAspect();
-  setStatus("");
+  setStatus(legacyFirefox ? "Legacy decoder active — set the sender Layout to 1 QR." : "");
 
   pool.resize(workerCount);
   void applyCameraExtras();

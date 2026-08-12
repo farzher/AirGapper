@@ -19,5 +19,8 @@
     "vite": "^6.0.0",
     "vite-plugin-pwa": "^1.3.0",
     "vite-plugin-singlefile": "^2.3.3"
+  },
+  "dependencies": {
+    "jsqr": "^1.4.0"
   }
 }
