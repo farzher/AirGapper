@@ -38,7 +38,7 @@ import {
 import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
-import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid } from "../shared/android";
+import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid, setAndroidTrackingBoxes } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
@@ -46,8 +46,6 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
-const androidCanvasPreview = isAndroidApp();
-if (androidCanvasPreview) cameraBox.classList.add("android-app-preview");
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
@@ -312,12 +310,6 @@ function drawOverlay(now: number) {
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
   const offY = (ph - vh * scale) / 2;
-  if (androidCanvasPreview) {
-    // Some old WebViews keep their hardware video plane above DOM canvases
-    // even when CSS asks them to composite it. Paint the preview into the same
-    // canvas as the brackets instead; this makes their ordering unconditional.
-    overlayCtx.drawImage(video, offX, offY, vw * scale, vh * scale);
-  }
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
   // Solid glowing corners mean a successful frame. A plausible code that the
@@ -325,6 +317,8 @@ function drawOverlay(now: number) {
   // this makes distance/focus/cropping trouble visible without covering the
   // camera image or adding instructions over it.
   const ordered = [...regions].sort(layoutOrder);
+  const nativeBoxes: Parameters<typeof setAndroidTrackingBoxes>[0] = [];
+  const overlayRect = overlay.getBoundingClientRect();
   for (const r of ordered) {
     const decodedAge = now - (r.decodedSeen ?? -Infinity);
     const sightingAge = now - r.seen;
@@ -347,6 +341,15 @@ function drawOverlay(now: number) {
     const age = successful ? decodedAge : sightingAge;
     const fade = successful ? INDICATOR_FADE_MS : SIGHTING_FADE_MS;
     overlayCtx.globalAlpha = successful ? 1 - 0.65 * age / fade : 0.7 * (1 - age / fade);
+    nativeBoxes.push({
+      x: overlayRect.left + x / dpr,
+      y: overlayRect.top + y / dpr,
+      w: w / dpr,
+      h: h / dpr,
+      color,
+      alpha: overlayCtx.globalAlpha,
+      successful,
+    });
     overlayCtx.beginPath();
     overlayCtx.moveTo(x, y + len);
     overlayCtx.lineTo(x, y);
@@ -365,6 +368,7 @@ function drawOverlay(now: number) {
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
+  if (isAndroidApp()) setAndroidTrackingBoxes(nativeBoxes);
 }
 startBtn.onclick = () => void start();
 window.addEventListener("airgapper:enter-receive", () => {
@@ -402,6 +406,7 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
+  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
@@ -833,6 +838,7 @@ function updateProgressEstimate() {
  * AirGapper container or SHA-256; files never take this path. */
 function finishPlainQr(text: string): void {
   done = true;
+  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
@@ -862,6 +868,7 @@ function liveGoodputKbs(now: number): number {
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
+  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   captureGen++;
   // Snapshot diagnostics before teardown, but do not report success until the

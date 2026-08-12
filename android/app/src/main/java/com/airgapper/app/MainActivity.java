@@ -7,7 +7,11 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Base64;
@@ -30,6 +34,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
     private static final String APP_HOST = "appassets.androidplatform.net";
@@ -39,6 +48,7 @@ public final class MainActivity extends Activity {
     private static final int SAVE_REQUEST = 12;
 
     private WebView webView;
+    private TrackingOverlay trackingOverlay;
     private PermissionRequest cameraRequest;
     private ValueCallback<Uri[]> fileCallback;
     private View fullscreenView;
@@ -56,7 +66,13 @@ public final class MainActivity extends Activity {
 
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(247, 247, 245));
-        setContentView(webView);
+        trackingOverlay = new TrackingOverlay(this);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(trackingOverlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(root);
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -284,6 +300,87 @@ public final class MainActivity extends Activity {
                 if (enabled) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             });
+        }
+
+        @JavascriptInterface
+        public void setTrackingBoxes(String json) {
+            List<TrackingBox> boxes = new ArrayList<>();
+            try {
+                JSONArray array = new JSONArray(json);
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject box = array.getJSONObject(i);
+                    boxes.add(new TrackingBox(
+                            (float) box.getDouble("x"), (float) box.getDouble("y"),
+                            (float) box.getDouble("w"), (float) box.getDouble("h"),
+                            Color.parseColor(box.getString("color")),
+                            (float) box.getDouble("alpha"), box.getBoolean("successful")));
+                }
+            } catch (Exception ignored) {
+                boxes.clear();
+            }
+            runOnUiThread(() -> trackingOverlay.setBoxes(boxes));
+        }
+    }
+
+    private static final class TrackingBox {
+        final float x, y, w, h, alpha;
+        final int color;
+        final boolean successful;
+
+        TrackingBox(float x, float y, float w, float h, int color, float alpha, boolean successful) {
+            this.x = x;
+            this.y = y;
+            this.w = w;
+            this.h = h;
+            this.color = color;
+            this.alpha = alpha;
+            this.successful = successful;
+        }
+    }
+
+    private static final class TrackingOverlay extends View {
+        private final float density;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private List<TrackingBox> boxes = new ArrayList<>();
+
+        TrackingOverlay(Context context) {
+            super(context);
+            density = context.getResources().getDisplayMetrics().density;
+            setClickable(false);
+            setFocusable(false);
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+
+        void setBoxes(List<TrackingBox> boxes) {
+            this.boxes = boxes;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            for (TrackingBox box : boxes) {
+                float x = box.x * density;
+                float y = box.y * density;
+                float w = box.w * density;
+                float h = box.h * density;
+                float len = Math.min(w, h) * 0.24f;
+                paint.setColor(box.color);
+                paint.setAlpha(Math.max(0, Math.min(255, Math.round(box.alpha * 255))));
+                paint.setStrokeWidth((box.successful ? 2.5f : 1.5f) * density);
+                paint.setPathEffect(box.successful ? null : new DashPathEffect(
+                        new float[]{5 * density, 5 * density}, 0));
+                Path path = new Path();
+                path.moveTo(x, y + len); path.lineTo(x, y); path.lineTo(x + len, y);
+                path.moveTo(x + w - len, y); path.lineTo(x + w, y); path.lineTo(x + w, y + len);
+                path.moveTo(x + w, y + h - len); path.lineTo(x + w, y + h); path.lineTo(x + w - len, y + h);
+                path.moveTo(x + len, y + h); path.lineTo(x, y + h); path.lineTo(x, y + h - len);
+                canvas.drawPath(path, paint);
+            }
+            paint.setPathEffect(null);
         }
     }
 
