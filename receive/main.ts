@@ -30,6 +30,8 @@ import {
 import { PlainQrPolicy } from "../shared/plain-qr-policy";
 import { isSnippet, snippetText } from "../shared/snippet";
 import {
+  FRAME_CRC_LEN,
+  HEADER_LEN,
   fnv1a,
   parseFrame,
   streamIdentity,
@@ -208,6 +210,7 @@ const TIMELINE_MAX_SAMPLES = 2400; // 10 min — past that the tail tells nothin
 // across the worker pool. A periodic full-frame scan (re)acquires anything
 // the crops lose — nothing here can get permanently stuck.
 interface Region extends SymbolBox {
+  id: number;
   seen: number;
   /** True once bytes have actually decoded here. Sighting-only regions are
    *  probationary: they get crops, but they are not drawn, not counted
@@ -230,8 +233,10 @@ interface Region extends SymbolBox {
    *  detection entirely. Only ever set from real decodes. */
   quad?: SymbolQuad;
   dim?: number;
+  crc32?: boolean;
 }
 const regions: Region[] = [];
+let nextRegionId = 1;
 // Retain one trustworthy size after active regions expire. During a bad
 // camera/display phase, full acquisition may detect a QR but fail its bytes;
 // this yardstick lets that sighting seed a crop instead of leaving the receiver
@@ -240,17 +245,7 @@ let lastDecodedRegionSize = 0;
 // Crop replies retain the exact anchor they attempted, so a miss can
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
-// Parallelism helps when one decode takes longer than a camera interval, but
-// filling every worker with the same physical QR burns cores on near-identical
-// captures. Two jobs preserve a useful pipeline without letting a single code
-// monopolize the entire pool.
-const MAX_INFLIGHT_PER_REGION = 2;
 const bitmapCropsPending = new Map<Region, number>();
-function regionInflightCount(region: Region): number {
-  let count = bitmapCropsPending.get(region) ?? 0;
-  for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
-  return count;
-}
 function adjustBitmapPending(region: Region, delta: number): void {
   const count = (bitmapCropsPending.get(region) ?? 0) + delta;
   if (count > 0) bitmapCropsPending.set(region, count);
@@ -372,12 +367,10 @@ const ACQUISITION_SCAN_MS = 100;
 // would otherwise keep this receiver rescanning for codes that no longer
 // exist until the transfer ends.
 const EXPECTED_REGIONS_DECAY_MS = 10_000;
-const REGION_PAD = 0.35;
 // The densest sender layout is a portrait 3×4 grid. Keep one tracked region
 // for every cell so full acquisition can hand all twelve off to crop decoding.
 const MAX_REGIONS = 12;
 let lastFullScan = 0;
-let cropRotate = 0;
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
 
@@ -420,6 +413,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       lastDecodedRegionSize = Math.max(box.w, box.h);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
+      if (info?.crc32 !== undefined) r.crc32 = info.crc32;
       return;
     }
   }
@@ -450,6 +444,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
   if (decoded) lastDecodedRegionSize = Math.max(box.w, box.h);
   regions.push({
     ...box,
+    id: nextRegionId++,
     seen: now,
     decoded,
     decodedSeen: decoded ? now : undefined,
@@ -457,6 +452,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     outcomes: [],
     quad: info?.quad,
     dim: info?.modules,
+    crc32: info?.crc32,
   });
   regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
@@ -646,7 +642,6 @@ function stopReceiver(): void {
   expectedRegions = 0;
   expectedRegionsAt = 0;
   lastFullScan = 0;
-  cropRotate = 0;
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
@@ -861,13 +856,15 @@ const BITMAP_CAPTURE =
   new URLSearchParams(window.location.search).get("capture") === "bitmap" &&
   typeof createImageBitmap === "function" &&
   typeof OffscreenCanvas !== "undefined";
+const DIRECT_Y_CAPTURE = typeof VideoFrame !== "undefined";
 
 /** Fire-and-forget submit of a GPU-cropped frame. The bitmap resolves async;
  *  by then the pool may have filled or the transfer ended — close it rather
  *  than leak GPU memory. */
 function submitBitmap(
   pending: Promise<ImageBitmap>,
-  meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number; region?: Region },
+  meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number; region?: Region;
+    tracks?: { id: number; quad: SymbolQuad; dim: number; crc32: boolean }[] },
 ): void {
   const pendingRegion = meta.region;
   void pending
@@ -951,39 +948,32 @@ function captureFrame() {
     return;
   }
 
+  const tracks = regions.flatMap((r) => r.decoded && r.quad && r.dim
+    ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
+    : []);
+
+  if (!fullScanDue && tracks.length && DIRECT_Y_CAPTURE) {
+    try {
+      const frame = new VideoFrame(video, { timestamp: Math.round(now * 1000) });
+      const id = frameId++;
+      if (pool.submit({ id, frame, full: false, tracks }, [frame])) {
+        cropsSubmitted += tracks.length;
+        return;
+      }
+      frame.close();
+    } catch {
+      // Older WebCodecs implementations reject HTMLVideoElement sources.
+    }
+  }
+
   if (BITMAP_CAPTURE) {
     if (fullScanDue) {
       lastFullScan = now;
       fullScans++;
       submitBitmap(createImageBitmap(video), { ox: 0, oy: 0, full: true });
-      return;
+    } else {
+      submitBitmap(createImageBitmap(video), { ox: 0, oy: 0, full: false, tracks });
     }
-    // The bitmaps resolve async, so "stop when the pool refuses" becomes
-    // "create no more than the free slots seen now" — submitBitmap closes
-    // any bitmap that loses the race anyway.
-    let free = pool.size - pool.busyCount;
-    for (let i = 0; i < regions.length && free > 0; i++) {
-      const r = regions[(i + cropRotate) % regions.length]!;
-      if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
-      const size = Math.max(r.w, r.h);
-      const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
-      const x = Math.max(0, Math.floor(r.x - pad));
-      const y = Math.max(0, Math.floor(r.y - pad));
-      const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
-      const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
-      if (w < 32 || h < 32) continue;
-      free--;
-      adjustBitmapPending(r, 1);
-      submitBitmap(createImageBitmap(video, x, y, w, h), {
-        ox: x,
-        oy: y,
-        full: false,
-        quad: r.quad,
-        dim: r.dim,
-        region: r,
-      });
-    }
-    cropRotate++;
     return;
   }
 
@@ -1004,51 +994,24 @@ function captureFrame() {
     );
     return;
   }
-  // One crop per known code, rotated so a short worker pool doesn't starve
-  // the same tail region every frame. Draw each source crop directly into the
-  // canvas origin instead of copying the entire 1.2 MP video first. On old
-  // Android WebViews that full-frame GPU readback was the capture bottleneck,
-  // even on frames where acquisition was idle and no pixels were submitted.
-  for (let i = 0; i < regions.length; i++) {
-    const r = regions[(i + cropRotate) % regions.length]!;
-    if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
-    // The pad leads a moving target: base margin plus twice the displacement
-    // observed between the region's last decodes, so a handheld receiver's
-    // crops keep containing the code instead of chasing where it was. Capped
-    // at one code size — past that the crop approaches frame-sized anyway.
-    const size = Math.max(r.w, r.h);
-    const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
-    const x = Math.max(0, Math.floor(r.x - pad));
-    const y = Math.max(0, Math.floor(r.y - pad));
-    const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
-    const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
-    if (w < 32 || h < 32) continue;
-    ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
-    // The quad + dimension arm the worker's tracked fast path (detection
-    // skipped entirely, 2× at V40); absent — or stale after a miss — the
-    // worker falls back to the stock decoder on the same buffer.
-    const id = frameId++;
-    cropAttempts.set(id, { region: r, quad: r.quad });
-    const taken = pool.submit(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
-      [img.data.buffer],
-    );
-    if (!taken) {
-      cropAttempts.delete(id);
-      poolBusyTimes.push(performance.now());
-      break;
-    }
-    cropsSubmitted++;
+  ctx.drawImage(video, 0, 0);
+  const img = ctx.getImageData(0, 0, vw, vh);
+  if (pool.submit(
+    { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: false, tracks },
+    [img.data.buffer],
+  )) {
+    cropsSubmitted += tracks.length;
+  } else {
+    poolBusyTimes.push(performance.now());
   }
-  cropRotate++;
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
-  if (box) noteRegion(box, performance.now(), true, info);
   const parsed = parseFrame(bytes);
+  const hasFrameCRC = Boolean(parsed && bytes.length === HEADER_LEN + parsed.header.blockLen + FRAME_CRC_LEN);
+  if (box) noteRegion(box, performance.now(), true, { ...info, crc32: info?.crc32 ?? hasFrameCRC });
   if (done) return;
   if (!parsed) {
     // Once a fountain decoder exists, unrelated normal QRs can never replace

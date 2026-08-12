@@ -58,6 +58,12 @@ let offscreen: OffscreenCanvas | undefined;
 // allocator churn to the hottest path.
 let inputPtr = 0;
 let inputCapacity = 0;
+let batchDecoder = 0;
+let batchResultsPtr = 0;
+let batchOutputPtr = 0;
+let batchMetricsPtr = 0;
+let batchCapacity = 0;
+const batchTrackKeys: string[] = [];
 
 function inputBuffer(zx: DecimenModule, bytes: number): number {
   if (bytes <= inputCapacity) return inputPtr;
@@ -69,7 +75,22 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
 
 /** Pixels from either capture mode: a transferred ArrayBuffer (readback
  *  fallback) or an ImageBitmap (GPU-side crop, Safari 17+/modern engines). */
-function pixelsOf(buf: ArrayBuffer | undefined, bitmap: ImageBitmap | undefined, w: number, h: number) {
+async function pixelsOf(
+  buf: ArrayBuffer | undefined,
+  bitmap: ImageBitmap | undefined,
+  frame: VideoFrame | undefined,
+  w: number,
+  h: number,
+) {
+  if (frame) {
+    const fw = frame.displayWidth;
+    const fh = frame.displayHeight;
+    const bytes = frame.allocationSize({ format: "I420" });
+    const data = new Uint8Array(bytes);
+    await frame.copyTo(data, { format: "I420" });
+    frame.close();
+    return { data: data.subarray(0, fw * fh), w: fw, h: fh, format: "y" as const, stride: fw };
+  }
   if (bitmap) {
     const bw = bitmap.width;
     const bh = bitmap.height;
@@ -80,19 +101,58 @@ function pixelsOf(buf: ArrayBuffer | undefined, bitmap: ImageBitmap | undefined,
     octx.drawImage(bitmap, 0, 0);
     bitmap.close();
     const img = octx.getImageData(0, 0, bw, bh);
-    return { data: img.data, w: bw, h: bh };
+    return { data: img.data, w: bw, h: bh, format: "rgba" as const, stride: bw * 4 };
   }
-  return { data: new Uint8Array(buf!), w, h };
+  return { data: new Uint8Array(buf!), w, h, format: "rgba" as const, stride: w * 4 };
+}
+
+interface BatchTrack {
+  id: number;
+  quad: DecimenQuad;
+  dim: number;
+  crc32: boolean;
+}
+
+function batchBuffers(zx: DecimenModule, count: number): void {
+  if (!batchDecoder) {
+    batchDecoder = zx._createTrackedDecoder(12, 177);
+    zx._setTrackedDecoderFallbackBudget(batchDecoder, 2);
+  }
+  if (count <= batchCapacity) return;
+  if (batchResultsPtr) zx._free(batchResultsPtr);
+  if (batchOutputPtr) zx._free(batchOutputPtr);
+  batchResultsPtr = zx._malloc(count * 32);
+  batchOutputPtr = zx._malloc(count * 3000);
+  if (!batchMetricsPtr) batchMetricsPtr = zx._malloc(72);
+  batchCapacity = count;
+}
+
+function quadKey(track: BatchTrack): string {
+  const q = track.quad;
+  return [track.id, track.dim, Number(track.crc32), q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+    q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
+}
+
+function offsetQuad(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
+  const move = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  return {
+    topLeft: move(q.topLeft), topRight: move(q.topRight),
+    bottomRight: move(q.bottomRight), bottomLeft: move(q.bottomLeft),
+  };
 }
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, bitmap, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
+  const { id, buf, bitmap, frame, tracks, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
     /** Readback-fallback capture: raw RGBA. */
     buf?: ArrayBuffer;
     /** Bitmap capture: GPU-cropped, pixels read on this thread. */
     bitmap?: ImageBitmap;
+    /** WebCodecs path: copied directly as I420 luma. */
+    frame?: VideoFrame;
+    /** All acquired symbols sampled together from one full camera frame. */
+    tracks?: BatchTrack[];
     w?: number;
     h?: number;
     /** Crop origin within the capture, for mapping positions back. */
@@ -105,19 +165,71 @@ ctx.onmessage = async (e: MessageEvent) => {
     /** The stream's QR dimension in modules — tracked path. */
     dim?: number;
   };
-  const pixels = pixelsOf(buf, bitmap, w, h);
+  const pixels = await pixelsOf(buf, bitmap, frame, w, h);
   const { w: pw, h: ph } = pixels;
   let zx: DecimenModule | undefined;
   let ptr = 0;
   try {
     zx = await ready;
-    ptr = inputBuffer(zx, pw * ph * 4);
+    ptr = inputBuffer(zx, pixels.data.byteLength);
     zx.HEAPU8.set(
       pixels.data instanceof Uint8Array ? pixels.data : new Uint8Array(pixels.data.buffer),
       ptr,
     );
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean }[] = [];
     const sightings: object[] = [];
+
+    if (!full && tracks?.length) {
+      batchBuffers(zx, tracks.length);
+      const byId = new Map(tracks.map((track) => [track.id, track]));
+      for (let slot = 0; slot < tracks.length; slot++) {
+        const track = tracks[slot]!;
+        const key = quadKey(track);
+        if (batchTrackKeys[slot] !== key) {
+          const q = track.quad;
+          zx._setTrackedDecoderTrack(
+            batchDecoder, slot, track.id, track.dim,
+            q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+            q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y,
+          );
+          zx._setTrackedDecoderTrackCRC32(batchDecoder, slot, Number(track.crc32));
+          batchTrackKeys[slot] = key;
+        }
+      }
+      for (let slot = tracks.length; slot < batchTrackKeys.length; slot++) {
+        zx._clearTrackedDecoderTrack(batchDecoder, slot);
+        batchTrackKeys[slot] = "";
+      }
+      const count = pixels.format === "y"
+        ? zx._decodeTrackedBatchY(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
+          tracks.length, batchOutputPtr, tracks.length * 3000, batchMetricsPtr)
+        : zx._decodeTrackedBatchRGBA(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
+          tracks.length, batchOutputPtr, tracks.length * 3000, batchMetricsPtr);
+      const view = new DataView(zx.HEAPU8.buffer);
+      const packedSymbols: { byteOffset: number; byteLength: number; box: object; quad: DecimenQuad; modules: number; tracked: true; crc32: boolean }[] = [];
+      let outputLength = 0;
+      for (let index = 0; index < count; index++) {
+        const base = batchResultsPtr + index * 32;
+        if (view.getInt32(base + 4, true) !== 1) continue;
+        const track = byId.get(view.getInt32(base, true));
+        if (!track) continue;
+        const byteOffset = view.getInt32(base + 8, true);
+        const byteLength = view.getInt32(base + 12, true);
+        const updatedQuad = offsetQuad(track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true));
+        packedSymbols.push({
+          byteOffset, byteLength, box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad,
+          modules: track.dim, tracked: true, crc32: track.crc32,
+        });
+        outputLength = Math.max(outputLength, byteOffset + byteLength);
+      }
+      const packedBytes = zx.HEAPU8.slice(batchOutputPtr, batchOutputPtr + outputLength).buffer;
+      ctx.postMessage({
+        id, symbols: packedSymbols, packedBytes, sightings: [], full: false,
+        trackedAttempted: true, trackedHit: packedSymbols.length > 0, fallbackAttempted: false,
+        latencyMs: performance.now() - startedAt,
+      }, [packedBytes]);
+      return;
+    }
 
     let trackedHit = false;
     let trackedAttempted = false;

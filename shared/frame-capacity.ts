@@ -6,14 +6,14 @@
 // not 64. The sender has to catch that before it starts streaming, and tell
 // you which setting fixes it.
 
-import { HEADER_LEN } from "./protocol";
+import { FRAME_CRC_LEN, HEADER_LEN } from "./protocol";
 
 /** `k` is a u16 in the frame header. */
 export const MAX_SOURCE_BLOCKS = 0xffff;
 
 /** Payload bytes per frame, once the header has taken its cut. */
 export function blockLength(frameBytes: number): number {
-  return frameBytes - HEADER_LEN;
+  return frameBytes - HEADER_LEN - FRAME_CRC_LEN;
 }
 
 /**
@@ -52,7 +52,7 @@ export function fitsInOneStream(payloadBytes: number, frameBytes: number): boole
 
 /** The smallest bytes-per-frame that can carry this payload at all. */
 export function minimumFrameBytes(payloadBytes: number): number {
-  return Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) + HEADER_LEN;
+  return Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) + HEADER_LEN + FRAME_CRC_LEN;
 }
 
 /**

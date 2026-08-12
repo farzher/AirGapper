@@ -42,13 +42,17 @@ export interface SymbolInfo {
   modules?: number;
   /** True when the tracked fast path produced this decode. */
   tracked?: boolean;
+  /** Application packet ends in the CRC32 consumed by the fast path. */
+  crc32?: boolean;
 }
 
 interface DecodeMessage {
   id: number;
   /** Every QR found in the frame. The grid sender shows several codes at
    *  once; each one is an independent fountain frame. Empty means a miss. */
-  symbols: { bytes: Uint8Array; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean }[];
+  symbols: { bytes?: Uint8Array; byteOffset?: number; byteLength?: number; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean; crc32?: boolean }[];
+  /** One caller-owned batch buffer; symbol entries contain offsets into it. */
+  packedBytes?: ArrayBuffer;
   /** Codes DETECTED but not decoded — no bytes, but the position is real.
    *  The receiver uses these to aim crops at codes the full frame lost. */
   sightings?: SymbolBox[];
@@ -109,8 +113,12 @@ export class DecodeWorkerPool {
         if (id === -1) return; // warm-up ping, no frame attached
         this.busy[slot] = false;
         if (trackedAttempted) this.onTrackedAttempt?.();
-        for (const s of symbols)
-          this.onDecoded(s.bytes, s.box, { scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked });
+        for (const s of symbols) {
+          const bytes = s.bytes ?? new Uint8Array(message.packedBytes!, s.byteOffset!, s.byteLength!);
+          this.onDecoded(bytes, s.box, {
+            scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked, crc32: s.crc32,
+          });
+        }
         if (this.onSighted) for (const box of sightings ?? []) this.onSighted(box);
         this.onCompleted?.(id, {
           full: Boolean(message.full),

@@ -15,6 +15,7 @@
 //  16  u32  payloadFnv  FNV-1a of the whole container — verified on completion
 
 export const HEADER_LEN = 20;
+export const FRAME_CRC_LEN = 4;
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 /**
  * One place for the number, so the picker label, the rejection message and
@@ -283,7 +284,7 @@ export interface FrameHeader {
 }
 
 export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
-  const out = new Uint8Array(HEADER_LEN + block.length);
+  const out = new Uint8Array(HEADER_LEN + block.length + FRAME_CRC_LEN);
   const dv = new DataView(out.buffer);
   dv.setUint8(0, MAGIC0);
   dv.setUint8(1, MAGIC1);
@@ -294,6 +295,7 @@ export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
   dv.setUint32(12, h.totalLen, true);
   dv.setUint32(16, h.payloadFnv, true);
   out.set(block, HEADER_LEN);
+  dv.setUint32(HEADER_LEN + block.length, crc32(out.subarray(0, HEADER_LEN + block.length)), true);
   return out;
 }
 
@@ -312,8 +314,11 @@ export function parseFrame(
     payloadFnv: dv.getUint32(16, true),
   };
   if (header.k === 0 || header.blockLen === 0 || header.totalLen === 0) return null;
-  if (bytes.length !== HEADER_LEN + header.blockLen) return null;
-  return { header, block: bytes.subarray(HEADER_LEN) };
+  const packetLength = HEADER_LEN + header.blockLen;
+  if (bytes.length !== packetLength && bytes.length !== packetLength + FRAME_CRC_LEN) return null;
+  if (bytes.length === packetLength + FRAME_CRC_LEN &&
+      dv.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
+  return { header, block: bytes.subarray(HEADER_LEN, packetLength) };
 }
 
 /**
@@ -331,6 +336,15 @@ export function parseFrame(
  */
 export function streamIdentity(h: FrameHeader): string {
   return `${h.sessionId}:${h.k}:${h.blockLen}:${h.totalLen}:${h.payloadFnv}`;
+}
+
+export function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const value of bytes) {
+    crc ^= value;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (~crc) >>> 0;
 }
 
 export function fnv1a(bytes: Uint8Array): number {
