@@ -55,7 +55,7 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.13";
+const APP_VERSION = "0.1.14";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -1432,15 +1432,12 @@ function updateStats() {
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
   const saturated = busyRate >= 0.15;
-  const senderLimited = qrRate > 0 && scanRate > qrRate * 1.4 && !saturated;
   const limit = metric("m-limit");
   limit.textContent = stalled
     ? "Scanner stalled"
     : saturated
-      ? "Receiver limited"
-      : senderLimited
-        ? "Sender limited"
-        : "";
+      ? `Decoder ${Math.min(100, Math.round(busyRate * 100))}%`
+      : "";
   limit.classList.toggle("scanner-bound", stalled || saturated);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
