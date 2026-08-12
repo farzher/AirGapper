@@ -5,6 +5,8 @@ interface AndroidBridge {
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
   setTrackingBoxes(json: string): void;
+  cameraHealthy(): void;
+  recoverCamera(): void;
 }
 
 function bridge(): AndroidBridge | undefined {
@@ -53,4 +55,12 @@ export interface AndroidTrackingBox {
 
 export function setAndroidTrackingBoxes(boxes: AndroidTrackingBox[]): void {
   bridge()?.setTrackingBoxes(JSON.stringify(boxes));
+}
+
+export function reportAndroidCameraHealthy(): void {
+  bridge()?.cameraHealthy();
+}
+
+export function recoverAndroidCamera(): void {
+  bridge()?.recoverCamera();
 }

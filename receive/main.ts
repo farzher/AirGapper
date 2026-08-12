@@ -38,7 +38,14 @@ import {
 import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
-import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid, setAndroidTrackingBoxes } from "../shared/android";
+import {
+  copyTextOnAndroid,
+  isAndroidApp,
+  recoverAndroidCamera,
+  reportAndroidCameraHealthy,
+  saveFileOnAndroid,
+  setAndroidTrackingBoxes,
+} from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
@@ -117,6 +124,7 @@ let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
 // the fork's real hit rate; zero attempts means the quad/dim plumbing broke
 let cameraStartedTs = 0; // acquisition latency = first decode − camera start
+let cameraHealthyReported = false;
 let zeroRegionMs = 0; // transfer time spent with tracking fully collapsed
 let degradedMs = 0; // transfer time spent below the expected code count
 let minSeq = Infinity; // seq span ≈ what the sender emitted while we watched;
@@ -436,6 +444,7 @@ function stopReceiver(): void {
   trackedDecodes = 0;
   trackedAttempts = 0;
   cameraStartedTs = 0;
+  cameraHealthyReported = false;
   zeroRegionMs = 0;
   degradedMs = 0;
   minSeq = Infinity;
@@ -549,7 +558,16 @@ async function start() {
 
   cameraStartedTs = performance.now();
   captureGen++;
-  scheduleFrame(captureGen);
+  const startedGen = captureGen;
+  scheduleFrame(startedGen);
+  if (isAndroidApp()) {
+    // Permission revocation fixes this phone because Android kills the stale
+    // camera client. If a granted stream delivers no frame at all, recycle the
+    // app process once to get the same camera-service cleanup automatically.
+    setTimeout(() => {
+      if (!done && startedGen === captureGen && totalCaptures === 0) recoverAndroidCamera();
+    }, 5000);
+  }
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
@@ -629,6 +647,10 @@ function captureFrame() {
   const vh = video.videoHeight;
   if (!vw || !vh) return;
   const now = performance.now();
+  if (!cameraHealthyReported && isAndroidApp()) {
+    cameraHealthyReported = true;
+    reportAndroidCameraHealthy();
+  }
   captureTimes.push(now);
   totalCaptures++;
   if (pool.busyCount === pool.size) {
