@@ -886,6 +886,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
     seconds = (performance.now() - startTs) / 1000;
     document.body.classList.add("receive-complete");
+    // Restore the root scroller so mobile browsers can use their normal
+    // pull-to-refresh gesture on the completed screen.
+    document.body.classList.remove("receive-mode");
     transferSizeLabel.textContent = "0 B remaining";
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
@@ -940,7 +943,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     }
     const actions = document.createElement("div");
     actions.className = "note-actions";
-    actions.append(download, restartButton("Home"));
+    actions.append(download);
     result.append(actions);
   } catch (error) {
     sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
@@ -1015,7 +1018,7 @@ function showSnippet(text: string) {
       copy.textContent = "Copy failed";
     }
   });
-  actions.append(copy, restartButton("Home"));
+  actions.append(copy);
 
   result.replaceChildren(body, actions);
 }

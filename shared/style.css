@@ -269,7 +269,7 @@ input[type="range"] { accent-color: #222; }
 .text-button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font-size: 12px; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 #result:empty { display: none; }
-body.receive-complete { overflow: hidden; }
+body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
 body.receive-complete .app-main { margin-block: 0; padding: 4px 0 8px; }
 body.receive-complete .receiver-primary { gap: 8px; }
 body.receive-complete #result { min-height: 0; }
