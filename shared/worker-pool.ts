@@ -55,6 +55,22 @@ interface DecodeMessage {
   /** True when this reply's crop went through the tracked fast path first —
    *  paired with per-symbol `tracked`, the receiver derives the hit rate. */
   trackedAttempted?: boolean;
+  trackedHit?: boolean;
+  fallbackAttempted?: boolean;
+  full?: boolean;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface DecodeCompletion {
+  full: boolean;
+  symbolCount: number;
+  sightingCount: number;
+  trackedAttempted: boolean;
+  trackedHit: boolean;
+  fallbackAttempted: boolean;
+  latencyMs: number;
+  error?: string;
 }
 
 export class DecodeWorkerPool {
@@ -66,7 +82,7 @@ export class DecodeWorkerPool {
     private readonly onDecoded: (bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) => void,
     private readonly onSighted?: (box: SymbolBox) => void,
     private readonly onTrackedAttempt?: () => void,
-    private readonly onCompleted?: (id: number, symbolCount: number) => void,
+    private readonly onCompleted?: (id: number, completion: DecodeCompletion) => void,
   ) {}
 
   get size(): number {
@@ -88,14 +104,24 @@ export class DecodeWorkerPool {
       const slot = this.workers.length;
       const worker = this.create();
       worker.onmessage = (event: MessageEvent) => {
-        const { id, symbols, sightings, trackedAttempted } = event.data as DecodeMessage;
+        const message = event.data as DecodeMessage;
+        const { id, symbols, sightings, trackedAttempted } = message;
         if (id === -1) return; // warm-up ping, no frame attached
         this.busy[slot] = false;
         if (trackedAttempted) this.onTrackedAttempt?.();
         for (const s of symbols)
           this.onDecoded(s.bytes, s.box, { scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked });
         if (this.onSighted) for (const box of sightings ?? []) this.onSighted(box);
-        this.onCompleted?.(id, symbols.length);
+        this.onCompleted?.(id, {
+          full: Boolean(message.full),
+          symbolCount: symbols.length,
+          sightingCount: sightings?.length ?? 0,
+          trackedAttempted: Boolean(trackedAttempted),
+          trackedHit: Boolean(message.trackedHit),
+          fallbackAttempted: Boolean(message.fallbackAttempted),
+          latencyMs: message.latencyMs ?? 0,
+          error: message.error,
+        });
       };
       this.workers.push(worker);
       this.busy.push(false);

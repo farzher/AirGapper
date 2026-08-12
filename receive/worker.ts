@@ -73,6 +73,7 @@ function pixelsOf(buf: ArrayBuffer | undefined, bitmap: ImageBitmap | undefined,
 }
 
 ctx.onmessage = async (e: MessageEvent) => {
+  const startedAt = performance.now();
   const { id, buf, bitmap, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
     /** Readback-fallback capture: raw RGBA. */
@@ -107,6 +108,7 @@ ctx.onmessage = async (e: MessageEvent) => {
 
     let trackedHit = false;
     let trackedAttempted = false;
+    let fallbackAttempted = false;
     if (!full && quad && dim) {
       trackedAttempted = true;
       const r = zx.readTracked(
@@ -129,35 +131,46 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+      fallbackAttempted = !full;
       // Full scans get returnErrors (sightings live there — error results
       // COUNT against the symbol cap, hence the headroom above 12 codes) and a
       // crop fallback stays in the cheapest configuration. tryHarder stays on
       // everywhere: real marginal captures are where it earns its keep.
       const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
-      for (let i = 0; i < vec.size(); i++) {
-        const r = vec.get(i);
-        if (r.valid && r.bytes.length > 0) {
-          symbols.push({
-            bytes: r.bytes,
-            box: boundsOf(r.position, ox, oy),
-            quad: shifted(r.position, ox, oy),
-            modules: r.modules,
-            tracked: false,
-          });
-        } else if (full) {
-          // A symbol zxing DETECTED but could not decode (glare or noise past
-          // the ECC budget) is still a fix on where a code sits — the
-          // receiver aims a crop there, and crops decode where full frames
-          // fail. Positions stay pixel-accurate through a ChecksumError.
-          const box = boundsOf(r.position, ox, oy);
-          if (box.w > 0 && box.h > 0) sightings.push(box);
+      try {
+        for (let i = 0; i < vec.size(); i++) {
+          const r = vec.get(i);
+          if (r.valid && r.bytes.length > 0) {
+            symbols.push({
+              bytes: r.bytes,
+              box: boundsOf(r.position, ox, oy),
+              quad: shifted(r.position, ox, oy),
+              modules: r.modules,
+              tracked: false,
+            });
+          } else if (full) {
+            // A symbol zxing DETECTED but could not decode (glare or noise past
+            // the ECC budget) is still a fix on where a code sits — the
+            // receiver aims a crop there, and crops decode where full frames
+            // fail. Positions stay pixel-accurate through a ChecksumError.
+            const box = boundsOf(r.position, ox, oy);
+            if (box.w > 0 && box.h > 0) sightings.push(box);
+          }
         }
+      } finally {
+        vec.delete();
       }
-      vec.delete();
     }
-    ctx.postMessage({ id, symbols, sightings, trackedAttempted });
-  } catch {
-    ctx.postMessage({ id, symbols: [], sightings: [] });
+    ctx.postMessage({
+      id, symbols, sightings, full, trackedAttempted, trackedHit, fallbackAttempted,
+      latencyMs: performance.now() - startedAt,
+    });
+  } catch (error) {
+    ctx.postMessage({
+      id, symbols: [], sightings: [], full,
+      latencyMs: performance.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
   } finally {
     if (zx && ptr) zx._free(ptr);
   }

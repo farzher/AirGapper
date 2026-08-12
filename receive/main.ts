@@ -22,6 +22,7 @@ import {
 import { createDecodeWorker } from "./worker-factory";
 import {
   DecodeWorkerPool,
+  type DecodeCompletion,
   type SymbolBox,
   type SymbolInfo,
   type SymbolQuad,
@@ -104,7 +105,7 @@ const pool = new DecodeWorkerPool(
   // the crop path go decode what the full frame could not.
   (box) => noteRegion(box, performance.now(), false),
   () => trackedAttempts++,
-  (id, symbolCount) => noteDecodeCompleted(id, symbolCount),
+  (id, completion) => noteDecodeCompleted(id, completion),
 );
 const captureTimes: number[] = [];
 // Distinct sender symbols acquired, not successful attempts. A 10 fps
@@ -153,9 +154,10 @@ interface Region extends SymbolBox {
    *  probationary: they get crops, but they are not drawn, not counted
    *  toward the expected code total, and evicted first. */
   decoded: boolean;
-  /** Last successful byte decode. Failed detector sightings keep the crop
-   * alive but must not make the success outline flash. */
+  /** Last successful byte decode. Detector sightings are tracked separately:
+   * they may draw feedback, but cannot make a stale decode-proven region live. */
   decodedSeen?: number;
+  sightedSeen?: number;
   /** Recent distinct sender symbols inferred from sequence changes. Repeated
    * camera reads of one displayed symbol are neutral, not extra successes. */
   outcomes: boolean[];
@@ -176,10 +178,37 @@ const regions: Region[] = [];
 // this yardstick lets that sighting seed a crop instead of leaving the receiver
 // stuck with no regions and throwing the useful position away.
 let lastDecodedRegionSize = 0;
-// Crop replies are associated with their target so failed jobs count toward
-// that code's quality. Previously only detector sightings counted as misses,
-// making a code with many silent crop failures misleadingly appear perfect.
-const cropAttempts = new Map<number, Region>();
+// Crop replies retain the exact anchor they attempted, so a miss can
+// invalidate stale tracked geometry without clobbering a newer worker's hit.
+const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
+
+// Bounded pipeline evidence for diagnostics builds. These distinguish an idle
+// scheduler from decoder misses without turning every camera frame into a log.
+let schedulerNoJobs = 0;
+let cropMisses = 0;
+let fullDetectorMisses = 0;
+let fullSightings = 0;
+let trackedMissFallbacks = 0;
+let decodeExceptions = 0;
+let regionExpiries = 0;
+let regionCreations = 0;
+let trackingInvalidations = 0;
+let completedJobs = 0;
+let workerLatencyTotalMs = 0;
+let workerLatencyMaxMs = 0;
+let lastDistinctArrivalAt = 0;
+let maxSequenceGapMs = 0;
+const pipelineEvents: [number, string, number][] = [];
+const PIPELINE_EVENT_LIMIT = 80;
+
+function notePipelineEvent(kind: string, value = 0): void {
+  if (pipelineEvents.length >= PIPELINE_EVENT_LIMIT) return;
+  pipelineEvents.push([
+    Number(((performance.now() - cameraStartedTs) / 1000).toFixed(2)),
+    kind,
+    value,
+  ]);
+}
 
 function noteOutcome(region: Region, success: boolean): void {
   region.outcomes.push(success);
@@ -206,8 +235,36 @@ function noteSequence(region: Region, seq: number): void {
   region.lastSeq = seq;
 }
 
-function noteDecodeCompleted(id: number, _symbolCount: number): void {
+function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
+  completedJobs++;
+  workerLatencyTotalMs += completion.latencyMs;
+  workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
+  if (completion.error) {
+    decodeExceptions++;
+    notePipelineEvent("decode-exception", decodeExceptions);
+  }
+  if (completion.full) {
+    fullSightings += completion.sightingCount;
+    if (completion.symbolCount === 0 && completion.sightingCount === 0) fullDetectorMisses++;
+  } else if (completion.symbolCount === 0) {
+    cropMisses++;
+  }
+  if (completion.trackedAttempted && !completion.trackedHit && completion.fallbackAttempted) {
+    trackedMissFallbacks++;
+  }
+
+  const attempt = cropAttempts.get(id);
   cropAttempts.delete(id);
+  if (!attempt || completion.symbolCount > 0) return;
+  // The same crop already ran stock acquisition and found nothing. Do not pay
+  // for a known-stale transform forever. Guard against an older reply clearing
+  // a newer anchor installed by a faster worker.
+  if (attempt.region.quad === attempt.quad) {
+    attempt.region.quad = undefined;
+    attempt.region.dim = undefined;
+    trackingInvalidations++;
+    notePipelineEvent("tracking-invalidated", trackingInvalidations);
+  }
 }
 
 // Tried and reverted: a longer TTL for regions with a decode track record
@@ -266,12 +323,13 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     const dy = Math.abs(box.y + box.h / 2 - (r.y + r.h / 2));
     if (dx < Math.max(box.w, r.w) / 2 && dy < Math.max(box.h, r.h) / 2) {
       if (!decoded) {
-        // A sighting is an eyewitness report, not a measurement: enough to
-        // keep the region alive, never enough to move or resize it. zxing's
-        // failed quads are routinely clipped or wildly mis-sized, and one
-        // overwriting a decode-proven box aims every following crop at
-        // garbage — a measured 6× throughput collapse on a 4-code grid.
-        r.seen = now;
+        // A sighting is an eyewitness report, not a successful track. It may
+        // keep a probationary crop alive, but must not keep a decode-proven
+        // region counted as healthy forever. Otherwise repeated error results
+        // suppress cold full-frame reacquisition during the exact stall they
+        // are reporting.
+        r.sightedSeen = now;
+        if (!r.decoded) r.seen = now;
         return;
       }
       // Half-life blend of per-decode displacement: steady hands decay it to
@@ -280,6 +338,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
+      r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
@@ -304,10 +363,13 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     seen: now,
     decoded,
     decodedSeen: decoded ? now : undefined,
+    sightedSeen: now,
     outcomes: [],
     quad: info?.quad,
     dim: info?.modules,
   });
+  regionCreations++;
+  notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
   if (regions.length > MAX_REGIONS) {
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
     regions.length = MAX_REGIONS;
@@ -386,7 +448,7 @@ function drawOverlay(now: number) {
   const ordered = [...regions].sort(layoutOrder);
   for (const r of ordered) {
     const decodedAge = now - (r.decodedSeen ?? -Infinity);
-    const sightingAge = now - r.seen;
+    const sightingAge = now - (r.sightedSeen ?? r.seen);
     const successful = decodedAge <= INDICATOR_FADE_MS;
     if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
 
@@ -485,6 +547,21 @@ function stopReceiver(): void {
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
   cropAttempts.clear();
+  schedulerNoJobs = 0;
+  cropMisses = 0;
+  fullDetectorMisses = 0;
+  fullSightings = 0;
+  trackedMissFallbacks = 0;
+  decodeExceptions = 0;
+  regionExpiries = 0;
+  regionCreations = 0;
+  trackingInvalidations = 0;
+  completedJobs = 0;
+  workerLatencyTotalMs = 0;
+  workerLatencyMaxMs = 0;
+  lastDistinctArrivalAt = 0;
+  maxSequenceGapMs = 0;
+  pipelineEvents.length = 0;
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
@@ -682,7 +759,7 @@ function submitBitmap(
     .then((bitmap) => {
       const id = frameId++;
       const { region, ...messageMeta } = meta;
-      if (region) cropAttempts.set(id, region);
+      if (region) cropAttempts.set(id, { region, quad: region.quad });
       const taken =
         !done && pool.submit({ id, bitmap, ...messageMeta }, [bitmap]);
       if (!taken) {
@@ -721,7 +798,11 @@ function captureFrame() {
   for (let i = regions.length - 1; i >= 0; i--) {
     const region = regions[i]!;
     const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
-    if (now - region.seen > ttl) regions.splice(i, 1);
+    if (now - region.seen > ttl) {
+      regions.splice(i, 1);
+      regionExpiries++;
+      notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
+    }
   }
   // Only decode-proven regions count toward "how many codes does this stream
   // show" — phantom sighting regions once inflated the total and locked the
@@ -747,6 +828,10 @@ function captureFrame() {
   // next frame — including crops of probationary sighting regions, which now
   // run between cold scans instead of being crowded out by them.
   const fullScanDue = now - lastFullScan > scanInterval;
+  if (!fullScanDue && regions.length === 0) {
+    schedulerNoJobs++;
+    return;
+  }
 
   if (BITMAP_CAPTURE) {
     if (fullScanDue) {
@@ -823,7 +908,7 @@ function captureFrame() {
     // skipped entirely, 2× at V40); absent — or stale after a miss — the
     // worker falls back to the stock decoder on the same buffer.
     const id = frameId++;
-    cropAttempts.set(id, r);
+    cropAttempts.set(id, { region: r, quad: r.quad });
     const taken = pool.submit(
       { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
       [img.data.buffer],
@@ -885,7 +970,11 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = performance.now();
-  if (decoder.framesNew > framesNewBefore) qrReadTimes.push(receivedAt);
+  if (decoder.framesNew > framesNewBefore) {
+    qrReadTimes.push(receivedAt);
+    if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
+    lastDistinctArrivalAt = receivedAt;
+  }
   if (decoder.framesNew - decoder.framesRedundant > usefulBefore) {
     usefulFrameTimes.push(receivedAt);
   }
@@ -1002,8 +1091,22 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         decodes: totalDecodes,
         trackedAttempts,
         trackedDecodes,
+        trackedMissFallbacks,
+        schedulerNoJobs,
+        cropMisses,
+        fullDetectorMisses,
+        fullSightings,
+        decodeExceptions,
+        regionCreations,
+        regionExpiries,
+        trackingInvalidations,
         zeroRegionMs,
         degradedMs,
+        maxSequenceGapMs: Number(maxSequenceGapMs.toFixed(1)),
+        workerJobs: completedJobs,
+        workerLatencyMeanMs: completedJobs ? Number((workerLatencyTotalMs / completedJobs).toFixed(1)) : 0,
+        workerLatencyMaxMs: Number(workerLatencyMaxMs.toFixed(1)),
+        events: pipelineEvents,
       },
       workers: pool.size,
       requested: { width: requestedWidth, fps: requestedFps, workers: workerCount },
