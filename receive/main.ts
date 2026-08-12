@@ -60,7 +60,7 @@ const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.19";
+const APP_VERSION = "0.1.20";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -882,6 +882,7 @@ let pendingScanCapture: {
   tracks: SymbolQuad[];
 } | null = null;
 captureScanBtn.addEventListener("click", () => {
+  if (captureNextScan || pendingScanCapture) return;
   captureNextScan = true;
   captureScanBtn.textContent = "Capturing…";
   captureScanBtn.disabled = true;
@@ -890,6 +891,39 @@ closeScanBtn.addEventListener("click", () => scanDialog.close());
 scanDialog.addEventListener("click", (event) => {
   if (event.target === scanDialog) scanDialog.close();
 });
+
+function trackedQuadBounds(quad: SymbolQuad): { left: number; top: number; right: number; bottom: number } | null {
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+  return {
+    left: Math.min(...points.map((point) => point.x)),
+    top: Math.min(...points.map((point) => point.y)),
+    right: Math.max(...points.map((point) => point.x)),
+    bottom: Math.max(...points.map((point) => point.y)),
+  };
+}
+
+function validTrackedQuad(region: Region, vw: number, vh: number): boolean {
+  if (!region.quad) return false;
+  const bounds = trackedQuadBounds(region.quad);
+  if (!bounds) return false;
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const regionSize = Math.max(region.w, region.h);
+  const quadSize = Math.max(width, height);
+  return width >= 24 && height >= 24 &&
+    Math.max(width / height, height / width) <= 2.5 &&
+    bounds.right > 0 && bounds.bottom > 0 && bounds.left < vw && bounds.top < vh &&
+    quadSize >= regionSize * 0.4 && quadSize <= regionSize * 2.5;
+}
+
+function invalidateTrackedQuad(region: Region): void {
+  region.quad = undefined;
+  region.dim = undefined;
+  region.consecutiveMisses = 0;
+  trackingInvalidations++;
+  notePipelineEvent("tracking-invalidated", trackingInvalidations);
+}
 
 function captureSubmittedScan(
   ctx: CanvasRenderingContext2D,
@@ -905,12 +939,17 @@ function captureSubmittedScan(
   pendingScanCapture = { image: ctx.getImageData(0, 0, w, h), ox, oy, full, tracks };
 }
 
+function cancelScanCapture(): void {
+  pendingScanCapture = null;
+  captureNextScan = false;
+  captureScanBtn.textContent = "Capture scan";
+  captureScanBtn.disabled = false;
+}
+
 function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const capture = pendingScanCapture;
   if (!capture || capture.id !== id) return;
-  pendingScanCapture = null;
-  captureScanBtn.textContent = "Capture scan";
-  captureScanBtn.disabled = false;
+  cancelScanCapture();
   scanCapture.width = capture.image.width;
   scanCapture.height = capture.image.height;
   const ctx = scanCapture.getContext("2d")!;
@@ -1022,12 +1061,15 @@ function captureFrame() {
     )) {
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
-      pendingScanCapture = null;
-      captureNextScan = true;
+      cancelScanCapture();
     }
     return;
   }
-  const batchRegions = regions.filter((region) => region.decoded && region.quad && region.dim);
+  for (const region of regions) {
+    if (region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
+  }
+  const batchRegions = regions.filter((region) =>
+    region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const batchTracks = batchRegions.map((region) => ({
     id: region.id, quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
@@ -1060,10 +1102,7 @@ function captureFrame() {
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
-        if (pendingScanCapture?.id === undefined) {
-          pendingScanCapture = null;
-          captureNextScan = true;
-        }
+        if (pendingScanCapture?.id === undefined) cancelScanCapture();
         poolBusyTimes.push(now);
       }
     }
@@ -1084,13 +1123,11 @@ function captureFrame() {
     // The quad is the geometry actually passed to tracked decoding, so crop
     // around it—not the independently updated axis-aligned region box. A stale
     // box could otherwise clip half the QR while the search quad sat outside.
-    const points = r.quad
-      ? [r.quad.topLeft, r.quad.topRight, r.quad.bottomRight, r.quad.bottomLeft]
-      : [{ x: r.x, y: r.y }, { x: r.x + r.w, y: r.y + r.h }];
-    const left = Math.min(...points.map((point) => point.x));
-    const top = Math.min(...points.map((point) => point.y));
-    const right = Math.max(...points.map((point) => point.x));
-    const bottom = Math.max(...points.map((point) => point.y));
+    const quadBounds = r.quad ? trackedQuadBounds(r.quad) : null;
+    const left = quadBounds?.left ?? r.x;
+    const top = quadBounds?.top ?? r.y;
+    const right = quadBounds?.right ?? r.x + r.w;
+    const bottom = quadBounds?.bottom ?? r.y + r.h;
     const size = Math.max(right - left, bottom - top);
     const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
     const x = Math.max(0, Math.floor(left - pad));
@@ -1108,10 +1145,7 @@ function captureFrame() {
       [img.data.buffer],
     )) {
       cropAttempts.delete(id);
-      if (pendingScanCapture?.id === undefined) {
-        pendingScanCapture = null;
-        captureNextScan = true;
-      }
+      if (pendingScanCapture?.id === undefined) cancelScanCapture();
       poolBusyTimes.push(performance.now());
       break;
     }
