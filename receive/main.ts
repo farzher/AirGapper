@@ -676,9 +676,11 @@ function offerRetry(message: string) {
   startBtn.hidden = false;
   startBtn.style.display = "";
   startBtn.textContent = "Try camera again";
-  preview.style.display = "none";
+  preview.style.display = "";
   preview.classList.remove("camera-loading");
-  metricsEl.style.display = "none";
+  metricsEl.style.display = "block";
+  progressStatus.style.display = "block";
+  progressEl.style.display = "block";
   if (diagnosticsEl) diagnosticsEl.style.display = "none";
   showError(message);
 }
@@ -787,9 +789,18 @@ const localCameraMessage =
   "This browser does not allow camera access from a local file. Use the installed offline PWA for receiving.";
 
 async function start() {
+  // Materialize the complete receiver layout before camera permission or
+  // startup can delay it. Camera readiness should only replace the viewfinder,
+  // never determine the size or visibility of the controls below it.
+  preview.style.display = "";
+  preview.classList.add("camera-loading");
+  metricsEl.style.display = "block";
+  progressStatus.style.display = "block";
+  progressEl.style.display = "block";
+  showRequestedCameraSettings();
   if (!navigator.mediaDevices?.getUserMedia) {
     // Mobile browsers commonly omit the API entirely for file:// origins.
-    showError(
+    offerRetry(
       location.protocol === "file:"
         ? localCameraMessage
         : "Camera access needs HTTPS. Open the hosted app or its installed offline PWA.",
@@ -799,10 +810,6 @@ async function start() {
   const captureWidth = requestedWidth;
   const captureHeight = requestedHeight;
   const captureFps = requestedFps;
-  // Reserve the final viewfinder space immediately so permission and camera
-  // startup never make the rest of the receive page jump around.
-  preview.style.display = "";
-  preview.classList.add("camera-loading");
   startBtn.disabled = true;
   startBtn.style.display = "none";
   const base: MediaTrackConstraints = {
@@ -848,9 +855,6 @@ async function start() {
   startBtn.style.display = "none";
   // "": back to the stylesheet's flex — the zone centers the camera box.
   preview.style.display = "";
-  metricsEl.style.display = "block";
-  progressStatus.style.display = "block";
-  progressEl.style.display = "block";
   if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => undefined);
