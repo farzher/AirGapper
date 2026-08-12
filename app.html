@@ -67,6 +67,14 @@
       <section class="receiver-primary">
         <div class="receiver-heading"><div class="hint status-line" id="stats"></div></div>
         <button id="start" class="enable-camera" type="button" hidden>Enable camera</button>
+        <details class="settings receiver-settings">
+          <summary>Advanced camera</summary>
+          <div class="row">
+            <label><span>Resolution</span><select id="camera-resolution"><option value="640x480">640×480 — Performance</option><option value="960x720">960×720 — Fast</option><option value="1280x960" selected>1280×960 — Balanced</option><option value="1920x1080">1920×1080 — High detail</option></select></label>
+            <label><span>Frame rate</span><select id="camera-fps"><option value="auto">Auto</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+          </div>
+          <p class="settings-actual" id="camera-actual"></p>
+        </details>
         <div class="preview-zone" id="preview" style="display:none">
           <div class="preview receive-card">
             <video id="video" muted playsinline></video><canvas id="detect-overlay" class="detect-overlay" aria-hidden="true"></canvas>

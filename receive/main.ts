@@ -49,6 +49,9 @@ import {
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
+const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
+const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
+const cameraActual = document.getElementById("camera-actual")!;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -72,8 +75,46 @@ const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2)
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const requestedWidth = 1280;
-const requestedFps = 60;
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v1";
+const CAMERA_RESOLUTIONS = {
+  "640x480": { width: 640, height: 480 },
+  "960x720": { width: 960, height: 720 },
+  "1280x960": { width: 1280, height: 960 },
+  "1920x1080": { width: 1920, height: 1080 },
+} as const;
+type CameraResolution = keyof typeof CAMERA_RESOLUTIONS;
+
+function restoreCameraSettings(): void {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
+      resolution?: unknown;
+      fps?: unknown;
+    } | null;
+    if (!saved) return;
+    if (typeof saved.resolution === "string" && saved.resolution in CAMERA_RESOLUTIONS) {
+      cameraResolution.value = saved.resolution;
+    }
+    if (saved.fps === "auto" || saved.fps === "30" || saved.fps === "60") cameraFps.value = saved.fps;
+  } catch {
+    // Camera defaults still work when storage is unavailable or corrupt.
+  }
+}
+
+function saveCameraSettings(): void {
+  try {
+    localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
+      resolution: cameraResolution.value,
+      fps: cameraFps.value,
+    }));
+  } catch {
+    // A blocked store must never prevent camera use.
+  }
+}
+
+restoreCameraSettings();
+let requestedWidth = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].width;
+let requestedHeight = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].height;
+let requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
 const metric = (id: string) => document.getElementById(id)!;
 
 // Sliding window for the capture/decode fps metrics — the per-second rates in
@@ -505,6 +546,19 @@ function drawOverlay(now: number) {
   overlayCtx.setLineDash([]);
 }
 startBtn.onclick = () => void start();
+const changeCameraSettings = () => {
+  const selected = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution];
+  requestedWidth = selected.width;
+  requestedHeight = selected.height;
+  requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
+  saveCameraSettings();
+  if (stream && !done) {
+    stopReceiver();
+    void start();
+  }
+};
+cameraResolution.addEventListener("change", changeCameraSettings);
+cameraFps.addEventListener("change", changeCameraSettings);
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -596,6 +650,7 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
+  cameraActual.textContent = "";
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -641,6 +696,7 @@ async function start() {
     return;
   }
   const captureWidth = requestedWidth;
+  const captureHeight = requestedHeight;
   const captureFps = requestedFps;
   // Nothing on the page changes until the camera is actually running: the
   // error paths below all have to leave a usable Start button behind.
@@ -649,17 +705,17 @@ async function start() {
   const base: MediaTrackConstraints = {
     facingMode: "environment",
     width: { ideal: captureWidth },
-    height: { ideal: Math.round((captureWidth * 3) / 4) },
+    height: { ideal: captureHeight },
   };
   try {
-    if (isAndroidApp()) {
+    if (isAndroidApp() || captureFps === undefined) {
       // Use exactly one request in the APK: some old Android camera providers
       // wedge after either a rejected request or a live applyConstraints call.
-      // `ideal` asks for browser-equivalent throughput without making failure
-      // of 60 fps fatal.
+      // `ideal` asks for browser-equivalent throughput without making the
+      // selected fps fatal. Auto omits the frame-rate constraint entirely.
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { ...base, frameRate: { ideal: captureFps } },
+        video: captureFps === undefined ? base : { ...base, frameRate: { ideal: captureFps } },
       });
     } else {
       try {
@@ -695,6 +751,13 @@ async function start() {
   if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => undefined);
+  const activeCamera = stream.getVideoTracks()[0]?.getSettings();
+  const activeSize = activeCamera?.width && activeCamera.height
+    ? `${activeCamera.width}×${activeCamera.height}`
+    : "Camera active";
+  cameraActual.textContent = activeCamera?.frameRate
+    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
+    : `Active: ${activeSize}`;
   syncPreviewAspect();
   setStatus("");
 
@@ -1124,7 +1187,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         events: pipelineEvents,
       },
       workers: pool.size,
-      requested: { width: requestedWidth, fps: requestedFps, workers: workerCount },
+      requested: { width: requestedWidth, height: requestedHeight, fps: requestedFps ?? "auto", workers: workerCount },
       camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: camera.facingMode ?? null } : null,
       cameraCapabilities: track ? probeCameraCapabilities(track) : null,
       device: { cores: navigator.hardwareConcurrency ?? null, ua: navigator.userAgent },
