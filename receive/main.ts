@@ -56,7 +56,7 @@ const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
 const receiverVersion = document.getElementById("receiver-version")!;
-const APP_VERSION = "0.1.4";
+const APP_VERSION = "0.1.5";
 receiverVersion.textContent = `v${APP_VERSION} · stable codec`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
@@ -871,10 +871,10 @@ const BITMAP_CAPTURE =
   new URLSearchParams(window.location.search).get("capture") === "bitmap" &&
   typeof createImageBitmap === "function" &&
   typeof OffscreenCanvas !== "undefined";
-// Constructing a VideoFrame from the live <video> wedges the camera compositor
-// on affected old Android WebViews once tracked decoding starts. Keep that path
-// off there; crop readback is bounded to QR-sized regions instead.
-const DIRECT_Y_CAPTURE = typeof VideoFrame !== "undefined" && !isAndroidApp();
+// Constructing a VideoFrame from the live <video> can wedge the camera
+// compositor after first lock in both Android WebViews and Chrome PWAs. Do not
+// infer safety from API presence; the bounded crop path works on both.
+const DIRECT_Y_CAPTURE = false;
 
 /** Fire-and-forget submit of a GPU-cropped frame. The bitmap resolves async;
  *  by then the pool may have filled or the transfer ended — close it rather
