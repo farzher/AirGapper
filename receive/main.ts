@@ -1342,7 +1342,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       when: new Date().toISOString(),
       sessionId: reportSessionId,
       acquisitionSeconds: cameraStartedTs ? Number(((startTs - cameraStartedTs) / 1000).toFixed(2)) : null,
-      payloadSha256: [...container.slice(17, 49)].map((b) => b.toString(16).padStart(2, "0")).join(""),
+      payloadSha256: [...container.slice(9, 41)].map((b) => b.toString(16).padStart(2, "0")).join(""),
       fountain: {
         k: decoder?.k,
         blockLen: decoder?.blockLen,

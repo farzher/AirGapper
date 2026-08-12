@@ -1,8 +1,8 @@
 /**
  * Distinct frames per source block a stream needs.
  *
- * The v1 soliton fountain needed 1.15–1.6 depending on k (see git history for
- * the measured curve). The v2 systematic carousel (fountain.ts) needs exactly
+ * The older soliton fountain needed 1.15–1.6 depending on k (see git history
+ * for the measured curve). The systematic carousel (fountain.ts) needs exactly
  * 1.00 at zero loss — measured p50 AND p90 over 100 trials each at
  * k ∈ {5, 25, 100, 400, 1600} — because one caught sweep is the whole file.
  * The 2% margin keeps the bar and the goodput figure from over-promising on
@@ -54,7 +54,7 @@ export function estimateTransferProgress(
   // motion blur, a camera that won't hold focus. That is exactly when someone
   // is staring at the bar wondering whether it has stalled, so keep quoting a
   // time instead of going silent: extend the target a tenth of the stream at
-  // a time. (The v2 carousel's nominal redundancy is only 2%, which as a step
+  // a time. (The carousel's nominal redundancy is only 2%, which as a step
   // size would quote a perpetual "about 1s" — a floor keeps the steps honest.)
   const overshoot = uniqueFrames - expectedFrames;
   const step = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));

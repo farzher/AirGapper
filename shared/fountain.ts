@@ -1,4 +1,4 @@
-// Systematic-carousel fountain code (wire format v2) — the trick that makes
+// Systematic-carousel fountain code — the trick that makes
 // a one-way optical channel practical.
 //
 // The sender emits an endless carousel: a systematic sweep of all K blocks,
@@ -167,9 +167,9 @@ function repairIndices(k: number, sessionId: number, seq: number): number[] {
  * Repair frames seed from the ABSOLUTE seq, so every cycle's repair frames
  * draw different subsets — re-watching the carousel never replays them.
  *
- * This is wire format v2 (frame header magic 0x0D). The v1 soliton stream
- * (frameIndices, solitonCdf, dlog) is kept above, pinned by its golden
- * vectors, in case a future format wants it back — it is no longer emitted.
+ * The older soliton stream (frameIndices, solitonCdf, dlog) is kept above,
+ * pinned by its golden vectors, in case a future format wants it back — it is
+ * no longer emitted.
  */
 export function frameComposition(k: number, sessionId: number, seq: number): number[] {
   const pos = seq % cycleLength(k);

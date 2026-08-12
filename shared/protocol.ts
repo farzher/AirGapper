@@ -2,19 +2,19 @@
 // handshake — the receiver locks onto a stream mid-flight, and a new session
 // id on any frame simply starts a fresh transfer.
 //
-// Layout (little-endian), 20 bytes, followed by `blockLen` payload bytes:
+// Layout (little-endian), 17 bytes, followed by `blockLen` payload bytes:
 //   0  u8   magic 0xD1
-//   1  u8   magic 0x0D — wire format v2: systematic-carousel fountain
-//                        (bumped from 0x0C so v1 senders/receivers reject
-//                        v2 streams cleanly instead of desyncing silently)
-//   2  u16  sessionId   random per sender start
-//   4  u32  seq         drives the fountain PRNG (see fountain.ts)
-//   8  u16  k           source block count
-//  10  u16  blockLen    payload bytes per frame
-//  12  u32  totalLen    protected file-container length in bytes
-//  16  u32  payloadFnv  FNV-1a of the whole container — verified on completion
+//   1  u16  sessionId   random per sender start
+//   3  u32  seq         drives the fountain PRNG (see fountain.ts)
+//   7  u16  blockLen    payload bytes per frame
+//   9  u32  totalLen    protected file-container length in bytes
+//  13  u32  payloadFnv  FNV-1a of the whole container — verified on completion
+//
+// The source block count is ceil(totalLen / blockLen), so carrying it in every
+// frame was redundant. A single magic byte plus the frame CRC identifies the
+// format without spending a byte on a version number.
 
-export const HEADER_LEN = 20;
+export const HEADER_LEN = 17;
 export const FRAME_CRC_LEN = 4;
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 /**
@@ -26,10 +26,12 @@ export const MAX_FILE_BYTES = 64 * 1024 * 1024;
  * so that one is on you if this ever changes.
  */
 export const MAX_FILE_LABEL = `${MAX_FILE_BYTES / 1024 / 1024} MB`;
-const FILE_HEADER_LEN = 49;
-const MAGIC0 = 0xd1;
-const MAGIC1 = 0x0d; // v2: systematic-carousel fountain (see fountain.ts)
-const FILE_MAGIC = new Uint8Array([0x44, 0x43, 0x46, 0x32]); // DCF2
+// flags + name length + media-type length + original length + SHA-256.
+// The transmitted length is everything after the metadata and therefore does
+// not need to be stored. The outer framed stream already authenticates this
+// container, so it also needs no magic or version bytes of its own.
+const FILE_HEADER_LEN = 41;
+const MAGIC = 0xd1;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -195,13 +197,11 @@ export async function packFile(
     FILE_HEADER_LEN + nameBytes.length + typeBytes.length + transmitted.length,
   );
   const view = new DataView(out.buffer);
-  out.set(FILE_MAGIC, 0);
-  view.setUint8(4, useGzip ? 1 : 0);
-  view.setUint16(5, nameBytes.length, true);
-  view.setUint16(7, typeBytes.length, true);
-  view.setUint32(9, bytes.length, true);
-  view.setUint32(13, transmitted.length, true);
-  out.set(sha256, 17);
+  view.setUint8(0, useGzip ? 1 : 0);
+  view.setUint16(1, nameBytes.length, true);
+  view.setUint16(3, typeBytes.length, true);
+  view.setUint32(5, bytes.length, true);
+  out.set(sha256, 9);
   out.set(nameBytes, FILE_HEADER_LEN);
   out.set(typeBytes, FILE_HEADER_LEN + nameBytes.length);
   out.set(transmitted, FILE_HEADER_LEN + nameBytes.length + typeBytes.length);
@@ -215,25 +215,22 @@ export async function packFile(
 
 export async function unpackFile(container: Uint8Array): Promise<OpticalFile> {
   if (container.length < FILE_HEADER_LEN) throw new Error("The recovered file header is incomplete.");
-  for (let i = 0; i < FILE_MAGIC.length; i++) {
-    if (container[i] !== FILE_MAGIC[i]) throw new Error("The recovered file header is invalid.");
-  }
 
   const view = new DataView(container.buffer, container.byteOffset, container.byteLength);
-  const compressionByte = view.getUint8(4);
+  const compressionByte = view.getUint8(0);
   if (compressionByte > 1) throw new Error("The recovered file uses unsupported compression.");
   const compression: CompressionMode = compressionByte === 1 ? "gzip" : "none";
-  const nameLength = view.getUint16(5, true);
-  const typeLength = view.getUint16(7, true);
-  const fileLength = view.getUint32(9, true);
-  const transmittedLength = view.getUint32(13, true);
+  const nameLength = view.getUint16(1, true);
+  const typeLength = view.getUint16(3, true);
+  const fileLength = view.getUint32(5, true);
   const dataOffset = FILE_HEADER_LEN + nameLength + typeLength;
+  const transmittedLength = container.length - dataOffset;
   if (
     fileLength === 0 ||
     fileLength > MAX_FILE_BYTES ||
-    transmittedLength === 0 ||
+    transmittedLength <= 0 ||
     transmittedLength > MAX_FILE_BYTES ||
-    dataOffset + transmittedLength !== container.length
+    dataOffset > container.length
   ) {
     throw new Error("The recovered file length does not match its header.");
   }
@@ -262,7 +259,7 @@ export async function unpackFile(container: Uint8Array): Promise<OpticalFile> {
     type:
       textDecoder.decode(container.subarray(FILE_HEADER_LEN + nameLength, dataOffset)) ||
       "application/octet-stream",
-    sha256: container.slice(17, 49),
+    sha256: container.slice(9, 41),
     bytes,
     compression,
     transmittedSize: transmittedLength,
@@ -286,14 +283,12 @@ export interface FrameHeader {
 export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
   const out = new Uint8Array(HEADER_LEN + block.length + FRAME_CRC_LEN);
   const dv = new DataView(out.buffer);
-  dv.setUint8(0, MAGIC0);
-  dv.setUint8(1, MAGIC1);
-  dv.setUint16(2, h.sessionId, true);
-  dv.setUint32(4, h.seq, true);
-  dv.setUint16(8, h.k, true);
-  dv.setUint16(10, h.blockLen, true);
-  dv.setUint32(12, h.totalLen, true);
-  dv.setUint32(16, h.payloadFnv, true);
+  dv.setUint8(0, MAGIC);
+  dv.setUint16(1, h.sessionId, true);
+  dv.setUint32(3, h.seq, true);
+  dv.setUint16(7, h.blockLen, true);
+  dv.setUint32(9, h.totalLen, true);
+  dv.setUint32(13, h.payloadFnv, true);
   out.set(block, HEADER_LEN);
   dv.setUint32(HEADER_LEN + block.length, crc32(out.subarray(0, HEADER_LEN + block.length)), true);
   return out;
@@ -303,17 +298,19 @@ export function parseFrame(
   bytes: Uint8Array,
 ): { header: FrameHeader; block: Uint8Array } | null {
   if (bytes.length <= HEADER_LEN) return null;
-  if (bytes[0] !== MAGIC0 || bytes[1] !== MAGIC1) return null;
+  if (bytes[0] !== MAGIC) return null;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const blockLen = dv.getUint16(7, true);
+  const totalLen = dv.getUint32(9, true);
   const header: FrameHeader = {
-    sessionId: dv.getUint16(2, true),
-    seq: dv.getUint32(4, true),
-    k: dv.getUint16(8, true),
-    blockLen: dv.getUint16(10, true),
-    totalLen: dv.getUint32(12, true),
-    payloadFnv: dv.getUint32(16, true),
+    sessionId: dv.getUint16(1, true),
+    seq: dv.getUint32(3, true),
+    k: Math.ceil(totalLen / blockLen),
+    blockLen,
+    totalLen,
+    payloadFnv: dv.getUint32(13, true),
   };
-  if (header.k === 0 || header.blockLen === 0 || header.totalLen === 0) return null;
+  if (header.k === 0 || header.k > 0xffff || header.blockLen === 0 || header.totalLen === 0) return null;
   const packetLength = HEADER_LEN + header.blockLen;
   if (bytes.length !== packetLength && bytes.length !== packetLength + FRAME_CRC_LEN) return null;
   if (bytes.length === packetLength + FRAME_CRC_LEN &&
