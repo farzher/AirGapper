@@ -55,10 +55,22 @@ const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
+const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.1";
-const WEBGPU_REQUESTED = new URLSearchParams(location.search).get("webgpu") === "1";
-cameraActual.textContent = `AirGapper ${APP_VERSION} · WebGPU ${WEBGPU_REQUESTED ? "requested" : "off (safe mode)"}`;
+const receiverVersion = document.getElementById("receiver-version")!;
+const APP_VERSION = "0.1.2";
+const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
+let webgpuRequested = false;
+try {
+  // URL flags from older experimental builds must not silently survive as the
+  // production setting. Only this visible control can enable WebGPU.
+  webgpuRequested = localStorage.getItem(WEBGPU_SETTING_KEY) === "on";
+} catch {
+  webgpuRequested = false;
+}
+webgpuMode.value = webgpuRequested ? "on" : "off";
+receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
+cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -619,6 +631,15 @@ const changeCameraSettings = () => {
 cameraResolution.addEventListener("change", changeCameraSettings);
 cameraFps.addEventListener("change", changeCameraSettings);
 decodeWorkers.addEventListener("change", changeCameraSettings);
+webgpuMode.addEventListener("change", () => {
+  webgpuRequested = webgpuMode.value === "on";
+  try { localStorage.setItem(WEBGPU_SETTING_KEY, webgpuRequested ? "on" : "off"); } catch { /* optional */ }
+  receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
+  if (stream && !done) {
+    stopReceiver();
+    void start();
+  }
+});
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -719,7 +740,7 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
-  cameraActual.textContent = `AirGapper ${APP_VERSION} · WebGPU ${WEBGPU_REQUESTED ? "requested" : "off (safe mode)"}`;
+  cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -826,8 +847,8 @@ async function start() {
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
   const cameraLabel = activeCamera?.frameRate
-    ? `AirGapper ${APP_VERSION} · Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
-    : `AirGapper ${APP_VERSION} · Active: ${activeSize}`;
+    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps · WebGPU ${webgpuRequested ? "requested" : "OFF"}`
+    : `Active: ${activeSize} · WebGPU ${webgpuRequested ? "requested" : "OFF"}`;
   cameraActual.textContent = cameraLabel;
   syncPreviewAspect();
   setStatus("");
@@ -842,7 +863,7 @@ async function start() {
   // Android WebGPU drivers. Keep the implementation available for controlled
   // profiling (?webgpu=1), but never select it merely because the API exists.
   // The established VideoFrame/CPU tracked sampler remains the production path.
-  if (WEBGPU_REQUESTED) {
+  if (webgpuRequested) {
     void WebGpuQrSampler.create().then((sampler) => {
       if (startedGen !== captureGen || done) {
         sampler?.destroy();
