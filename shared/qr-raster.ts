@@ -36,6 +36,32 @@ export function rasterizeQr(
   return { size, pixels };
 }
 
+/** Overlay two same-size standard QR matrices into independent color channels.
+ * Green carries A, red carries B, and blue remains fully lit. */
+export function rasterizeDualQr(
+  moduleCount: number,
+  modulesA: ArrayLike<number>,
+  modulesB: ArrayLike<number>,
+  margin: number,
+): QrRaster {
+  const size = moduleCount + 2 * margin;
+  const pixels = new Uint32Array(size * size);
+  pixels.fill(WHITE);
+  for (let y = 0; y < moduleCount; y++) {
+    const row = (y + margin) * size + margin;
+    const src = y * moduleCount;
+    for (let x = 0; x < moduleCount; x++) {
+      const a = Boolean(modulesA[src + x]);
+      const b = Boolean(modulesB[src + x]);
+      // Uint32 is AABBGGRR on the little-endian platforms used by ImageData.
+      pixels[row + x] = a
+        ? b ? 0xffff0000 : 0xffff00ff // blue : magenta
+        : b ? 0xffffff00 : WHITE;     // cyan : white
+    }
+  }
+  return { size, pixels };
+}
+
 export interface QrGridRaster {
   /** Pixels across/down, with one outer margin and one shared margin between symbols. */
   width: number;

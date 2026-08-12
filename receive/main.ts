@@ -154,6 +154,8 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
+const channelAttemptTimes: number[] = [];
+const channelHitTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
@@ -164,6 +166,8 @@ const usefulFrameTimes: number[] = [];
 // answer "how much, in total, did this run do".
 let totalCaptures = 0;
 let totalDecodes = 0;
+let totalChannelAttempts = 0;
+let totalChannelHits = 0;
 let fullScans = 0;
 let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
@@ -281,6 +285,11 @@ function noteSequence(region: Region, seq: number): void {
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   completedJobs++;
+  const completedAt = performance.now();
+  totalChannelAttempts += completion.channelAttempts;
+  totalChannelHits += completion.channelHits;
+  for (let i = 0; i < completion.channelAttempts; i++) channelAttemptTimes.push(completedAt);
+  for (let i = 0; i < completion.channelHits; i++) channelHitTimes.push(completedAt);
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.error) {
@@ -615,6 +624,8 @@ function stopReceiver(): void {
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
+  channelAttemptTimes.length = 0;
+  channelHitTimes.length = 0;
   cropAttempts.clear();
   schedulerNoJobs = 0;
   cropMisses = 0;
@@ -634,6 +645,8 @@ function stopReceiver(): void {
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
+  totalChannelAttempts = 0;
+  totalChannelHits = 0;
   fullScans = 0;
   peakRegions = 0;
   capturesDropped = 0;
@@ -662,6 +675,7 @@ function stopReceiver(): void {
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
+  metric("m-success").textContent = "— decode";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
@@ -1167,6 +1181,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         cropsSubmitted,
         fullScans,
         decodes: totalDecodes,
+        channelAttempts: totalChannelAttempts,
+        channelHits: totalChannelHits,
+        channelSuccessRate: totalChannelAttempts ? Number((totalChannelHits / totalChannelAttempts).toFixed(3)) : null,
         trackedAttempts,
         trackedDecodes,
         trackedMissFallbacks,
@@ -1247,6 +1264,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = completedGoodputKbs(file.bytes.length, seconds).toFixed(1);
     metric("m-rate").textContent = `${rate} KB/s`;
+    metric("m-success").textContent = totalChannelAttempts
+      ? `${Math.round(totalChannelHits / totalChannelAttempts * 100)}% decode`
+      : "— decode";
     speedFeedback.className = "speed-feedback speed-good";
     if (isSnippet(file)) {
       progressLabel.textContent = "100%";
@@ -1455,9 +1475,15 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
+  prune(channelAttemptTimes);
+  prune(channelHitTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
+  const channelSuccess = channelHitTimes.length / Math.max(1, channelAttemptTimes.length);
+  metric("m-success").textContent = channelAttemptTimes.length
+    ? `${Math.round(channelSuccess * 100)}% decode`
+    : "— decode";
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const limit = metric("m-limit");
   limit.textContent = `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
