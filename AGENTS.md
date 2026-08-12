@@ -36,7 +36,7 @@ Build AirGapper: a simple, fully offline screen-to-camera file and text transfer
 - Reproduce and protect the retained QR/fountain protocol before optimizing it.
 - Do not add frameworks, page routers, duplicate HTML pages, custom optical symbols, color modulation, CDNs, analytics, remote fonts, or automatic network services.
 - Keep settings and diagnostics collapsed and secondary. Keep the light UI free of dark themes, gradients, marketing copy, and decorative clutter.
-- Keep visible UI text minimal. Prefer compact labels and values (for example, `500 KB remaining`) over explanatory status sentences.
+- Keep visible UI text minimal. Prefer compact values (for example, `500 KB`) over explanatory status sentences.
 - The root artifact must not depend on sibling scripts, stylesheets, workers, WASM, icons, or TypeScript. `Download offline` must save a complete working copy.
 - Do not publish upstream, projected, or codec-only speed as an AirGapper measurement.
 - Keep prose documentation to README.md, RETROSPECTIVE.md, UPSTREAM.md, AGENTS.md, and required legal files.

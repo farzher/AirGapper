@@ -773,7 +773,7 @@ function updateProgressEstimate() {
   progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
   progressLabel.textContent = `${shownPercent}%`;
   const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
-  transferSizeLabel.textContent = `${formatBytes(remainingBytes)} remaining`;
+  transferSizeLabel.textContent = formatBytes(remainingBytes);
   const liveKbs = liveGoodputKbs(performance.now());
   const liveUsefulFps = liveKbs > 0
     ? liveKbs * 1024 * expectedFountainOverhead(decoder.k) / decoder.blockLen
@@ -878,7 +878,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
-  transferSizeLabel.textContent = "0 B remaining";
+  transferSizeLabel.textContent = "0 B";
   etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
@@ -889,7 +889,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // Restore the root scroller so mobile browsers can use their normal
     // pull-to-refresh gesture on the completed screen.
     document.body.classList.remove("receive-mode");
-    transferSizeLabel.textContent = "0 B remaining";
+    transferSizeLabel.textContent = "0 B";
     etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
