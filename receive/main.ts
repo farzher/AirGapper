@@ -26,6 +26,7 @@ import {
   type SymbolInfo,
   type SymbolQuad,
 } from "../shared/worker-pool";
+import { PlainQrPolicy } from "../shared/plain-qr-policy";
 import { isSnippet, snippetText } from "../shared/snippet";
 import {
   fnv1a,
@@ -83,6 +84,7 @@ let captureGen = 0;
 let done = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 const plainQrDecoder = new TextDecoder("utf-8", { fatal: true });
+const plainQrPolicy = new PlainQrPolicy();
 
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
@@ -422,6 +424,7 @@ function stopReceiver(): void {
   minSeq = Infinity;
   maxSeq = -1;
   timeline.length = 0;
+  plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
   progressEl.style.display = "none";
@@ -721,17 +724,30 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   if (box) noteRegion(box, performance.now(), true, info);
+  // Plain senders show exactly one static symbol. Seeing a multi-code scene is
+  // another early signal that this is a fountain grid, even before one of its
+  // binary frames has decoded successfully.
+  if (regions.length > 1) plainQrPolicy.noteFramed();
   const parsed = parseFrame(bytes);
   if (done) return;
   if (!parsed) {
+    // Once a fountain decoder exists, unrelated normal QRs can never replace
+    // or complete that transfer. Only framed symbols are considered until the
+    // verified file finishes or the receiver is explicitly reset.
+    if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      if (text) finishPlainQr(text);
+      const settled = plainQrPolicy.addPlain(text, performance.now());
+      if (settled) finishPlainQr(settled);
     } catch {
       // Non-text binary QR content is not a plain snippet or AirGapper frame.
     }
     return;
   }
+  // A real AirGapper frame always wins. Plain QR candidates are delayed so a
+  // spurious text decode from a dense fountain grid cannot finish the receive
+  // path before zxing acquires one of the actual file frames.
+  plainQrPolicy.noteFramed();
   const { header, block } = parsed;
   // streamIdentity() covers every header field that has to hold constant, not
   // just the session id — see the note on it in protocol.ts.
