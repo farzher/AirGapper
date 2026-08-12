@@ -146,6 +146,9 @@ let requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.val
 function showRequestedCameraSettings(): void {
   const fps = requestedFps === undefined ? "auto fps" : `${requestedFps} fps`;
   cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${fps}`;
+  // Size the reserved viewfinder from the selected capture shape immediately;
+  // metadata will replace this with the negotiated camera shape once available.
+  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 showRequestedCameraSettings();
 const metric = (id: string) => document.getElementById(id)!;
@@ -488,11 +491,10 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
   }
 }
 
-/** The stylesheet guesses 4:3 for the camera box, but cameras rarely negotiate
- *  exactly that, and any mismatch used to be swallowed by object-fit: cover
- *  silently cropping — codes the decoder could see sat outside the visible
- *  preview. Sync the box to the stream's real shape instead; with the aspect
- *  matched, contain shows every pixel the decoder gets, edge to edge. */
+/** The selected resolution reserves the initial camera box. Cameras can still
+ *  negotiate a different shape, so metadata replaces that estimate with the
+ *  stream's real dimensions. With the aspect matched, contain shows every
+ *  capture pixel edge to edge. */
 function syncPreviewAspect() {
   if (video.videoWidth && video.videoHeight) {
     cameraBox.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
