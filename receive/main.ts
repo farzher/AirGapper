@@ -61,7 +61,6 @@ const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
 const scanSightingLegend = document.getElementById("scan-sighting-legend")!;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.25";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -146,7 +145,7 @@ let requestedHeight = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolut
 let requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
 function showRequestedCameraSettings(): void {
   const fps = requestedFps === undefined ? "auto fps" : `${requestedFps} fps`;
-  cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${fps} · v${APP_VERSION}`;
+  cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${fps}`;
 }
 showRequestedCameraSettings();
 const metric = (id: string) => document.getElementById(id)!;
@@ -861,8 +860,8 @@ async function start() {
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
   cameraActual.textContent = activeCamera?.frameRate
-    ? `${activeSize} · ${Math.round(activeCamera.frameRate)} fps · v${APP_VERSION}`
-    : `${activeSize} · v${APP_VERSION}`;
+    ? `${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
+    : activeSize;
   syncPreviewAspect();
   setStatus("");
 
