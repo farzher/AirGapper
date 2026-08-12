@@ -170,9 +170,37 @@ ctx.onmessage = async (e: MessageEvent) => {
           tracked: true, crc32: track.crc32,
         });
       }
+      // The batched fast path is opportunistic, just like readTracked below.
+      // If every known transform misses, run stock acquisition on the same
+      // pixels instead of reporting a false hard failure. This also discovers
+      // tracks omitted from an incomplete grid lock.
+      let fallbackAttempted = false;
+      if (symbols.length === 0) {
+        fallbackAttempted = true;
+        const vec = zx.readFull(ptr, pw, ph, true, 16, true);
+        try {
+          for (let i = 0; i < vec.size(); i++) {
+            const result = vec.get(i);
+            if (result.valid && result.bytes.length > 0) {
+              symbols.push({
+                bytes: result.bytes,
+                box: boundsOf(result.position, ox, oy),
+                quad: shifted(result.position, ox, oy),
+                modules: result.modules,
+                tracked: false,
+              });
+            } else {
+              const box = boundsOf(result.position, ox, oy);
+              if (box.w > 0 && box.h > 0) sightings.push(box);
+            }
+          }
+        } finally {
+          vec.delete();
+        }
+      }
       ctx.postMessage({
-        id, symbols, sightings: [], full: false, trackedAttempted: true,
-        trackedHit: symbols.length > 0, fallbackAttempted: false,
+        id, symbols, sightings, full: false, trackedAttempted: true,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
         latencyMs: performance.now() - startedAt,
       });
       return;

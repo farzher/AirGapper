@@ -61,7 +61,7 @@ const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
 const scanSightingLegend = document.getElementById("scan-sighting-legend")!;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.24";
+const APP_VERSION = "0.1.25";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -971,9 +971,9 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   scanDialogStatus.textContent = completion.error
     ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.error}`
     : tracked
-      ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded`
+      ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded${completion.fallbackAttempted ? ` · fallback searched${completion.sightingCount ? ` · ${completion.sightingCount} found` : ""}` : ""}`
       : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
-  scanSightingLegend.hidden = tracked;
+  scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
   scanDialog.showModal();
 }
 
