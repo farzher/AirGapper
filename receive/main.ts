@@ -527,7 +527,7 @@ async function start() {
   setStatus("");
 
   pool.resize(workerCount);
-  void applyCameraExtras();
+  await applyCameraExtras();
 
   cameraStartedTs = performance.now();
   captureGen++;
@@ -536,16 +536,27 @@ async function start() {
   await requestScreenWakeLock();
 }
 
-/** Report what the camera actually negotiated — iOS in particular will happily
- *  hand back 30 fps after accepting a request for 60. */
 /** Use what this camera can actually do, probed rather than UA-sniffed.
- *  Continuous autofocus is applied silently — a lens hunting between frames is
- *  the top decode killer, and a camera that refuses is left as it was. Frame
- *  rates the current mode can't reach are grayed out. */
+ *  The APK starts with a deliberately broad getUserMedia request because some
+ *  old Android providers wedge after rejecting a constrained request. Their
+ *  default is often only 10 fps, so raise the rate on the already-live track.
+ *  Continuous autofocus keeps the lens from hunting between frames. */
 async function applyCameraExtras() {
   const track = stream?.getVideoTracks()[0];
   if (!track) return;
   const caps = probeCameraCapabilities(track);
+  if (isAndroidApp()) {
+    const reportedMax = caps.maxFrameRate;
+    const target = reportedMax && Number.isFinite(reportedMax)
+      ? Math.min(requestedFps, reportedMax)
+      : requestedFps;
+    try {
+      await track.applyConstraints({ frameRate: { ideal: target } });
+    } catch {
+      // Keep the broadly negotiated stream when this camera refuses a live
+      // frame-rate change; restarting it can wedge older providers.
+    }
+  }
   if (caps.continuousFocus) {
     await applyAdvancedConstraint(track, { focusMode: "continuous" });
   }
