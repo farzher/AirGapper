@@ -31,18 +31,6 @@ export interface DecimenResultVector {
 export interface DecimenModule {
   _malloc(bytes: number): number;
   _free(ptr: number): void;
-  _createTrackedDecoder(maxTracks: number, maxDimension: number): number;
-  _destroyTrackedDecoder(handle: number): void;
-  _setTrackedDecoderTrack(handle: number, slot: number, id: number, dimension: number,
-    x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number): number;
-  _clearTrackedDecoderTrack(handle: number, slot: number): void;
-  _setTrackedDecoderSampleMap(handle: number, slot: number, xyPtr: number, pointCount: number): number;
-  _setTrackedDecoderTrackCRC32(handle: number, slot: number, enabled: number): void;
-  _setTrackedDecoderFallbackBudget(handle: number, maxFallbacks: number): void;
-  _decodeTrackedBatchY(handle: number, ptr: number, width: number, height: number, stride: number,
-    resultsPtr: number, resultCapacity: number, outputPtr: number, outputCapacity: number, metricsPtr: number): number;
-  _decodeTrackedBatchRGBA(handle: number, ptr: number, width: number, height: number, stride: number,
-    resultsPtr: number, resultCapacity: number, outputPtr: number, outputCapacity: number, metricsPtr: number): number;
   HEAPU8: Uint8Array;
   /** Codec version (decimen-codec package.json at build time), e.g. "0.1.0". */
   version(): string;
