@@ -127,7 +127,6 @@ const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
 const cfgChannels = document.getElementById("cfg-channels") as HTMLSelectElement;
-const cfgHold = document.getElementById("cfg-hold") as HTMLSelectElement;
 
 function selectedFps(): number {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
@@ -395,7 +394,6 @@ function restoreSendSettings(): void {
       scaling?: unknown;
       layout?: unknown;
       channels?: unknown;
-      holdRefreshes?: unknown;
     } | null;
     if (!saved) return;
     if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
@@ -409,9 +407,6 @@ function restoreSendSettings(): void {
       cfgLayout.value = saved.layout;
     }
     if (saved.channels === "same" || saved.channels === "dual") cfgChannels.value = saved.channels;
-    if (saved.holdRefreshes === 2 || saved.holdRefreshes === 3 || saved.holdRefreshes === 4) {
-      cfgHold.value = String(saved.holdRefreshes);
-    }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
@@ -425,7 +420,6 @@ function saveSendSettings(): void {
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
       channels: cfgChannels.value,
-      holdRefreshes: Number(cfgHold.value),
     }));
   } catch {
     // A blocked or full store must never prevent a transfer.
@@ -472,7 +466,7 @@ async function main() {
   const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgChannels, cfgHold]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgChannels]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
@@ -510,7 +504,6 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = selectedFps();
-  const holdRefreshes = Number(cfgHold.value) || 2;
   const channelMode = cfgChannels.value === "same" ? "same" : "dual";
   const sizeLevel = Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
@@ -683,7 +676,6 @@ async function startStream(revealStage = false) {
             },
             settings: {
               txFps,
-              holdRefreshes,
               channelMode,
               frameBytes,
               ecc,
@@ -762,33 +754,24 @@ async function startStream(revealStage = false) {
   }
   if (staticStream) return;
 
-  // FPS remains the requested per-square symbol rate. Minimum hold only caps
-  // rates that would change a square in fewer than 2/3/4 physical refreshes.
-  // Thus 15 fps on a 360 Hz monitor naturally holds for about 24 refreshes.
+  // FPS is the requested per-square symbol rate. Grid cells are staggered
+  // across each interval so they do not all transition on the same refresh.
   const interval = 1000 / txFps;
   const subInterval = interval / gridCodes;
-  const lastPaintRefresh = new Array<number>(gridCodes).fill(0);
-  let refreshCount = 0;
   let cellCursor = 0;
   let nextAt = performance.now() + interval;
   const tick = (now: number) => {
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
-    refreshCount++;
     if (now < nextAt) return;
     if (now - nextAt > interval) nextAt = now;
     while (now >= nextAt) {
-      if (refreshCount - lastPaintRefresh[cellCursor]! < holdRefreshes) {
-        nextAt = now;
-        break;
-      }
       const img = queue.shift();
       if (!img) {
         nextAt = now + subInterval;
         break;
       }
       paintCell(img, cellCursor);
-      lastPaintRefresh[cellCursor] = refreshCount;
       cellCursor = (cellCursor + 1) % gridCodes;
       nextAt += subInterval;
       pump(1);
