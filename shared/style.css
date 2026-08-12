@@ -270,8 +270,8 @@ input[type="range"] { accent-color: #222; }
 #transfer-size-label:not(:empty)::before { content: "·"; margin: 0 8px; }
 .pipeline-metrics { display: flex; gap: 14px; }
 .pipeline-metrics strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-#m-limit { display: inline-block; width: 8ch; margin-left: .5ch; color: var(--bad); font-weight: 700; font-variant-numeric: tabular-nums; visibility: hidden; }
-#m-limit.cpu-bound { visibility: visible; }
+#m-limit { display: none; margin-right: 8px; color: var(--bad); font-weight: 700; font-variant-numeric: tabular-nums; }
+#m-limit.cpu-bound { display: inline; }
 #result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 #result:empty { display: none; }
 .received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
