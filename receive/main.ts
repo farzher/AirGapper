@@ -55,13 +55,12 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const decoderActual = document.getElementById("decoder-actual")!;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.18";
+const APP_VERSION = "0.1.19";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -340,9 +339,6 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     trackedMissFallbacks++;
   }
 
-  decoderActual.textContent = completion.error
-    ? `Decode error · ${completion.error}`
-    : `${completion.latencyMs.toFixed(0)} ms · ${completion.trackedHit ? "tracked hit" : completion.trackedAttempted ? "tracked miss" : "acquisition"}`;
   finishScanCapture(id, completion);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
@@ -711,8 +707,10 @@ function stopReceiver(): void {
   result.replaceChildren();
   preview.style.display = "none";
   cameraActual.textContent = "";
-  decoderActual.textContent = "";
   pendingScanCapture = null;
+  captureNextScan = false;
+  captureScanBtn.textContent = "Capture scan";
+  captureScanBtn.disabled = false;
   if (scanDialog.open) scanDialog.close();
   scanCapture.width = 0;
   scanCapture.height = 0;
@@ -885,7 +883,8 @@ let pendingScanCapture: {
 } | null = null;
 captureScanBtn.addEventListener("click", () => {
   captureNextScan = true;
-  decoderActual.textContent = "Capturing next submitted scan…";
+  captureScanBtn.textContent = "Capturing…";
+  captureScanBtn.disabled = true;
 });
 closeScanBtn.addEventListener("click", () => scanDialog.close());
 scanDialog.addEventListener("click", (event) => {
@@ -910,6 +909,8 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const capture = pendingScanCapture;
   if (!capture || capture.id !== id) return;
   pendingScanCapture = null;
+  captureScanBtn.textContent = "Capture scan";
+  captureScanBtn.disabled = false;
   scanCapture.width = capture.image.width;
   scanCapture.height = capture.image.height;
   const ctx = scanCapture.getContext("2d")!;
@@ -932,10 +933,10 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   ctx.strokeStyle = "#f2a51a";
   ctx.lineWidth = 4;
   for (const box of completion.sightings) ctx.strokeRect(box.x - capture.ox, box.y - capture.oy, box.w, box.h);
-  const mode = capture.full ? "Full-frame acquisition" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
+  const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
   scanDialogStatus.textContent = completion.error
     ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.error}`
-    : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.latencyMs.toFixed(0)} ms · ${completion.symbolCount} decoded · ${completion.sightingCount} detected`;
+    : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} detected`;
   scanDialog.showModal();
 }
 
@@ -1080,12 +1081,22 @@ function captureFrame() {
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
     if (regionInflightCount(r) >= perRegionCapacity) continue;
-    const size = Math.max(r.w, r.h);
+    // The quad is the geometry actually passed to tracked decoding, so crop
+    // around it—not the independently updated axis-aligned region box. A stale
+    // box could otherwise clip half the QR while the search quad sat outside.
+    const points = r.quad
+      ? [r.quad.topLeft, r.quad.topRight, r.quad.bottomRight, r.quad.bottomLeft]
+      : [{ x: r.x, y: r.y }, { x: r.x + r.w, y: r.y + r.h }];
+    const left = Math.min(...points.map((point) => point.x));
+    const top = Math.min(...points.map((point) => point.y));
+    const right = Math.max(...points.map((point) => point.x));
+    const bottom = Math.max(...points.map((point) => point.y));
+    const size = Math.max(right - left, bottom - top);
     const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
-    const x = Math.max(0, Math.floor(r.x - pad));
-    const y = Math.max(0, Math.floor(r.y - pad));
-    const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
-    const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
+    const x = Math.max(0, Math.floor(left - pad));
+    const y = Math.max(0, Math.floor(top - pad));
+    const w = Math.min(vw - x, Math.ceil(right + pad) - x);
+    const h = Math.min(vh - y, Math.ceil(bottom + pad) - y);
     if (w < 32 || h < 32) continue;
     ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
     captureSubmittedScan(ctx, w, h, x, y, false, r.quad ? [r.quad] : []);
