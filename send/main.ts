@@ -45,7 +45,8 @@ const LOOKAHEAD = 3;
 // Advanced layouts may reduce that to one or tile a denser grid across the
 // sender's whole screen; none of these choices changes the wire format.
 const DEFAULT_GRID_CODES = 12;
-const FILL_GRID_CODES = 48;
+const MAX_FILL_GRID_CODES = 48;
+const MIN_FILL_MODULE_PIXELS = 2;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
 type LayoutMode = "four-three" | "single" | "fill";
@@ -54,17 +55,44 @@ function selectedLayout(): LayoutMode {
   return cfgLayout.value === "single" || cfgLayout.value === "fill" ? cfgLayout.value : "four-three";
 }
 
-function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
+const moduleCountCache = new Map<number, number>();
+function moduleCountForFrame(frameBytes: number): number {
+  const cached = moduleCountCache.get(frameBytes);
+  if (cached) return cached;
+  const qr = QRCode.create([{ data: new Uint8Array(frameBytes), mode: "byte" } as unknown as QRCode.QRCodeSegment], {
+    errorCorrectionLevel: "L",
+    maskPattern: 4,
+  });
+  moduleCountCache.set(frameBytes, qr.modules.size);
+  return qr.modules.size;
+}
+
+function layoutGrid(mode = selectedLayout(), modules = 0): { cols: number; rows: number; codes: number } {
   if (mode === "single") return { cols: 1, rows: 1, codes: 1 };
   if (mode === "four-three") return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
 
-  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
-  // Fill mode is deliberately much denser than the camera-friendly default.
-  // Shape roughly 48 complete cells to the actual viewport so the screen is
-  // tiled with QRs instead of merely rotating the same twelve-code layout.
-  const rows = Math.max(1, Math.round(Math.sqrt(FILL_GRID_CODES / aspect)));
-  const cols = Math.max(1, Math.round(aspect * rows));
-  return { cols, rows, codes: cols * rows };
+  // Fill with as many complete cells as the current physical display can show
+  // at two device pixels per QR module. The cap protects generation and decode
+  // throughput on high-DPI screens; denser byte settings naturally yield
+  // fewer, larger codes instead of overflowing the viewport.
+  const dpr = window.devicePixelRatio || 1;
+  const usableHeight = window.innerHeight - (document.body.classList.contains("qr-full") ? stageBottom.offsetHeight : 0);
+  const stride = Math.max(1, modules + GRID_MARGIN);
+  const widthModules = (window.innerWidth * dpr) / MIN_FILL_MODULE_PIXELS;
+  const heightModules = (Math.max(1, usableHeight) * dpr) / MIN_FILL_MODULE_PIXELS;
+  const maxCols = Math.max(1, Math.floor((widthModules - GRID_MARGIN) / stride));
+  const maxRows = Math.max(1, Math.floor((heightModules - GRID_MARGIN) / stride));
+  const aspect = window.innerWidth / Math.max(1, usableHeight);
+  let best = { cols: 1, rows: 1, codes: 1, error: Number.POSITIVE_INFINITY };
+  for (let rows = 1; rows <= maxRows; rows++) {
+    for (let cols = 1; cols <= maxCols; cols++) {
+      const codes = cols * rows;
+      if (codes > MAX_FILL_GRID_CODES) continue;
+      const error = Math.abs(Math.log((cols / rows) / aspect));
+      if (codes > best.codes || (codes === best.codes && error < best.error)) best = { cols, rows, codes, error };
+    }
+  }
+  return { cols: best.cols, rows: best.rows, codes: best.codes };
 }
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
@@ -418,14 +446,17 @@ async function main() {
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
   restoreSendSettings();
-  window.addEventListener("resize", () => resizeDisplay?.());
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
     const level = Number(cfgSize.value);
     const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    const { codes } = layoutGrid();
+    const { codes } = layoutGrid(selectedLayout(), moduleCountForFrame(bytes));
     sizeValue.textContent = `${formatBytes(bytes)} · ${codes} ${codes === 1 ? "QR" : "QRs"}`;
   };
+  window.addEventListener("resize", () => {
+    updateControlLabels();
+    resizeDisplay?.();
+  });
   for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("input", updateControlLabels);
     el.addEventListener("change", () => {
@@ -466,7 +497,8 @@ async function startStream(revealStage = false) {
   // parallel maximum-density symbols. Each remains an ordinary independent
   // fountain frame, so this does not change the wire protocol.
   const layoutMode = selectedLayout();
-  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
+  const expectedModules = moduleCountForFrame(frameBytes);
+  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode, expectedModules);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
   const blockLen = blockLength(frameBytes);
@@ -528,7 +560,12 @@ async function startStream(revealStage = false) {
       budgetH = rect.height - stageBottom.offsetHeight - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
     }
     const availableScale = Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH);
-    scale = fitScaling ? Math.max(Number.EPSILON, availableScale) : Math.max(1, Math.floor(availableScale));
+    // Integer scaling must never force scale 1 into a viewport where it does
+    // not fit. In that exceptional case use the exact fractional fit: a
+    // slightly softened QR is preferable to clipping finder patterns.
+    scale = fitScaling || availableScale < 1
+      ? Math.max(Number.EPSILON, availableScale)
+      : Math.floor(availableScale);
     staging.width = totalW;
     staging.height = totalH;
     canvas.width = Math.max(1, Math.round(totalW * scale));
@@ -571,7 +608,20 @@ async function startStream(revealStage = false) {
       version = qr.version;
       modules = qr.modules.size;
       sizeCanvas();
-      resizeDisplay = sizeCanvas;
+      let layoutRestartTimer: ReturnType<typeof setTimeout> | undefined;
+      resizeDisplay = () => {
+        const desired = layoutGrid(layoutMode, modules);
+        if (desired.cols !== gridCols || desired.rows !== gridRows) {
+          // Resizing/orientation/fullscreen can cross a two-pixels-per-module
+          // boundary. Debounce regeneration so a resize drag does not build a
+          // fresh fountain queue for every intermediate browser event.
+          clearTimeout(layoutRestartTimer);
+          layoutRestartTimer = setTimeout(() => {
+            if (gen === generation) void startStream();
+          }, 120);
+        }
+        sizeCanvas();
+      };
       // Scroll only now: before sizeCanvas() the canvas is still 16×16, so the
       // scroll target would be the wrong height.
       if (revealStage) scrollStageIntoView();
