@@ -612,8 +612,11 @@ function classifyGridSlots(vw: number, vh: number): Region[] {
     region.pixelsPerModule = shortestEdge / region.dim;
     if (region.visibleFraction < 0.1) region.slotState = "OFFSCREEN";
     else if (region.visibleFraction < 0.88) region.slotState = "PARTIAL";
-    else if (region.pixelsPerModule < 2.25) region.slotState = "LOW_QUALITY";
     else if (region.consecutiveMisses >= 6) region.slotState = "LOST";
+    // Detection becomes unreliable before direct sampling does. Keep a fully
+    // visible low-density slot eligible for the tracked sampler down to the
+    // practical two-pixel/module floor instead of silently scheduling nothing.
+    else if (region.pixelsPerModule < 2) region.slotState = "LOW_QUALITY";
     else region.slotState = "ACTIVE";
     if (region.slotState !== "OFFSCREEN") visible.push(region);
   }
@@ -624,7 +627,7 @@ function slotUsefulness(region: Region): number {
   const success = region.decodeAttempts ? region.decodeConfidence : 0.65;
   const quality = Math.min(1.5, region.pixelsPerModule / 4);
   const cost = region.averageDecodeCostMs || 8;
-  const stateWeight = region.slotState === "ACTIVE" ? 1 : region.slotState === "LOST" ? 0.35 : 0;
+  const stateWeight = region.slotState === "ACTIVE" ? 1 : region.slotState === "LOST" ? 0.35 : region.slotState === "LOW_QUALITY" ? 0.2 : 0;
   return stateWeight * region.visibleFraction * quality * (0.25 + success) / Math.sqrt(cost);
 }
 
@@ -1234,12 +1237,14 @@ function captureFrame() {
     expectedRegionsAt = now;
   }
   const visibleGridSlots = classifyGridSlots(vw, vh);
+  const gridNeedsDiscovery = visibleGridSlots.some((region) =>
+    !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === undefined && region.decoded && region.consecutiveMisses >= 4);
-  gridLattice.noteMissing(visibleGridSlots.some((region) => region.slotState === "LOST"));
+  gridLattice.noteMissing(gridNeedsDiscovery);
   const scanInterval =
     live === 0
       ? ACQUISITION_SCAN_MS
-      : live < expectedRegions || trackingUnhealthy
+      : live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery
         ? FULL_SCAN_DEGRADED_MS
         : FULL_SCAN_INTERVAL_MS;
   // A due full scan takes priority over crops, deliberately. The crop loop
@@ -1249,10 +1254,11 @@ function captureFrame() {
   // rare (1.5 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
   // next frame — including crops of probationary sighting regions, which now
   // run between cold scans instead of being crowded out by them.
-  // Whole-frame detection belongs only to SEARCH/REACQUIRE. A hypothesis and
-  // a locked grid spend decoder work at predicted slots; one good QR can no
-  // longer turn into a tight global crop or repeated whole-frame discovery.
-  const fullScanDue = !gridLattice.active && now - lastFullScan > scanInterval;
+  // Predicted crops are the fast path, never the only path. A single imperfect
+  // anchor, display transition, or missed neighbor must not suppress global
+  // reacquisition forever. Degraded grids rescan quickly; a healthy grid still
+  // gets a sparse scan that can correct motion and discover every visible QR.
+  const fullScanDue = now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
     return;
@@ -1332,7 +1338,7 @@ function captureFrame() {
   // slots consume no worker time and do not count as failures.
   const eligible = gridLattice.active
     ? visibleGridSlots
-      .filter((region) => region.slotState === "ACTIVE" || region.slotState === "LOST")
+      .filter((region) => region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY")
       .sort((a, b) => slotUsefulness(b) - slotUsefulness(a))
     : [...regions];
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;

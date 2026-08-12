@@ -167,7 +167,12 @@ export class GridLattice {
       const codeCount = this.candidate.layout.cols * this.candidate.layout.rows;
       const largeSingle = Math.max(detection.box.w / this.frameWidth, detection.box.h / this.frameHeight) > 0.38;
       const scanCount = new Set(this.observations.map((item) => item.scanId)).size;
-      if (distinct >= 2 || (codeCount === 1 && largeSingle && scanCount >= 2)) this.state = "GRID_LOCK";
+      // New senders put the exact layout and physical slot in every CRC-checked
+      // packet. One decoded quad therefore fixes all eight homography degrees
+      // of freedom and identifies the entire lattice immediately; waiting for
+      // a second QR only traps acquisition behind the no-longer-needed global
+      // detector. Legacy packets still earn a lock from repeated evidence.
+      if (declaredLayout || distinct >= 2 || (codeCount === 1 && largeSingle && scanCount >= 2)) this.state = "GRID_LOCK";
       else this.state = "GRID_HYPOTHESIS";
     }
     return this.snapshot();

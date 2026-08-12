@@ -232,33 +232,40 @@ ctx.onmessage = async (e: MessageEvent) => {
 
     if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       fallbackAttempted = !full;
-      // Full scans get returnErrors (sightings live there — error results
-      // COUNT against the symbol cap, hence the headroom above 12 codes) and a
-      // crop fallback stays in the cheapest configuration. tryHarder stays on
-      // everywhere: real marginal captures are where it earns its keep.
-      const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
-      try {
-        for (let i = 0; i < vec.size(); i++) {
-          const r = vec.get(i);
-          if (r.valid && r.bytes.length > 0) {
-            symbols.push({
-              bytes: r.bytes,
-              box: boundsOf(r.position, ox, oy),
-              quad: shifted(r.position, ox, oy),
-              modules: r.modules,
-              tracked: false,
-            });
-          } else if (full) {
-            // A symbol zxing DETECTED but could not decode (glare or noise past
-            // the ECC budget) is still a fix on where a code sits — the
-            // receiver aims a crop there, and crops decode where full frames
-            // fail. Positions stay pixel-accurate through a ChecksumError.
-            const box = boundsOf(r.position, ox, oy);
-            if (box.w > 0 && box.h > 0) sightings.push(box);
+      const appendResults = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
+        try {
+          for (let i = 0; i < vec.size(); i++) {
+            const r = vec.get(i);
+            if (r.valid && r.bytes.length > 0) {
+              symbols.push({
+                bytes: r.bytes,
+                box: boundsOf(r.position, ox, oy),
+                quad: shifted(r.position, ox, oy),
+                modules: r.modules,
+                tracked: false,
+              });
+            } else if (includeErrors) {
+              // A symbol zxing DETECTED but could not decode (glare or noise
+              // past ECC) still supplies a useful crop position.
+              const box = boundsOf(r.position, ox, oy);
+              if (box.w > 0 && box.h > 0) sightings.push(box);
+            }
           }
+        } finally {
+          vec.delete();
         }
-      } finally {
-        vec.delete();
+      };
+      if (full) {
+        // Error results count against ZXing's symbol limit. Dense neighboring
+        // QRs can produce dozens of plausible finder triples, previously
+        // filling all 16 entries before obvious valid codes were considered.
+        // Decode valid symbols without error noise first. Only a total miss
+        // pays for a high-capacity detector pass to seed recovery crops.
+        appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
+        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 64, true), true);
+      } else {
+        // Crop fallback stays in the cheapest detector configuration.
+        appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
       }
     }
     ctx.postMessage({
