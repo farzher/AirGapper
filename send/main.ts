@@ -38,6 +38,7 @@ import { isAndroid, isIOS } from "../shared/platform";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
+import { readFileBytes, replaceChildren } from "../shared/dom";
 
 const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
@@ -181,8 +182,8 @@ function updateFilePicker(): void {
     total.textContent = selectedFile.compression === "gzip"
       ? `${formatBytes(originalTotal)} · ${formatBytes(selectedFile.transmittedSize)} gzip`
       : formatBytes(originalTotal);
-    selectionSummary.replaceChildren(names, total);
-  } else selectionSummary.replaceChildren();
+    replaceChildren(selectionSummary, names, total);
+  } else replaceChildren(selectionSummary);
 }
 
 /** Tear the stream down and disarm the picker. The input is cleared so the
@@ -315,12 +316,12 @@ async function selectFiles(fileList: FileList | readonly File[]): Promise<void> 
     }
     if (files.length === 1) {
       const file = files[0]!;
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      const bytes = await readFileBytes(file);
       return { name: file.name, size: file.size, packed: await packFile(file.name, file.type, bytes), files: [{ name: file.name, size: file.size }] };
     }
     const entries = await Promise.all(files.map(async (file) => ({
       name: file.name,
-      bytes: new Uint8Array(await file.arrayBuffer()),
+      bytes: await readFileBytes(file),
     })));
     const archive = makeZip(entries);
     return {

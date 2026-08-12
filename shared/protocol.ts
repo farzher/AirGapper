@@ -72,6 +72,9 @@ async function gzipAsync(bytes: Uint8Array): Promise<Uint8Array> {
  * this an 80 KB stream could claim to be small and inflate to gigabytes.
  */
 async function gunzipAsync(bytes: Uint8Array, maxBytes: number): Promise<Uint8Array> {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("This older browser cannot unpack a compressed transfer. Send it again without compression.");
+  }
   const inflated = new Blob([bytes as BlobPart])
     .stream()
     .pipeThrough(new DecompressionStream("gzip"));
@@ -181,7 +184,8 @@ export async function packFile(
   }
 
   // Too small to be worth a gzip header, or a format gzip cannot help with.
-  const tryGzip = bytes.length >= 768 && (tryCompression || !isPrecompressedType(type));
+  const tryGzip = typeof CompressionStream !== "undefined" &&
+    bytes.length >= 768 && (tryCompression || !isPrecompressedType(type));
   const [sha256, compressed] = await Promise.all([
     digest(bytes),
     tryGzip ? gzipAsync(bytes) : Promise.resolve(undefined),

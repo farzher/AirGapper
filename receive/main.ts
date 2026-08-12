@@ -39,6 +39,7 @@ import { statusLine } from "../shared/status-line";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
+import { replaceChildren } from "../shared/dom";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const video = document.getElementById("video") as HTMLVideoElement;
@@ -425,7 +426,7 @@ function stopReceiver(): void {
   maxSeq = -1;
   timeline.length = 0;
   plainQrPolicy.reset();
-  result.replaceChildren();
+  replaceChildren(result);
   preview.style.display = "none";
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
@@ -949,7 +950,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
 
     progressLabel.textContent = "100%";
     setStatus("");
-    result.replaceChildren();
+    replaceChildren(result);
     if (file.type === "application/vnd.airgapper.files+zip") {
       const entries = readStoredZip(file.bytes);
       for (const entry of entries) await appendReceivedFile(entry, result, true);
@@ -977,7 +978,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     detail.textContent =
       "Nothing usable came out of that stream. Restart the sender, then scan it again — " +
       "a partial transfer costs nothing but the time.";
-    result.replaceChildren(heading, detail, restartButton("Try again"));
+    replaceChildren(result, heading, detail, restartButton("Try again"));
   }
 }
 
@@ -1131,7 +1132,7 @@ function showSnippet(text: string) {
   });
   actions.append(copy);
 
-  result.replaceChildren(body, actions);
+  replaceChildren(result, body, actions);
 }
 
 function updateStats() {
