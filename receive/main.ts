@@ -51,6 +51,7 @@ import { readStoredZip, type ZipEntry } from "../shared/zip";
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
+const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
@@ -70,7 +71,12 @@ const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
-const workerCount = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const autoWorkerCount = Math.min(6, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
+autoWorkerOption.textContent = `Auto (${autoWorkerCount} worker${autoWorkerCount === 1 ? "" : "s"})`;
+function selectedWorkerCount(): number {
+  return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(6, Number(decodeWorkers.value) || autoWorkerCount));
+}
 // Camera maximum resolution is not maximum optical throughput: a 4K video
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
@@ -89,12 +95,16 @@ function restoreCameraSettings(): void {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
       resolution?: unknown;
       fps?: unknown;
+      workers?: unknown;
     } | null;
     if (!saved) return;
     if (typeof saved.resolution === "string" && saved.resolution in CAMERA_RESOLUTIONS) {
       cameraResolution.value = saved.resolution;
     }
     if (saved.fps === "auto" || saved.fps === "30" || saved.fps === "60") cameraFps.value = saved.fps;
+    if (saved.workers === "auto" || ["1", "2", "3", "4", "5", "6"].includes(String(saved.workers))) {
+      decodeWorkers.value = String(saved.workers);
+    }
   } catch {
     // Camera defaults still work when storage is unavailable or corrupt.
   }
@@ -105,6 +115,7 @@ function saveCameraSettings(): void {
     localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
       resolution: cameraResolution.value,
       fps: cameraFps.value,
+      workers: decodeWorkers.value,
     }));
   } catch {
     // A blocked store must never prevent camera use.
@@ -575,6 +586,7 @@ const changeCameraSettings = () => {
 };
 cameraResolution.addEventListener("change", changeCameraSettings);
 cameraFps.addEventListener("change", changeCameraSettings);
+decodeWorkers.addEventListener("change", changeCameraSettings);
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -778,7 +790,7 @@ async function start() {
   syncPreviewAspect();
   setStatus("");
 
-  pool.resize(workerCount);
+  pool.resize(selectedWorkerCount());
   void applyCameraExtras();
 
   cameraStartedTs = performance.now();
@@ -1211,7 +1223,13 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         events: pipelineEvents,
       },
       workers: pool.size,
-      requested: { width: requestedWidth, height: requestedHeight, fps: requestedFps ?? "auto", workers: workerCount },
+      requested: {
+        width: requestedWidth,
+        height: requestedHeight,
+        fps: requestedFps ?? "auto",
+        workers: selectedWorkerCount(),
+        workerSetting: decodeWorkers.value,
+      },
       camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: camera.facingMode ?? null } : null,
       cameraCapabilities: track ? probeCameraCapabilities(track) : null,
       device: { cores: navigator.hardwareConcurrency ?? null, ua: navigator.userAgent },
