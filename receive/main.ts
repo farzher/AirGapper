@@ -107,18 +107,19 @@ const pool = new DecodeWorkerPool(
   (id, symbolCount) => noteDecodeCompleted(id, symbolCount),
 );
 const captureTimes: number[] = [];
-const decodeTimes: number[] = [];
+// Distinct sender symbols acquired, not successful attempts. A 10 fps
+// single-code sender can therefore never misleadingly read as 30 QR/s merely
+// because the camera decoded the same displayed symbol three times.
+const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
-const cropAttemptTimes: number[] = [];
-const cropMissTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
 const usefulFrameTimes: number[] = [];
 
 // Run-level totals for the diagnostics report (npm run diagnostics). The
-// captureTimes/decodeTimes windows above are pruned for the live fps metrics
-// and cannot answer "how much, in total, did this run do".
+// The live timestamp windows above are pruned for the UI rates and cannot
+// answer "how much, in total, did this run do".
 let totalCaptures = 0;
 let totalDecodes = 0;
 let fullScans = 0;
@@ -182,9 +183,6 @@ function noteDecodeCompleted(id: number, symbolCount: number): void {
   const region = cropAttempts.get(id);
   if (!region) return;
   cropAttempts.delete(id);
-  const now = performance.now();
-  cropAttemptTimes.push(now);
-  if (symbolCount === 0) cropMissTimes.push(now);
   if (regions.includes(region)) noteOutcome(region, symbolCount > 0);
 }
 
@@ -310,6 +308,7 @@ function captureQualityRate(region: Region): number {
 }
 
 function captureQualityColor(rate: number): string {
+  if (rate === 1) return "#42e8ff"; // every recent attempt decoded
   if (rate >= 0.9) return "#35d66f"; // strong lock
   if (rate >= 0.65) return "#a9c93d";
   if (rate >= 0.35) return "#ffb23e";
@@ -389,24 +388,6 @@ function drawOverlay(now: number) {
     overlayCtx.lineTo(x, y + h - len);
     overlayCtx.stroke();
 
-    // A tiny rolling hit rate removes the need to memorize color thresholds.
-    // Wait for a few attempts so a newly found code does not claim 0%/100%
-    // certainty from a single sample.
-    if (r.outcomes.length >= 3) {
-      const label = `${Math.round(quality * 100)}%`;
-      const fontSize = Math.max(10, 10 * dpr);
-      overlayCtx.font = `600 ${fontSize}px system-ui, sans-serif`;
-      overlayCtx.textBaseline = "top";
-      const textWidth = overlayCtx.measureText(label).width;
-      const labelPad = 3 * dpr;
-      const labelY = Math.max(0, y - fontSize - 5 * dpr);
-      overlayCtx.globalAlpha = 0.9;
-      overlayCtx.shadowBlur = 0;
-      overlayCtx.fillStyle = "#111";
-      overlayCtx.fillRect(x, labelY, textWidth + 2 * labelPad, fontSize + 2 * labelPad);
-      overlayCtx.fillStyle = color;
-      overlayCtx.fillText(label, x + labelPad, labelY + labelPad);
-    }
   }
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
@@ -466,10 +447,8 @@ function stopReceiver(): void {
   lastFullScan = 0;
   cropRotate = 0;
   captureTimes.length = 0;
-  decodeTimes.length = 0;
+  qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
-  cropAttemptTimes.length = 0;
-  cropMissTimes.length = 0;
   cropAttempts.clear();
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
@@ -823,7 +802,6 @@ function captureFrame() {
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
-  decodeTimes.push(performance.now());
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   if (box) noteRegion(box, performance.now(), true, info);
@@ -862,10 +840,13 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   minSeq = Math.min(minSeq, header.seq);
   maxSeq = Math.max(maxSeq, header.seq);
+  const framesNewBefore = decoder.framesNew;
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
+  const receivedAt = performance.now();
+  if (decoder.framesNew > framesNewBefore) qrReadTimes.push(receivedAt);
   if (decoder.framesNew - decoder.framesRedundant > usefulBefore) {
-    usefulFrameTimes.push(performance.now());
+    usefulFrameTimes.push(receivedAt);
   }
   updateProgressEstimate();
 
@@ -1250,20 +1231,13 @@ function updateStats() {
     while (a.length > 0 && a[0]! < now - STATS_WINDOW_MS) a.shift();
   };
   prune(captureTimes);
-  prune(decodeTimes);
+  prune(qrReadTimes);
   prune(poolBusyTimes);
-  prune(cropAttemptTimes);
-  prune(cropMissTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
-  metric("m-dec").textContent = `${perSecond(decodeTimes).toFixed(1)} QR/s`;
+  metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
-  const missRate = cropMissTimes.length / Math.max(1, cropAttemptTimes.length);
-  metric("m-limit").textContent = busyRate >= 0.15
-    ? " · CPU limit"
-    : cropAttemptTimes.length >= 4 && missRate >= 0.25
-      ? " · scan misses"
-      : "";
+  metric("m-limit").textContent = busyRate >= 0.15 ? " · CPU bound" : "";
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
@@ -1283,7 +1257,7 @@ function updateStats() {
       liveNow,
       regions.length,
       Number(perSecond(captureTimes).toFixed(1)),
-      Number(perSecond(decodeTimes).toFixed(1)),
+      Number(perSecond(qrReadTimes).toFixed(1)),
       fullScans,
     ]);
   }
