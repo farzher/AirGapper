@@ -58,7 +58,7 @@ const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectEle
 const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
 const receiverVersion = document.getElementById("receiver-version")!;
-const APP_VERSION = "0.1.6";
+const APP_VERSION = "0.1.7";
 const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
 let webgpuRequested = false;
 try {
@@ -69,8 +69,7 @@ try {
   webgpuRequested = false;
 }
 webgpuMode.value = webgpuRequested ? "on" : "off";
-receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
-cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
+receiverVersion.textContent = `v${APP_VERSION} · custom codec`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -641,7 +640,6 @@ decodeWorkers.addEventListener("change", changeCameraSettings);
 webgpuMode.addEventListener("change", () => {
   webgpuRequested = webgpuMode.value === "on";
   try { localStorage.setItem(WEBGPU_SETTING_KEY, webgpuRequested ? "on" : "off"); } catch { /* optional */ }
-  receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
   if (stream && !done) {
     stopReceiver();
     void start();
@@ -748,7 +746,7 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
-  cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
+  cameraActual.textContent = "";
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -853,10 +851,9 @@ async function start() {
   const activeSize = activeCamera?.width && activeCamera.height
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
-  const cameraLabel = activeCamera?.frameRate
-    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps · WebGPU ${webgpuRequested ? "requested" : "OFF"}`
-    : `Active: ${activeSize} · WebGPU ${webgpuRequested ? "requested" : "OFF"}`;
-  cameraActual.textContent = cameraLabel;
+  cameraActual.textContent = activeCamera?.frameRate
+    ? `${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
+    : activeSize;
   syncPreviewAspect();
   setStatus("");
 
@@ -877,7 +874,11 @@ async function start() {
         return;
       }
       webgpuSampler = sampler;
-      cameraActual.textContent = `${cameraLabel} · WebGPU ${sampler ? "experimental" : "unavailable"}`;
+      if (!sampler) {
+        webgpuRequested = false;
+        webgpuMode.value = "off";
+        try { localStorage.setItem(WEBGPU_SETTING_KEY, "off"); } catch { /* optional */ }
+      }
     });
   }
   scheduleFrame(startedGen);
