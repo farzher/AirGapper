@@ -104,7 +104,7 @@ const pool = new DecodeWorkerPool(
   // the crop path go decode what the full frame could not.
   (box) => noteRegion(box, performance.now(), false),
   () => trackedAttempts++,
-  (id, symbolCount) => noteDecodeCompleted(id, symbolCount),
+  (id, symbolBoxes, sightingBoxes) => noteDecodeCompleted(id, symbolBoxes, sightingBoxes),
 );
 const captureTimes: number[] = [];
 // Distinct sender symbols acquired, not successful attempts. A 10 fps
@@ -173,6 +173,13 @@ const regions: Region[] = [];
 // that code's quality. Previously only detector sightings counted as misses,
 // making a code with many silent crop failures misleadingly appear perfect.
 const cropAttempts = new Map<number, Region>();
+const fullScanRegions = new Map<number, Region[]>();
+
+function overlapsRegion(box: SymbolBox, region: Region): boolean {
+  const dx = Math.abs(box.x + box.w / 2 - (region.x + region.w / 2));
+  const dy = Math.abs(box.y + box.h / 2 - (region.y + region.h / 2));
+  return dx < Math.max(box.w, region.w) / 2 && dy < Math.max(box.h, region.h) / 2;
+}
 
 function noteOutcome(region: Region, success: boolean): void {
   // This intentionally measures end-to-end readability. A code not submitted
@@ -181,11 +188,22 @@ function noteOutcome(region: Region, success: boolean): void {
   if (region.outcomes.length > 20) region.outcomes.shift();
 }
 
-function noteDecodeCompleted(id: number, symbolCount: number): void {
-  const region = cropAttempts.get(id);
-  if (!region) return;
-  cropAttempts.delete(id);
-  if (regions.includes(region)) noteOutcome(region, symbolCount > 0);
+function noteDecodeCompleted(id: number, symbolBoxes: SymbolBox[], sightingBoxes: SymbolBox[]): void {
+  const cropRegion = cropAttempts.get(id);
+  if (cropRegion) {
+    cropAttempts.delete(id);
+    if (regions.includes(cropRegion)) noteOutcome(cropRegion, symbolBoxes.length > 0);
+  }
+  const scannedRegions = fullScanRegions.get(id);
+  if (!scannedRegions) return;
+  fullScanRegions.delete(id);
+  for (const region of scannedRegions) {
+    if (!regions.includes(region)) continue;
+    if (symbolBoxes.some((box) => overlapsRegion(box, region))) noteOutcome(region, true);
+    else if (!sightingBoxes.some((box) => overlapsRegion(box, region))) noteOutcome(region, false);
+    // A detected-but-undecoded sighting was already recorded as a miss by
+    // noteRegion(), so do not count it twice here.
+  }
 }
 
 // Tried and reverted: a longer TTL for regions with a decode track record
@@ -250,7 +268,8 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       r.decodedSeen = now;
       // A targeted crop records exactly one outcome when its worker finishes.
       // Full-frame discoveries still record their success here.
-      if (!cropAttempts.has(info?.scanId ?? -1)) noteOutcome(r, true);
+      const scanId = info?.scanId ?? -1;
+      if (!cropAttempts.has(scanId) && !fullScanRegions.has(scanId)) noteOutcome(r, true);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -452,6 +471,7 @@ function stopReceiver(): void {
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
   cropAttempts.clear();
+  fullScanRegions.clear();
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
@@ -650,10 +670,12 @@ function submitBitmap(
       const id = frameId++;
       const { region, ...messageMeta } = meta;
       if (region) cropAttempts.set(id, region);
+      else if (meta.full) fullScanRegions.set(id, [...regions]);
       const taken =
         !done && pool.submit({ id, bitmap, ...messageMeta }, [bitmap]);
       if (!taken) {
         cropAttempts.delete(id);
+        fullScanRegions.delete(id);
         poolBusyTimes.push(performance.now());
         if (region && regions.includes(region)) noteOutcome(region, false);
         bitmap.close();
@@ -766,10 +788,13 @@ function captureFrame() {
     fullScans++;
     ctx.drawImage(video, 0, 0);
     const img = ctx.getImageData(0, 0, vw, vh);
-    pool.submit(
-      { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+    const id = frameId++;
+    fullScanRegions.set(id, [...regions]);
+    const taken = pool.submit(
+      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
       [img.data.buffer],
     );
+    if (!taken) fullScanRegions.delete(id);
     return;
   }
   // One crop per known code, rotated so a short worker pool doesn't starve
