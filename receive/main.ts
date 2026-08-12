@@ -104,7 +104,7 @@ const pool = new DecodeWorkerPool(
   // the crop path go decode what the full frame could not.
   (box) => noteRegion(box, performance.now(), false),
   () => trackedAttempts++,
-  (id, symbolBoxes, sightingBoxes) => noteDecodeCompleted(id, symbolBoxes, sightingBoxes),
+  (id, symbolCount) => noteDecodeCompleted(id, symbolCount),
 );
 const captureTimes: number[] = [];
 // Distinct sender symbols acquired, not successful attempts. A 10 fps
@@ -156,9 +156,11 @@ interface Region extends SymbolBox {
   /** Last successful byte decode. Failed detector sightings keep the crop
    * alive but must not make the success outline flash. */
   decodedSeen?: number;
-  /** Recent camera-frame opportunities. Success means this code decoded;
-   * failure includes a decode miss or no worker capacity to try it. */
+  /** Recent distinct sender symbols inferred from sequence changes. Repeated
+   * camera reads of one displayed symbol are neutral, not extra successes. */
   outcomes: boolean[];
+  lastSeq?: number;
+  seqStep?: number;
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
   drift?: number;
@@ -173,37 +175,34 @@ const regions: Region[] = [];
 // that code's quality. Previously only detector sightings counted as misses,
 // making a code with many silent crop failures misleadingly appear perfect.
 const cropAttempts = new Map<number, Region>();
-const fullScanRegions = new Map<number, Region[]>();
-
-function overlapsRegion(box: SymbolBox, region: Region): boolean {
-  const dx = Math.abs(box.x + box.w / 2 - (region.x + region.w / 2));
-  const dy = Math.abs(box.y + box.h / 2 - (region.y + region.h / 2));
-  return dx < Math.max(box.w, region.w) / 2 && dy < Math.max(box.h, region.h) / 2;
-}
 
 function noteOutcome(region: Region, success: boolean): void {
-  // This intentionally measures end-to-end readability. A code not submitted
-  // because another code consumed the CPU is still unread throughput.
   region.outcomes.push(success);
   if (region.outcomes.length > 20) region.outcomes.shift();
 }
 
-function noteDecodeCompleted(id: number, symbolBoxes: SymbolBox[], sightingBoxes: SymbolBox[]): void {
-  const cropRegion = cropAttempts.get(id);
-  if (cropRegion) {
-    cropAttempts.delete(id);
-    if (regions.includes(cropRegion)) noteOutcome(cropRegion, symbolBoxes.length > 0);
+function noteSequence(region: Region, seq: number): void {
+  // Sequence numbers are global across the grid, so one cell normally advances
+  // by the number of cells. The high-water count is stable through a temporary
+  // lost region and is 1 for the common single-code sender.
+  const step = Math.max(1, expectedRegions);
+  if (region.lastSeq === undefined || region.seqStep !== step) {
+    region.lastSeq = seq;
+    region.seqStep = step;
+    region.outcomes.length = 0;
+    noteOutcome(region, true);
+    return;
   }
-  const scannedRegions = fullScanRegions.get(id);
-  if (!scannedRegions) return;
-  fullScanRegions.delete(id);
-  for (const region of scannedRegions) {
-    if (!regions.includes(region)) continue;
-    if (symbolBoxes.some((box) => overlapsRegion(box, region))) noteOutcome(region, true);
-    else if (!sightingBoxes.some((box) => overlapsRegion(box, region))) noteOutcome(region, false);
-    // A detected-but-undecoded sighting was already recorded as a miss by
-    // noteRegion(), so do not count it twice here.
-  }
+  if (seq <= region.lastSeq) return; // repeated camera read of one sender frame
+  const delta = seq - region.lastSeq;
+  const skipped = Math.min(20, Math.max(0, Math.round(delta / step) - 1));
+  for (let i = 0; i < skipped; i++) noteOutcome(region, false);
+  noteOutcome(region, true);
+  region.lastSeq = seq;
+}
+
+function noteDecodeCompleted(id: number, _symbolCount: number): void {
+  cropAttempts.delete(id);
 }
 
 // Tried and reverted: a longer TTL for regions with a decode track record
@@ -245,6 +244,14 @@ function decodedCount(): number {
   return n;
 }
 
+function regionAt(box: SymbolBox): Region | undefined {
+  return regions.find((r) => {
+    const dx = Math.abs(box.x + box.w / 2 - (r.x + r.w / 2));
+    const dy = Math.abs(box.y + box.h / 2 - (r.y + r.h / 2));
+    return dx < Math.max(box.w, r.w) / 2 && dy < Math.max(box.h, r.h) / 2;
+  });
+}
+
 function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolInfo): void {
   for (const r of regions) {
     const dx = Math.abs(box.x + box.w / 2 - (r.x + r.w / 2));
@@ -257,7 +264,6 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
         // overwriting a decode-proven box aims every following crop at
         // garbage — a measured 6× throughput collapse on a 4-code grid.
         r.seen = now;
-        noteOutcome(r, false);
         return;
       }
       // Half-life blend of per-decode displacement: steady hands decay it to
@@ -266,10 +272,6 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
-      // A targeted crop records exactly one outcome when its worker finishes.
-      // Full-frame discoveries still record their success here.
-      const scanId = info?.scanId ?? -1;
-      if (!cropAttempts.has(scanId) && !fullScanRegions.has(scanId)) noteOutcome(r, true);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -291,7 +293,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     seen: now,
     decoded,
     decodedSeen: decoded ? now : undefined,
-    outcomes: [decoded],
+    outcomes: [],
     quad: info?.quad,
     dim: info?.modules,
   });
@@ -471,7 +473,6 @@ function stopReceiver(): void {
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
   cropAttempts.clear();
-  fullScanRegions.clear();
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
@@ -670,14 +671,11 @@ function submitBitmap(
       const id = frameId++;
       const { region, ...messageMeta } = meta;
       if (region) cropAttempts.set(id, region);
-      else if (meta.full) fullScanRegions.set(id, [...regions]);
       const taken =
         !done && pool.submit({ id, bitmap, ...messageMeta }, [bitmap]);
       if (!taken) {
         cropAttempts.delete(id);
-        fullScanRegions.delete(id);
         poolBusyTimes.push(performance.now());
-        if (region && regions.includes(region)) noteOutcome(region, false);
         bitmap.close();
       } else if (!meta.full) cropsSubmitted++;
     })
@@ -705,10 +703,6 @@ function captureFrame() {
   if (pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
-    // This camera frame was an opportunity to read every known code, but CPU
-    // pressure prevented any attempt. Count that in the overlay: its purpose
-    // is achievable read quality, not decoder accuracy in isolation.
-    for (const r of regions) noteOutcome(r, false);
     return;
   }
 
@@ -751,7 +745,6 @@ function captureFrame() {
     // "create no more than the free slots seen now" — submitBitmap closes
     // any bitmap that loses the race anyway.
     let free = pool.size - pool.busyCount;
-    const attempted = new Set<Region>();
     for (let i = 0; i < regions.length && free > 0; i++) {
       const r = regions[(i + cropRotate) % regions.length]!;
       const size = Math.max(r.w, r.h);
@@ -762,7 +755,6 @@ function captureFrame() {
       const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
       if (w < 32 || h < 32) continue;
       free--;
-      attempted.add(r);
       submitBitmap(createImageBitmap(video, x, y, w, h), {
         ox: x,
         oy: y,
@@ -772,7 +764,6 @@ function captureFrame() {
         region: r,
       });
     }
-    for (const r of regions) if (!attempted.has(r)) noteOutcome(r, false);
     cropRotate++;
     return;
   }
@@ -788,13 +779,10 @@ function captureFrame() {
     fullScans++;
     ctx.drawImage(video, 0, 0);
     const img = ctx.getImageData(0, 0, vw, vh);
-    const id = frameId++;
-    fullScanRegions.set(id, [...regions]);
-    const taken = pool.submit(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+    pool.submit(
+      { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
       [img.data.buffer],
     );
-    if (!taken) fullScanRegions.delete(id);
     return;
   }
   // One crop per known code, rotated so a short worker pool doesn't starve
@@ -802,7 +790,6 @@ function captureFrame() {
   // canvas origin instead of copying the entire 1.2 MP video first. On old
   // Android WebViews that full-frame GPU readback was the capture bottleneck,
   // even on frames where acquisition was idle and no pixels were submitted.
-  const attempted = new Set<Region>();
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
     // The pad leads a moving target: base margin plus twice the displacement
@@ -832,13 +819,8 @@ function captureFrame() {
       poolBusyTimes.push(performance.now());
       break;
     }
-    attempted.add(r);
     cropsSubmitted++;
   }
-  // Codes skipped because all worker slots were consumed are misses from the
-  // user's perspective. Including them stops sparse successful samples from
-  // painting an underpowered multi-code run blue.
-  for (const r of regions) if (!attempted.has(r)) noteOutcome(r, false);
   cropRotate++;
 }
 
@@ -867,6 +849,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   // path before zxing acquires one of the actual file frames.
   plainQrPolicy.noteFramed();
   const { header, block } = parsed;
+  if (box) {
+    const region = regionAt(box);
+    if (region) noteSequence(region, header.seq);
+  }
   // streamIdentity() covers every header field that has to hold constant, not
   // just the session id — see the note on it in protocol.ts.
   const identity = streamIdentity(header);
@@ -1278,7 +1264,9 @@ function updateStats() {
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
-  metric("m-limit").textContent = busyRate >= 0.15 ? " · CPU bound" : "";
+  const limit = metric("m-limit");
+  limit.textContent = busyRate >= 0.15 ? ` · CPU bound ${Math.min(100, Math.round(busyRate * 100))}%` : "";
+  limit.classList.toggle("cpu-bound", busyRate >= 0.15);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
