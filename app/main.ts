@@ -9,7 +9,13 @@ const views = {
   receive: document.getElementById("receiveView")!,
 };
 type ViewName = keyof typeof views;
+type HistoryMode = "push" | "replace" | "none";
 let active: ViewName = "home";
+
+function historyView(): ViewName | null {
+  const view = (history.state as { airgapperView?: unknown } | null)?.airgapperView;
+  return view === "home" || view === "send" || view === "receive" ? view : null;
+}
 const headerQr = document.getElementById("receiver-link-qr") as HTMLCanvasElement;
 const headerQrButton = document.getElementById("receiver-link-open") as HTMLButtonElement;
 const receiverLinkDialog = document.getElementById("receiver-link-dialog") as HTMLDialogElement;
@@ -27,10 +33,15 @@ receiverLinkUrl.rel = "noopener";
 headerQrButton.addEventListener("click", () => receiverLinkDialog.showModal());
 closeOnBackdropClick(receiverLinkDialog);
 
-function showView(name: ViewName): void {
-  if (name === active) return;
+function showView(name: ViewName, historyMode: HistoryMode = "push"): void {
+  if (name === active) {
+    if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");
+    return;
+  }
   if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
   active = name;
+  if (historyMode === "push") history.pushState({ ...history.state, airgapperView: name }, "");
+  else if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name === "receive";
@@ -58,11 +69,21 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   initialParams.delete("r");
   initialParams.delete("receive");
   const query = initialParams.toString();
-  history.replaceState(history.state, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+  history.replaceState(
+    { ...history.state, airgapperView: "receive" },
+    "",
+    `${location.pathname}${query ? `?${query}` : ""}${location.hash}`,
+  );
   // Entering asks for the rear camera immediately; browsers that require
   // interaction or previously denied access expose the existing retry button.
-  showView("receive");
+  showView("receive", "none");
+} else {
+  const restoredView = historyView();
+  if (restoredView && restoredView !== "home") showView(restoredView, "none");
+  else history.replaceState({ ...history.state, airgapperView: "home" }, "");
 }
+
+window.addEventListener("popstate", () => showView(historyView() ?? "home", "none"));
 (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend = () => {
   // The Android document picker pauses the Activity while saving a completed
   // transfer. Preserve that result screen and its in-memory file until the
@@ -94,7 +115,7 @@ window.addEventListener("pageshow", resumeActiveView);
     return true;
   }
   if (active !== "home") {
-    showView("home");
+    history.back();
     return true;
   }
   return false;
