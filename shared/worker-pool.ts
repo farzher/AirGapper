@@ -64,6 +64,16 @@ interface DecodeMessage {
   full?: boolean;
   latencyMs?: number;
   error?: string;
+  gpuSampled?: boolean;
+  wasmMetrics?: {
+    trackingMs: number;
+    samplingMs: number;
+    parseMs: number;
+    crcMs: number;
+    rsMs: number;
+    totalMs: number;
+    rsFallbacks: number;
+  };
 }
 
 export interface DecodeCompletion {
@@ -75,6 +85,8 @@ export interface DecodeCompletion {
   fallbackAttempted: boolean;
   latencyMs: number;
   error?: string;
+  gpuSampled: boolean;
+  wasmMetrics?: DecodeMessage["wasmMetrics"];
 }
 
 export class DecodeWorkerPool {
@@ -129,6 +141,8 @@ export class DecodeWorkerPool {
           fallbackAttempted: Boolean(message.fallbackAttempted),
           latencyMs: message.latencyMs ?? 0,
           error: message.error,
+          gpuSampled: Boolean(message.gpuSampled),
+          wasmMetrics: message.wasmMetrics,
         });
       };
       this.workers.push(worker);

@@ -1,0 +1,317 @@
+import type { SymbolQuad } from "../shared/worker-pool";
+
+export interface GpuSampleTrack {
+  id: number;
+  quad: SymbolQuad;
+  dim: number;
+  crc32: boolean;
+  /** 0 = luminance, 1 = red, 2 = green. Separate logical tracks may share a
+   * quad to support future dual-colour streams without another camera copy. */
+  channel?: 0 | 1 | 2;
+}
+
+export interface GpuSampleResult {
+  packed: ArrayBuffer;
+  tracks: GpuSampleTrack[];
+  wordsPerMatrix: number;
+  gpuMs: number;
+  readbackMs: number;
+}
+
+export interface WebGpuSamplerMetrics {
+  enabled: boolean;
+  submitted: number;
+  dropped: number;
+  trackedQrs: number;
+  packedBytes: number;
+  gpuTotalMs: number;
+  readbackMs: number;
+  lastGpuMs: number;
+  lastReadbackMs: number;
+}
+
+const MAX_TRACKS = 15;
+const MAX_DIMENSION = 177;
+const WORDS_PER_MATRIX = Math.ceil(MAX_DIMENSION * MAX_DIMENSION / 32);
+const TRACK_FLOATS = 12;
+const TRACK_BYTES = TRACK_FLOATS * 4;
+const SLOT_COUNT = 3;
+
+// WebGPU constants are repeated here because TypeScript's DOM library does not
+// yet include WebGPU on every supported compiler.
+const BUFFER_MAP_READ = 0x0001;
+const BUFFER_COPY_SRC = 0x0004;
+const BUFFER_COPY_DST = 0x0008;
+const BUFFER_UNIFORM = 0x0040;
+const BUFFER_STORAGE = 0x0080;
+const MAP_READ = 0x0001;
+
+const SHADER = /* wgsl */ `
+struct Params { frameSize: vec2f, trackCount: u32, wordsPerMatrix: u32 }
+struct Track { h0: vec4f, h1: vec4f, info: vec4f }
+struct Calibration { threshold: f32, contrast: f32, score: f32, unused: f32 }
+
+@group(0) @binding(0) var camera: texture_external;
+@group(0) @binding(1) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read> tracks: array<Track>;
+@group(0) @binding(3) var<storage, read_write> calibration: array<Calibration>;
+@group(0) @binding(4) var<storage, read_write> packed: array<u32>;
+
+fn cameraPoint(track: Track, module: vec2f) -> vec2f {
+  let d = track.h0.w * module.x + track.h1.w * module.y + 1.0;
+  return vec2f(
+    (track.h0.x * module.x + track.h0.y * module.y + track.h0.z) / d,
+    (track.h1.x * module.x + track.h1.y * module.y + track.h1.z) / d
+  );
+}
+
+fn level(track: Track, module: vec2f) -> f32 {
+  let rgb = textureSampleBaseClampToEdge(camera, cameraPoint(track, module) / params.frameSize).rgb;
+  let channel = u32(track.info.y);
+  if (channel == 1u) { return rgb.r; }
+  if (channel == 2u) { return rgb.g; }
+  return dot(rgb, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+fn finderBlack(x: u32, y: u32) -> bool {
+  return x == 0u || x == 6u || y == 0u || y == 6u || (x >= 2u && x <= 4u && y >= 2u && y <= 4u);
+}
+
+@compute @workgroup_size(1)
+fn calibrate(@builtin(global_invocation_id) gid: vec3u) {
+  let index = gid.x;
+  if (index >= params.trackCount) { return; }
+  let track = tracks[index];
+  let dim = u32(track.info.x);
+  var black = 0.0;
+  var white = 0.0;
+  var blackCount = 0u;
+  var whiteCount = 0u;
+  for (var finder = 0u; finder < 3u; finder++) {
+    let origin = select(select(vec2u(0u, dim - 7u), vec2u(dim - 7u, 0u), finder == 1u), vec2u(0u), finder == 0u);
+    for (var y = 0u; y < 7u; y++) {
+      for (var x = 0u; x < 7u; x++) {
+        let value = level(track, vec2f(origin + vec2u(x, y)) + vec2f(0.5));
+        if (finderBlack(x, y)) { black += value; blackCount++; }
+        else { white += value; whiteCount++; }
+      }
+    }
+  }
+  let blackLevel = black / f32(blackCount);
+  let whiteLevel = white / f32(whiteCount);
+  calibration[index] = Calibration((blackLevel + whiteLevel) * 0.5, whiteLevel - blackLevel, 0.0, 0.0);
+}
+
+@compute @workgroup_size(64)
+fn sampleAndPack(@builtin(global_invocation_id) gid: vec3u) {
+  let word = gid.x;
+  let trackIndex = gid.y;
+  if (trackIndex >= params.trackCount || word >= params.wordsPerMatrix) { return; }
+  let track = tracks[trackIndex];
+  let dim = u32(track.info.x);
+  var result = 0u;
+  for (var bit = 0u; bit < 32u; bit++) {
+    let linear = word * 32u + bit;
+    if (linear < dim * dim) {
+      let module = vec2u(linear % dim, linear / dim);
+      if (level(track, vec2f(module) + vec2f(0.5)) <= calibration[trackIndex].threshold) {
+        result |= 1u << bit;
+      }
+    }
+  }
+  packed[trackIndex * params.wordsPerMatrix + word] = result;
+}
+`;
+
+interface Slot {
+  busy: boolean;
+  params: any;
+  tracks: any;
+  calibration: any;
+  output: any;
+  readback: any;
+}
+
+/** Direct video-external-texture prototype for already acquired QR quads. */
+export class WebGpuQrSampler {
+  private readonly slots: Slot[] = [];
+  private nextSlot = 0;
+  private alive = true;
+  private readonly values = new Float32Array(MAX_TRACKS * TRACK_FLOATS);
+  private readonly counters: WebGpuSamplerMetrics = {
+    enabled: true, submitted: 0, dropped: 0, trackedQrs: 0, packedBytes: 0,
+    gpuTotalMs: 0, readbackMs: 0, lastGpuMs: 0, lastReadbackMs: 0,
+  };
+
+  private constructor(private readonly device: any, private readonly pipeline: any) {
+    const outputBytes = MAX_TRACKS * WORDS_PER_MATRIX * 4;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      this.slots.push({
+        busy: false,
+        params: device.createBuffer({ size: 16, usage: BUFFER_UNIFORM | BUFFER_COPY_DST }),
+        tracks: device.createBuffer({ size: MAX_TRACKS * TRACK_BYTES, usage: BUFFER_STORAGE | BUFFER_COPY_DST }),
+        calibration: device.createBuffer({ size: MAX_TRACKS * 16, usage: BUFFER_STORAGE }),
+        output: device.createBuffer({ size: outputBytes, usage: BUFFER_STORAGE | BUFFER_COPY_SRC }),
+        readback: device.createBuffer({ size: outputBytes, usage: BUFFER_COPY_DST | BUFFER_MAP_READ }),
+      });
+    }
+  }
+
+  static async create(): Promise<WebGpuQrSampler | null> {
+    const gpu = (navigator as Navigator & { gpu?: any }).gpu;
+    if (!gpu) return null;
+    try {
+      const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+      if (!adapter) return null;
+      const device = await adapter.requestDevice();
+      const module = device.createShaderModule({ code: SHADER });
+      const pipeline = device.createComputePipeline({
+        layout: "auto",
+        compute: { module, entryPoint: "sampleAndPack" },
+      });
+      // Both entry points have the same explicitly declared bindings, so the
+      // sampling pipeline's auto layout can also run calibration.
+      const calibrationPipeline = device.createComputePipeline({
+        layout: pipeline.getBindGroupLayout(0) ? device.createPipelineLayout({ bindGroupLayouts: [pipeline.getBindGroupLayout(0)] }) : "auto",
+        compute: { module, entryPoint: "calibrate" },
+      });
+      const sampler = new WebGpuQrSampler(device, { sampling: pipeline, calibration: calibrationPipeline });
+      void device.lost.then(() => sampler.destroy());
+      return sampler;
+    } catch {
+      return null;
+    }
+  }
+
+  get metrics(): WebGpuSamplerMetrics {
+    return { ...this.counters, enabled: this.alive };
+  }
+
+  submit(video: HTMLVideoElement, inputTracks: GpuSampleTrack[], done: (result: GpuSampleResult) => void): boolean {
+    if (!this.alive || !inputTracks.length) return false;
+    const tracks = inputTracks.slice(0, MAX_TRACKS);
+    let slot: Slot | undefined;
+    for (let i = 0; i < this.slots.length; i++) {
+      const candidate = this.slots[(this.nextSlot + i) % this.slots.length];
+      if (candidate && !candidate.busy) {
+        slot = candidate;
+        this.nextSlot = (this.nextSlot + i + 1) % this.slots.length;
+        break;
+      }
+    }
+    if (!slot) {
+      this.counters.dropped++;
+      return true; // Saturation drops the frame rather than invoking CPU capture.
+    }
+
+    try {
+      for (let i = 0; i < tracks.length; i++) this.writeTrack(i, tracks[i]!);
+      const params = new ArrayBuffer(16);
+      const paramsView = new DataView(params);
+      paramsView.setFloat32(0, video.videoWidth, true);
+      paramsView.setFloat32(4, video.videoHeight, true);
+      paramsView.setUint32(8, tracks.length, true);
+      paramsView.setUint32(12, WORDS_PER_MATRIX, true);
+      this.device.queue.writeBuffer(slot.params, 0, params);
+      this.device.queue.writeBuffer(slot.tracks, 0, this.values.buffer, 0, tracks.length * TRACK_BYTES);
+
+      const external = this.device.importExternalTexture({ source: video });
+      const bindGroup = this.device.createBindGroup({
+        layout: this.pipeline.sampling.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: external },
+          { binding: 1, resource: { buffer: slot.params } },
+          { binding: 2, resource: { buffer: slot.tracks } },
+          { binding: 3, resource: { buffer: slot.calibration } },
+          { binding: 4, resource: { buffer: slot.output } },
+        ],
+      });
+      const encoder = this.device.createCommandEncoder();
+      let pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipeline.calibration);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(tracks.length);
+      pass.end();
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipeline.sampling);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(WORDS_PER_MATRIX / 64), tracks.length);
+      pass.end();
+      const bytes = tracks.length * WORDS_PER_MATRIX * 4;
+      encoder.copyBufferToBuffer(slot.output, 0, slot.readback, 0, bytes);
+      slot.busy = true;
+      const submittedAt = performance.now();
+      this.device.queue.submit([encoder.finish()]);
+      this.counters.submitted++;
+      this.counters.trackedQrs += tracks.length;
+      this.counters.packedBytes += bytes;
+      void slot.readback.mapAsync(MAP_READ, 0, bytes).then(() => {
+        const mappedAt = performance.now();
+        const packed = slot!.readback.getMappedRange(0, bytes).slice(0);
+        slot!.readback.unmap();
+        slot!.busy = false;
+        if (!this.alive) return;
+        const readbackMs = performance.now() - mappedAt;
+        const gpuMs = mappedAt - submittedAt;
+        this.counters.lastGpuMs = gpuMs;
+        this.counters.lastReadbackMs = readbackMs;
+        this.counters.gpuTotalMs += gpuMs;
+        this.counters.readbackMs += readbackMs;
+        done({ packed, tracks, wordsPerMatrix: WORDS_PER_MATRIX, gpuMs, readbackMs });
+      }).catch(() => {
+        slot!.busy = false;
+      });
+      return true;
+    } catch {
+      slot.busy = false;
+      return false;
+    }
+  }
+
+  destroy(): void {
+    if (!this.alive) return;
+    this.alive = false;
+    for (const slot of this.slots) {
+      slot.params.destroy();
+      slot.tracks.destroy();
+      slot.calibration.destroy();
+      slot.output.destroy();
+      if (!slot.busy) slot.readback.destroy();
+    }
+  }
+
+  private writeTrack(index: number, track: GpuSampleTrack): void {
+    const h = homography(track.dim, track.quad);
+    const offset = index * TRACK_FLOATS;
+    this.values.set([h[0]!, h[1]!, h[2]!, h[6]!, h[3]!, h[4]!, h[5]!, h[7]!, track.dim, track.channel ?? 0, 0, 0], offset);
+  }
+}
+
+/** Solve the 8 projective coefficients mapping module-space corners to the
+ * camera quad. The shader applies the ninth coefficient as 1. */
+function homography(dim: number, quad: SymbolQuad): number[] {
+  const points = [
+    [0, 0, quad.topLeft.x, quad.topLeft.y],
+    [dim, 0, quad.topRight.x, quad.topRight.y],
+    [dim, dim, quad.bottomRight.x, quad.bottomRight.y],
+    [0, dim, quad.bottomLeft.x, quad.bottomLeft.y],
+  ];
+  const a: number[][] = [];
+  for (const [x, y, u, v] of points) {
+    a.push([x!, y!, 1, 0, 0, 0, -u! * x!, -u! * y!, u!]);
+    a.push([0, 0, 0, x!, y!, 1, -v! * x!, -v! * y!, v!]);
+  }
+  for (let col = 0; col < 8; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < 8; row++) if (Math.abs(a[row]![col]!) > Math.abs(a[pivot]![col]!)) pivot = row;
+    [a[col], a[pivot]] = [a[pivot]!, a[col]!];
+    const scale = a[col]![col]!;
+    for (let k = col; k < 9; k++) a[col]![k] = a[col]![k]! / scale;
+    for (let row = 0; row < 8; row++) {
+      if (row === col) continue;
+      const factor = a[row]![col]!;
+      for (let k = col; k < 9; k++) a[row]![k] = a[row]![k]! - factor * a[col]![k]!;
+    }
+  }
+  return a.map((row) => row[8]!);
+}

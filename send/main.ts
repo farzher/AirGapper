@@ -47,13 +47,12 @@ const LOOKAHEAD = 3;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
-type LayoutMode = "single" | "one-two" | "two-two" | "two-three" | "four-three";
+type LayoutMode = "single" | "one-two" | "two-two" | "two-three" | "four-three" | "three-five";
 
 function selectedLayout(): LayoutMode {
   const mode = cfgLayout.value;
-  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three"
-    ? mode
-    : "four-three";
+  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" ||
+    mode === "three-five" ? mode : "four-three";
 }
 
 function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
@@ -62,6 +61,7 @@ function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; code
     case "one-two": return { cols: 1, rows: 2, codes: 2 };
     case "two-two": return { cols: 2, rows: 2, codes: 4 };
     case "two-three": return { cols: 2, rows: 3, codes: 6 };
+    case "three-five": return { cols: 3, rows: 5, codes: 15 };
     default: return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
   }
 }
@@ -436,7 +436,7 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three") {
+    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five") {
       cfgLayout.value = saved.layout;
     }
   } catch {

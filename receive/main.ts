@@ -49,6 +49,7 @@ import {
   saveFileOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
+import { WebGpuQrSampler } from "./webgpu-sampler";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
@@ -72,6 +73,7 @@ const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
+const gpuDebug = document.getElementById("gpu-debug")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 const autoWorkerCount = hardwareThreadCount;
@@ -266,6 +268,11 @@ let trackingInvalidations = 0;
 let completedJobs = 0;
 let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
+let gpuWasmFrames = 0;
+let wasmParseTotalMs = 0;
+let wasmRsTotalMs = 0;
+let wasmTotalMs = 0;
+let wasmRsFallbacks = 0;
 let lastDistinctArrivalAt = 0;
 let maxSequenceGapMs = 0;
 const pipelineEvents: [number, string, number][] = [];
@@ -312,6 +319,13 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
+  if (completion.gpuSampled && completion.wasmMetrics) {
+    gpuWasmFrames++;
+    wasmParseTotalMs += completion.wasmMetrics.parseMs;
+    wasmRsTotalMs += completion.wasmMetrics.rsMs;
+    wasmTotalMs += completion.wasmMetrics.totalMs;
+    wasmRsFallbacks += completion.wasmMetrics.rsFallbacks;
+  }
   if (completion.error) {
     decodeExceptions++;
     notePipelineEvent("decode-exception", decodeExceptions);
@@ -367,9 +381,8 @@ const ACQUISITION_SCAN_MS = 100;
 // would otherwise keep this receiver rescanning for codes that no longer
 // exist until the transfer ends.
 const EXPECTED_REGIONS_DECAY_MS = 10_000;
-// The densest sender layout is a portrait 3×4 grid. Keep one tracked region
-// for every cell so full acquisition can hand all twelve off to crop decoding.
-const MAX_REGIONS = 12;
+// Keep one tracked region for every cell in the densest 3×5 layout.
+const MAX_REGIONS = 15;
 let lastFullScan = 0;
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
@@ -629,6 +642,8 @@ function stopReceiver(): void {
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -659,6 +674,11 @@ function stopReceiver(): void {
   completedJobs = 0;
   workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
+  gpuWasmFrames = 0;
+  wasmParseTotalMs = 0;
+  wasmRsTotalMs = 0;
+  wasmTotalMs = 0;
+  wasmRsFallbacks = 0;
   lastDistinctArrivalAt = 0;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
@@ -697,6 +717,7 @@ function stopReceiver(): void {
   metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
+  gpuDebug.textContent = "WebGPU: initializing";
   if (diagnosticsEl) {
     diagnosticsEl.style.display = "none";
     diagnosticsEl.open = false;
@@ -786,9 +807,10 @@ async function start() {
   const activeSize = activeCamera?.width && activeCamera.height
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
-  cameraActual.textContent = activeCamera?.frameRate
+  const cameraLabel = activeCamera?.frameRate
     ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
     : `Active: ${activeSize}`;
+  cameraActual.textContent = cameraLabel;
   syncPreviewAspect();
   setStatus("");
 
@@ -798,6 +820,16 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   const startedGen = captureGen;
+  if (new URLSearchParams(location.search).get("webgpu") !== "0") {
+    void WebGpuQrSampler.create().then((sampler) => {
+      if (startedGen !== captureGen || done) {
+        sampler?.destroy();
+        return;
+      }
+      webgpuSampler = sampler;
+      cameraActual.textContent = `${cameraLabel} · WebGPU ${sampler ? "on" : "unavailable"}`;
+    });
+  }
   scheduleFrame(startedGen);
   if (isAndroidApp()) {
     // Permission revocation fixes this phone because Android kills the stale
@@ -840,6 +872,7 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 let frameId = 0;
+let webgpuSampler: WebGpuQrSampler | null = null;
 
 // GPU-side capture: createImageBitmap(video, crop) hands each worker a
 // transferable bitmap with NO main-thread pixel readback — the worker draws
@@ -951,6 +984,20 @@ function captureFrame() {
   const tracks = regions.flatMap((r) => r.decoded && r.quad && r.dim
     ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
     : []);
+
+  if (!fullScanDue && tracks.length && webgpuSampler) {
+    const accepted = webgpuSampler.submit(video, tracks, ({ packed, tracks: sampledTracks, wordsPerMatrix }) => {
+      const id = frameId++;
+      if (!done && pool.submit({
+        id, gpuPacked: packed, full: false, tracks: sampledTracks, wordsPerMatrix,
+      }, [packed])) return;
+      poolBusyTimes.push(performance.now());
+    });
+    if (accepted) {
+      cropsSubmitted += tracks.length;
+      return;
+    }
+  }
 
   if (!fullScanDue && tracks.length && DIRECT_Y_CAPTURE) {
     try {
@@ -1114,6 +1161,8 @@ function finishPlainQr(text: string): void {
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   preview.style.display = "none";
   metricsEl.style.display = "none";
   document.body.classList.add("receive-complete");
@@ -1167,7 +1216,13 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       },
       codes: peakRegions,
       pipeline: {
-        captureMode: BITMAP_CAPTURE ? "bitmap" : "readback",
+        captureMode: webgpuSampler ? "webgpu-external-texture" : BITMAP_CAPTURE ? "bitmap" : DIRECT_Y_CAPTURE ? "video-frame-y" : "readback",
+        webgpu: webgpuSampler?.metrics ?? { enabled: false },
+        wasmGpuFrames: gpuWasmFrames,
+        wasmParseMeanMs: gpuWasmFrames ? Number((wasmParseTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmRsMeanMs: gpuWasmFrames ? Number((wasmRsTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmTotalMeanMs: gpuWasmFrames ? Number((wasmTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmRsFallbacks,
         captures: totalCaptures,
         capturesDroppedPoolBusy: capturesDropped,
         cropsSubmitted,
@@ -1228,6 +1283,8 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   // decode pool. Each worker holds its own ~940 KB zxing WASM instance, which
   // is worth reclaiming on a phone the moment the last frame is in.
   stream?.getTracks().forEach((t) => t.stop());
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -1472,8 +1529,29 @@ function updateStats() {
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const limit = metric("m-limit");
-  limit.textContent = `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
-  limit.classList.toggle("cpu-bound", busyRate >= 0.15);
+  const gpuMetrics = webgpuSampler?.metrics;
+  limit.textContent = gpuMetrics?.submitted
+    ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms`
+    : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
+  limit.classList.toggle("cpu-bound", !gpuMetrics?.submitted && busyRate >= 0.15);
+  const live = decodedCount();
+  const successes = perSecond(qrReadTimes);
+  gpuDebug.textContent = [
+    `WebGPU enabled: ${Boolean(gpuMetrics?.enabled)}`,
+    `camera: ${perSecond(captureTimes).toFixed(1)} fps · ${video.videoWidth}×${video.videoHeight}`,
+    `layout: ${Math.max(expectedRegions, live) || "acquiring"} QR · version: ${regions[0]?.dim ? (regions[0]!.dim! - 17) / 4 : "—"}`,
+    `GPU tracking: CPU acquisition prototype`,
+    `GPU sampling + packing + total: ${gpuMetrics?.lastGpuMs.toFixed(2) ?? "—"} ms`,
+    `GPU→CPU readback: ${gpuMetrics?.lastReadbackMs.toFixed(2) ?? "—"} ms`,
+    `WASM parse: ${gpuWasmFrames ? (wasmParseTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms`,
+    `RS: ${gpuWasmFrames ? (wasmRsTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms (${wasmRsFallbacks} fallbacks)`,
+    `total decode: ${gpuWasmFrames ? (wasmTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms/frame`,
+    `tracked/success: ${live}/${successes.toFixed(1)} QR/s`,
+    `QR success: ${live ? Math.min(100, successes / live / Math.max(1, perSecond(captureTimes)) * 100).toFixed(1) : "—"}%`,
+    `CPU fallback/reacquisition: ${trackedMissFallbacks}/${fullScans}`,
+    `packed: ${gpuMetrics ? (gpuMetrics.packedBytes / 1024).toFixed(1) : "0.0"} KB total`,
+    `verified: ${liveGoodputKbs(now).toFixed(1)} KB/s`,
+  ].join("\n");
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
