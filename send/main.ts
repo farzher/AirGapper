@@ -119,7 +119,16 @@ const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
 const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
+const sendAdvanced = document.getElementById("send-advanced") as HTMLDetailsElement;
 const fpsValue = document.getElementById("fps-value")!;
+
+// Native <details> stays open when focus moves elsewhere. Treat this one as a
+// compact popover and dismiss it when the user clicks anywhere outside it.
+document.addEventListener("click", (event) => {
+  if (sendAdvanced.open && event.target instanceof Node && !sendAdvanced.contains(event.target)) {
+    sendAdvanced.open = false;
+  }
+});
 const sizeValue = document.getElementById("size-value")!;
 
 let selectedFile: {
