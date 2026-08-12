@@ -635,7 +635,7 @@ async function startStream(revealStage = false) {
     });
   };
 
-  let alternatingChannel = 0;
+  let alternatingCellsGenerated = 0;
   const makeCell = (): ImageData => {
     const first = makeCode();
     const second = channelMode === "dual" ? makeCode() : first;
@@ -703,9 +703,12 @@ async function startStream(revealStage = false) {
     let modulesB: ArrayLike<number> = second.modules.data;
     if (channelMode === "alternating") {
       const blank = new Uint8Array(first.modules.size * first.modules.size);
-      if (alternatingChannel === 0) modulesB = blank;
+      // Color is a whole-layout state, not a per-cell state. Queue generation
+      // runs in complete grid sweeps, so every QR in a sweep uses one channel.
+      const channel = Math.floor(alternatingCellsGenerated / gridCodes) % 2;
+      if (channel === 0) modulesB = blank;
       else modulesA = blank;
-      alternatingChannel ^= 1;
+      alternatingCellsGenerated++;
     }
     const raster = channelMode === "normal"
       ? rasterizeQr(first.modules.size, first.modules.data, GRID_MARGIN)
@@ -764,12 +767,33 @@ async function startStream(revealStage = false) {
   }
   if (staticStream) return;
 
-  // FPS is the requested per-square symbol rate. Grid cells are staggered
-  // across each interval so they do not all transition on the same refresh.
+  // FPS is the requested per-square symbol rate. Alternating-color mode must
+  // switch the entire layout as one optical state; otherwise a grid becomes a
+  // spatial red/green checkerboard rather than alternating over time.
   const interval = 1000 / txFps;
+  let nextAt = performance.now() + interval;
+  if (channelMode === "alternating") {
+    const tickLayout = (now: number) => {
+      if (gen !== generation || generatorFailed) return;
+      requestAnimationFrame(tickLayout);
+      if (now < nextAt) return;
+      if (now - nextAt > interval) nextAt = now;
+      for (let i = 0; i < gridCodes; i++) {
+        const img = queue.shift();
+        if (!img) break;
+        paintCell(img, i);
+      }
+      pump(gridCodes);
+      nextAt += interval;
+    };
+    requestAnimationFrame(tickLayout);
+    return;
+  }
+
+  // Other multi-code modes retain staggered cell transitions so one exposure
+  // cannot catch every physical square changing at once.
   const subInterval = interval / gridCodes;
   let cellCursor = 0;
-  let nextAt = performance.now() + interval;
   const tick = (now: number) => {
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
