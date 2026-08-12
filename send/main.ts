@@ -47,16 +47,23 @@ const LOOKAHEAD = 3;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
-type LayoutMode = "four-three" | "single";
+type LayoutMode = "single" | "one-two" | "two-two" | "two-three" | "four-three";
 
 function selectedLayout(): LayoutMode {
-  return cfgLayout.value === "single" ? "single" : "four-three";
+  const mode = cfgLayout.value;
+  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three"
+    ? mode
+    : "four-three";
 }
 
 function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
-  return mode === "single"
-    ? { cols: 1, rows: 1, codes: 1 }
-    : { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
+  switch (mode) {
+    case "single": return { cols: 1, rows: 1, codes: 1 };
+    case "one-two": return { cols: 1, rows: 2, codes: 2 };
+    case "two-two": return { cols: 2, rows: 2, codes: 4 };
+    case "two-three": return { cols: 2, rows: 3, codes: 6 };
+    default: return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
+  }
 }
 
 const canvas = document.getElementById("qr") as HTMLCanvasElement;
@@ -417,7 +424,9 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "four-three" || saved.layout === "single") cfgLayout.value = saved.layout;
+    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three") {
+      cfgLayout.value = saved.layout;
+    }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
   }
