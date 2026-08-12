@@ -17,6 +17,7 @@ import { rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
   blockLength,
+  denseBlockLength,
   fitsInOneStream,
   minimumFrameBytes,
   sourceBlockCount,
@@ -461,7 +462,12 @@ async function startStream(revealStage = false) {
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
 
   const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
-  const blockLen = blockLength(frameBytes);
+  const maximumBlockLen = blockLength(frameBytes);
+  // A small payload in one maximum-size block makes every grid cell carry the
+  // same mostly-zero data. Use enough compact blocks to fill the first grid
+  // with distinct source chunks. Large transfers still use the selected
+  // maximum unchanged, and single-code mode merely avoids tail padding.
+  const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
   // Keep selectedFile on this path — raising bytes/frame back up is the fix,
   // and dropping the pick would hide that.
   if (!fitsInOneStream(payload.length, frameBytes)) {

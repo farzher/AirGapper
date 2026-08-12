@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   MAX_SOURCE_BLOCKS,
   blockLength,
+  denseBlockLength,
   fitsInOneStream,
   minimumFrameBytes,
   smallestSufficientFrameSize,
@@ -25,6 +26,29 @@ test("block count rounds up, because a partial block still needs a frame", () =>
   assert.equal(sourceBlockCount(2933, 2953), 1);
   assert.equal(sourceBlockCount(2934, 2953), 2);
   assert.equal(sourceBlockCount(10 * 2933, 2953), 10);
+});
+
+test("small grid transfers use a dense gridful of source blocks", () => {
+  for (const payloadBytes of [12, 61, 100, 2933, 20_000]) {
+    const blockLen = denseBlockLength(payloadBytes, blockLength(2953), 12);
+    const blocks = Math.ceil(payloadBytes / blockLen);
+    assert.ok(blockLen <= blockLength(2953));
+    assert.ok(blocks >= 12, `${payloadBytes} bytes made only ${blocks} blocks`);
+    // The helper picks the largest block that satisfies the target, avoiding
+    // gratuitous extra symbols as well as the old mostly-zero giant block.
+    assert.ok(Math.ceil(payloadBytes / (blockLen + 1)) < 12);
+  }
+});
+
+test("dense block sizing handles tiny payloads and single-code mode", () => {
+  assert.equal(denseBlockLength(1, 2933, 12), 1);
+  assert.equal(denseBlockLength(7, 2933, 12), 1);
+  assert.equal(denseBlockLength(100, 2933, 1), 100);
+  assert.equal(denseBlockLength(5000, 2933, 1), 2933);
+});
+
+test("large transfers retain the configured maximum block size", () => {
+  assert.equal(denseBlockLength(100_000, 2933, 12), 2933);
 });
 
 test("the block ceiling bites well below the file size limit", () => {

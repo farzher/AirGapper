@@ -16,6 +16,31 @@ export function blockLength(frameBytes: number): number {
   return frameBytes - HEADER_LEN;
 }
 
+/**
+ * Choose a payload block size up to the user's frame-size limit while keeping
+ * the first gridful of a small transfer useful. Without this cap, a 100-byte
+ * container at the 2,953-byte setting becomes one mostly-zero block: every QR
+ * repeats that block and differs only in its sequence header. Splitting it
+ * across the visible codes gives each code distinct source data and removes
+ * almost all padding.
+ *
+ * Equal-sized fountain blocks cannot produce every requested count exactly.
+ * This returns the largest block size whose count is at least `desiredBlocks`,
+ * capped at one block per payload byte and at the configured maximum.
+ */
+export function denseBlockLength(
+  payloadBytes: number,
+  maximumBlockLength: number,
+  desiredBlocks: number,
+): number {
+  const payload = Math.max(1, Math.floor(payloadBytes));
+  const maximum = Math.max(1, Math.floor(maximumBlockLength));
+  const target = Math.max(1, Math.min(Math.floor(desiredBlocks), payload));
+  if (target === 1) return Math.min(payload, maximum);
+  const largestForTarget = Math.floor((payload - 1) / (target - 1));
+  return Math.min(maximum, Math.max(1, largestForTarget));
+}
+
 /** Source blocks a payload splits into at this frame size. */
 export function sourceBlockCount(payloadBytes: number, frameBytes: number): number {
   return Math.ceil(payloadBytes / blockLength(frameBytes));
