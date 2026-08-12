@@ -244,9 +244,10 @@ input[type="range"] { accent-color: #222; }
 .preview video { position: relative; z-index: 0; width: 100%; height: 100%; display: block; object-fit: contain; background: #111; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; transform: translateZ(0); pointer-events: none; }
 /* Old Android WebViews may put video in a hardware overlay plane above every
-   DOM layer, ignoring the canvas z-index. Tiny opacity forces the video back
-   through normal compositing so the tracking canvas can appear over it. */
-.android-app-preview video { opacity: .999; }
+   DOM layer, ignoring canvas z-index. The receiver paints both the video and
+   brackets into the canvas in the APK, while this element remains playing as
+   the camera source but is visually removed. */
+.android-app-preview video { opacity: 0; }
 .transfer-panel { padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; white-space: nowrap; }
 .progress-amount { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }

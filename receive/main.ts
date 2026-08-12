@@ -46,7 +46,8 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
-if (isAndroidApp()) cameraBox.classList.add("android-app-preview");
+const androidCanvasPreview = isAndroidApp();
+if (androidCanvasPreview) cameraBox.classList.add("android-app-preview");
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
@@ -311,6 +312,12 @@ function drawOverlay(now: number) {
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
   const offY = (ph - vh * scale) / 2;
+  if (androidCanvasPreview) {
+    // Some old WebViews keep their hardware video plane above DOM canvases
+    // even when CSS asks them to composite it. Paint the preview into the same
+    // canvas as the brackets instead; this makes their ordering unconditional.
+    overlayCtx.drawImage(video, offX, offY, vw * scale, vh * scale);
+  }
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
   // Solid glowing corners mean a successful frame. A plausible code that the
