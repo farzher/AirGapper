@@ -22,11 +22,11 @@ const LN2 = 0.6931471805599453;
 /**
  * Deterministic natural log: exact-ops range reduction + atanh series.
  *
- * Exported only so tests can pin it. This is wire format, not a utility: it
- * differs from `Math.log` by up to 1 ulp on roughly a quarter of the inputs
- * solitonCdf() feeds it, which is enough to shift a CDF entry and flip a
- * sampled degree. Swapping it for `Math.log` would desync any sender and
- * receiver that don't share a JS engine. See tests/fountain.test.ts.
+ * Exported because this is wire format, not a utility: it differs from
+ * `Math.log` by up to 1 ulp on roughly a quarter of the inputs solitonCdf()
+ * feeds it, which is enough to shift a CDF entry and flip a sampled degree.
+ * Swapping it for `Math.log` would desync senders and receivers that do not
+ * share a JavaScript engine.
  */
 export function dlog(x: number): number {
   let e = 0;
@@ -86,8 +86,8 @@ function frameSeed(sessionId: number, seq: number): number {
 /**
  * The block indices XORed into frame `seq` — identical on both ends.
  *
- * Exported for the golden-vector tests. Sender and receiver derive this
- * independently and never compare notes, so any change here is a breaking
+ * Sender and receiver derive this independently and never compare notes, so
+ * any change here is a breaking
  * wire-format change: an `airgapper.html` copy saved months ago has to keep
  * agreeing with a current receiver.
  */
