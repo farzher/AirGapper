@@ -66,6 +66,7 @@ export class DecodeWorkerPool {
     private readonly onDecoded: (bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) => void,
     private readonly onSighted?: (box: SymbolBox) => void,
     private readonly onTrackedAttempt?: () => void,
+    private readonly onCompleted?: (id: number, symbolCount: number) => void,
   ) {}
 
   get size(): number {
@@ -94,6 +95,7 @@ export class DecodeWorkerPool {
         for (const s of symbols)
           this.onDecoded(s.bytes, s.box, { scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked });
         if (this.onSighted) for (const box of sightings ?? []) this.onSighted(box);
+        this.onCompleted?.(id, symbols.length);
       };
       this.workers.push(worker);
       this.busy.push(false);

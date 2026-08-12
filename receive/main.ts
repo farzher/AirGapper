@@ -104,9 +104,13 @@ const pool = new DecodeWorkerPool(
   // the crop path go decode what the full frame could not.
   (box) => noteRegion(box, performance.now(), false),
   () => trackedAttempts++,
+  (id, symbolCount) => noteDecodeCompleted(id, symbolCount),
 );
 const captureTimes: number[] = [];
 const decodeTimes: number[] = [];
+const poolBusyTimes: number[] = [];
+const cropAttemptTimes: number[] = [];
+const cropMissTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
@@ -164,6 +168,26 @@ interface Region extends SymbolBox {
   dim?: number;
 }
 const regions: Region[] = [];
+// Crop replies are associated with their target so failed jobs count toward
+// that code's quality. Previously only detector sightings counted as misses,
+// making a code with many silent crop failures misleadingly appear perfect.
+const cropAttempts = new Map<number, Region>();
+
+function noteOutcome(region: Region, success: boolean): void {
+  region.outcomes.push(success);
+  if (region.outcomes.length > 20) region.outcomes.shift();
+}
+
+function noteDecodeCompleted(id: number, symbolCount: number): void {
+  const region = cropAttempts.get(id);
+  if (!region) return;
+  cropAttempts.delete(id);
+  const now = performance.now();
+  cropAttemptTimes.push(now);
+  if (symbolCount === 0) cropMissTimes.push(now);
+  if (regions.includes(region)) noteOutcome(region, symbolCount > 0);
+}
+
 // Tried and reverted: a longer TTL for regions with a decode track record
 // (6 s after 5 hits). It measured WORSE — a stale region squats on crop
 // slots at a dead position, and by keeping regions.length looking healthy it
@@ -215,8 +239,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
         // overwriting a decode-proven box aims every following crop at
         // garbage — a measured 6× throughput collapse on a 4-code grid.
         r.seen = now;
-        r.outcomes.push(false);
-        if (r.outcomes.length > 20) r.outcomes.shift();
+        noteOutcome(r, false);
         return;
       }
       // Half-life blend of per-decode displacement: steady hands decay it to
@@ -225,8 +248,9 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
-      r.outcomes.push(true);
-      if (r.outcomes.length > 20) r.outcomes.shift();
+      // A targeted crop records exactly one outcome when its worker finishes.
+      // Full-frame discoveries still record their success here.
+      if (!cropAttempts.has(info?.scanId ?? -1)) noteOutcome(r, true);
       if (info?.quad) r.quad = info.quad;
       if (info?.modules) r.dim = info.modules;
       return;
@@ -281,10 +305,11 @@ window.addEventListener("resize", syncPreviewAspect);
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
 const overlayCtx = overlay.getContext("2d")!;
-function captureQualityColor(region: Region): string {
-  const successes = region.outcomes.reduce((sum, ok) => sum + Number(ok), 0);
-  const rate = successes / region.outcomes.length;
-  if (rate === 1) return "#42e8ff"; // perfect lock: safe to raise sender density/speed
+function captureQualityRate(region: Region): number {
+  return region.outcomes.reduce((sum, ok) => sum + Number(ok), 0) / region.outcomes.length;
+}
+
+function captureQualityColor(rate: number): string {
   if (rate >= 0.9) return "#35d66f"; // strong lock
   if (rate >= 0.65) return "#a9c93d";
   if (rate >= 0.35) return "#ffb23e";
@@ -332,7 +357,8 @@ function drawOverlay(now: number) {
     const successful = decodedAge <= INDICATOR_FADE_MS;
     if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
 
-    const color = captureQualityColor(r);
+    const quality = captureQualityRate(r);
+    const color = captureQualityColor(quality);
     overlayCtx.strokeStyle = color;
     overlayCtx.shadowColor = color;
     overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
@@ -362,6 +388,25 @@ function drawOverlay(now: number) {
     overlayCtx.lineTo(x, y + h);
     overlayCtx.lineTo(x, y + h - len);
     overlayCtx.stroke();
+
+    // A tiny rolling hit rate removes the need to memorize color thresholds.
+    // Wait for a few attempts so a newly found code does not claim 0%/100%
+    // certainty from a single sample.
+    if (r.outcomes.length >= 3) {
+      const label = `${Math.round(quality * 100)}%`;
+      const fontSize = Math.max(10, 10 * dpr);
+      overlayCtx.font = `600 ${fontSize}px system-ui, sans-serif`;
+      overlayCtx.textBaseline = "top";
+      const textWidth = overlayCtx.measureText(label).width;
+      const labelPad = 3 * dpr;
+      const labelY = Math.max(0, y - fontSize - 5 * dpr);
+      overlayCtx.globalAlpha = 0.9;
+      overlayCtx.shadowBlur = 0;
+      overlayCtx.fillStyle = "#111";
+      overlayCtx.fillRect(x, labelY, textWidth + 2 * labelPad, fontSize + 2 * labelPad);
+      overlayCtx.fillStyle = color;
+      overlayCtx.fillText(label, x + labelPad, labelY + labelPad);
+    }
   }
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
@@ -422,6 +467,10 @@ function stopReceiver(): void {
   cropRotate = 0;
   captureTimes.length = 0;
   decodeTimes.length = 0;
+  poolBusyTimes.length = 0;
+  cropAttemptTimes.length = 0;
+  cropMissTimes.length = 0;
+  cropAttempts.clear();
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
@@ -451,7 +500,8 @@ function stopReceiver(): void {
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
-  metric("m-dec").textContent = "— fps";
+  metric("m-dec").textContent = "— QR/s";
+  metric("m-limit").textContent = "";
   metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
@@ -612,14 +662,20 @@ const BITMAP_CAPTURE =
  *  than leak GPU memory. */
 function submitBitmap(
   pending: Promise<ImageBitmap>,
-  meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number },
+  meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number; region?: Region },
 ): void {
   void pending
     .then((bitmap) => {
+      const id = frameId++;
+      const { region, ...messageMeta } = meta;
+      if (region) cropAttempts.set(id, region);
       const taken =
-        !done && pool.submit({ id: frameId++, bitmap, ...meta }, [bitmap]);
-      if (!taken) bitmap.close();
-      else if (!meta.full) cropsSubmitted++;
+        !done && pool.submit({ id, bitmap, ...messageMeta }, [bitmap]);
+      if (!taken) {
+        cropAttempts.delete(id);
+        poolBusyTimes.push(performance.now());
+        bitmap.close();
+      } else if (!meta.full) cropsSubmitted++;
     })
     .catch(() => undefined);
 }
@@ -644,6 +700,7 @@ function captureFrame() {
   totalCaptures++;
   if (pool.busyCount === pool.size) {
     capturesDropped++;
+    poolBusyTimes.push(now);
     return; // all busy — drop it, no harm done
   }
 
@@ -702,6 +759,7 @@ function captureFrame() {
         full: false,
         quad: r.quad,
         dim: r.dim,
+        region: r,
       });
     }
     cropRotate++;
@@ -748,11 +806,17 @@ function captureFrame() {
     // The quad + dimension arm the worker's tracked fast path (detection
     // skipped entirely, 2× at V40); absent — or stale after a miss — the
     // worker falls back to the stock decoder on the same buffer.
+    const id = frameId++;
+    cropAttempts.set(id, r);
     const taken = pool.submit(
-      { id: frameId++, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
+      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
       [img.data.buffer],
     );
-    if (!taken) break;
+    if (!taken) {
+      cropAttempts.delete(id);
+      poolBusyTimes.push(performance.now());
+      break;
+    }
     cropsSubmitted++;
   }
   cropRotate++;
@@ -1187,9 +1251,19 @@ function updateStats() {
   };
   prune(captureTimes);
   prune(decodeTimes);
+  prune(poolBusyTimes);
+  prune(cropAttemptTimes);
+  prune(cropMissTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
-  metric("m-dec").textContent = `${perSecond(decodeTimes).toFixed(1)} fps`;
+  metric("m-dec").textContent = `${perSecond(decodeTimes).toFixed(1)} QR/s`;
+  const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
+  const missRate = cropMissTimes.length / Math.max(1, cropAttemptTimes.length);
+  metric("m-limit").textContent = busyRate >= 0.15
+    ? " · CPU limit"
+    : cropAttemptTimes.length >= 4 && missRate >= 0.25
+      ? " · scan misses"
+      : "";
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
