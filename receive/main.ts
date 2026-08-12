@@ -46,6 +46,7 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
+if (isAndroidApp()) cameraBox.classList.add("android-app-preview");
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
