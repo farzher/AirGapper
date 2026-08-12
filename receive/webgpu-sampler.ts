@@ -76,12 +76,13 @@ fn levelAt(track: Track, module: vec2f, offset: vec2f) -> f32 {
 
 fn level(track: Track, module: vec2f) -> f32 {
   let correction = vec2f(calibration[u32(track.info.w)].dx, calibration[u32(track.info.w)].dy);
-  // Four quarter-module samples survive defocus, display scaling and rolling
-  // shutter substantially better than one fragile center texel.
-  return (levelAt(track, module + vec2f(-0.25, -0.25), correction) +
-    levelAt(track, module + vec2f(0.25, -0.25), correction) +
-    levelAt(track, module + vec2f(-0.25, 0.25), correction) +
-    levelAt(track, module + vec2f(0.25, 0.25), correction)) * 0.25;
+  // Dense symbols need area sampling; comfortably large modules use one fetch.
+  // Four fetches for every V40 module overwhelmed older integrated GPUs.
+  if (track.info.z >= 2.75) { return levelAt(track, module, correction); }
+  return (levelAt(track, module + vec2f(-0.22, -0.22), correction) +
+    levelAt(track, module + vec2f(0.22, -0.22), correction) +
+    levelAt(track, module + vec2f(-0.22, 0.22), correction) +
+    levelAt(track, module + vec2f(0.22, 0.22), correction)) * 0.25;
 }
 
 fn finderBlack(x: u32, y: u32) -> bool {
@@ -96,11 +97,13 @@ fn calibrate(@builtin(global_invocation_id) gid: vec3u) {
   let dim = u32(track.info.x);
   var bestScore = -100000.0;
   var best = Calibration(0.5, 0.0, 0.0, 0.0);
-  // Search only around the cached transform. This replaces twelve independent
-  // detections with a small parallel finder-pattern correlation.
-  for (var sy = -8; sy <= 8; sy++) {
-    for (var sx = -8; sx <= 8; sx++) {
-      let correction = vec2f(f32(sx), f32(sy)) * 0.5;
+  // Nine local candidates keep this invocation bounded. The previous 17×17
+  // search serialized 42,483 external-texture reads per QR and could reduce an
+  // older phone to one frame every several seconds. Persistent corrections let
+  // this ±1 px/frame search follow larger motion over successive frames.
+  for (var sy = -1; sy <= 1; sy++) {
+    for (var sx = -1; sx <= 1; sx++) {
+      let correction = vec2f(f32(sx), f32(sy));
       var black = 0.0;
       var white = 0.0;
       var blackCount = 0u;
@@ -321,7 +324,13 @@ export class WebGpuQrSampler {
   private writeTrack(index: number, track: GpuSampleTrack): void {
     const h = homography(track.dim, track.quad);
     const offset = index * TRACK_FLOATS;
-    this.values.set([h[0]!, h[1]!, h[2]!, h[6]!, h[3]!, h[4]!, h[5]!, h[7]!, track.dim, track.channel ?? 0, 0, index], offset);
+    const top = Math.hypot(track.quad.topRight.x - track.quad.topLeft.x, track.quad.topRight.y - track.quad.topLeft.y);
+    const bottom = Math.hypot(track.quad.bottomRight.x - track.quad.bottomLeft.x, track.quad.bottomRight.y - track.quad.bottomLeft.y);
+    const left = Math.hypot(track.quad.bottomLeft.x - track.quad.topLeft.x, track.quad.bottomLeft.y - track.quad.topLeft.y);
+    const right = Math.hypot(track.quad.bottomRight.x - track.quad.topRight.x, track.quad.bottomRight.y - track.quad.topRight.y);
+    const pixelsPerModule = (top + bottom + left + right) / (4 * track.dim);
+    this.values.set([h[0]!, h[1]!, h[2]!, h[6]!, h[3]!, h[4]!, h[5]!, h[7]!,
+      track.dim, track.channel ?? 0, pixelsPerModule, index], offset);
   }
 }
 

@@ -1555,7 +1555,7 @@ function updateStats() {
     `WebGPU enabled: ${Boolean(gpuMetrics?.enabled)}`,
     `camera: ${perSecond(captureTimes).toFixed(1)} fps · ${video.videoWidth}×${video.videoHeight}`,
     `layout: ${Math.max(expectedRegions, live) || "acquiring"} QR · version: ${regions[0]?.dim ? (regions[0]!.dim! - 17) / 4 : "—"}`,
-    `GPU tracking: finder search ±4 px${now < gpuCooldownUntil ? " · CPU re-anchor" : ""}`,
+    `GPU tracking: finder search ±1 px${now < gpuCooldownUntil ? " · CPU re-anchor" : ""}`,
     `GPU sampling + packing + total: ${gpuMetrics?.lastGpuMs.toFixed(2) ?? "—"} ms`,
     `GPU→CPU readback: ${gpuMetrics?.lastReadbackMs.toFixed(2) ?? "—"} ms`,
     `WASM parse: ${gpuWasmFrames ? (wasmParseTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms`,
