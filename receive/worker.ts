@@ -109,11 +109,25 @@ async function pixelsOf(
   if (frame) {
     const fw = frame.displayWidth;
     const fh = frame.displayHeight;
-    const bytes = frame.allocationSize({ format: "I420" });
-    const data = new Uint8Array(bytes);
-    await frame.copyTo(data, { format: "I420" });
-    frame.close();
-    return { data: data.subarray(0, fw * fh), w: fw, h: fh, format: "y" as const, stride: fw };
+    const chromaWidth = Math.ceil(fw / 2);
+    const chromaHeight = Math.ceil(fh / 2);
+    const yBytes = fw * fh;
+    const chromaBytes = chromaWidth * chromaHeight;
+    const options = {
+      format: "I420" as const,
+      layout: [
+        { offset: 0, stride: fw },
+        { offset: yBytes, stride: chromaWidth },
+        { offset: yBytes + chromaBytes, stride: chromaWidth },
+      ],
+    };
+    const data = new Uint8Array(yBytes + chromaBytes * 2);
+    try {
+      await frame.copyTo(data, options);
+    } finally {
+      frame.close();
+    }
+    return { data: data.subarray(0, yBytes), w: fw, h: fh, format: "y" as const, stride: fw };
   }
   if (bitmap) {
     const bw = bitmap.width;

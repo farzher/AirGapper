@@ -57,7 +57,7 @@ const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.8";
+const APP_VERSION = "0.1.9";
 const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
 let webgpuRequested = false;
 try {
@@ -335,6 +335,7 @@ function noteSequence(region: Region, seq: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
+  if (id === directFrameJobId) directFrameJobId = -1;
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -678,6 +679,7 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
+  stopDirectCameraCapture();
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
@@ -861,11 +863,11 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   const startedGen = captureGen;
-  // External-texture compute stalls the camera compositor on several older
-  // Android WebGPU drivers. Keep the implementation available for controlled
-  // profiling (?webgpu=1), but never select it merely because the API exists.
-  // The established VideoFrame/CPU tracked sampler remains the production path.
-  if (webgpuRequested) {
+  const cameraTrack = stream.getVideoTracks()[0];
+  const usingDirectFrames = Boolean(cameraTrack && startDirectCameraCapture(cameraTrack, startedGen));
+  // External-texture compute can stall the camera compositor. It remains an
+  // explicit fallback for browsers without direct camera-frame access.
+  if (webgpuRequested && !usingDirectFrames) {
     void WebGpuQrSampler.create().then((sampler) => {
       if (startedGen !== captureGen || done) {
         sampler?.destroy();
@@ -911,7 +913,9 @@ function scheduleFrame(gen: number) {
   const v = video as VideoRVFC;
   const next = () => {
     if (done || gen !== captureGen) return;
-    captureFrame();
+    // Native camera frames handle tracked decoding when available. The preview
+    // callback then performs only bookkeeping and occasional reacquisition.
+    captureFrame(!directCameraCapture);
     if (showDetectionOverlay) drawOverlay(performance.now());
     scheduleFrame(gen);
   };
@@ -922,6 +926,95 @@ function scheduleFrame(gen: number) {
 const grab = document.createElement("canvas");
 let frameId = 0;
 let webgpuSampler: WebGpuQrSampler | null = null;
+let cameraFrameReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
+let directCameraCapture = false;
+let directFrameJobId = -1;
+
+/** Stop consuming camera-native frames without waiting for a pending read. */
+function stopDirectCameraCapture(): void {
+  directCameraCapture = false;
+  directFrameJobId = -1;
+  const reader = cameraFrameReader;
+  cameraFrameReader = null;
+  if (reader) void reader.cancel().catch(() => undefined);
+}
+
+/**
+ * Consume frames from the camera track rather than constructing them from the
+ * compositor-backed <video>. Only one latest frame enters the worker pipeline;
+ * stale frames are closed immediately, so decoding cannot throttle preview.
+ */
+function startDirectCameraCapture(track: MediaStreamTrack, gen: number): boolean {
+  const Processor = (globalThis as typeof globalThis & {
+    MediaStreamTrackProcessor?: new (init: { track: MediaStreamTrack }) => {
+      readable: ReadableStream<VideoFrame>;
+    };
+  }).MediaStreamTrackProcessor;
+  if (!Processor || typeof VideoFrame === "undefined") return false;
+  try {
+    const reader = new Processor({ track }).readable.getReader();
+    cameraFrameReader = reader;
+    directCameraCapture = true;
+    void (async () => {
+      try {
+        while (directCameraCapture && gen === captureGen && !done) {
+          const next = await reader.read();
+          if (next.done) break;
+          const frame = next.value;
+          if (!directCameraCapture || gen !== captureGen || done) {
+            frame.close();
+            break;
+          }
+          submitDirectCameraFrame(frame);
+        }
+      } catch {
+        // The preview-driven crop path remains available as the fallback.
+      } finally {
+        if (cameraFrameReader === reader) {
+          cameraFrameReader = null;
+          directCameraCapture = false;
+        }
+        try { reader.releaseLock(); } catch { /* already cancelled */ }
+      }
+    })();
+    return true;
+  } catch {
+    cameraFrameReader = null;
+    directCameraCapture = false;
+    return false;
+  }
+}
+
+function submitDirectCameraFrame(frame: VideoFrame): void {
+  const now = performance.now();
+  const live = decodedCount();
+  const scanInterval = live === 0
+    ? ACQUISITION_SCAN_MS
+    : live < expectedRegions
+      ? FULL_SCAN_DEGRADED_MS
+      : FULL_SCAN_INTERVAL_MS;
+  const tracks = regions.flatMap((region) => region.decoded && region.quad && region.dim
+    ? [{ id: region.id, quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32) }]
+    : []);
+  if (frame.displayWidth !== video.videoWidth || frame.displayHeight !== video.videoHeight) {
+    frame.close();
+    stopDirectCameraCapture();
+    return;
+  }
+  if (directFrameJobId !== -1 || !tracks.length || now - lastFullScan > scanInterval) {
+    frame.close();
+    return;
+  }
+  const id = frameId++;
+  directFrameJobId = id;
+  if (pool.submit({ id, frame, full: false, tracks }, [frame])) {
+    cropsSubmitted += tracks.length;
+    return;
+  }
+  directFrameJobId = -1;
+  poolBusyTimes.push(now);
+  frame.close();
+}
 
 // GPU-side capture: createImageBitmap(video, crop) hands each worker a
 // transferable bitmap with NO main-thread pixel readback — the worker draws
@@ -978,7 +1071,7 @@ function submitBitmap(
 // thing requiring main-thread pixel access. Duplicates now cost one cheap
 // tracked decode each, which the pool absorbs without noticing.
 
-function captureFrame() {
+function captureFrame(allowTrackedCapture = true) {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh) return;
@@ -1036,6 +1129,10 @@ function captureFrame() {
   const tracks = regions.flatMap((r) => r.decoded && r.quad && r.dim
     ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
     : []);
+
+  // MediaStreamTrackProcessor owns the hot tracked path. Do not touch the
+  // compositor-backed video unless its periodic full-frame scan is due.
+  if (!fullScanDue && !allowTrackedCapture) return;
 
   if (!fullScanDue && tracks.length && webgpuSampler && now >= gpuCooldownUntil) {
     const accepted = webgpuSampler.submit(video, tracks, ({ packed, tracks: sampledTracks, wordsPerMatrix }) => {
@@ -1243,6 +1340,7 @@ function finishPlainQr(text: string): void {
   done = true;
   releaseScreenWakeLock();
   captureGen++;
+  stopDirectCameraCapture();
   stream?.getTracks().forEach((track) => track.stop());
   clearInterval(statsTimer);
   statsTimer = undefined;
@@ -1274,6 +1372,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
   releaseScreenWakeLock();
   captureGen++;
+  stopDirectCameraCapture();
   // Snapshot diagnostics before teardown, but do not report success until the
   // recovered output passes SHA-256. Goodput is unique original-file bytes
   // divided by time through verification, never projected frame capacity.
