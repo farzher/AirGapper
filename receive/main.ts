@@ -59,8 +59,9 @@ const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElem
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
+const scanSightingLegend = document.getElementById("scan-sighting-legend")!;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.23";
+const APP_VERSION = "0.1.24";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -343,18 +344,11 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts || completion.symbolCount > 0) return;
-  // Camera/display transitions commonly spoil one frame. Keep valid geometry
-  // through several misses; immediately dropping it forced generic detection
-  // to reacquire after every transient blur.
+  // A tracked miss says this camera frame was unreadable; it does not prove the
+  // remembered location is wrong. Keep geometry available for later frames and
+  // use the miss count only to trigger aggressive full-frame reacquisition.
   for (const attempt of attempts) {
-    if (attempt.region.quad !== attempt.quad) continue;
-    attempt.region.consecutiveMisses++;
-    if (attempt.region.consecutiveMisses < 4) continue;
-    attempt.region.quad = undefined;
-    attempt.region.dim = undefined;
-    attempt.region.consecutiveMisses = 0;
-    trackingInvalidations++;
-    notePipelineEvent("tracking-invalidated", trackingInvalidations);
+    if (attempt.region.quad === attempt.quad) attempt.region.consecutiveMisses++;
   }
 }
 
@@ -363,7 +357,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
 // slots at a dead position, and by keeping regions.length looking healthy it
 // suppresses the degraded rescan cadence exactly when reacquisition is
 // needed. Expiring fast and rescanning hard wins.
-const REGION_TTL_MS = 1500;
+const REGION_TTL_MS = 5000;
 // A probationary detector sighting has no decodedSeen timestamp; keeping it
 // through several cold full scans gives its cheap crop path time to recover.
 const SIGHTING_REGION_TTL_MS = 3000;
@@ -972,10 +966,14 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   ctx.strokeStyle = "#f2a51a";
   ctx.lineWidth = 4;
   for (const box of completion.sightings) ctx.strokeRect(box.x - capture.ox, box.y - capture.oy, box.w, box.h);
+  const tracked = !capture.full;
   const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
   scanDialogStatus.textContent = completion.error
     ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.error}`
-    : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} detected`;
+    : tracked
+      ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded`
+      : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
+  scanSightingLegend.hidden = tracked;
   scanDialog.showModal();
 }
 
@@ -1022,10 +1020,11 @@ function captureFrame() {
     expectedRegions = live;
     expectedRegionsAt = now;
   }
+  const trackingUnhealthy = regions.some((region) => region.decoded && region.consecutiveMisses >= 4);
   const scanInterval =
     live === 0
       ? ACQUISITION_SCAN_MS
-      : live < expectedRegions
+      : live < expectedRegions || trackingUnhealthy
         ? FULL_SCAN_DEGRADED_MS
         : FULL_SCAN_INTERVAL_MS;
   // A due full scan takes priority over crops, deliberately. The crop loop
