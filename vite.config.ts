@@ -50,6 +50,10 @@ export default defineConfig({
   ],
   worker: { format: "iife", plugins: () => [inlineCodecWasm()] },
   build: {
+    // Firefox 68 was the last pre-Fenix Android release and is still common
+    // on deliberately offline older phones. Avoid shipping newer syntax that
+    // makes the entire module fail to parse before any buttons are wired up.
+    target: "firefox68",
     outDir: "dist",
     assetsInlineLimit: Number.MAX_SAFE_INTEGER,
     rollupOptions: { input: resolve(__dirname, "app.html") },
