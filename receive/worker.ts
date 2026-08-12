@@ -177,26 +177,31 @@ ctx.onmessage = async (e: MessageEvent) => {
       let fallbackAttempted = false;
       if (symbols.length === 0) {
         fallbackAttempted = true;
-        const vec = zx.readFull(ptr, pw, ph, true, 16, true);
-        try {
-          for (let i = 0; i < vec.size(); i++) {
-            const result = vec.get(i);
-            if (result.valid && result.bytes.length > 0) {
-              symbols.push({
-                bytes: result.bytes,
-                box: boundsOf(result.position, ox, oy),
-                quad: shifted(result.position, ox, oy),
-                modules: result.modules,
-                tracked: false,
-              });
-            } else {
-              const box = boundsOf(result.position, ox, oy);
-              if (box.w > 0 && box.h > 0) sightings.push(box);
+        const appendFallback = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
+          try {
+            for (let i = 0; i < vec.size(); i++) {
+              const result = vec.get(i);
+              if (result.valid && result.bytes.length > 0) {
+                symbols.push({
+                  bytes: result.bytes,
+                  box: boundsOf(result.position, ox, oy),
+                  quad: shifted(result.position, ox, oy),
+                  modules: result.modules,
+                  tracked: false,
+                });
+              } else if (includeErrors) {
+                const box = boundsOf(result.position, ox, oy);
+                if (box.w > 0 && box.h > 0) sightings.push(box);
+              }
             }
+          } finally {
+            vec.delete();
           }
-        } finally {
-          vec.delete();
-        }
+        };
+        // A lattice crop can hold all 15 dense symbols. Find valid payloads
+        // before allowing error candidates to consume the result capacity.
+        appendFallback(zx.readFull(ptr, pw, ph, true, 64, false), false);
+        if (symbols.length === 0) appendFallback(zx.readFull(ptr, pw, ph, true, 64, true), true);
       }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,

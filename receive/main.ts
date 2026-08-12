@@ -309,6 +309,10 @@ let completedJobs = 0;
 let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
+// Any valid packet refreshes this, including a duplicate. It gates deliberate
+// sender/layout handover without letting stale pipelined replies steal a live
+// transfer back.
+let lastStreamDecodeAt = 0;
 let maxSequenceGapMs = 0;
 const pipelineEvents: [number, string, number][] = [];
 const PIPELINE_EVENT_LIMIT = 80;
@@ -612,7 +616,7 @@ function classifyGridSlots(vw: number, vh: number): Region[] {
     region.pixelsPerModule = shortestEdge / region.dim;
     if (region.visibleFraction < 0.1) region.slotState = "OFFSCREEN";
     else if (region.visibleFraction < 0.88) region.slotState = "PARTIAL";
-    else if (region.consecutiveMisses >= 6) region.slotState = "LOST";
+    else if (region.consecutiveMisses >= 3) region.slotState = "LOST";
     // Detection becomes unreliable before direct sampling does. Keep a fully
     // visible low-density slot eligible for the tracked sampler down to the
     // practical two-pixel/module floor instead of silently scheduling nothing.
@@ -883,6 +887,7 @@ function stopReceiver(): void {
   workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
+  lastStreamDecodeAt = 0;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
   usefulFrameTimes.length = 0;
@@ -1130,9 +1135,7 @@ function invalidateTrackedQuad(region: Region): void {
 }
 
 function captureSubmittedScan(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
+  image: ImageData,
   ox: number,
   oy: number,
   full: boolean,
@@ -1140,7 +1143,19 @@ function captureSubmittedScan(
 ): void {
   if (!captureNextScan) return;
   captureNextScan = false;
-  pendingScanCapture = { image: ctx.getImageData(0, 0, w, h), ox, oy, full, tracks };
+  // The worker transfer detaches image.data, so retain a cheap memory copy.
+  // This replaces the old second synchronous canvas readback, which made the
+  // Capture button feel hung on full-resolution frames.
+  pendingScanCapture = {
+    image: new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
+    ox, oy, full, tracks,
+  };
+  scanCapture.width = image.width;
+  scanCapture.height = image.height;
+  scanCapture.getContext("2d")!.putImageData(pendingScanCapture.image, 0, 0);
+  scanDialogStatus.textContent = `${full ? "Full-frame scan" : `${tracks.length || 1} tracked region${tracks.length === 1 ? "" : "s"}`} · ${image.width}×${image.height} · decoding…`;
+  scanSightingLegend.hidden = true;
+  if (!scanDialog.open) scanDialog.showModal();
 }
 
 function cancelScanCapture(): void {
@@ -1186,7 +1201,7 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const gridSummary = gridDebugSummary();
   if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
-  scanDialog.showModal();
+  if (!scanDialog.open) scanDialog.showModal();
 }
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
@@ -1258,7 +1273,9 @@ function captureFrame() {
   // anchor, display transition, or missed neighbor must not suppress global
   // reacquisition forever. Degraded grids rescan quickly; a healthy grid still
   // gets a sparse scan that can correct motion and discover every visible QR.
-  const fullScanDue = now - lastFullScan > scanInterval;
+  // A requested diagnostic capture prefers the locked lattice crop rather
+  // than randomly landing on a due full-frame maintenance scan.
+  const fullScanDue = !captureNextScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
     return;
@@ -1275,8 +1292,8 @@ function captureFrame() {
     lastFullScan = now;
     fullScans++;
     ctx.drawImage(video, 0, 0);
-    captureSubmittedScan(ctx, vw, vh, 0, 0, true);
     const img = ctx.getImageData(0, 0, vw, vh);
+    captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
     if (pool.submit(
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
@@ -1291,12 +1308,17 @@ function captureFrame() {
   for (const region of regions) {
     if (region.gridSlot === undefined && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchRegions = regions.filter((region) =>
-    (region.decoded || region.gridSlot !== undefined) && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const batchRegions = (gridLattice.active
+    ? visibleGridSlots.filter((region) =>
+      region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY" ||
+      (region.slotState === "PARTIAL" && region.visibleFraction >= 0.92))
+    : regions.filter((region) => region.decoded))
+    .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh))
+    .slice(0, 15);
   const batchTracks = batchRegions.map((region) => ({
     id: region.id, quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
-  if (batchTracks.length > 1 && !gridLattice.active) {
+  if (batchTracks.length > 1) {
     // One readback and one worker message per camera frame. Four independent
     // getImageData calls were stalling camera delivery even though the decode
     // workers were mostly idle.
@@ -1307,15 +1329,16 @@ function captureFrame() {
     const minY = Math.min(...points.map((point) => point.y));
     const maxX = Math.max(...points.map((point) => point.x));
     const maxY = Math.max(...points.map((point) => point.y));
-    const pad = Math.max(8, Math.round(Math.max(maxX - minX, maxY - minY) * 0.04));
+    const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
+    const pad = Math.max(8, Math.round(typicalEdge * 0.16));
     const x = Math.max(0, Math.floor(minX - pad));
     const y = Math.max(0, Math.floor(minY - pad));
     const w = Math.min(vw - x, Math.ceil(maxX + pad) - x);
     const h = Math.min(vh - y, Math.ceil(maxY + pad) - y);
     if (w >= 32 && h >= 32) {
       ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-      captureSubmittedScan(ctx, w, h, x, y, false, batchTracks.map((track) => track.quad));
       const img = ctx.getImageData(0, 0, w, h);
+      captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
       const id = frameId++;
       if (pool.submit(
         { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
@@ -1369,8 +1392,8 @@ function captureFrame() {
     const h = Math.min(vh - y, Math.ceil(bottom + pad) - y);
     if (w < 32 || h < 32) continue;
     ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
-    captureSubmittedScan(ctx, w, h, x, y, false, r.quad ? [r.quad] : []);
     const img = ctx.getImageData(0, 0, w, h);
+    captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     if (!pool.submit(
@@ -1389,6 +1412,33 @@ function captureFrame() {
   // Being blocked by per-track limits is scanner saturation too.
   if (!submitted && scheduledRegions.length > 0) poolBusyTimes.push(now);
   cropRotate++;
+}
+
+function resetActiveTransfer(): void {
+  decoder = null;
+  streamKey = "";
+  reportSessionId = 0;
+  startTs = 0;
+  regions.length = 0;
+  gridLattice.reset();
+  gridShape = "";
+  lastGridSnapshot = undefined;
+  activeDecodeBudget = 0;
+  expectedRegions = 0;
+  expectedRegionsAt = 0;
+  lastDecodedRegionSize = 0;
+  cropAttempts.clear();
+  qrReadTimes.length = 0;
+  usefulFrameTimes.length = 0;
+  lastDistinctArrivalAt = 0;
+  minSeq = Infinity;
+  maxSeq = -1;
+  bar.style.width = "0";
+  progressEl.setAttribute("aria-valuenow", "0");
+  progressLabel.textContent = "0%";
+  transferSizeLabel.textContent = "";
+  etaLabel.textContent = "Waiting for QR";
+  plainQrPolicy.reset();
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
@@ -1413,10 +1463,15 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   const { header, block } = parsed;
   const identity = streamIdentity(header);
-  // Once a transfer has begun, a packet from another session/shape is valid QR
-  // data but invalid evidence for this lattice. It cannot move tracks or reset
-  // the fountain decoder.
-  if (decoder && streamKey !== identity) return;
+  // A live stream is sticky against stray codes and out-of-order worker
+  // replies, but after it has been optically silent a valid packet from a new
+  // sender or layout starts a clean transfer. Sender settings restart with a
+  // new session, so layout changes recover without reloading the receiver.
+  if (decoder && streamKey !== identity) {
+    if (decodedAt - lastStreamDecodeAt < 1800) return;
+    resetActiveTransfer();
+  }
+  lastStreamDecodeAt = decodedAt;
 
   plainQrPolicy.noteFramed();
   const hasFrameCRC = bytes.length === HEADER_LEN + header.blockLen + FRAME_CRC_LEN;
