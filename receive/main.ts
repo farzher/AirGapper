@@ -972,13 +972,7 @@ async function appendReceivedFile(
 ): Promise<void> {
   const type = declaredType || inferredType(entry.name);
   const container = separate ? document.createElement("section") : parent;
-  if (separate) {
-    container.className = "received-file";
-    const name = document.createElement("strong");
-    name.className = "received-file-name";
-    name.textContent = entry.name;
-    container.append(name);
-  }
+  if (separate) container.className = "received-file";
   const url = URL.createObjectURL(new Blob([entry.bytes as BlobPart], { type }));
   if (type.startsWith("image/")) {
     const image = document.createElement("img");
