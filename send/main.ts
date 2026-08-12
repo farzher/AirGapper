@@ -92,11 +92,12 @@ function renderReceiverLink(): void {
   const receiverUrl = receiverLinkQr.dataset.receiverUrl;
   if (!receiverUrl) return;
   const qr = QRCode.create(receiverUrl, { errorCorrectionLevel: "L" });
-  const render = (target: HTMLCanvasElement, targetCssSize: number, margin: number): number => {
+  const render = (target: HTMLCanvasElement, targetCssSize: number, margin: number, moduleCssScale?: number): number => {
     const raster = rasterizeQr(qr.modules.size, qr.modules.data, margin);
-    // Keep every module an integer number of physical display pixels.
     const dpr = window.devicePixelRatio || 1;
-    const scale = Math.max(1, Math.round((targetCssSize * dpr) / raster.size));
+    const scale = moduleCssScale === undefined
+      ? Math.max(1, Math.round((targetCssSize * dpr) / raster.size))
+      : Math.max(1, Math.round(moduleCssScale * dpr));
     const source = document.createElement("canvas");
     source.width = source.height = raster.size;
     source.getContext("2d")!.putImageData(
@@ -105,7 +106,7 @@ function renderReceiverLink(): void {
       0,
     );
     target.width = target.height = raster.size * scale;
-    const cssSize = target.width / dpr;
+    const cssSize = moduleCssScale === undefined ? target.width / dpr : raster.size * moduleCssScale;
     target.style.width = target.style.height = `${cssSize}px`;
     target.style.imageRendering = "pixelated";
     const ctx = target.getContext("2d")!;
@@ -113,7 +114,7 @@ function renderReceiverLink(): void {
     ctx.drawImage(source, 0, 0, target.width, target.height);
     return cssSize;
   };
-  const headerSize = render(receiverLinkQr, 48, HEADER_MARGIN);
+  const headerSize = render(receiverLinkQr, 48, HEADER_MARGIN, 1);
   const headerButton = receiverLinkQr.parentElement as HTMLButtonElement;
   headerButton.style.width = headerButton.style.height = `${headerSize}px`;
   render(receiverLinkQrLarge, 240, 4);
