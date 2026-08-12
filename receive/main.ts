@@ -59,8 +59,9 @@ const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElem
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
+const scanFrame = document.getElementById("scan-frame") as HTMLCanvasElement;
 const scanCapture = document.getElementById("scan-capture") as HTMLCanvasElement;
-const APP_VERSION = "0.1.20";
+const APP_VERSION = "0.1.21";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -712,6 +713,8 @@ function stopReceiver(): void {
   captureScanBtn.textContent = "Capture scan";
   captureScanBtn.disabled = false;
   if (scanDialog.open) scanDialog.close();
+  scanFrame.width = 0;
+  scanFrame.height = 0;
   scanCapture.width = 0;
   scanCapture.height = 0;
   progressEl.style.display = "none";
@@ -876,6 +879,7 @@ let captureNextScan = false;
 let pendingScanCapture: {
   id?: number;
   image: ImageData;
+  frame: ImageData;
   ox: number;
   oy: number;
   full: boolean;
@@ -936,7 +940,15 @@ function captureSubmittedScan(
 ): void {
   if (!captureNextScan) return;
   captureNextScan = false;
-  pendingScanCapture = { image: ctx.getImageData(0, 0, w, h), ox, oy, full, tracks };
+  const frameCtx = document.createElement("canvas").getContext("2d")!;
+  frameCtx.canvas.width = video.videoWidth;
+  frameCtx.canvas.height = video.videoHeight;
+  frameCtx.drawImage(video, 0, 0);
+  pendingScanCapture = {
+    image: ctx.getImageData(0, 0, w, h),
+    frame: frameCtx.getImageData(0, 0, frameCtx.canvas.width, frameCtx.canvas.height),
+    ox, oy, full, tracks,
+  };
 }
 
 function cancelScanCapture(): void {
@@ -950,6 +962,13 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const capture = pendingScanCapture;
   if (!capture || capture.id !== id) return;
   cancelScanCapture();
+  scanFrame.width = capture.frame.width;
+  scanFrame.height = capture.frame.height;
+  const frameCtx = scanFrame.getContext("2d")!;
+  frameCtx.putImageData(capture.frame, 0, 0);
+  frameCtx.strokeStyle = "#d837c4";
+  frameCtx.lineWidth = Math.max(3, capture.frame.width / 250);
+  frameCtx.strokeRect(capture.ox, capture.oy, capture.image.width, capture.image.height);
   scanCapture.width = capture.image.width;
   scanCapture.height = capture.image.height;
   const ctx = scanCapture.getContext("2d")!;
