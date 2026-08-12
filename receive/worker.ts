@@ -64,8 +64,6 @@ let batchOutputPtr = 0;
 let batchMetricsPtr = 0;
 let batchCapacity = 0;
 const batchTrackKeys: string[] = [];
-const GPU_ATLAS_WIDTH = 177;
-let gpuAtlas = new Uint8Array(GPU_ATLAS_WIDTH * GPU_ATLAS_WIDTH * 15);
 
 function inputBuffer(zx: DecimenModule, bytes: number): number {
   if (bytes <= inputCapacity) return inputPtr;
@@ -82,31 +80,9 @@ async function pixelsOf(
   bitmap: ImageBitmap | undefined,
   frame: VideoFrame | undefined,
   frameRect: { x: number; y: number; width: number; height: number } | undefined,
-  gpuPacked: ArrayBuffer | undefined,
-  tracks: BatchTrack[] | undefined,
-  wordsPerMatrix: number,
   w: number,
   h: number,
 ) {
-  if (gpuPacked && tracks?.length) {
-    const height = tracks.length * GPU_ATLAS_WIDTH;
-    const size = GPU_ATLAS_WIDTH * height;
-    if (gpuAtlas.byteLength < size) gpuAtlas = new Uint8Array(size);
-    gpuAtlas.fill(255, 0, size);
-    const words = new Uint32Array(gpuPacked);
-    for (let slot = 0; slot < tracks.length; slot++) {
-      const dim = tracks[slot]!.dim;
-      const wordBase = slot * wordsPerMatrix;
-      const rowBase = slot * GPU_ATLAS_WIDTH * GPU_ATLAS_WIDTH;
-      for (let bit = 0; bit < dim * dim; bit++) {
-        if ((words[wordBase + (bit >>> 5)]! & (1 << (bit & 31))) !== 0) {
-          gpuAtlas[rowBase + Math.floor(bit / dim) * GPU_ATLAS_WIDTH + bit % dim] = 0;
-        }
-      }
-    }
-    return { data: gpuAtlas.subarray(0, size), w: GPU_ATLAS_WIDTH, h: height,
-      format: "matrix" as const, stride: GPU_ATLAS_WIDTH };
-  }
   if (frame) {
     const fw = frameRect?.width ?? frame.displayWidth;
     const fh = frameRect?.height ?? frame.displayHeight;
@@ -183,7 +159,7 @@ function offsetQuad(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, bitmap, frame, frameRect, gpuPacked, tracks, wordsPerMatrix = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
+  const { id, buf, bitmap, frame, frameRect, tracks, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
     /** Readback-fallback capture: raw RGBA. */
     buf?: ArrayBuffer;
@@ -193,9 +169,6 @@ ctx.onmessage = async (e: MessageEvent) => {
     frame?: VideoFrame;
     /** Camera-track crop copied directly into planar luma. */
     frameRect?: { x: number; y: number; width: number; height: number };
-    /** GPU-packed module matrices; no camera pixels cross to this worker. */
-    gpuPacked?: ArrayBuffer;
-    wordsPerMatrix?: number;
     /** All acquired symbols sampled together from one full camera frame. */
     tracks?: BatchTrack[];
     w?: number;
@@ -210,7 +183,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     /** The stream's QR dimension in modules — tracked path. */
     dim?: number;
   };
-  const pixels = await pixelsOf(buf, bitmap, frame, frameRect, gpuPacked, tracks, wordsPerMatrix, w, h);
+  const pixels = await pixelsOf(buf, bitmap, frame, frameRect, w, h);
   const { w: pw, h: ph } = pixels;
   let zx: DecimenModule | undefined;
   let ptr = 0;
@@ -229,15 +202,9 @@ ctx.onmessage = async (e: MessageEvent) => {
       const byId = new Map(tracks.map((track) => [track.id, track]));
       for (let slot = 0; slot < tracks.length; slot++) {
         const track = tracks[slot]!;
-        const matrixY = slot * GPU_ATLAS_WIDTH;
-        const key = pixels.format === "matrix"
-          ? `matrix:${track.id}:${track.dim}:${Number(track.crc32)}:${slot}`
-          : `${quadKey(track)}:${frameRect?.x ?? 0}:${frameRect?.y ?? 0}`;
+        const key = `${quadKey(track)}:${frameRect?.x ?? 0}:${frameRect?.y ?? 0}`;
         if (batchTrackKeys[slot] !== key) {
-          const q = pixels.format === "matrix" ? {
-            topLeft: { x: 0, y: matrixY }, topRight: { x: track.dim, y: matrixY },
-            bottomRight: { x: track.dim, y: matrixY + track.dim }, bottomLeft: { x: 0, y: matrixY + track.dim },
-          } : frameRect ? offsetQuad(track.quad, -frameRect.x, -frameRect.y) : track.quad;
+          const q = frameRect ? offsetQuad(track.quad, -frameRect.x, -frameRect.y) : track.quad;
           zx._setTrackedDecoderTrack(
             batchDecoder, slot, track.id, track.dim,
             q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
@@ -251,7 +218,7 @@ ctx.onmessage = async (e: MessageEvent) => {
         zx._clearTrackedDecoderTrack(batchDecoder, slot);
         batchTrackKeys[slot] = "";
       }
-      const count = pixels.format === "y" || pixels.format === "matrix"
+      const count = pixels.format === "y"
         ? zx._decodeTrackedBatchY(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
           tracks.length, batchOutputPtr, tracks.length * 3000, batchMetricsPtr)
         : zx._decodeTrackedBatchRGBA(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
@@ -266,8 +233,9 @@ ctx.onmessage = async (e: MessageEvent) => {
         if (!track) continue;
         const byteOffset = view.getInt32(base + 8, true);
         const byteLength = view.getInt32(base + 12, true);
-        const updatedQuad = pixels.format === "matrix" ? track.quad :
-          offsetQuad(track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true));
+        const updatedQuad = offsetQuad(
+          track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true),
+        );
         packedSymbols.push({
           byteOffset, byteLength, box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad,
           modules: track.dim, tracked: true, crc32: track.crc32,
@@ -275,20 +243,9 @@ ctx.onmessage = async (e: MessageEvent) => {
         outputLength = Math.max(outputLength, byteOffset + byteLength);
       }
       const packedBytes = zx.HEAPU8.slice(batchOutputPtr, batchOutputPtr + outputLength).buffer;
-      const metricsView = new DataView(zx.HEAPU8.buffer);
-      const wasmMetrics = {
-        trackingMs: metricsView.getFloat64(batchMetricsPtr, true),
-        samplingMs: metricsView.getFloat64(batchMetricsPtr + 8, true),
-        parseMs: metricsView.getFloat64(batchMetricsPtr + 16, true),
-        crcMs: metricsView.getFloat64(batchMetricsPtr + 24, true),
-        rsMs: metricsView.getFloat64(batchMetricsPtr + 32, true),
-        totalMs: metricsView.getFloat64(batchMetricsPtr + 40, true),
-        rsFallbacks: metricsView.getUint32(batchMetricsPtr + 68, true),
-      };
       ctx.postMessage({
         id, symbols: packedSymbols, packedBytes, sightings: [], full: false,
         trackedAttempted: true, trackedHit: packedSymbols.length > 0, fallbackAttempted: false,
-        gpuSampled: pixels.format === "matrix", wasmMetrics,
         latencyMs: performance.now() - startedAt,
       }, [packedBytes]);
       return;
