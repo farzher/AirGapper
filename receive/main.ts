@@ -462,6 +462,7 @@ function stopReceiver(): void {
     if (label) label.textContent = "Progress and measured KB/s";
   }
   startBtn.disabled = false;
+  startBtn.hidden = false;
   startBtn.style.display = "";
   startBtn.textContent = "Enable camera";
   setStatus("");

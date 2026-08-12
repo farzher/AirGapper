@@ -72,9 +72,17 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   }
 };
 
+function resumeActiveView(): void {
+  if (document.visibilityState === "visible" && active === "receive" && !document.body.classList.contains("receive-complete")) {
+    window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+  }
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend?.();
+  else resumeActiveView();
 });
+window.addEventListener("pageshow", resumeActiveView);
 
 (window as Window & { airgapperHandleBack?: () => boolean }).airgapperHandleBack = () => {
   if (receiverLinkDialog.open) {
