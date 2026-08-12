@@ -59,8 +59,6 @@ interface DecodeMessage {
   fallbackAttempted?: boolean;
   full?: boolean;
   latencyMs?: number;
-  channelAttempts?: number;
-  channelHits?: number;
   error?: string;
 }
 
@@ -72,8 +70,6 @@ export interface DecodeCompletion {
   trackedHit: boolean;
   fallbackAttempted: boolean;
   latencyMs: number;
-  channelAttempts: number;
-  channelHits: number;
   error?: string;
 }
 
@@ -124,8 +120,6 @@ export class DecodeWorkerPool {
           trackedHit: Boolean(message.trackedHit),
           fallbackAttempted: Boolean(message.fallbackAttempted),
           latencyMs: message.latencyMs ?? 0,
-          channelAttempts: message.channelAttempts ?? 0,
-          channelHits: message.channelHits ?? 0,
           error: message.error,
         });
       };

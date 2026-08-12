@@ -53,6 +53,19 @@ function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
 // read back on THIS thread — the whole point of the bitmap path is that the
 // main thread never touches pixels.
 let offscreen: OffscreenCanvas | undefined;
+// Keep one input allocation for this worker's lifetime. Camera crops are
+// similarly sized from frame to frame; malloc/free on every decode only adds
+// allocator churn to the hottest path.
+let inputPtr = 0;
+let inputCapacity = 0;
+
+function inputBuffer(zx: DecimenModule, bytes: number): number {
+  if (bytes <= inputCapacity) return inputPtr;
+  if (inputPtr) zx._free(inputPtr);
+  inputPtr = zx._malloc(bytes);
+  inputCapacity = bytes;
+  return inputPtr;
+}
 
 /** Pixels from either capture mode: a transferred ArrayBuffer (readback
  *  fallback) or an ImageBitmap (GPU-side crop, Safari 17+/modern engines). */
@@ -98,95 +111,81 @@ ctx.onmessage = async (e: MessageEvent) => {
   let ptr = 0;
   try {
     zx = await ready;
-    ptr = zx._malloc(pw * ph * 4);
-    const source = pixels.data instanceof Uint8Array
-      ? pixels.data
-      : new Uint8Array(pixels.data.buffer, pixels.data.byteOffset, pixels.data.byteLength);
+    ptr = inputBuffer(zx, pw * ph * 4);
+    zx.HEAPU8.set(
+      pixels.data instanceof Uint8Array ? pixels.data : new Uint8Array(pixels.data.buffer),
+      ptr,
+    );
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean }[] = [];
     const sightings: object[] = [];
 
     let trackedHit = false;
     let trackedAttempted = false;
     let fallbackAttempted = false;
-    let channelHits = 0;
-    // QR A is green and QR B is red. Copy one sensor channel at a time into a
-    // conventional opaque grayscale RGBA image before handing it to ZXing.
-    for (const channelOffset of [1, 0]) {
-      const gray = zx.HEAPU8.subarray(ptr, ptr + pw * ph * 4);
-      for (let p = 0; p < source.length; p += 4) {
-        const value = source[p + channelOffset]!;
-        gray[p] = value;
-        gray[p + 1] = value;
-        gray[p + 2] = value;
-        gray[p + 3] = 255;
+    if (!full && quad && dim) {
+      trackedAttempted = true;
+      const r = zx.readTracked(
+        ptr, pw, ph, dim,
+        quad.topLeft.x - ox, quad.topLeft.y - oy,
+        quad.topRight.x - ox, quad.topRight.y - oy,
+        quad.bottomRight.x - ox, quad.bottomRight.y - oy,
+        quad.bottomLeft.x - ox, quad.bottomLeft.y - oy,
+      );
+      if (r.valid && r.bytes.length > 0) {
+        symbols.push({
+          bytes: r.bytes,
+          box: boundsOf(r.position, ox, oy),
+          quad: shifted(r.position, ox, oy),
+          modules: r.modules,
+          tracked: true,
+        });
+        trackedHit = true;
       }
+    }
 
-      const before = symbols.length;
-      let channelTrackedHit = false;
-      const channelTrackedAttempted = !full && Boolean(quad && dim);
-      if (channelTrackedAttempted && quad && dim) {
-        trackedAttempted = true;
-        const r = zx.readTracked(
-          ptr, pw, ph, dim,
-          quad.topLeft.x - ox, quad.topLeft.y - oy,
-          quad.topRight.x - ox, quad.topRight.y - oy,
-          quad.bottomRight.x - ox, quad.bottomRight.y - oy,
-          quad.bottomLeft.x - ox, quad.bottomLeft.y - oy,
-        );
-        if (r.valid && r.bytes.length > 0) {
-          symbols.push({
-            bytes: r.bytes,
-            box: boundsOf(r.position, ox, oy),
-            quad: shifted(r.position, ox, oy),
-            modules: r.modules,
-            tracked: true,
-          });
-          channelTrackedHit = true;
-          trackedHit = true;
-        }
-      }
-
-      if (shouldRunFullDecode(full, channelTrackedAttempted, channelTrackedHit)) {
-        fallbackAttempted ||= !full;
-        const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
-        try {
-          for (let i = 0; i < vec.size(); i++) {
-            const r = vec.get(i);
-            if (r.valid && r.bytes.length > 0) {
-              symbols.push({
-                bytes: r.bytes,
-                box: boundsOf(r.position, ox, oy),
-                quad: shifted(r.position, ox, oy),
-                modules: r.modules,
-                tracked: false,
-              });
-            } else if (full) {
-              const box = boundsOf(r.position, ox, oy);
-              if (box.w > 0 && box.h > 0) sightings.push(box);
-            }
+    if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+      fallbackAttempted = !full;
+      // Full scans get returnErrors (sightings live there — error results
+      // COUNT against the symbol cap, hence the headroom above 12 codes) and a
+      // crop fallback stays in the cheapest configuration. tryHarder stays on
+      // everywhere: real marginal captures are where it earns its keep.
+      const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
+      try {
+        for (let i = 0; i < vec.size(); i++) {
+          const r = vec.get(i);
+          if (r.valid && r.bytes.length > 0) {
+            symbols.push({
+              bytes: r.bytes,
+              box: boundsOf(r.position, ox, oy),
+              quad: shifted(r.position, ox, oy),
+              modules: r.modules,
+              tracked: false,
+            });
+          } else if (full) {
+            // A symbol zxing DETECTED but could not decode (glare or noise past
+            // the ECC budget) is still a fix on where a code sits — the
+            // receiver aims a crop there, and crops decode where full frames
+            // fail. Positions stay pixel-accurate through a ChecksumError.
+            const box = boundsOf(r.position, ox, oy);
+            if (box.w > 0 && box.h > 0) sightings.push(box);
           }
-        } finally {
-          vec.delete();
         }
+      } finally {
+        vec.delete();
       }
-      if (symbols.length > before) channelHits++;
     }
     ctx.postMessage({
       id, symbols, sightings, full, trackedAttempted, trackedHit, fallbackAttempted,
-      channelAttempts: 2,
-      channelHits,
       latencyMs: performance.now() - startedAt,
     });
   } catch (error) {
     ctx.postMessage({
       id, symbols: [], sightings: [], full,
-      channelAttempts: 2,
-      channelHits: 0,
       latencyMs: performance.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
   } finally {
-    if (zx && ptr) zx._free(ptr);
+    // inputPtr is intentionally retained until the worker is terminated.
   }
 };
 

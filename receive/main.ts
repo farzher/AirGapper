@@ -154,8 +154,6 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
-const channelAttemptTimes: number[] = [];
-const channelHitTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
@@ -166,8 +164,6 @@ const usefulFrameTimes: number[] = [];
 // answer "how much, in total, did this run do".
 let totalCaptures = 0;
 let totalDecodes = 0;
-let totalChannelAttempts = 0;
-let totalChannelHits = 0;
 let fullScans = 0;
 let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
@@ -226,6 +222,22 @@ let lastDecodedRegionSize = 0;
 // Crop replies retain the exact anchor they attempted, so a miss can
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
+// Parallelism helps when one decode takes longer than a camera interval, but
+// filling every worker with the same physical QR burns cores on near-identical
+// captures. Two jobs preserve a useful pipeline without letting a single code
+// monopolize the entire pool.
+const MAX_INFLIGHT_PER_REGION = 2;
+const bitmapCropsPending = new Map<Region, number>();
+function regionInflightCount(region: Region): number {
+  let count = bitmapCropsPending.get(region) ?? 0;
+  for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
+  return count;
+}
+function adjustBitmapPending(region: Region, delta: number): void {
+  const count = (bitmapCropsPending.get(region) ?? 0) + delta;
+  if (count > 0) bitmapCropsPending.set(region, count);
+  else bitmapCropsPending.delete(region);
+}
 
 // Bounded pipeline evidence for diagnostics builds. These distinguish an idle
 // scheduler from decoder misses without turning every camera frame into a log.
@@ -285,11 +297,6 @@ function noteSequence(region: Region, seq: number): void {
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   completedJobs++;
-  const completedAt = performance.now();
-  totalChannelAttempts += completion.channelAttempts;
-  totalChannelHits += completion.channelHits;
-  for (let i = 0; i < completion.channelAttempts; i++) channelAttemptTimes.push(completedAt);
-  for (let i = 0; i < completion.channelHits; i++) channelHitTimes.push(completedAt);
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.error) {
@@ -624,9 +631,8 @@ function stopReceiver(): void {
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
-  channelAttemptTimes.length = 0;
-  channelHitTimes.length = 0;
   cropAttempts.clear();
+  bitmapCropsPending.clear();
   schedulerNoJobs = 0;
   cropMisses = 0;
   fullDetectorMisses = 0;
@@ -645,8 +651,6 @@ function stopReceiver(): void {
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
-  totalChannelAttempts = 0;
-  totalChannelHits = 0;
   fullScans = 0;
   peakRegions = 0;
   capturesDropped = 0;
@@ -675,7 +679,6 @@ function stopReceiver(): void {
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
-  metric("m-success").textContent = "— decode";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
@@ -847,8 +850,10 @@ function submitBitmap(
   pending: Promise<ImageBitmap>,
   meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number; region?: Region },
 ): void {
+  const pendingRegion = meta.region;
   void pending
     .then((bitmap) => {
+      if (pendingRegion) adjustBitmapPending(pendingRegion, -1);
       const id = frameId++;
       const { region, ...messageMeta } = meta;
       if (region) cropAttempts.set(id, { region, quad: region.quad });
@@ -860,7 +865,9 @@ function submitBitmap(
         bitmap.close();
       } else if (!meta.full) cropsSubmitted++;
     })
-    .catch(() => undefined);
+    .catch(() => {
+      if (pendingRegion) adjustBitmapPending(pendingRegion, -1);
+    });
 }
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
@@ -938,6 +945,7 @@ function captureFrame() {
     let free = pool.size - pool.busyCount;
     for (let i = 0; i < regions.length && free > 0; i++) {
       const r = regions[(i + cropRotate) % regions.length]!;
+      if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
       const size = Math.max(r.w, r.h);
       const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
       const x = Math.max(0, Math.floor(r.x - pad));
@@ -946,6 +954,7 @@ function captureFrame() {
       const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
       if (w < 32 || h < 32) continue;
       free--;
+      adjustBitmapPending(r, 1);
       submitBitmap(createImageBitmap(video, x, y, w, h), {
         ox: x,
         oy: y,
@@ -983,6 +992,7 @@ function captureFrame() {
   // even on frames where acquisition was idle and no pixels were submitted.
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
+    if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
     // The pad leads a moving target: base margin plus twice the displacement
     // observed between the region's last decodes, so a handheld receiver's
     // crops keep containing the code instead of chasing where it was. Capped
@@ -1181,9 +1191,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         cropsSubmitted,
         fullScans,
         decodes: totalDecodes,
-        channelAttempts: totalChannelAttempts,
-        channelHits: totalChannelHits,
-        channelSuccessRate: totalChannelAttempts ? Number((totalChannelHits / totalChannelAttempts).toFixed(3)) : null,
         trackedAttempts,
         trackedDecodes,
         trackedMissFallbacks,
@@ -1264,9 +1271,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // rate is complete, unique original-file goodput through SHA verification.
     const rate = completedGoodputKbs(file.bytes.length, seconds).toFixed(1);
     metric("m-rate").textContent = `${rate} KB/s`;
-    metric("m-success").textContent = totalChannelAttempts
-      ? `${Math.round(totalChannelHits / totalChannelAttempts * 100)}% decode`
-      : "— decode";
     speedFeedback.className = "speed-feedback speed-good";
     if (isSnippet(file)) {
       progressLabel.textContent = "100%";
@@ -1475,15 +1479,9 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
-  prune(channelAttemptTimes);
-  prune(channelHitTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
-  const channelSuccess = channelHitTimes.length / Math.max(1, channelAttemptTimes.length);
-  metric("m-success").textContent = channelAttemptTimes.length
-    ? `${Math.round(channelSuccess * 100)}% decode`
-    : "— decode";
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const limit = metric("m-limit");
   limit.textContent = `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;

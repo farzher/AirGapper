@@ -13,7 +13,7 @@
 //   handles erasures, and a frame is either decoded whole or discarded.
 
 import QRCode from "qrcode";
-import { rasterizeDualQr, rasterizeQr } from "../shared/qr-raster";
+import { rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
   blockLength,
@@ -126,7 +126,6 @@ const speedControl = cfgFps.closest(".speed-control")!;
 const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
-const cfgChannels = document.getElementById("cfg-channels") as HTMLSelectElement;
 
 function selectedFps(): number {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
@@ -144,19 +143,42 @@ function selectFps(fps: number): void {
 function monitorDisplayRefreshRate(): void {
   const intervals: number[] = [];
   let previous = 0;
-  const started = performance.now();
+  const monitorStarted = performance.now();
+  let windowStarted = monitorStarted;
+  let displayOption: HTMLOptionElement | null = null;
   const sample = (now: number) => {
-    if (previous && now - previous > 1 && now - previous < 40) intervals.push(now - previous);
-    previous = now;
-    if (now - started < 1500) return requestAnimationFrame(sample);
-    if (!intervals.length) return;
-    intervals.sort((a, b) => a - b);
-    const measured = 1000 / intervals[Math.floor(intervals.length / 2)]!;
-    const common = [60, 75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
-    const refresh = common.reduce((best, rate) => Math.abs(rate - measured) < Math.abs(best - measured) ? rate : best);
-    if (refresh > 60 && !Array.from(cfgFps.options).some((option) => Number(option.value) === refresh)) {
-      cfgFps.insertBefore(new Option(`${refresh} fps (display refresh)`, String(refresh)), cfgFps.options[cfgFps.options.length - 1] ?? null);
+    if (previous) {
+      const interval = now - previous;
+      if (interval > 1 && interval < 40) intervals.push(interval);
     }
+    previous = now;
+    if (now - windowStarted >= 750 && intervals.length) {
+      const sorted = intervals.slice().sort((a, b) => a - b);
+      const measuredRate = 1000 / sorted[Math.floor(sorted.length / 2)]!;
+      const commonRates = [75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
+      const nearestCommon = commonRates.reduce((nearest, rate) => Math.abs(rate - measuredRate) < Math.abs(nearest - measuredRate) ? rate : nearest);
+      const refreshRate = Math.abs(nearestCommon - measuredRate) / nearestCommon <= 0.03 ? nearestCommon : Math.round(measuredRate);
+      if (refreshRate > 60) {
+        const previousValue = displayOption?.value;
+        const wasSelected = cfgFps.value === previousValue;
+        if (!displayOption) {
+          displayOption = new Option();
+          cfgFps.insertBefore(displayOption, cfgFps.options[cfgFps.options.length - 1] ?? null);
+        }
+        displayOption.value = String(refreshRate);
+        displayOption.textContent = `${refreshRate} fps (display refresh)`;
+        if (wasSelected) {
+          cfgFps.value = displayOption.value;
+          if (previousValue !== displayOption.value) {
+            saveSendSettings();
+            void startStream();
+          }
+        }
+      }
+      intervals.length = 0;
+      windowStarted = now;
+    }
+    if (now - monitorStarted < 5000) requestAnimationFrame(sample);
   };
   requestAnimationFrame(sample);
 }
@@ -393,7 +415,6 @@ function restoreSendSettings(): void {
       sizeLevel?: unknown;
       scaling?: unknown;
       layout?: unknown;
-      channels?: unknown;
     } | null;
     if (!saved) return;
     if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
@@ -405,9 +426,6 @@ function restoreSendSettings(): void {
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
     if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three") {
       cfgLayout.value = saved.layout;
-    }
-    if (saved.channels === "normal" || saved.channels === "same" || saved.channels === "dual" || saved.channels === "alternating") {
-      cfgChannels.value = saved.channels;
     }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
@@ -421,7 +439,6 @@ function saveSendSettings(): void {
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
-      channels: cfgChannels.value,
     }));
   } catch {
     // A blocked or full store must never prevent a transfer.
@@ -468,7 +485,7 @@ async function main() {
   const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgChannels]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
@@ -480,7 +497,6 @@ async function main() {
     void startStream();
   });
   monitorDisplayRefreshRate();
-
 }
 
 /** Only on a fresh pick — a settings change restarts the stream too, and
@@ -506,9 +522,6 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
   const txFps = selectedFps();
-  const channelMode = cfgChannels.value === "normal" || cfgChannels.value === "same" || cfgChannels.value === "alternating"
-    ? cfgChannels.value
-    : "dual";
   const sizeLevel = Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
@@ -635,14 +648,11 @@ async function startStream(revealStage = false) {
     });
   };
 
-  let alternatingCellsGenerated = 0;
   const makeCell = (): ImageData => {
-    const first = makeCode();
-    const second = channelMode === "dual" ? makeCode() : first;
-    if (first.modules.size !== second.modules.size) throw new Error("The two QR channels have different dimensions.");
+    const qr = makeCode();
     if (version === undefined) {
-      version = first.version;
-      modules = first.modules.size;
+      version = qr.version;
+      modules = qr.modules.size;
       sizeCanvas();
       resizeDisplay = sizeCanvas;
       // WebView can report its pre-layout stage size during the same task that
@@ -681,7 +691,6 @@ async function startStream(revealStage = false) {
             },
             settings: {
               txFps,
-              channelMode,
               frameBytes,
               ecc,
               gridCodes,
@@ -699,20 +708,7 @@ async function startStream(revealStage = false) {
         }).catch(() => undefined);
       }
     }
-    let modulesA: ArrayLike<number> = first.modules.data;
-    let modulesB: ArrayLike<number> = second.modules.data;
-    if (channelMode === "alternating") {
-      const blank = new Uint8Array(first.modules.size * first.modules.size);
-      // Color is a whole-layout state, not a per-cell state. Queue generation
-      // runs in complete grid sweeps, so every QR in a sweep uses one channel.
-      const channel = Math.floor(alternatingCellsGenerated / gridCodes) % 2;
-      if (channel === 0) modulesB = blank;
-      else modulesA = blank;
-      alternatingCellsGenerated++;
-    }
-    const raster = channelMode === "normal"
-      ? rasterizeQr(first.modules.size, first.modules.data, GRID_MARGIN)
-      : rasterizeDualQr(first.modules.size, modulesA, modulesB, GRID_MARGIN);
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
     return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
   };
 
@@ -739,12 +735,13 @@ async function startStream(revealStage = false) {
   };
   pump();
 
-  const paintCell = (img: ImageData, cellIndex: number): void => {
+  let cellCursor = 0;
+  const paintCell = (img: ImageData): void => {
     const cell = modules + 2 * GRID_MARGIN;
     const stride = modules + GRID_MARGIN;
-    const cx = (cellIndex % gridCols) * stride;
-    const cy = Math.floor(cellIndex / gridCols) * stride;
-    cells[cellIndex] = img;
+    const cx = (cellCursor % gridCols) * stride;
+    const cy = Math.floor(cellCursor / gridCols) * stride;
+    cells[cellCursor] = img;
     staging.getContext("2d")!.putImageData(img, cx, cy);
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
@@ -755,60 +752,83 @@ async function startStream(revealStage = false) {
     } else {
       ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
     }
+    cellCursor = (cellCursor + 1) % gridCodes;
   };
 
-  // Fill every physical square before animation begins. Each subsequent state
-  // is held for an exact number of requestAnimationFrame display refreshes.
-  for (let i = 0; i < gridCodes; i++) {
+  if (staticStream) {
     const img = queue.shift();
-    if (!img) break;
-    paintCell(img, i);
-    pump(1);
-  }
-  if (staticStream) return;
-
-  // FPS is the requested per-square symbol rate. Alternating-color mode must
-  // switch the entire layout as one optical state; otherwise a grid becomes a
-  // spatial red/green checkerboard rather than alternating over time.
-  const interval = 1000 / txFps;
-  let nextAt = performance.now() + interval;
-  if (channelMode === "alternating") {
-    const tickLayout = (now: number) => {
-      if (gen !== generation || generatorFailed) return;
-      requestAnimationFrame(tickLayout);
-      if (now < nextAt) return;
-      if (now - nextAt > interval) nextAt = now;
-      for (let i = 0; i < gridCodes; i++) {
-        const img = queue.shift();
-        if (!img) break;
-        paintCell(img, i);
-      }
-      pump(gridCodes);
-      nextAt += interval;
-    };
-    requestAnimationFrame(tickLayout);
+    if (img) paintCell(img);
     return;
   }
 
-  // Other multi-code modes retain staggered cell transitions so one exposure
-  // cannot catch every physical square changing at once.
+  // Staggered flips: every cell refreshes at txFps, but cell j flips at phase
+  // j/N of the frame interval instead of all N flipping together. A camera
+  // exposure that straddles a flip therefore catches at most ONE code mid-
+  // transition — the other N−1 sit stable under it. With simultaneous flips
+  // that same exposure lost all N at once. Each flip repaints only its own
+  // cell rectangle; cells align to cell×scale boundaries, so the partial blit
+  // is pixel-exact. (Sub-ticks land on rAF frames, so at high fps × codes
+  // several cells can still flip in one refresh — the stagger degrades toward
+  // the old behavior, never below it. A grid of one IS the old behavior.)
+  const interval = 1000 / txFps;
   const subInterval = interval / gridCodes;
-  let cellCursor = 0;
+  let nextAt = performance.now();
+  let lastTickAt = performance.now();
+  let completedSweeps = 0;
   const tick = (now: number) => {
+    // generatorFailed means no frame will ever be produced again, so stop the
+    // rAF loop rather than spinning on an empty queue until a settings change.
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
+    // Keep stalls in development diagnostics without interrupting the sender
+    // with a warning: the cadence reset below resumes cleanly on its own.
+    const sinceLastTick = now - lastTickAt;
+    lastTickAt = now;
+    if (sinceLastTick > 1000) {
+      if (import.meta.env.DEV && import.meta.env.VITE_DIAGNOSTICS === "1") {
+        void fetch("/__diagnostics", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            role: "sender",
+            event: "stall",
+            when: new Date().toISOString(),
+            sessionId,
+            stallSeconds: Number((sinceLastTick / 1000).toFixed(1)),
+          }),
+        }).catch(() => undefined);
+      }
+    }
     if (now < nextAt) return;
+    // A long stall (hidden tab, GC pause) leaves a backlog no camera ever saw
+    // — restart the cadence instead of bursting it out.
     if (now - nextAt > interval) nextAt = now;
+    // Flip EVERY cell that has come due, not one per callback: txFps × codes
+    // can exceed the display's refresh rate, so a single vsync may owe
+    // several flips. Cells that land on the same vsync paint together — that
+    // is the display's floor, not a scheduling choice — but deferring them
+    // (one flip per rAF) silently capped per-code fps at refresh ÷ codes and
+    // slowed every multi-code grid down. Bounded: the reset above keeps the
+    // debt under one frame interval, so this bursts at most gridCodes flips.
     while (now >= nextAt) {
       const img = queue.shift();
+      pump(1);
       if (!img) {
         nextAt = now + subInterval;
         break;
       }
-      paintCell(img, cellCursor);
-      cellCursor = (cellCursor + 1) % gridCodes;
+      paintCell(img);
       nextAt += subInterval;
-      pump(1);
+      if (cellCursor === 0) {
+        completedSweeps++;
+        // A 30 fps sender and 30 fps camera can remain phase-locked: every
+        // exposure then intersects (or avoids) the same display transition,
+        // producing the observed waves of total misses despite an unchanged
+        // view. Occasionally hold one frame half an interval longer. This
+        // shifts the optical phase without introducing a dangerously short
+        // one-refresh QR, and costs only about 3% throughput at 30 fps.
+        if (txFps === 30 && completedSweeps % 15 === 0) nextAt += interval / 2;
+      }
     }
   };
   requestAnimationFrame(tick);
