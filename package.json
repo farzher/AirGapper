@@ -1,0 +1,25 @@
+{
+  "name": "airgapper",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "description": "Offline file and text transfer using fountain-coded animated QR codes.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --open /app.html",
+    "serve": "npm run build && vite preview",
+    "diagnostics": "vite --mode diagnostics --open /app.html",
+    "build": "tsc && tsc -p tsconfig.node.json && vite build",
+    "build:codec": "bash vendor/decimen-codec-source/build.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/qrcode": "^1.5.5",
+    "@vitejs/plugin-basic-ssl": "^1.2.0",
+    "qrcode": "^1.5.4",
+    "typescript": "^5.5.0",
+    "vite": "^6.0.0",
+    "vite-plugin-pwa": "^1.3.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}
