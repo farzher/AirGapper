@@ -44,7 +44,6 @@ import {
   recoverAndroidCamera,
   reportAndroidCameraHealthy,
   saveFileOnAndroid,
-  setAndroidTrackingBoxes,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
@@ -53,6 +52,8 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
+const showDetectionOverlay = !isAndroidApp();
+overlay.hidden = !showDetectionOverlay;
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
@@ -325,8 +326,6 @@ function drawOverlay(now: number) {
   // this makes distance/focus/cropping trouble visible without covering the
   // camera image or adding instructions over it.
   const ordered = [...regions].sort(layoutOrder);
-  const nativeBoxes: Parameters<typeof setAndroidTrackingBoxes>[0] = [];
-  const overlayRect = overlay.getBoundingClientRect();
   for (const r of ordered) {
     const decodedAge = now - (r.decodedSeen ?? -Infinity);
     const sightingAge = now - r.seen;
@@ -349,15 +348,6 @@ function drawOverlay(now: number) {
     const age = successful ? decodedAge : sightingAge;
     const fade = successful ? INDICATOR_FADE_MS : SIGHTING_FADE_MS;
     overlayCtx.globalAlpha = successful ? 1 - 0.65 * age / fade : 0.7 * (1 - age / fade);
-    nativeBoxes.push({
-      x: overlayRect.left + x / dpr,
-      y: overlayRect.top + y / dpr,
-      w: w / dpr,
-      h: h / dpr,
-      color,
-      alpha: overlayCtx.globalAlpha,
-      successful,
-    });
     overlayCtx.beginPath();
     overlayCtx.moveTo(x, y + len);
     overlayCtx.lineTo(x, y);
@@ -376,7 +366,6 @@ function drawOverlay(now: number) {
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
-  if (isAndroidApp()) setAndroidTrackingBoxes(nativeBoxes);
 }
 startBtn.onclick = () => void start();
 window.addEventListener("airgapper:enter-receive", () => {
@@ -414,7 +403,6 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
-  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
@@ -592,7 +580,7 @@ function scheduleFrame(gen: number) {
   const next = () => {
     if (done || gen !== captureGen) return;
     captureFrame();
-    drawOverlay(performance.now());
+    if (showDetectionOverlay) drawOverlay(performance.now());
     scheduleFrame(gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
@@ -860,7 +848,6 @@ function updateProgressEstimate() {
  * AirGapper container or SHA-256; files never take this path. */
 function finishPlainQr(text: string): void {
   done = true;
-  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
@@ -890,7 +877,6 @@ function liveGoodputKbs(now: number): number {
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
-  setAndroidTrackingBoxes([]);
   releaseScreenWakeLock();
   captureGen++;
   // Snapshot diagnostics before teardown, but do not report success until the

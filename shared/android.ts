@@ -4,7 +4,6 @@ interface AndroidBridge {
   finishDownload(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
-  setTrackingBoxes(json: string): void;
   cameraHealthy(): void;
   recoverCamera(): void;
 }
@@ -41,20 +40,6 @@ export function copyTextOnAndroid(text: string): boolean {
 
 export function setAndroidKeepScreenOn(enabled: boolean): void {
   bridge()?.setKeepScreenOn(enabled);
-}
-
-export interface AndroidTrackingBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  color: string;
-  alpha: number;
-  successful: boolean;
-}
-
-export function setAndroidTrackingBoxes(boxes: AndroidTrackingBox[]): void {
-  bridge()?.setTrackingBoxes(JSON.stringify(boxes));
 }
 
 export function reportAndroidCameraHealthy(): void {
