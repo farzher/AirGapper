@@ -115,13 +115,14 @@ function showStreamPanels(visible: boolean): void {
 
 const cfgFps = document.getElementById("cfg-fps") as HTMLSelectElement;
 const cfgFpsCustom = document.getElementById("cfg-fps-custom") as HTMLInputElement;
+const speedControl = cfgFps.closest(".speed-control")!;
 const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
 
 function selectedFps(): number {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
-  return Number.isFinite(value) ? Math.max(1, Math.min(240, Math.round(value))) : 15;
+  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 15;
 }
 
 function selectFps(fps: number): void {
@@ -129,6 +130,7 @@ function selectFps(fps: number): void {
   cfgFps.value = preset?.value ?? "custom";
   cfgFpsCustom.value = String(fps);
   cfgFpsCustom.hidden = cfgFps.value !== "custom";
+  speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
 }
 
 function monitorDisplayRefreshRate(): void {
@@ -145,16 +147,26 @@ function monitorDisplayRefreshRate(): void {
     previous = now;
     if (now - windowStarted >= 750 && intervals.length) {
       const sorted = intervals.slice().sort((a, b) => a - b);
-      const refreshRate = Math.round(1000 / sorted[Math.floor(sorted.length / 2)]!);
+      const measuredRate = 1000 / sorted[Math.floor(sorted.length / 2)]!;
+      const commonRates = [75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
+      const nearestCommon = commonRates.reduce((nearest, rate) => Math.abs(rate - measuredRate) < Math.abs(nearest - measuredRate) ? rate : nearest);
+      const refreshRate = Math.abs(nearestCommon - measuredRate) / nearestCommon <= 0.03 ? nearestCommon : Math.round(measuredRate);
       if (refreshRate > 60) {
-        const wasSelected = cfgFps.value === displayOption?.value;
+        const previousValue = displayOption?.value;
+        const wasSelected = cfgFps.value === previousValue;
         if (!displayOption) {
           displayOption = new Option();
           cfgFps.insertBefore(displayOption, cfgFps.options[cfgFps.options.length - 1] ?? null);
         }
         displayOption.value = String(refreshRate);
-        displayOption.textContent = `${refreshRate} fps (display)`;
-        if (wasSelected) cfgFps.value = displayOption.value;
+        displayOption.textContent = `${refreshRate} fps (display refresh)`;
+        if (wasSelected) {
+          cfgFps.value = displayOption.value;
+          if (previousValue !== displayOption.value) {
+            saveSendSettings();
+            void startStream();
+          }
+        }
       }
       intervals.length = 0;
       windowStarted = now;
@@ -398,7 +410,7 @@ function restoreSendSettings(): void {
       layout?: unknown;
     } | null;
     if (!saved) return;
-    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 240) {
+    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
       selectFps(saved.fps);
     }
     if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
@@ -458,17 +470,23 @@ async function main() {
   restoreSendSettings();
   cfgFps.addEventListener("change", () => {
     cfgFpsCustom.hidden = cfgFps.value !== "custom";
+    speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
     if (!cfgFpsCustom.hidden) cfgFpsCustom.focus();
   });
   const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgFpsCustom, cfgSize, cfgScaling, cfgLayout]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
     });
   }
+  cfgFpsCustom.addEventListener("input", () => {
+    if (!cfgFpsCustom.value) return;
+    saveSendSettings();
+    void startStream();
+  });
   monitorDisplayRefreshRate();
 }
 

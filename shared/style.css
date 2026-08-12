@@ -117,7 +117,7 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .send-controls select,
 .send-controls input { width: 100%; }
 .send-controls input { margin-top: 2px; }
-.send-controls .speed-control { display: grid; grid-template-columns: minmax(0, 3fr) minmax(64px, 2fr); }
+.send-controls .speed-control.has-custom { display: grid; grid-template-columns: minmax(0, 3fr) minmax(64px, 2fr); }
 .speed-control span { grid-column: 1 / -1; }
 .speed-control input { margin: 0; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -204,7 +204,7 @@ details.settings {
 details.settings summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; }
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-select, input[type="range"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
 input[type="range"] { accent-color: #222; }
 .stream-specs, .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 0; }
 .stream-specs dt, .metric .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
