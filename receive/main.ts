@@ -273,6 +273,8 @@ let wasmParseTotalMs = 0;
 let wasmRsTotalMs = 0;
 let wasmTotalMs = 0;
 let wasmRsFallbacks = 0;
+let gpuConsecutiveMisses = 0;
+let gpuCooldownUntil = 0;
 let lastDistinctArrivalAt = 0;
 let maxSequenceGapMs = 0;
 const pipelineEvents: [number, string, number][] = [];
@@ -321,6 +323,14 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.gpuSampled && completion.wasmMetrics) {
     gpuWasmFrames++;
+    gpuConsecutiveMisses = completion.symbolCount ? 0 : gpuConsecutiveMisses + 1;
+    // Never let a marginal GPU matrix starve the proven CPU tracked path. A
+    // short cooldown re-anchors geometry without launching generic detection
+    // for every QR or permanently disabling acceleration.
+    if (gpuConsecutiveMisses >= 3) {
+      gpuCooldownUntil = performance.now() + 1000;
+      gpuConsecutiveMisses = 0;
+    }
     wasmParseTotalMs += completion.wasmMetrics.parseMs;
     wasmRsTotalMs += completion.wasmMetrics.rsMs;
     wasmTotalMs += completion.wasmMetrics.totalMs;
@@ -363,7 +373,10 @@ const REGION_TTL_MS = 1500;
 // A probationary detector sighting has no decodedSeen timestamp; keeping it
 // through several cold full scans gives its cheap crop path time to recover.
 const SIGHTING_REGION_TTL_MS = 3000;
-const FULL_SCAN_INTERVAL_MS = 1500;
+// A healthy GPU track validates every finder on every frame. Generic full-frame
+// detection during that state only steals CPU and camera bandwidth; retain a
+// sparse safety scan, while degraded tracks still reacquire aggressively.
+const FULL_SCAN_INTERVAL_MS = 10_000;
 // A grid sender shows several codes; when fewer regions are live than the
 // stream has shown simultaneously, one of them is MISSING — glare, focus, a
 // borderline density. Crops can't find it (they only look where codes were),
@@ -679,6 +692,8 @@ function stopReceiver(): void {
   wasmRsTotalMs = 0;
   wasmTotalMs = 0;
   wasmRsFallbacks = 0;
+  gpuConsecutiveMisses = 0;
+  gpuCooldownUntil = 0;
   lastDistinctArrivalAt = 0;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
@@ -985,7 +1000,7 @@ function captureFrame() {
     ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
     : []);
 
-  if (!fullScanDue && tracks.length && webgpuSampler) {
+  if (!fullScanDue && tracks.length && webgpuSampler && now >= gpuCooldownUntil) {
     const accepted = webgpuSampler.submit(video, tracks, ({ packed, tracks: sampledTracks, wordsPerMatrix }) => {
       const id = frameId++;
       if (!done && pool.submit({
@@ -1531,7 +1546,7 @@ function updateStats() {
   const limit = metric("m-limit");
   const gpuMetrics = webgpuSampler?.metrics;
   limit.textContent = gpuMetrics?.submitted
-    ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms`
+    ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
     : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
   limit.classList.toggle("cpu-bound", !gpuMetrics?.submitted && busyRate >= 0.15);
   const live = decodedCount();
@@ -1540,7 +1555,7 @@ function updateStats() {
     `WebGPU enabled: ${Boolean(gpuMetrics?.enabled)}`,
     `camera: ${perSecond(captureTimes).toFixed(1)} fps · ${video.videoWidth}×${video.videoHeight}`,
     `layout: ${Math.max(expectedRegions, live) || "acquiring"} QR · version: ${regions[0]?.dim ? (regions[0]!.dim! - 17) / 4 : "—"}`,
-    `GPU tracking: CPU acquisition prototype`,
+    `GPU tracking: finder search ±4 px${now < gpuCooldownUntil ? " · CPU re-anchor" : ""}`,
     `GPU sampling + packing + total: ${gpuMetrics?.lastGpuMs.toFixed(2) ?? "—"} ms`,
     `GPU→CPU readback: ${gpuMetrics?.lastReadbackMs.toFixed(2) ?? "—"} ms`,
     `WASM parse: ${gpuWasmFrames ? (wasmParseTotalMs / gpuWasmFrames).toFixed(2) : "—"} ms`,

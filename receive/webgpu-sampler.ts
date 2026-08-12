@@ -36,6 +36,7 @@ const WORDS_PER_MATRIX = Math.ceil(MAX_DIMENSION * MAX_DIMENSION / 32);
 const TRACK_FLOATS = 12;
 const TRACK_BYTES = TRACK_FLOATS * 4;
 const SLOT_COUNT = 3;
+const CALIBRATION_READBACK_BYTES = 256;
 
 // WebGPU constants are repeated here because TypeScript's DOM library does not
 // yet include WebGPU on every supported compiler.
@@ -49,7 +50,7 @@ const MAP_READ = 0x0001;
 const SHADER = /* wgsl */ `
 struct Params { frameSize: vec2f, trackCount: u32, wordsPerMatrix: u32 }
 struct Track { h0: vec4f, h1: vec4f, info: vec4f }
-struct Calibration { threshold: f32, contrast: f32, score: f32, unused: f32 }
+struct Calibration { threshold: f32, contrast: f32, dx: f32, dy: f32 }
 
 @group(0) @binding(0) var camera: texture_external;
 @group(0) @binding(1) var<uniform> params: Params;
@@ -65,12 +66,22 @@ fn cameraPoint(track: Track, module: vec2f) -> vec2f {
   );
 }
 
-fn level(track: Track, module: vec2f) -> f32 {
-  let rgb = textureSampleBaseClampToEdge(camera, cameraPoint(track, module) / params.frameSize).rgb;
+fn levelAt(track: Track, module: vec2f, offset: vec2f) -> f32 {
+  let rgb = textureSampleBaseClampToEdge(camera, (cameraPoint(track, module) + offset) / params.frameSize).rgb;
   let channel = u32(track.info.y);
   if (channel == 1u) { return rgb.r; }
   if (channel == 2u) { return rgb.g; }
   return dot(rgb, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+fn level(track: Track, module: vec2f) -> f32 {
+  let correction = vec2f(calibration[u32(track.info.w)].dx, calibration[u32(track.info.w)].dy);
+  // Four quarter-module samples survive defocus, display scaling and rolling
+  // shutter substantially better than one fragile center texel.
+  return (levelAt(track, module + vec2f(-0.25, -0.25), correction) +
+    levelAt(track, module + vec2f(0.25, -0.25), correction) +
+    levelAt(track, module + vec2f(-0.25, 0.25), correction) +
+    levelAt(track, module + vec2f(0.25, 0.25), correction)) * 0.25;
 }
 
 fn finderBlack(x: u32, y: u32) -> bool {
@@ -83,23 +94,39 @@ fn calibrate(@builtin(global_invocation_id) gid: vec3u) {
   if (index >= params.trackCount) { return; }
   let track = tracks[index];
   let dim = u32(track.info.x);
-  var black = 0.0;
-  var white = 0.0;
-  var blackCount = 0u;
-  var whiteCount = 0u;
-  for (var finder = 0u; finder < 3u; finder++) {
-    let origin = select(select(vec2u(0u, dim - 7u), vec2u(dim - 7u, 0u), finder == 1u), vec2u(0u), finder == 0u);
-    for (var y = 0u; y < 7u; y++) {
-      for (var x = 0u; x < 7u; x++) {
-        let value = level(track, vec2f(origin + vec2u(x, y)) + vec2f(0.5));
-        if (finderBlack(x, y)) { black += value; blackCount++; }
-        else { white += value; whiteCount++; }
+  var bestScore = -100000.0;
+  var best = Calibration(0.5, 0.0, 0.0, 0.0);
+  // Search only around the cached transform. This replaces twelve independent
+  // detections with a small parallel finder-pattern correlation.
+  for (var sy = -8; sy <= 8; sy++) {
+    for (var sx = -8; sx <= 8; sx++) {
+      let correction = vec2f(f32(sx), f32(sy)) * 0.5;
+      var black = 0.0;
+      var white = 0.0;
+      var blackCount = 0u;
+      var whiteCount = 0u;
+      for (var finder = 0u; finder < 3u; finder++) {
+        let origin = select(select(vec2u(0u, dim - 7u), vec2u(dim - 7u, 0u), finder == 1u), vec2u(0u), finder == 0u);
+        for (var y = 0u; y < 7u; y++) {
+          for (var x = 0u; x < 7u; x++) {
+            let value = levelAt(track, vec2f(origin + vec2u(x, y)) + vec2f(0.5), correction);
+            if (finderBlack(x, y)) { black += value; blackCount++; }
+            else { white += value; whiteCount++; }
+          }
+        }
+      }
+      let blackLevel = black / f32(blackCount);
+      let whiteLevel = white / f32(whiteCount);
+      // Contrast is the finder correlation for a known binary pattern. A tiny
+      // distance penalty prevents noisy frames from walking a stable track.
+      let score = whiteLevel - blackLevel - length(correction) * 0.002;
+      if (score > bestScore) {
+        bestScore = score;
+        best = Calibration((blackLevel + whiteLevel) * 0.5, whiteLevel - blackLevel, correction.x, correction.y);
       }
     }
   }
-  let blackLevel = black / f32(blackCount);
-  let whiteLevel = white / f32(whiteCount);
-  calibration[index] = Calibration((blackLevel + whiteLevel) * 0.5, whiteLevel - blackLevel, 0.0, 0.0);
+  calibration[index] = best;
 }
 
 @compute @workgroup_size(64)
@@ -145,14 +172,15 @@ export class WebGpuQrSampler {
 
   private constructor(private readonly device: any, private readonly pipeline: any) {
     const outputBytes = MAX_TRACKS * WORDS_PER_MATRIX * 4;
+    const readbackBytes = CALIBRATION_READBACK_BYTES + outputBytes;
     for (let i = 0; i < SLOT_COUNT; i++) {
       this.slots.push({
         busy: false,
         params: device.createBuffer({ size: 16, usage: BUFFER_UNIFORM | BUFFER_COPY_DST }),
         tracks: device.createBuffer({ size: MAX_TRACKS * TRACK_BYTES, usage: BUFFER_STORAGE | BUFFER_COPY_DST }),
-        calibration: device.createBuffer({ size: MAX_TRACKS * 16, usage: BUFFER_STORAGE }),
+        calibration: device.createBuffer({ size: MAX_TRACKS * 16, usage: BUFFER_STORAGE | BUFFER_COPY_SRC }),
         output: device.createBuffer({ size: outputBytes, usage: BUFFER_STORAGE | BUFFER_COPY_SRC }),
-        readback: device.createBuffer({ size: outputBytes, usage: BUFFER_COPY_DST | BUFFER_MAP_READ }),
+        readback: device.createBuffer({ size: readbackBytes, usage: BUFFER_COPY_DST | BUFFER_MAP_READ }),
       });
     }
   }
@@ -238,16 +266,26 @@ export class WebGpuQrSampler {
       pass.dispatchWorkgroups(Math.ceil(WORDS_PER_MATRIX / 64), tracks.length);
       pass.end();
       const bytes = tracks.length * WORDS_PER_MATRIX * 4;
-      encoder.copyBufferToBuffer(slot.output, 0, slot.readback, 0, bytes);
+      const mappedBytes = CALIBRATION_READBACK_BYTES + bytes;
+      encoder.copyBufferToBuffer(slot.calibration, 0, slot.readback, 0, tracks.length * 16);
+      encoder.copyBufferToBuffer(slot.output, 0, slot.readback, CALIBRATION_READBACK_BYTES, bytes);
       slot.busy = true;
       const submittedAt = performance.now();
       this.device.queue.submit([encoder.finish()]);
       this.counters.submitted++;
       this.counters.trackedQrs += tracks.length;
       this.counters.packedBytes += bytes;
-      void slot.readback.mapAsync(MAP_READ, 0, bytes).then(() => {
+      void slot.readback.mapAsync(MAP_READ, 0, mappedBytes).then(() => {
         const mappedAt = performance.now();
-        const packed = slot!.readback.getMappedRange(0, bytes).slice(0);
+        const mapped = slot!.readback.getMappedRange(0, mappedBytes);
+        const calibration = new Float32Array(mapped, 0, tracks.length * 4);
+        const correctedTracks = tracks.map((track, index) => {
+          const contrast = calibration[index * 4 + 1] ?? 0;
+          const dx = contrast >= 0.08 ? calibration[index * 4 + 2] ?? 0 : 0;
+          const dy = contrast >= 0.08 ? calibration[index * 4 + 3] ?? 0 : 0;
+          return dx || dy ? { ...track, quad: translateQuad(track.quad, dx, dy) } : track;
+        });
+        const packed = mapped.slice(CALIBRATION_READBACK_BYTES, CALIBRATION_READBACK_BYTES + bytes);
         slot!.readback.unmap();
         slot!.busy = false;
         if (!this.alive) return;
@@ -257,7 +295,7 @@ export class WebGpuQrSampler {
         this.counters.lastReadbackMs = readbackMs;
         this.counters.gpuTotalMs += gpuMs;
         this.counters.readbackMs += readbackMs;
-        done({ packed, tracks, wordsPerMatrix: WORDS_PER_MATRIX, gpuMs, readbackMs });
+        done({ packed, tracks: correctedTracks, wordsPerMatrix: WORDS_PER_MATRIX, gpuMs, readbackMs });
       }).catch(() => {
         slot!.busy = false;
       });
@@ -283,8 +321,16 @@ export class WebGpuQrSampler {
   private writeTrack(index: number, track: GpuSampleTrack): void {
     const h = homography(track.dim, track.quad);
     const offset = index * TRACK_FLOATS;
-    this.values.set([h[0]!, h[1]!, h[2]!, h[6]!, h[3]!, h[4]!, h[5]!, h[7]!, track.dim, track.channel ?? 0, 0, 0], offset);
+    this.values.set([h[0]!, h[1]!, h[2]!, h[6]!, h[3]!, h[4]!, h[5]!, h[7]!, track.dim, track.channel ?? 0, 0, index], offset);
   }
+}
+
+function translateQuad(quad: SymbolQuad, dx: number, dy: number): SymbolQuad {
+  const move = (point: { x: number; y: number }) => ({ x: point.x + dx, y: point.y + dy });
+  return {
+    topLeft: move(quad.topLeft), topRight: move(quad.topRight),
+    bottomRight: move(quad.bottomRight), bottomLeft: move(quad.bottomLeft),
+  };
 }
 
 /** Solve the 8 projective coefficients mapping module-space corners to the
