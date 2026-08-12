@@ -55,7 +55,7 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.14";
+const APP_VERSION = "0.1.15";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -249,7 +249,6 @@ let lastDecodedRegionSize = 0;
 // Crop replies retain the exact anchor they attempted, so a miss can
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
-const MAX_INFLIGHT_PER_REGION = 1;
 function regionInflightCount(region: Region): number {
   let count = 0;
   for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
@@ -931,11 +930,16 @@ function captureFrame() {
     );
     return;
   }
-  // Read back only individual tracked crops. A full-frame RGBA copy for every
-  // locked QR frame can freeze older Android WebViews.
+  // Pipeline successive camera frames across the workers. The old one-job
+  // limit made a single QR use only one worker, so its decode latency directly
+  // capped throughput even while the rest of the pool sat idle. Due full scans
+  // take priority above; between them, divide all capacity fairly across tracks.
+  const trackedCapacity = Math.max(1, pool.size);
+  const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, regions.length)));
+  let submitted = false;
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
-    if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
+    if (regionInflightCount(r) >= perRegionCapacity) continue;
     const size = Math.max(r.w, r.h);
     const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
     const x = Math.max(0, Math.floor(r.x - pad));
@@ -956,7 +960,10 @@ function captureFrame() {
       break;
     }
     cropsSubmitted++;
+    submitted = true;
   }
+  // Being blocked by per-track limits is scanner saturation too.
+  if (!submitted && regions.length > 0) poolBusyTimes.push(now);
   cropRotate++;
 }
 
