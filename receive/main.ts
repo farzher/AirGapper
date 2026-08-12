@@ -20,6 +20,7 @@ import {
   formatDuration,
 } from "../shared/progress";
 import { createDecodeWorker } from "./worker-factory";
+import { GridLattice, type GridSnapshot } from "./grid-lattice";
 import {
   DecodeWorkerPool,
   type DecodeCompletion,
@@ -180,7 +181,11 @@ const pool = new DecodeWorkerPool(
   // Heavily gated in noteRegion (refresh-only on matches, size-checked on
   // creation) because failed quads are often junk — but a plausible one lets
   // the crop path go decode what the full frame could not.
-  (box) => noteRegion(box, performance.now(), false),
+  (box) => {
+    // Detector-only geometry is never lattice evidence. It may seed cold
+    // acquisition, but is ignored once predicted slots exist.
+    if (!gridLattice.active) noteRegion(box, performance.now(), false);
+  },
   () => trackedAttempts++,
   (id, completion) => noteDecodeCompleted(id, completion),
 );
@@ -253,8 +258,15 @@ interface Region extends SymbolBox {
   dim?: number;
   crc32?: boolean;
   consecutiveMisses: number;
+  /** Lattice slots exist independently of whether their QR has decoded. */
+  gridSlot?: number;
+  detectionConfidence: number;
+  decodeConfidence: number;
+  globalGridConfidence: number;
 }
 const regions: Region[] = [];
+const gridLattice = new GridLattice();
+let gridShape = "";
 let nextRegionId = 1;
 // Retain one trustworthy size after active regions expire. During a bad
 // camera/display phase, full acquisition may detect a QR but fail its bytes;
@@ -353,12 +365,12 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   finishScanCapture(id, completion);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
-  if (!attempts || completion.symbolCount > 0) return;
-  // A tracked miss says this camera frame was unreadable; it does not prove the
-  // remembered location is wrong. Keep geometry available for later frames and
-  // use the miss count only to trigger aggressive full-frame reacquisition.
+  if (!attempts) return;
+  // Attribute misses per slot. In a multi-track reply, one successful QR must
+  // not hide every missing neighbor or move/contract their independent ROIs.
   for (const attempt of attempts) {
-    if (attempt.region.quad === attempt.quad) attempt.region.consecutiveMisses++;
+    const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === attempt.region);
+    if (!hit && attempt.region.quad === attempt.quad) attempt.region.consecutiveMisses++;
   }
 }
 
@@ -482,6 +494,9 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     dim: info?.modules,
     crc32: info?.crc32,
     consecutiveMisses: 0,
+    detectionConfidence: decoded ? 1 : 0.35,
+    decodeConfidence: decoded ? 1 : 0,
+    globalGridConfidence: 0,
   });
   regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
@@ -489,6 +504,62 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
     regions.length = MAX_REGIONS;
   }
+}
+
+function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, info?: SymbolInfo): Region | undefined {
+  const shape = `${snapshot.layout.cols}x${snapshot.layout.rows}`;
+  if (shape !== gridShape) {
+    for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot !== undefined) regions.splice(i, 1);
+    gridShape = shape;
+  }
+  // A validated AirGapper lattice supersedes all independently acquired boxes.
+  // From here on every region is a slot derived from one global transform.
+  for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot === undefined) regions.splice(i, 1);
+  let decodedRegion: Region | undefined;
+  for (const slot of snapshot.slots) {
+    let region = regions.find((candidate) => candidate.gridSlot === slot.index);
+    if (!region) {
+      region = {
+        ...slot.box,
+        id: nextRegionId++,
+        seen: now,
+        decoded: false,
+        sightedSeen: now,
+        sequenceSamples: [],
+        qualityLevel: 0,
+        quad: slot.quad,
+        dim: snapshot.modules,
+        crc32: true,
+        consecutiveMisses: 0,
+        gridSlot: slot.index,
+        detectionConfidence: 0,
+        decodeConfidence: 0,
+        globalGridConfidence: snapshot.confidence,
+      };
+      regions.push(region);
+      regionCreations++;
+    }
+    Object.assign(region, slot.box, {
+      quad: slot.quad,
+      dim: snapshot.modules,
+      globalGridConfidence: snapshot.confidence,
+    });
+    if (slot.index === decodedSlot) {
+      region.decoded = true;
+      region.seen = now;
+      region.decodedSeen = now;
+      region.sightedSeen = now;
+      region.consecutiveMisses = 0;
+      region.detectionConfidence = 1;
+      region.decodeConfidence = 1;
+      region.crc32 = info?.crc32 ?? true;
+      decodedRegion = region;
+    }
+  }
+  expectedRegions = snapshot.slots.length;
+  expectedRegionsAt = now;
+  peakRegions = Math.max(peakRegions, snapshot.slots.length);
+  return decodedRegion;
 }
 
 /** The selected resolution reserves the initial camera box. Cameras can still
@@ -703,6 +774,8 @@ function stopReceiver(): void {
   startTs = 0;
   done = false;
   regions.length = 0;
+  gridLattice.reset();
+  gridShape = "";
   lastDecodedRegionSize = 0;
   expectedRegions = 0;
   expectedRegionsAt = 0;
@@ -1057,16 +1130,20 @@ function captureFrame() {
   for (let i = regions.length - 1; i >= 0; i--) {
     const region = regions[i]!;
     const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
-    if (now - region.seen > ttl) {
+    if (region.gridSlot === undefined && now - region.seen > ttl) {
       regions.splice(i, 1);
       regionExpiries++;
       notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
     }
   }
-  // Only decode-proven regions count toward "how many codes does this stream
-  // show" — phantom sighting regions once inflated the total and locked the
-  // receiver into a permanent 250 ms rescan storm. peakRegions is reported as
-  // the stream's code count, so it counts proven regions for the same reason.
+  const latticeSnapshot = gridLattice.tick(now);
+  if (latticeSnapshot) syncGrid(latticeSnapshot, now);
+  else if (gridLattice.state === "REACQUIRE") {
+    for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot !== undefined) regions.splice(i, 1);
+    gridShape = "";
+  }
+  // Decode confidence is separate from the lattice lock: undecoded slots stay
+  // alive and search locally instead of disappearing from the global model.
   const live = decodedCount();
   peakRegions = Math.max(peakRegions, live);
   if (live >= expectedRegions || now - expectedRegionsAt > EXPECTED_REGIONS_DECAY_MS) {
@@ -1074,6 +1151,7 @@ function captureFrame() {
     expectedRegionsAt = now;
   }
   const trackingUnhealthy = regions.some((region) => region.decoded && region.consecutiveMisses >= 4);
+  gridLattice.noteMissing(regions.some((region) => region.gridSlot !== undefined && region.consecutiveMisses >= 2));
   const scanInterval =
     live === 0
       ? ACQUISITION_SCAN_MS
@@ -1087,7 +1165,10 @@ function captureFrame() {
   // rare (1.5 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
   // next frame — including crops of probationary sighting regions, which now
   // run between cold scans instead of being crowded out by them.
-  const fullScanDue = now - lastFullScan > scanInterval;
+  // Whole-frame detection belongs only to SEARCH/REACQUIRE. A hypothesis and
+  // a locked grid spend decoder work at predicted slots; one good QR can no
+  // longer turn into a tight global crop or repeated whole-frame discovery.
+  const fullScanDue = !gridLattice.active && now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
     return;
@@ -1118,14 +1199,14 @@ function captureFrame() {
     return;
   }
   for (const region of regions) {
-    if (region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
+    if (region.gridSlot === undefined && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
   const batchRegions = regions.filter((region) =>
-    region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+    (region.decoded || region.gridSlot !== undefined) && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const batchTracks = batchRegions.map((region) => ({
     id: region.id, quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
-  if (batchTracks.length > 1) {
+  if (batchTracks.length > 1 && !gridLattice.active) {
     // One readback and one worker message per camera frame. Four independent
     // getImageData calls were stalling camera delivery even though the decode
     // workers were mostly idle.
@@ -1181,7 +1262,11 @@ function captureFrame() {
     const right = quadBounds?.right ?? r.x + r.w;
     const bottom = quadBounds?.bottom ?? r.y + r.h;
     const size = Math.max(right - left, bottom - top);
-    const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
+    // Each missing slot widens only its own ROI. The global transform and all
+    // successful slots remain fixed; expansion is capped before neighboring
+    // finder patterns can dominate this crop.
+    const missPad = r.gridSlot === undefined ? 0 : Math.min(0.9, r.consecutiveMisses * 0.08);
+    const pad = Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * (r.drift ?? 0)));
     const x = Math.max(0, Math.floor(left - pad));
     const y = Math.max(0, Math.floor(top - pad));
     const w = Math.min(vw - x, Math.ceil(right + pad) - x);
@@ -1215,16 +1300,14 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (info?.tracked) trackedDecodes++;
   const decodedAt = performance.now();
   const parsed = parseFrame(bytes);
-  const hasFrameCRC = Boolean(parsed && bytes.length === HEADER_LEN + parsed.header.blockLen + FRAME_CRC_LEN);
-  if (box) noteRegion(box, decodedAt, true, { ...info, crc32: info?.crc32 ?? hasFrameCRC });
   if (done) return;
   if (!parsed) {
-    // Once a fountain decoder exists, unrelated normal QRs can never replace
-    // or complete that transfer. Only framed symbols are considered until the
-    // verified file finishes or the receiver is explicitly reset.
+    // Finder-pattern sightings and arbitrary binary decodes never become
+    // tracks. A fully decoded UTF-8 QR may retain the legacy single-code path.
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
+      if (box) noteRegion(box, decodedAt, true, info);
       const settled = plainQrPolicy.addPlain(text, info?.scanId ?? -1);
       if (settled) finishPlainQr(settled);
     } catch {
@@ -1232,19 +1315,40 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     }
     return;
   }
-  // A real AirGapper frame always wins. Plain QR candidates are delayed so a
-  // spurious text decode from a dense fountain grid cannot finish the receive
-  // path before zxing acquires one of the actual file frames.
-  plainQrPolicy.noteFramed();
   const { header, block } = parsed;
-  if (box) {
-    const region = regionAt(box);
-    if (region) noteSequence(region, header.seq, decodedAt);
-  }
-  // streamIdentity() covers every header field that has to hold constant, not
-  // just the session id — see the note on it in protocol.ts.
   const identity = streamIdentity(header);
-  if (!decoder || streamKey !== identity) {
+  // Once a transfer has begun, a packet from another session/shape is valid QR
+  // data but invalid evidence for this lattice. It cannot move tracks or reset
+  // the fountain decoder.
+  if (decoder && streamKey !== identity) return;
+
+  plainQrPolicy.noteFramed();
+  const hasFrameCRC = bytes.length === HEADER_LEN + header.blockLen + FRAME_CRC_LEN;
+  let decodedRegion: Region | undefined;
+  if (box && info?.quad && info.modules) {
+    const snapshot = gridLattice.accept({
+      identity,
+      seq: header.seq,
+      at: decodedAt,
+      scanId: info.scanId ?? -1,
+      box,
+      quad: info.quad,
+      modules: info.modules,
+    }, video.videoWidth, video.videoHeight);
+    if (snapshot) {
+      decodedRegion = syncGrid(
+        snapshot,
+        decodedAt,
+        header.seq % snapshot.slots.length,
+        { ...info, crc32: info.crc32 ?? hasFrameCRC },
+      );
+    }
+  }
+  if (decodedRegion) noteSequence(decodedRegion, header.seq, decodedAt);
+
+  // streamIdentity() covers every invariant header field. parseFrame has
+  // already checked magic, lengths, field ranges and CRC before this point.
+  if (!decoder) {
     decoder = new LTDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
     usefulFrameTimes.length = 0;
     streamKey = identity;
