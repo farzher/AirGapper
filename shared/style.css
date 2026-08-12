@@ -279,19 +279,29 @@ input[type="range"] { accent-color: #222; }
   font-weight: 700;
 }
 .preview-zone { position: relative; display: flex; justify-content: center; width: 100%; }
-.preview-zone.camera-loading .preview::after {
-  content: "";
+.camera-loader {
   position: absolute;
+  inset: 0;
   z-index: 3;
-  left: 50%;
-  top: 50%;
-  width: 24px;
-  height: 24px;
-  margin: -14px;
-  border: 2px solid #fff3;
-  border-top-color: #fff;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  background: radial-gradient(circle at center, var(--card), var(--bg));
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .01em;
+}
+.preview-zone.camera-loading .camera-loader { display: flex; }
+.camera-spinner {
+  width: 38px;
+  height: 38px;
+  border: 3px solid var(--line);
+  border-top-color: var(--ink);
   border-radius: 50%;
-  animation: camera-loading .8s linear infinite;
+  animation: camera-loading .75s cubic-bezier(.55, .15, .45, .85) infinite;
 }
 @keyframes camera-loading { to { transform: rotate(360deg); } }
 .preview {
@@ -322,6 +332,7 @@ input[type="range"] { accent-color: #222; }
 .speed-good strong { color: var(--good); }
 .speed-high strong { color: #1769aa; }
 @media (prefers-reduced-motion: reduce) {
+  .camera-spinner { animation-duration: 1.5s; }
   .progress > div { animation: none; }
 }
 .transfer-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 11px; }
