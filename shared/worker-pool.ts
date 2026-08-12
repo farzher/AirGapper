@@ -10,6 +10,7 @@
 
 export interface PoolWorker {
   onmessage: ((event: MessageEvent) => void) | null;
+  onerror?: ((event: ErrorEvent) => void) | null;
   postMessage(message: unknown, transfer: Transferable[]): void;
   terminate(): void;
 }
@@ -50,9 +51,7 @@ interface DecodeMessage {
   id: number;
   /** Every QR found in the frame. The grid sender shows several codes at
    *  once; each one is an independent fountain frame. Empty means a miss. */
-  symbols: { bytes?: Uint8Array; byteOffset?: number; byteLength?: number; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean; crc32?: boolean }[];
-  /** One caller-owned batch buffer; symbol entries contain offsets into it. */
-  packedBytes?: ArrayBuffer;
+  symbols: { bytes: Uint8Array; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean; crc32?: boolean }[];
   /** Codes DETECTED but not decoded — no bytes, but the position is real.
    *  The receiver uses these to aim crops at codes the full frame lost. */
   sightings?: SymbolBox[];
@@ -80,6 +79,7 @@ export interface DecodeCompletion {
 export class DecodeWorkerPool {
   private readonly workers: PoolWorker[] = [];
   private readonly busy: boolean[] = [];
+  private readonly activeIds: (number | undefined)[] = [];
 
   constructor(
     private readonly create: () => PoolWorker,
@@ -97,42 +97,80 @@ export class DecodeWorkerPool {
     return this.busy.filter(Boolean).length;
   }
 
-  /** Grow or shrink in place. Terminating a busy worker just drops the frame it
-   *  held, which the fountain absorbs like any other miss. */
+  private configureWorker(slot: number, worker: PoolWorker): void {
+    worker.onmessage = (event: MessageEvent) => {
+      if (this.workers[slot] !== worker) return;
+      const message = event.data as DecodeMessage;
+      if (message.id === -1) return;
+      const symbols = message.symbols ?? [];
+      const sightings = message.sightings ?? [];
+      this.busy[slot] = false;
+      this.activeIds[slot] = undefined;
+      const completion: DecodeCompletion = {
+        full: Boolean(message.full),
+        symbolCount: symbols.length,
+        sightingCount: sightings.length,
+        trackedAttempted: Boolean(message.trackedAttempted),
+        trackedHit: Boolean(message.trackedHit),
+        fallbackAttempted: Boolean(message.fallbackAttempted),
+        latencyMs: message.latencyMs ?? 0,
+        error: message.error,
+      };
+      try {
+        if (message.trackedAttempted) this.onTrackedAttempt?.();
+        for (const symbol of symbols) {
+          this.onDecoded(symbol.bytes, symbol.box, {
+            scanId: message.id,
+            quad: symbol.quad,
+            modules: symbol.modules,
+            tracked: symbol.tracked,
+            crc32: symbol.crc32,
+          });
+        }
+        if (this.onSighted) for (const box of sightings) this.onSighted(box);
+      } finally {
+        this.onCompleted?.(message.id, completion);
+      }
+    };
+    worker.onerror = (event: ErrorEvent) => {
+      if (this.workers[slot] !== worker) return;
+      const id = this.activeIds[slot];
+      this.busy[slot] = false;
+      this.activeIds[slot] = undefined;
+      if (id !== undefined) {
+        this.onCompleted?.(id, {
+          full: false,
+          symbolCount: 0,
+          sightingCount: 0,
+          trackedAttempted: false,
+          trackedHit: false,
+          fallbackAttempted: false,
+          latencyMs: 0,
+          error: event.message || "Decode worker failed",
+        });
+      }
+      worker.terminate();
+      const replacement = this.create();
+      this.workers[slot] = replacement;
+      this.configureWorker(slot, replacement);
+    };
+  }
+
+  /** Grow or shrink in place. Terminating a busy worker drops its disposable
+   * frame during teardown; active operation always receives a completion. */
   resize(count: number): void {
     while (this.workers.length > Math.max(0, count)) {
       this.workers.pop()!.terminate();
       this.busy.pop();
+      this.activeIds.pop();
     }
     while (this.workers.length < count) {
       const slot = this.workers.length;
       const worker = this.create();
-      worker.onmessage = (event: MessageEvent) => {
-        const message = event.data as DecodeMessage;
-        const { id, symbols, sightings, trackedAttempted } = message;
-        if (id === -1) return; // warm-up ping, no frame attached
-        this.busy[slot] = false;
-        if (trackedAttempted) this.onTrackedAttempt?.();
-        for (const s of symbols) {
-          const bytes = s.bytes ?? new Uint8Array(message.packedBytes!, s.byteOffset!, s.byteLength!);
-          this.onDecoded(bytes, s.box, {
-            scanId: id, quad: s.quad, modules: s.modules, tracked: s.tracked, crc32: s.crc32,
-          });
-        }
-        if (this.onSighted) for (const box of sightings ?? []) this.onSighted(box);
-        this.onCompleted?.(id, {
-          full: Boolean(message.full),
-          symbolCount: symbols.length,
-          sightingCount: sightings?.length ?? 0,
-          trackedAttempted: Boolean(trackedAttempted),
-          trackedHit: Boolean(message.trackedHit),
-          fallbackAttempted: Boolean(message.fallbackAttempted),
-          latencyMs: message.latencyMs ?? 0,
-          error: message.error,
-        });
-      };
       this.workers.push(worker);
       this.busy.push(false);
+      this.activeIds.push(undefined);
+      this.configureWorker(slot, worker);
     }
   }
 
@@ -142,8 +180,16 @@ export class DecodeWorkerPool {
   submit(message: unknown, transfer: Transferable[]): boolean {
     const slot = this.busy.indexOf(false);
     if (slot === -1) return false;
+    const id = (message as { id?: unknown }).id;
     this.busy[slot] = true;
-    this.workers[slot]!.postMessage(message, transfer);
-    return true;
+    this.activeIds[slot] = typeof id === "number" ? id : undefined;
+    try {
+      this.workers[slot]!.postMessage(message, transfer);
+      return true;
+    } catch {
+      this.busy[slot] = false;
+      this.activeIds[slot] = undefined;
+      return false;
+    }
   }
 }

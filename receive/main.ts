@@ -55,7 +55,7 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const APP_VERSION = "0.1.11";
+const APP_VERSION = "0.1.12";
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -75,7 +75,9 @@ const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-const autoWorkerCount = hardwareThreadCount;
+// Leave cores for camera delivery, compositing, and the main thread. More than
+// four independent WASM instances has only increased contention on phones.
+const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount} worker${autoWorkerCount === 1 ? "" : "s"})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
@@ -248,16 +250,10 @@ let lastDecodedRegionSize = 0;
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 const cropAttempts = new Map<number, { region: Region; quad?: SymbolQuad }>();
 const MAX_INFLIGHT_PER_REGION = 1;
-const bitmapCropsPending = new Map<Region, number>();
 function regionInflightCount(region: Region): number {
-  let count = bitmapCropsPending.get(region) ?? 0;
+  let count = 0;
   for (const attempt of cropAttempts.values()) if (attempt.region === region) count++;
   return count;
-}
-function adjustBitmapPending(region: Region, delta: number): void {
-  const count = (bitmapCropsPending.get(region) ?? 0) + delta;
-  if (count > 0) bitmapCropsPending.set(region, count);
-  else bitmapCropsPending.delete(region);
 }
 
 // Bounded pipeline evidence for diagnostics builds. These distinguish an idle
@@ -317,7 +313,7 @@ function noteSequence(region: Region, seq: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
-  if (directFrameJobIds.delete(id)) scanCompletionTimes.push(performance.now());
+  scanCompletionTimes.push(performance.now());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -638,7 +634,6 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   captureGen++;
-  stopDirectCameraCapture();
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
@@ -661,7 +656,6 @@ function stopReceiver(): void {
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
   cropAttempts.clear();
-  bitmapCropsPending.clear();
   cropRotate = 0;
   schedulerNoJobs = 0;
   cropMisses = 0;
@@ -707,7 +701,8 @@ function stopReceiver(): void {
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
-  metric("m-cap").textContent = "— fps";
+  metric("m-cap").textContent = "Camera — fps";
+  metric("m-scan").textContent = "Scan — fps";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "— KB/s";
@@ -814,8 +809,6 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   const startedGen = captureGen;
-  const cameraTrack = stream.getVideoTracks()[0];
-  if (cameraTrack) startDirectCameraCapture(cameraTrack, startedGen);
   scheduleFrame(startedGen);
   if (isAndroidApp()) {
     // Permission revocation fixes this phone because Android kills the stale
@@ -848,9 +841,7 @@ function scheduleFrame(gen: number) {
   const v = video as VideoRVFC;
   const next = () => {
     if (done || gen !== captureGen) return;
-    // Native camera frames handle tracked decoding when available. The preview
-    // callback then performs only bookkeeping and occasional reacquisition.
-    captureFrame(!directCameraCapture);
+    captureFrame();
     if (showDetectionOverlay) drawOverlay(performance.now());
     scheduleFrame(gen);
   };
@@ -860,165 +851,6 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 let frameId = 0;
-let cameraFrameReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
-let directCameraCapture = false;
-const directFrameJobIds = new Set<number>();
-
-/** Stop consuming camera-native frames without waiting for a pending read. */
-function stopDirectCameraCapture(): void {
-  directCameraCapture = false;
-  directFrameJobIds.clear();
-  const reader = cameraFrameReader;
-  cameraFrameReader = null;
-  if (reader) void reader.cancel().catch(() => undefined);
-}
-
-/**
- * Consume frames from the camera track rather than constructing them from the
- * compositor-backed <video>. At most one frame per free worker enters the
- * pipeline; excess frames are closed immediately instead of being queued.
- */
-function startDirectCameraCapture(track: MediaStreamTrack, gen: number): boolean {
-  const Processor = (globalThis as typeof globalThis & {
-    MediaStreamTrackProcessor?: new (init: { track: MediaStreamTrack }) => {
-      readable: ReadableStream<VideoFrame>;
-    };
-  }).MediaStreamTrackProcessor;
-  if (!Processor || typeof VideoFrame === "undefined") return false;
-  try {
-    const reader = new Processor({ track }).readable.getReader();
-    cameraFrameReader = reader;
-    directCameraCapture = true;
-    void (async () => {
-      try {
-        while (directCameraCapture && gen === captureGen && !done) {
-          const next = await reader.read();
-          if (next.done) break;
-          const frame = next.value;
-          if (!directCameraCapture || gen !== captureGen || done) {
-            frame.close();
-            break;
-          }
-          submitDirectCameraFrame(frame);
-        }
-      } catch {
-        // The preview-driven crop path remains available as the fallback.
-      } finally {
-        if (cameraFrameReader === reader) {
-          cameraFrameReader = null;
-          directCameraCapture = false;
-        }
-        try { reader.releaseLock(); } catch { /* already cancelled */ }
-      }
-    })();
-    return true;
-  } catch {
-    cameraFrameReader = null;
-    directCameraCapture = false;
-    return false;
-  }
-}
-
-function submitDirectCameraFrame(frame: VideoFrame): void {
-  const now = performance.now();
-  const live = decodedCount();
-  const scanInterval = live === 0
-    ? ACQUISITION_SCAN_MS
-    : live < expectedRegions
-      ? FULL_SCAN_DEGRADED_MS
-      : FULL_SCAN_INTERVAL_MS;
-  const tracks = regions.flatMap((region) => region.decoded && region.quad && region.dim
-    ? [{ id: region.id, quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32) }]
-    : []);
-  if (frame.displayWidth !== video.videoWidth || frame.displayHeight !== video.videoHeight) {
-    frame.close();
-    stopDirectCameraCapture();
-    return;
-  }
-  if (!tracks.length || now - lastFullScan > scanInterval || pool.busyCount === pool.size) {
-    if (pool.busyCount === pool.size) poolBusyTimes.push(now);
-    frame.close();
-    return;
-  }
-
-  // copyTo() can crop before readback. Enclose every tracked quad with enough
-  // margin for the decoder's correction search, aligned to even I420 chroma
-  // coordinates. This avoids copying the rest of a high-resolution frame.
-  const points = tracks.flatMap((track) => [
-    track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft,
-  ]);
-  const minX = Math.min(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const maxY = Math.max(...points.map((point) => point.y));
-  const pad = Math.max(8, Math.round(Math.max(maxX - minX, maxY - minY) * 0.08));
-  const x = Math.max(0, Math.floor((minX - pad) / 2) * 2);
-  const y = Math.max(0, Math.floor((minY - pad) / 2) * 2);
-  const right = Math.min(frame.displayWidth, Math.ceil((maxX + pad) / 2) * 2);
-  const bottom = Math.min(frame.displayHeight, Math.ceil((maxY + pad) / 2) * 2);
-  const frameRect = { x, y, width: right - x, height: bottom - y };
-  if (frameRect.width < 2 || frameRect.height < 2) {
-    frame.close();
-    return;
-  }
-
-  const id = frameId++;
-  directFrameJobIds.add(id);
-  if (pool.submit({ id, frame, frameRect, full: false, tracks }, [frame])) {
-    cropsSubmitted += tracks.length;
-    return;
-  }
-  directFrameJobIds.delete(id);
-  poolBusyTimes.push(now);
-  frame.close();
-}
-
-// GPU-side capture: createImageBitmap(video, crop) hands each worker a
-// transferable bitmap with NO main-thread pixel readback — the worker draws
-// it onto an OffscreenCanvas and reads pixels on its own thread. On paper
-// this moves ~60 MB/s of GPU→CPU copies off the main thread and
-// parallelizes them across the pool.
-//
-// MEASURED 4× SLOWER on iOS (iPhone, Safari 26): 38% of captures dropped
-// pool-busy (vs ~0.5%) and the tracked hit rate halved — Safari's worker-
-// side OffscreenCanvas readback is far slower than the main-thread one, and
-// its video→bitmap conversion yields subtly different pixels. Opt-in only
-// (?capture=bitmap), kept because other engines may genuinely benefit.
-const BITMAP_CAPTURE =
-  new URLSearchParams(window.location.search).get("capture") === "bitmap" &&
-  typeof createImageBitmap === "function" &&
-  typeof OffscreenCanvas !== "undefined";
-// Constructing a VideoFrame from <video> can wedge the compositor. Direct
-// camera frames come only from MediaStreamTrackProcessor above.
-const DIRECT_Y_CAPTURE = false;
-
-/** Fire-and-forget submit of a GPU-cropped frame. The bitmap resolves async;
- *  by then the pool may have filled or the transfer ended — close it rather
- *  than leak GPU memory. */
-function submitBitmap(
-  pending: Promise<ImageBitmap>,
-  meta: { ox: number; oy: number; full: boolean; quad?: SymbolQuad; dim?: number; region?: Region;
-    tracks?: { id: number; quad: SymbolQuad; dim: number; crc32: boolean }[] },
-): void {
-  const pendingRegion = meta.region;
-  void pending
-    .then((bitmap) => {
-      if (pendingRegion) adjustBitmapPending(pendingRegion, -1);
-      const id = frameId++;
-      const { region, ...messageMeta } = meta;
-      if (region) cropAttempts.set(id, { region, quad: region.quad });
-      const taken =
-        !done && pool.submit({ id, bitmap, ...messageMeta }, [bitmap]);
-      if (!taken) {
-        cropAttempts.delete(id);
-        poolBusyTimes.push(performance.now());
-        bitmap.close();
-      } else if (!meta.full) cropsSubmitted++;
-    })
-    .catch(() => {
-      if (pendingRegion) adjustBitmapPending(pendingRegion, -1);
-    });
-}
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
@@ -1027,7 +859,7 @@ function submitBitmap(
 // thing requiring main-thread pixel access. Duplicates now cost one cheap
 // tracked decode each, which the pool absorbs without noticing.
 
-function captureFrame(allowTrackedCapture = true) {
+function captureFrame() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh) return;
@@ -1082,57 +914,8 @@ function captureFrame(allowTrackedCapture = true) {
     return;
   }
 
-  const tracks = regions.flatMap((r) => r.decoded && r.quad && r.dim
-    ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
-    : []);
-
-  // MediaStreamTrackProcessor owns the hot tracked path. Do not touch the
-  // compositor-backed video unless its periodic full-frame scan is due.
-  if (!fullScanDue && !allowTrackedCapture) return;
-
-  if (!fullScanDue && tracks.length && DIRECT_Y_CAPTURE) {
-    try {
-      const frame = new VideoFrame(video, { timestamp: Math.round(now * 1000) });
-      const id = frameId++;
-      if (pool.submit({ id, frame, full: false, tracks }, [frame])) {
-        cropsSubmitted += tracks.length;
-        return;
-      }
-      frame.close();
-    } catch {
-      // Older WebCodecs implementations reject HTMLVideoElement sources.
-    }
-  }
-
-  if (BITMAP_CAPTURE) {
-    if (fullScanDue) {
-      lastFullScan = now;
-      fullScans++;
-      submitBitmap(createImageBitmap(video), { ox: 0, oy: 0, full: true });
-      return;
-    }
-    let free = pool.size - pool.busyCount;
-    for (let i = 0; i < regions.length && free > 0; i++) {
-      const r = regions[(i + cropRotate) % regions.length]!;
-      if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
-      const size = Math.max(r.w, r.h);
-      const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * (r.drift ?? 0)));
-      const x = Math.max(0, Math.floor(r.x - pad));
-      const y = Math.max(0, Math.floor(r.y - pad));
-      const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
-      const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
-      if (w < 32 || h < 32) continue;
-      free--;
-      adjustBitmapPending(r, 1);
-      submitBitmap(createImageBitmap(video, x, y, w, h), {
-        ox: x, oy: y, full: false, quad: r.quad, dim: r.dim, region: r,
-      });
-    }
-    cropRotate++;
-    return;
-  }
-
-  // ---- Readback fallback: browsers without createImageBitmap/OffscreenCanvas.
+  // Read back only the bounded work selected above. Full-frame RGBA is used
+  // for sparse acquisition; healthy tracks copy QR-sized crops only.
   if (grab.width !== vw || grab.height !== vh) {
     grab.width = vw;
     grab.height = vh;
@@ -1149,8 +932,8 @@ function captureFrame(allowTrackedCapture = true) {
     );
     return;
   }
-  // Without VideoFrame, read back only individual tracked crops. A full-frame
-  // RGBA copy for every locked QR frame can freeze older Android WebViews.
+  // Read back only individual tracked crops. A full-frame RGBA copy for every
+  // locked QR frame can freeze older Android WebViews.
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
     if (regionInflightCount(r) >= MAX_INFLIGHT_PER_REGION) continue;
@@ -1282,7 +1065,6 @@ function finishPlainQr(text: string): void {
   done = true;
   releaseScreenWakeLock();
   captureGen++;
-  stopDirectCameraCapture();
   stream?.getTracks().forEach((track) => track.stop());
   clearInterval(statsTimer);
   statsTimer = undefined;
@@ -1312,7 +1094,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
   releaseScreenWakeLock();
   captureGen++;
-  stopDirectCameraCapture();
   // Snapshot diagnostics before teardown, but do not report success until the
   // recovered output passes SHA-256. Goodput is unique original-file bytes
   // divided by time through verification, never projected frame capacity.
@@ -1341,7 +1122,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       },
       codes: peakRegions,
       pipeline: {
-        captureMode: "camera-track-y",
+        captureMode: "bounded-rgba-crops",
         captures: totalCaptures,
         capturesDroppedPoolBusy: capturesDropped,
         cropsSubmitted,
@@ -1643,14 +1424,26 @@ function updateStats() {
   prune(poolBusyTimes);
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
-  metric("m-cap").textContent = `${perSecond(captureTimes).toFixed(0)} fps`;
-  metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
+  const cameraRate = perSecond(captureTimes);
+  const scanRate = perSecond(scanCompletionTimes);
+  const qrRate = perSecond(qrReadTimes);
+  metric("m-cap").textContent = `Camera ${cameraRate.toFixed(0)} fps`;
+  metric("m-scan").textContent = `Scan ${scanRate.toFixed(0)} fps`;
+  metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
+  const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
+    scanRate === 0 && pool.busyCount > 0;
+  const saturated = busyRate >= 0.15;
+  const senderLimited = qrRate > 0 && scanRate > qrRate * 1.4 && !saturated;
   const limit = metric("m-limit");
-  limit.textContent = directCameraCapture
-    ? `Scan ${perSecond(scanCompletionTimes).toFixed(0)} fps · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
-    : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
-  limit.classList.toggle("cpu-bound", busyRate >= 0.15);
+  limit.textContent = stalled
+    ? `Scanner stalled · ${pool.busyCount}/${pool.size} busy`
+    : saturated
+      ? `Pool saturated ${Math.min(100, Math.round(busyRate * 100))}%`
+      : senderLimited
+        ? "Sender/display limited"
+        : "Capacity available";
+  limit.classList.toggle("scanner-bound", stalled || saturated);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing

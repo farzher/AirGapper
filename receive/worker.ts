@@ -49,21 +49,11 @@ function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
   };
 }
 
-// Reused for bitmap captures: the GPU-cropped ImageBitmap is drawn here and
-// read back on THIS thread — the whole point of the bitmap path is that the
-// main thread never touches pixels.
-let offscreen: OffscreenCanvas | undefined;
 // Keep one input allocation for this worker's lifetime. Camera crops are
 // similarly sized from frame to frame; malloc/free on every decode only adds
 // allocator churn to the hottest path.
 let inputPtr = 0;
 let inputCapacity = 0;
-let batchDecoder = 0;
-let batchResultsPtr = 0;
-let batchOutputPtr = 0;
-let batchMetricsPtr = 0;
-let batchCapacity = 0;
-const batchTrackKeys: string[] = [];
 
 function inputBuffer(zx: DecimenModule, bytes: number): number {
   if (bytes <= inputCapacity) return inputPtr;
@@ -73,183 +63,29 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
   return inputPtr;
 }
 
-/** Pixels from either capture mode: a transferred ArrayBuffer (readback
- *  fallback) or an ImageBitmap (GPU-side crop, Safari 17+/modern engines). */
-async function pixelsOf(
-  buf: ArrayBuffer | undefined,
-  bitmap: ImageBitmap | undefined,
-  frame: VideoFrame | undefined,
-  frameRect: { x: number; y: number; width: number; height: number } | undefined,
-  w: number,
-  h: number,
-) {
-  if (frame) {
-    const fw = frameRect?.width ?? frame.displayWidth;
-    const fh = frameRect?.height ?? frame.displayHeight;
-    const chromaWidth = Math.ceil(fw / 2);
-    const chromaHeight = Math.ceil(fh / 2);
-    const yBytes = fw * fh;
-    const chromaBytes = chromaWidth * chromaHeight;
-    const options = {
-      format: "I420" as const,
-      rect: frameRect,
-      layout: [
-        { offset: 0, stride: fw },
-        { offset: yBytes, stride: chromaWidth },
-        { offset: yBytes + chromaBytes, stride: chromaWidth },
-      ],
-    };
-    const data = new Uint8Array(yBytes + chromaBytes * 2);
-    try {
-      await frame.copyTo(data, options);
-    } finally {
-      frame.close();
-    }
-    return { data: data.subarray(0, yBytes), w: fw, h: fh, format: "y" as const, stride: fw };
-  }
-  if (bitmap) {
-    const bw = bitmap.width;
-    const bh = bitmap.height;
-    if (!offscreen || offscreen.width !== bw || offscreen.height !== bh) {
-      offscreen = new OffscreenCanvas(bw, bh);
-    }
-    const octx = offscreen.getContext("2d", { willReadFrequently: true })!;
-    octx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-    const img = octx.getImageData(0, 0, bw, bh);
-    return { data: img.data, w: bw, h: bh, format: "rgba" as const, stride: bw * 4 };
-  }
-  return { data: new Uint8Array(buf!), w, h, format: "rgba" as const, stride: w * 4 };
-}
-
-interface BatchTrack {
-  id: number;
-  quad: DecimenQuad;
-  dim: number;
-  crc32: boolean;
-}
-
-function batchBuffers(zx: DecimenModule, count: number): void {
-  if (!batchDecoder) {
-    batchDecoder = zx._createTrackedDecoder(15, 177);
-    zx._setTrackedDecoderFallbackBudget(batchDecoder, 2);
-  }
-  if (count <= batchCapacity) return;
-  if (batchResultsPtr) zx._free(batchResultsPtr);
-  if (batchOutputPtr) zx._free(batchOutputPtr);
-  batchResultsPtr = zx._malloc(count * 32);
-  batchOutputPtr = zx._malloc(count * 3000);
-  if (!batchMetricsPtr) batchMetricsPtr = zx._malloc(72);
-  batchCapacity = count;
-}
-
-function quadKey(track: BatchTrack): string {
-  const q = track.quad;
-  return [track.id, track.dim, Number(track.crc32), q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
-    q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
-}
-
-function offsetQuad(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
-  const move = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
-  return {
-    topLeft: move(q.topLeft), topRight: move(q.topRight),
-    bottomRight: move(q.bottomRight), bottomLeft: move(q.bottomLeft),
-  };
-}
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, bitmap, frame, frameRect, tracks, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim } = e.data as {
     id: number;
-    /** Readback-fallback capture: raw RGBA. */
-    buf?: ArrayBuffer;
-    /** Bitmap capture: GPU-cropped, pixels read on this thread. */
-    bitmap?: ImageBitmap;
-    /** WebCodecs path: copied directly as I420 luma. */
-    frame?: VideoFrame;
-    /** Camera-track crop copied directly into planar luma. */
-    frameRect?: { x: number; y: number; width: number; height: number };
-    /** All acquired symbols sampled together from one full camera frame. */
-    tracks?: BatchTrack[];
+    buf: ArrayBuffer;
     w?: number;
     h?: number;
-    /** Crop origin within the capture, for mapping positions back. */
     ox?: number;
     oy?: number;
-    /** Full-frame scan (up to a 3×4 grid) vs a single-code crop. */
     full?: boolean;
-    /** The region's last decoded quad, capture coordinates — tracked path. */
     quad?: DecimenQuad;
-    /** The stream's QR dimension in modules — tracked path. */
     dim?: number;
   };
-  const pixels = await pixelsOf(buf, bitmap, frame, frameRect, w, h);
-  const { w: pw, h: ph } = pixels;
-  let zx: DecimenModule | undefined;
-  let ptr = 0;
   try {
-    zx = await ready;
-    ptr = inputBuffer(zx, pixels.data.byteLength);
-    zx.HEAPU8.set(
-      pixels.data instanceof Uint8Array ? pixels.data : new Uint8Array(pixels.data.buffer),
-      ptr,
-    );
+    const pixels = new Uint8Array(buf);
+    const zx = await ready;
+    const ptr = inputBuffer(zx, pixels.byteLength);
+    zx.HEAPU8.set(pixels, ptr);
+    const pw = w;
+    const ph = h;
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean }[] = [];
     const sightings: object[] = [];
-
-    if (!full && tracks?.length) {
-      batchBuffers(zx, tracks.length);
-      const byId = new Map(tracks.map((track) => [track.id, track]));
-      for (let slot = 0; slot < tracks.length; slot++) {
-        const track = tracks[slot]!;
-        const key = `${quadKey(track)}:${frameRect?.x ?? 0}:${frameRect?.y ?? 0}`;
-        if (batchTrackKeys[slot] !== key) {
-          const q = frameRect ? offsetQuad(track.quad, -frameRect.x, -frameRect.y) : track.quad;
-          zx._setTrackedDecoderTrack(
-            batchDecoder, slot, track.id, track.dim,
-            q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
-            q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y,
-          );
-          zx._setTrackedDecoderTrackCRC32(batchDecoder, slot, Number(track.crc32));
-          batchTrackKeys[slot] = key;
-        }
-      }
-      for (let slot = tracks.length; slot < batchTrackKeys.length; slot++) {
-        zx._clearTrackedDecoderTrack(batchDecoder, slot);
-        batchTrackKeys[slot] = "";
-      }
-      const count = pixels.format === "y"
-        ? zx._decodeTrackedBatchY(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
-          tracks.length, batchOutputPtr, tracks.length * 3000, batchMetricsPtr)
-        : zx._decodeTrackedBatchRGBA(batchDecoder, ptr, pw, ph, pixels.stride, batchResultsPtr,
-          tracks.length, batchOutputPtr, tracks.length * 3000, batchMetricsPtr);
-      const view = new DataView(zx.HEAPU8.buffer);
-      const packedSymbols: { byteOffset: number; byteLength: number; box: object; quad: DecimenQuad; modules: number; tracked: true; crc32: boolean }[] = [];
-      let outputLength = 0;
-      for (let index = 0; index < count; index++) {
-        const base = batchResultsPtr + index * 32;
-        if (view.getInt32(base + 4, true) !== 1) continue;
-        const track = byId.get(view.getInt32(base, true));
-        if (!track) continue;
-        const byteOffset = view.getInt32(base + 8, true);
-        const byteLength = view.getInt32(base + 12, true);
-        const updatedQuad = offsetQuad(
-          track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true),
-        );
-        packedSymbols.push({
-          byteOffset, byteLength, box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad,
-          modules: track.dim, tracked: true, crc32: track.crc32,
-        });
-        outputLength = Math.max(outputLength, byteOffset + byteLength);
-      }
-      const packedBytes = zx.HEAPU8.slice(batchOutputPtr, batchOutputPtr + outputLength).buffer;
-      ctx.postMessage({
-        id, symbols: packedSymbols, packedBytes, sightings: [], full: false,
-        trackedAttempted: true, trackedHit: packedSymbols.length > 0, fallbackAttempted: false,
-        latencyMs: performance.now() - startedAt,
-      }, [packedBytes]);
-      return;
-    }
 
     let trackedHit = false;
     let trackedAttempted = false;
@@ -316,8 +152,6 @@ ctx.onmessage = async (e: MessageEvent) => {
       latencyMs: performance.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
-  } finally {
-    // inputPtr is intentionally retained until the worker is terminated.
   }
 };
 
