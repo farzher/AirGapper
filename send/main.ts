@@ -27,6 +27,7 @@ import { MAX_SNIPPET_BYTES, MAX_SNIPPET_LABEL, packSnippet } from "../shared/sni
 import {
   MAX_FILE_BYTES,
   MAX_FILE_LABEL,
+  encodeGridSequence,
   fnv1a,
   packFile,
   packFrame,
@@ -37,6 +38,7 @@ import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
+import { gridLayoutId } from "../shared/grid-layout";
 
 const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
@@ -586,6 +588,7 @@ async function startStream(revealStage = false) {
   const header: FrameHeader = {
     sessionId,
     seq: 0,
+    layoutId: gridLayoutId(gridCols, gridRows),
     k: encoder.k,
     blockLen,
     totalLen: payload.length,
@@ -666,7 +669,12 @@ async function startStream(revealStage = false) {
         maskPattern: 4,
       });
     }
-    const bytes = packFrame({ ...header, seq: nextSeq }, encoder.encode(nextSeq));
+    const esiCycle = Math.floor(0x01000000 / gridCodes) * gridCodes;
+    if (nextSeq >= esiCycle) nextSeq = 0;
+    const esi = nextSeq;
+    const slotIndex = esi % gridCodes;
+    const wireEsi = encodeGridSequence(esi, header.layoutId!, slotIndex);
+    const bytes = packFrame({ ...header, seq: wireEsi, gridEsi: esi, slotIndex }, encoder.encode(wireEsi));
     nextSeq++;
     // Every code carries the same byte length at the same ECC with the same
     // pinned mask, so once the first one locks the version every later

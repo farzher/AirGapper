@@ -263,10 +263,19 @@ interface Region extends SymbolBox {
   detectionConfidence: number;
   decodeConfidence: number;
   globalGridConfidence: number;
+  slotState?: "ACTIVE" | "PARTIAL" | "OFFSCREEN" | "LOW_QUALITY" | "LOST";
+  visibleFraction: number;
+  pixelsPerModule: number;
+  decodeAttempts: number;
+  decodeSuccesses: number;
+  averageDecodeCostMs: number;
+  lastAttemptAt?: number;
 }
 const regions: Region[] = [];
 const gridLattice = new GridLattice();
 let gridShape = "";
+let lastGridSnapshot: GridSnapshot | undefined;
+let activeDecodeBudget = 0;
 let nextRegionId = 1;
 // Retain one trustworthy size after active regions expire. During a bad
 // camera/display phase, full acquisition may detect a QR but fail its bytes;
@@ -369,8 +378,15 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   // Attribute misses per slot. In a multi-track reply, one successful QR must
   // not hide every missing neighbor or move/contract their independent ROIs.
   for (const attempt of attempts) {
-    const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === attempt.region);
-    if (!hit && attempt.region.quad === attempt.quad) attempt.region.consecutiveMisses++;
+    const region = attempt.region;
+    region.decodeAttempts++;
+    region.lastAttemptAt = performance.now();
+    region.averageDecodeCostMs = region.averageDecodeCostMs
+      ? region.averageDecodeCostMs * 0.8 + completion.latencyMs * 0.2
+      : completion.latencyMs;
+    const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === region);
+    region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
+    if (!hit && region.quad === attempt.quad) region.consecutiveMisses++;
   }
 }
 
@@ -497,6 +513,11 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     detectionConfidence: decoded ? 1 : 0.35,
     decodeConfidence: decoded ? 1 : 0,
     globalGridConfidence: 0,
+    visibleFraction: 1,
+    pixelsPerModule: 0,
+    decodeAttempts: 0,
+    decodeSuccesses: 0,
+    averageDecodeCostMs: 0,
   });
   regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
@@ -507,6 +528,7 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
 }
 
 function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, info?: SymbolInfo): Region | undefined {
+  lastGridSnapshot = snapshot;
   const shape = `${snapshot.layout.cols}x${snapshot.layout.rows}`;
   if (shape !== gridShape) {
     for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot !== undefined) regions.splice(i, 1);
@@ -535,6 +557,11 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
         detectionConfidence: 0,
         decodeConfidence: 0,
         globalGridConfidence: snapshot.confidence,
+        visibleFraction: 0,
+        pixelsPerModule: 0,
+        decodeAttempts: 0,
+        decodeSuccesses: 0,
+        averageDecodeCostMs: 0,
       };
       regions.push(region);
       regionCreations++;
@@ -552,6 +579,7 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
       region.consecutiveMisses = 0;
       region.detectionConfidence = 1;
       region.decodeConfidence = 1;
+      region.decodeSuccesses++;
       region.crc32 = info?.crc32 ?? true;
       decodedRegion = region;
     }
@@ -560,6 +588,57 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
   expectedRegionsAt = now;
   peakRegions = Math.max(peakRegions, snapshot.slots.length);
   return decodedRegion;
+}
+
+function classifyGridSlots(vw: number, vh: number): Region[] {
+  const visible: Region[] = [];
+  for (const region of regions) {
+    if (region.gridSlot === undefined || !region.quad || !region.dim) continue;
+    const bounds = trackedQuadBounds(region.quad);
+    if (!bounds) {
+      region.slotState = "OFFSCREEN";
+      region.visibleFraction = 0;
+      continue;
+    }
+    const area = Math.max(1, (bounds.right - bounds.left) * (bounds.bottom - bounds.top));
+    const insideWidth = Math.max(0, Math.min(vw, bounds.right) - Math.max(0, bounds.left));
+    const insideHeight = Math.max(0, Math.min(vh, bounds.bottom) - Math.max(0, bounds.top));
+    region.visibleFraction = insideWidth * insideHeight / area;
+    const points = [region.quad.topLeft, region.quad.topRight, region.quad.bottomRight, region.quad.bottomLeft];
+    const shortestEdge = Math.min(...points.map((point, index) => {
+      const next = points[(index + 1) % 4]!;
+      return Math.hypot(point.x - next.x, point.y - next.y);
+    }));
+    region.pixelsPerModule = shortestEdge / region.dim;
+    if (region.visibleFraction < 0.1) region.slotState = "OFFSCREEN";
+    else if (region.visibleFraction < 0.88) region.slotState = "PARTIAL";
+    else if (region.pixelsPerModule < 2.25) region.slotState = "LOW_QUALITY";
+    else if (region.consecutiveMisses >= 6) region.slotState = "LOST";
+    else region.slotState = "ACTIVE";
+    if (region.slotState !== "OFFSCREEN") visible.push(region);
+  }
+  return visible;
+}
+
+function slotUsefulness(region: Region): number {
+  const success = region.decodeAttempts ? region.decodeConfidence : 0.65;
+  const quality = Math.min(1.5, region.pixelsPerModule / 4);
+  const cost = region.averageDecodeCostMs || 8;
+  const stateWeight = region.slotState === "ACTIVE" ? 1 : region.slotState === "LOST" ? 0.35 : 0;
+  return stateWeight * region.visibleFraction * quality * (0.25 + success) / Math.sqrt(cost);
+}
+
+function gridDebugSummary(): string {
+  if (!lastGridSnapshot) return "";
+  const slots = regions.filter((region) => region.gridSlot !== undefined);
+  const visible = slots.filter((region) => region.slotState !== "OFFSCREEN");
+  const active = slots.filter((region) => region.slotState === "ACTIVE");
+  const partial = slots.filter((region) => region.slotState === "PARTIAL");
+  const offscreen = slots.filter((region) => region.slotState === "OFFSCREEN");
+  const best = [...active].sort((a, b) => slotUsefulness(b) - slotUsefulness(a)).slice(0, activeDecodeBudget);
+  const avgPpm = best.length ? best.reduce((sum, region) => sum + region.pixelsPerModule, 0) / best.length : 0;
+  const successesPerFrame = totalCaptures ? totalDecodes / totalCaptures : 0;
+  return `sender ${lastGridSnapshot.layout.cols}×${lastGridSnapshot.layout.rows} · visible ${visible.length}/${slots.length} · active ${active.length} · offscreen ${offscreen.length} · partial ${partial.length} · best ${best.map((region) => region.gridSlot).join(",")} · ${avgPpm.toFixed(1)} px/module · budget ${activeDecodeBudget} · ${successesPerFrame.toFixed(1)} QR/frame · ${liveGoodputKbs(performance.now()).toFixed(1)} KB/s`;
 }
 
 /** The selected resolution reserves the initial camera box. Cameras can still
@@ -776,6 +855,8 @@ function stopReceiver(): void {
   regions.length = 0;
   gridLattice.reset();
   gridShape = "";
+  lastGridSnapshot = undefined;
+  activeDecodeBudget = 0;
   lastDecodedRegionSize = 0;
   expectedRegions = 0;
   expectedRegionsAt = 0;
@@ -1099,6 +1180,8 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     : tracked
       ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded${completion.fallbackAttempted ? ` · fallback searched${completion.sightingCount ? ` · ${completion.sightingCount} found` : ""}` : ""}`
       : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
+  const gridSummary = gridDebugSummary();
+  if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
   scanDialog.showModal();
 }
@@ -1150,8 +1233,9 @@ function captureFrame() {
     expectedRegions = live;
     expectedRegionsAt = now;
   }
-  const trackingUnhealthy = regions.some((region) => region.decoded && region.consecutiveMisses >= 4);
-  gridLattice.noteMissing(regions.some((region) => region.gridSlot !== undefined && region.consecutiveMisses >= 2));
+  const visibleGridSlots = classifyGridSlots(vw, vh);
+  const trackingUnhealthy = regions.some((region) => region.gridSlot === undefined && region.decoded && region.consecutiveMisses >= 4);
+  gridLattice.noteMissing(visibleGridSlots.some((region) => region.slotState === "LOST"));
   const scanInterval =
     live === 0
       ? ACQUISITION_SCAN_MS
@@ -1243,15 +1327,21 @@ function captureFrame() {
     return;
   }
 
-  // Pipeline successive camera frames across the workers. The old one-job
-  // limit made a single QR use only one worker, so its decode latency directly
-  // capped throughput even while the rest of the pool sat idle. Due full scans
-  // take priority above; between them, divide all capacity fairly across tracks.
+  // Rank only useful, fully visible lattice slots. The full sender layout is a
+  // coordinate system, not a work list: offscreen, clipped, and undersampled
+  // slots consume no worker time and do not count as failures.
+  const eligible = gridLattice.active
+    ? visibleGridSlots
+      .filter((region) => region.slotState === "ACTIVE" || region.slotState === "LOST")
+      .sort((a, b) => slotUsefulness(b) - slotUsefulness(a))
+    : [...regions];
+  activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
+  const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
-  const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, regions.length)));
+  const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
   let submitted = false;
-  for (let i = 0; i < regions.length; i++) {
-    const r = regions[(i + cropRotate) % regions.length]!;
+  for (let i = 0; i < scheduledRegions.length; i++) {
+    const r = scheduledRegions[(i + cropRotate) % scheduledRegions.length]!;
     if (regionInflightCount(r) >= perRegionCapacity) continue;
     // The quad is the geometry actually passed to tracked decoding, so crop
     // around it—not the independently updated axis-aligned region box. A stale
@@ -1291,7 +1381,7 @@ function captureFrame() {
     submitted = true;
   }
   // Being blocked by per-track limits is scanner saturation too.
-  if (!submitted && regions.length > 0) poolBusyTimes.push(now);
+  if (!submitted && scheduledRegions.length > 0) poolBusyTimes.push(now);
   cropRotate++;
 }
 
@@ -1329,6 +1419,9 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     const snapshot = gridLattice.accept({
       identity,
       seq: header.seq,
+      gridEsi: header.gridEsi,
+      layoutId: header.layoutId,
+      slotIndex: header.slotIndex,
       at: decodedAt,
       scanId: info.scanId ?? -1,
       box,
@@ -1339,12 +1432,12 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       decodedRegion = syncGrid(
         snapshot,
         decodedAt,
-        header.seq % snapshot.slots.length,
+        header.slotIndex ?? header.seq % snapshot.slots.length,
         { ...info, crc32: info.crc32 ?? hasFrameCRC },
       );
     }
   }
-  if (decodedRegion) noteSequence(decodedRegion, header.seq, decodedAt);
+  if (decodedRegion) noteSequence(decodedRegion, header.gridEsi ?? header.seq, decodedAt);
 
   // streamIdentity() covers every invariant header field. parseFrame has
   // already checked magic, lengths, field ranges and CRC before this point.
@@ -1357,8 +1450,9 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
   }
-  minSeq = Math.min(minSeq, header.seq);
-  maxSeq = Math.max(maxSeq, header.seq);
+  const sequenceOrdinal = header.gridEsi ?? header.seq;
+  minSeq = Math.min(minSeq, sequenceOrdinal);
+  maxSeq = Math.max(maxSeq, sequenceOrdinal);
   const framesNewBefore = decoder.framesNew;
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
@@ -1475,6 +1569,24 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         catchRate: seqSpan ? Number((parsed / seqSpan).toFixed(3)) : null,
       },
       codes: peakRegions,
+      grid: lastGridSnapshot ? {
+        senderLayout: `${lastGridSnapshot.layout.cols}x${lastGridSnapshot.layout.rows}`,
+        state: lastGridSnapshot.state,
+        confidence: Number(lastGridSnapshot.confidence.toFixed(3)),
+        totalSlots: regions.filter((region) => region.gridSlot !== undefined).length,
+        visibleSlots: regions.filter((region) => region.gridSlot !== undefined && region.slotState !== "OFFSCREEN").length,
+        activeDecodeSlots: activeDecodeBudget,
+        offscreenSlots: regions.filter((region) => region.slotState === "OFFSCREEN").length,
+        partialSlots: regions.filter((region) => region.slotState === "PARTIAL").length,
+        bestVisible: regions.filter((region) => region.slotState === "ACTIVE")
+          .sort((a, b) => slotUsefulness(b) - slotUsefulness(a)).slice(0, activeDecodeBudget).map((region) => region.gridSlot),
+        averagePixelsPerModule: (() => {
+          const active = regions.filter((region) => region.slotState === "ACTIVE");
+          return active.length ? Number((active.reduce((sum, region) => sum + region.pixelsPerModule, 0) / active.length).toFixed(2)) : 0;
+        })(),
+        decodeBudget: activeDecodeBudget,
+        verifiedKbs: Number(liveGoodputKbs(performance.now()).toFixed(2)),
+      } : null,
       pipeline: {
         captureMode: "bounded-rgba-crops",
         captures: totalCaptures,
@@ -1815,9 +1927,11 @@ function updateStats() {
   // sighting region must not mask a missing code (degradedMs) or hide a full
   // tracking collapse (zeroRegionMs). The timeline carries BOTH counts so
   // phantom churn stays visible next to the real one.
-  const liveNow = decodedCount();
+  const activeGrid = regions.filter((region) => region.gridSlot !== undefined && region.slotState === "ACTIVE");
+  const liveNow = gridLattice.active ? activeGrid.filter((region) => region.decoded).length : decodedCount();
+  const expectedNow = gridLattice.active ? activeGrid.length : expectedRegions;
   if (liveNow === 0) zeroRegionMs += STATS_TICK_MS;
-  if (liveNow < expectedRegions) degradedMs += STATS_TICK_MS;
+  if (liveNow < expectedNow) degradedMs += STATS_TICK_MS;
   if (timeline.length < TIMELINE_MAX_SAMPLES) {
     timeline.push([
       Number(elapsed.toFixed(1)),
