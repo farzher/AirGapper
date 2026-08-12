@@ -270,19 +270,23 @@ input[type="range"] { accent-color: #222; }
 #result:empty { display: none; }
 .received-file { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .received-file img.received, .received-file video.received, .received-file audio.received { max-width: 100%; }
+img.received, video.received { display: block; width: auto; height: auto; max-width: 100%; max-height: 520px; border-radius: 14px; object-fit: contain; }
 .archive-actions { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); width: 100%; }
 body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
 body.receive-complete .app-main { margin-block: 0; padding: 4px 0 8px; }
 body.receive-complete .receiver-primary { gap: 8px; }
 body.receive-complete #result { min-height: 0; }
 body.receive-complete img.received,
-body.receive-complete video.received { max-height: calc(100dvh - 260px); object-fit: contain; }
+body.receive-complete video.received {
+  /* Keep browser chrome appearing during a scroll from resizing the preview. */
+  max-height: calc(100vh - 260px);
+  max-height: min(520px, calc(100svh - 260px));
+}
 body.receive-complete .received-note { max-height: calc(100dvh - 260px); overflow: hidden; }
 .done { font-size: 20px; font-weight: 700; color: var(--good); }
 .failed { font-size: 20px; font-weight: 700; color: var(--bad); }
 .received-note { width: 100%; margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .received-note .snippet-link { color: #145ea8; text-decoration: underline; text-underline-offset: 2px; }
-img.received, video.received { max-width: 100%; max-height: 520px; border-radius: 14px; }
 .download { display: inline-block; border: 0; padding: 9px 13px; color: white; background: #171717; border-radius: 10px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere; cursor: pointer; }
 .note-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 
