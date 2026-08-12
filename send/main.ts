@@ -42,9 +42,10 @@ const HEADER_MARGIN = 0;
 const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
 // The default camera-friendly frame carries twelve independent standard QRs.
-// Advanced layouts may reduce that to one or shape a similarly sized grid to
-// the sender's whole screen; none of these choices changes the wire format.
+// Advanced layouts may reduce that to one or tile a denser grid across the
+// sender's whole screen; none of these choices changes the wire format.
 const DEFAULT_GRID_CODES = 12;
+const FILL_GRID_CODES = 48;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
 type LayoutMode = "four-three" | "single" | "fill";
@@ -55,17 +56,13 @@ function selectedLayout(): LayoutMode {
 
 function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
   if (mode === "single") return { cols: 1, rows: 1, codes: 1 };
-  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
-  if (mode === "four-three") {
-    return aspect >= 1
-      ? { cols: 4, rows: 3, codes: DEFAULT_GRID_CODES }
-      : { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
-  }
+  if (mode === "four-three") return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
 
-  // Keep roughly the default amount of parallel work, but choose complete
-  // rows and columns whose square cells follow the actual display. This can
-  // use the space above and below a 4:3 frame without stretching any QR.
-  const rows = Math.max(1, Math.round(Math.sqrt(DEFAULT_GRID_CODES / aspect)));
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  // Fill mode is deliberately much denser than the camera-friendly default.
+  // Shape roughly 48 complete cells to the actual viewport so the screen is
+  // tiled with QRs instead of merely rotating the same twelve-code layout.
+  const rows = Math.max(1, Math.round(Math.sqrt(FILL_GRID_CODES / aspect)));
   const cols = Math.max(1, Math.round(aspect * rows));
   return { cols, rows, codes: cols * rows };
 }
