@@ -34,6 +34,7 @@ import {
   type PackedOpticalFile,
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
+import { isAndroid, isIOS } from "../shared/platform";
 import { requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
@@ -42,8 +43,8 @@ const HEADER_MARGIN = 0;
 // A one-module shared quiet zone was the best-performing tested grid spacing.
 const GRID_MARGIN = 1;
 const LOOKAHEAD = 3;
-// The default camera-friendly frame carries twelve independent standard QRs.
-// The advanced layout can reduce that to one; neither choice changes the wire format.
+// The desktop default carries twelve independent standard QRs. Phones default
+// to one large code; neither choice changes the wire format.
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
@@ -407,6 +408,9 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
+  const mobileSender = isAndroid || isIOS || window.matchMedia("(pointer: coarse) and (max-width: 700px)").matches;
+  if (mobileSender) cfgLayout.value = "single";
+  // An explicit saved preference still wins over the device default.
   restoreSendSettings();
   const updateControlLabels = () => {
     fpsValue.textContent = `${cfgFps.value} fps`;
