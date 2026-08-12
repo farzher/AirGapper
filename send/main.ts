@@ -34,7 +34,6 @@ import {
   type PackedOpticalFile,
 } from "../shared/protocol";
 import { statusLine } from "../shared/status-line";
-import { isAndroid, isIOS } from "../shared/platform";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
@@ -114,21 +113,41 @@ function showStreamPanels(visible: boolean): void {
   sendControls.hidden = !visible;
 }
 
-const cfgFps = document.getElementById("cfg-fps") as HTMLInputElement;
-const cfgSize = document.getElementById("cfg-size") as HTMLInputElement;
+const cfgFps = document.getElementById("cfg-fps") as HTMLSelectElement;
+const cfgFpsCustom = document.getElementById("cfg-fps-custom") as HTMLInputElement;
+const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
-const sendAdvanced = document.getElementById("send-advanced") as HTMLDetailsElement;
-const fpsValue = document.getElementById("fps-value")!;
 
-// Native <details> stays open when focus moves elsewhere. Treat this one as a
-// compact popover and dismiss it when the user clicks anywhere outside it.
-document.addEventListener("click", (event) => {
-  if (sendAdvanced.open && event.target instanceof Node && !sendAdvanced.contains(event.target)) {
-    sendAdvanced.open = false;
-  }
-});
-const sizeValue = document.getElementById("size-value")!;
+function selectedFps(): number {
+  const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
+  return Number.isFinite(value) ? Math.max(1, Math.min(240, Math.round(value))) : 15;
+}
+
+function selectFps(fps: number): void {
+  const preset = Array.from(cfgFps.options).find((option) => Number(option.value) === fps);
+  cfgFps.value = preset?.value ?? "custom";
+  cfgFpsCustom.value = String(fps);
+  cfgFpsCustom.hidden = cfgFps.value !== "custom";
+}
+
+async function addDisplayRefreshRate(): Promise<void> {
+  const timestamps: number[] = [];
+  await new Promise<void>((resolve) => {
+    const sample = (now: number) => {
+      timestamps.push(now);
+      if (timestamps.length < 90) requestAnimationFrame(sample);
+      else resolve();
+    };
+    requestAnimationFrame(sample);
+  });
+  const intervals = timestamps.slice(1).map((time, index) => time - timestamps[index]!).filter((ms) => ms > 4 && ms < 40).sort((a, b) => a - b);
+  if (!intervals.length) return;
+  const refreshRate = Math.round(1000 / intervals[Math.floor(intervals.length / 2)]!);
+  if (refreshRate <= 60 || Array.from(cfgFps.options).some((option) => Number(option.value) === refreshRate)) return;
+  const option = new Option(`${refreshRate} fps (display)`, String(refreshRate));
+  cfgFps.insertBefore(option, cfgFps.options[cfgFps.options.length - 1] ?? null);
+}
 
 let selectedFile: {
   name: string;
@@ -364,8 +383,8 @@ function restoreSendSettings(): void {
       layout?: unknown;
     } | null;
     if (!saved) return;
-    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 60) {
-      cfgFps.value = String(saved.fps);
+    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 240) {
+      selectFps(saved.fps);
     }
     if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
       cfgSize.value = String(saved.sizeLevel);
@@ -380,7 +399,7 @@ function restoreSendSettings(): void {
 function saveSendSettings(): void {
   try {
     localStorage.setItem(SEND_SETTINGS_KEY, JSON.stringify({
-      fps: Number(cfgFps.value),
+      fps: selectedFps(),
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
@@ -420,31 +439,22 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
-  const mobileSender = isAndroid || isIOS || window.matchMedia("(pointer: coarse) and (max-width: 700px)").matches;
-  if (mobileSender) cfgLayout.value = "single";
-  // An explicit saved preference still wins over the device default.
+  FRAME_BYTES_OPTIONS.forEach((bytes, level) => cfgSize.add(new Option(`${formatBytes(bytes)} per QR`, String(level), false, level === FRAME_BYTES_OPTIONS.length - 1)));
   restoreSendSettings();
-  const updateControlLabels = () => {
-    fpsValue.textContent = `${cfgFps.value} fps`;
-    const level = Number(cfgSize.value);
-    const bytes = FRAME_BYTES_OPTIONS[Math.min(level, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
-    const { codes } = layoutGrid(selectedLayout());
-    sizeValue.textContent = `${formatBytes(bytes)} · ${codes} ${codes === 1 ? "QR" : "QRs"}`;
-  };
-  const resizeForViewport = () => {
-    updateControlLabels();
-    resizeDisplay?.();
-  };
+  cfgFps.addEventListener("change", () => {
+    cfgFpsCustom.hidden = cfgFps.value !== "custom";
+    if (!cfgFpsCustom.hidden) cfgFpsCustom.focus();
+  });
+  const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
-    el.addEventListener("input", updateControlLabels);
+  for (const el of [cfgFps, cfgFpsCustom, cfgSize, cfgScaling, cfgLayout]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
     });
   }
-  updateControlLabels();
+  void addDisplayRefreshRate();
 }
 
 /** Only on a fresh pick — a settings change restarts the stream too, and
@@ -469,7 +479,7 @@ async function startStream(revealStage = false) {
   await requestScreenWakeLock();
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
-  const txFps = Number(cfgFps.value);
+  const txFps = selectedFps();
   const sizeLevel = Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;

@@ -52,6 +52,8 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .header-qr-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .header-qr { display: block; image-rendering: pixelated; }
 .brand-button { border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
+.apk-download { flex: none; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 8px 11px; font-size: 12px; font-weight: 650; text-decoration: none; }
+.apk-download:hover { border-color: #ccc; }
 .brand { display: block; color: var(--ink); font-weight: 750; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
 .tag { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .ghost,
@@ -110,14 +112,11 @@ body.receive-mode .app { height: 100vh; height: 100dvh; min-height: 0; overflow:
 .selection-summary { display: flex; justify-content: space-between; gap: 20px; padding: 6px 4px; color: var(--muted); font-size: 11px; }
 .selection-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary span:last-child { flex: none; font-variant-numeric: tabular-nums; }
-.send-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
-.send-controls label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
-.send-controls output { min-width: 100px; text-align: right; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.send-advanced { position: relative; }
-.send-advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.advanced-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 2; width: 230px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 12px 36px #0001; }
-.advanced-menu label { grid-template-columns: 1fr; gap: 4px; }
-.advanced-menu label + label { margin-top: 10px; }
+.send-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; gap: 12px; padding: 8px 4px 0; border-top: 1px solid var(--line); }
+.send-controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.send-controls select,
+.send-controls input { width: 100%; }
+.send-controls input { margin-top: 2px; }
 .note-composer { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 .note-composer textarea {
   resize: none;
@@ -303,9 +302,7 @@ dialog::backdrop { background: #0004; }
   .home, .send-inputs { grid-template-columns: 1fr; }
   .mode { min-height: 130px; }
   .file-picker, .note-composer { min-height: 130px; }
-  .send-controls { grid-template-columns: 1fr auto; gap: 12px; }
-  .send-controls > label { grid-column: 1 / -1; }
-  .send-advanced { grid-column: 2; }
+  .send-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stage { min-height: 0; }
   .receiver-primary { gap: 8px; }
   .preview { min-height: 0; max-height: calc(100vh - 255px); max-height: calc(100dvh - 255px); }

@@ -9,7 +9,8 @@
     "serve": "npm run build && vite preview",
     "diagnostics": "vite --mode diagnostics --open /app.html",
     "build": "tsc && tsc -p tsconfig.node.json && vite build",
-    "apk:debug": "npm run build && android\\gradlew.bat -p android assembleDebug"
+    "apk:debug": "npm run build && android\\gradlew.bat -p android assembleDebug",
+    "apk:release": "npm run build && android\\gradlew.bat -p android assembleRelease && node -e \"require('node:fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','AirGapper.apk')\""
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

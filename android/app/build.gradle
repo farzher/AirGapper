@@ -17,6 +17,17 @@ android {
         }
     }
 
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+
+    lint {
+        disable "ExpiredTargetSdkVersion"
+    }
+
     buildFeatures {
         buildConfig true
     }
