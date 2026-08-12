@@ -120,11 +120,47 @@ function showStreamPanels(visible: boolean): void {
   sendControls.hidden = !visible;
 }
 
+const cfgFps = document.getElementById("cfg-fps") as HTMLSelectElement;
+const cfgFpsCustom = document.getElementById("cfg-fps-custom") as HTMLInputElement;
+const speedControl = cfgFps.closest(".speed-control")!;
 const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
 const cfgChannels = document.getElementById("cfg-channels") as HTMLSelectElement;
 const cfgHold = document.getElementById("cfg-hold") as HTMLSelectElement;
+
+function selectedFps(): number {
+  const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
+  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 15;
+}
+
+function selectFps(fps: number): void {
+  const preset = Array.from(cfgFps.options).find((option) => Number(option.value) === fps);
+  cfgFps.value = preset?.value ?? "custom";
+  cfgFpsCustom.value = String(fps);
+  cfgFpsCustom.hidden = cfgFps.value !== "custom";
+  speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
+}
+
+function monitorDisplayRefreshRate(): void {
+  const intervals: number[] = [];
+  let previous = 0;
+  const started = performance.now();
+  const sample = (now: number) => {
+    if (previous && now - previous > 1 && now - previous < 40) intervals.push(now - previous);
+    previous = now;
+    if (now - started < 1500) return requestAnimationFrame(sample);
+    if (!intervals.length) return;
+    intervals.sort((a, b) => a - b);
+    const measured = 1000 / intervals[Math.floor(intervals.length / 2)]!;
+    const common = [60, 75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
+    const refresh = common.reduce((best, rate) => Math.abs(rate - measured) < Math.abs(best - measured) ? rate : best);
+    if (refresh > 60 && !Array.from(cfgFps.options).some((option) => Number(option.value) === refresh)) {
+      cfgFps.insertBefore(new Option(`${refresh} fps (display refresh)`, String(refresh)), cfgFps.options[cfgFps.options.length - 1] ?? null);
+    }
+  };
+  requestAnimationFrame(sample);
+}
 
 let selectedFile: {
   name: string;
@@ -354,6 +390,7 @@ async function selectSnippet(): Promise<void> {
 function restoreSendSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(SEND_SETTINGS_KEY) ?? "null") as {
+      fps?: unknown;
       sizeLevel?: unknown;
       scaling?: unknown;
       layout?: unknown;
@@ -361,6 +398,9 @@ function restoreSendSettings(): void {
       holdRefreshes?: unknown;
     } | null;
     if (!saved) return;
+    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
+      selectFps(saved.fps);
+    }
     if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
       cfgSize.value = String(saved.sizeLevel);
     }
@@ -380,6 +420,7 @@ function restoreSendSettings(): void {
 function saveSendSettings(): void {
   try {
     localStorage.setItem(SEND_SETTINGS_KEY, JSON.stringify({
+      fps: selectedFps(),
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
@@ -423,15 +464,26 @@ async function main() {
   applyMode();
   Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
   restoreSendSettings();
+  cfgFps.addEventListener("change", () => {
+    cfgFpsCustom.hidden = cfgFps.value !== "custom";
+    speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
+    if (!cfgFpsCustom.hidden) cfgFpsCustom.focus();
+  });
   const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgSize, cfgScaling, cfgLayout, cfgChannels, cfgHold]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgChannels, cfgHold]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
     });
   }
+  cfgFpsCustom.addEventListener("input", () => {
+    if (!cfgFpsCustom.value) return;
+    saveSendSettings();
+    void startStream();
+  });
+  monitorDisplayRefreshRate();
 
 }
 
@@ -457,6 +509,7 @@ async function startStream(revealStage = false) {
   await requestScreenWakeLock();
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return; // superseded while fetching
+  const txFps = selectedFps();
   const holdRefreshes = Number(cfgHold.value) || 2;
   const channelMode = cfgChannels.value === "same" ? "same" : "dual";
   const sizeLevel = Number(cfgSize.value);
@@ -629,6 +682,7 @@ async function startStream(revealStage = false) {
               compression,
             },
             settings: {
+              txFps,
               holdRefreshes,
               channelMode,
               frameBytes,
@@ -708,19 +762,35 @@ async function startStream(revealStage = false) {
   }
   if (staticStream) return;
 
-  // Cells are divided across hold phases. Every cell changes once per selected
-  // refresh count, while a grid avoids flipping all of its squares together.
+  // FPS remains the requested per-square symbol rate. Minimum hold only caps
+  // rates that would change a square in fewer than 2/3/4 physical refreshes.
+  // Thus 15 fps on a 360 Hz monitor naturally holds for about 24 refreshes.
+  const interval = 1000 / txFps;
+  const subInterval = interval / gridCodes;
+  const lastPaintRefresh = new Array<number>(gridCodes).fill(0);
   let refreshCount = 0;
-  const tick = () => {
+  let cellCursor = 0;
+  let nextAt = performance.now() + interval;
+  const tick = (now: number) => {
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
     refreshCount++;
-    if (refreshCount <= holdRefreshes) return;
-    const phase = (refreshCount - holdRefreshes - 1) % holdRefreshes;
-    for (let i = phase; i < gridCodes; i += holdRefreshes) {
+    if (now < nextAt) return;
+    if (now - nextAt > interval) nextAt = now;
+    while (now >= nextAt) {
+      if (refreshCount - lastPaintRefresh[cellCursor]! < holdRefreshes) {
+        nextAt = now;
+        break;
+      }
       const img = queue.shift();
-      if (!img) break;
-      paintCell(img, i);
+      if (!img) {
+        nextAt = now + subInterval;
+        break;
+      }
+      paintCell(img, cellCursor);
+      lastPaintRefresh[cellCursor] = refreshCount;
+      cellCursor = (cellCursor + 1) % gridCodes;
+      nextAt += subInterval;
       pump(1);
     }
   };
