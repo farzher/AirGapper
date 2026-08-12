@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  completedGoodputKbs,
   estimateTransferProgress,
   expectedFountainOverhead,
   formatDuration,
@@ -55,6 +56,12 @@ test("a peeling cascade cannot hold back or jump the visible progress", () => {
   const early = estimateTransferProgress(K, 70, 20, 10).fraction;
   assert.equal(estimateTransferProgress(K, 70, 20, 69).fraction, early);
   assert.ok(estimateTransferProgress(K, 100, 20, 100).fraction > early);
+});
+
+test("tiny completed transfers never report more KB/s than the whole file", () => {
+  assert.equal(completedGoodputKbs(700, 0.003), 700 / 1024);
+  assert.equal(completedGoodputKbs(700, 0.5), 700 / 1024);
+  assert.equal(completedGoodputKbs(700, 2), 350 / 1024);
 });
 
 test("durations stay compact and readable", () => {

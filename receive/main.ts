@@ -14,6 +14,7 @@
 import { LTDecoder } from "../shared/fountain";
 import { formatBytes } from "../shared/format";
 import {
+  completedGoodputKbs,
   estimateTransferProgress,
   expectedFountainOverhead,
   formatDuration,
@@ -860,7 +861,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         sha256Verified: ok,
         seconds: Number(finalSeconds.toFixed(2)),
         payloadBytes: uniqueBytes,
-        goodputKBs: ok ? Number((uniqueBytes / 1024 / Math.max(0.01, finalSeconds)).toFixed(1)) : 0,
+        goodputKBs: ok ? Number(completedGoodputKbs(uniqueBytes, finalSeconds).toFixed(1)) : 0,
       }),
     }).catch(() => undefined);
   };
@@ -897,7 +898,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // The container carries its own media type, so the receiver never has to be
     // told in advance whether a file or a text snippet is coming. The displayed
     // rate is complete, unique original-file goodput through SHA verification.
-    const rate = (file.bytes.length / 1024 / seconds).toFixed(1);
+    const rate = completedGoodputKbs(file.bytes.length, seconds).toFixed(1);
     metric("m-rate").textContent = `${rate} KB/s`;
     speedFeedback.className = "speed-feedback speed-good";
     if (isSnippet(file)) {
