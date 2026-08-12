@@ -56,6 +56,9 @@ const cameraResolution = document.getElementById("camera-resolution") as HTMLSel
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
+const APP_VERSION = "0.1.1";
+const WEBGPU_REQUESTED = new URLSearchParams(location.search).get("webgpu") === "1";
+cameraActual.textContent = `AirGapper ${APP_VERSION} · WebGPU ${WEBGPU_REQUESTED ? "requested" : "off (safe mode)"}`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -716,7 +719,7 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
-  cameraActual.textContent = "";
+  cameraActual.textContent = `AirGapper ${APP_VERSION} · WebGPU ${WEBGPU_REQUESTED ? "requested" : "off (safe mode)"}`;
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -823,8 +826,8 @@ async function start() {
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
   const cameraLabel = activeCamera?.frameRate
-    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
-    : `Active: ${activeSize}`;
+    ? `AirGapper ${APP_VERSION} · Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
+    : `AirGapper ${APP_VERSION} · Active: ${activeSize}`;
   cameraActual.textContent = cameraLabel;
   syncPreviewAspect();
   setStatus("");
@@ -835,14 +838,18 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   const startedGen = captureGen;
-  if (new URLSearchParams(location.search).get("webgpu") !== "0") {
+  // External-texture compute stalls the camera compositor on several older
+  // Android WebGPU drivers. Keep the implementation available for controlled
+  // profiling (?webgpu=1), but never select it merely because the API exists.
+  // The established VideoFrame/CPU tracked sampler remains the production path.
+  if (WEBGPU_REQUESTED) {
     void WebGpuQrSampler.create().then((sampler) => {
       if (startedGen !== captureGen || done) {
         sampler?.destroy();
         return;
       }
       webgpuSampler = sampler;
-      cameraActual.textContent = `${cameraLabel} · WebGPU ${sampler ? "on" : "unavailable"}`;
+      cameraActual.textContent = `${cameraLabel} · WebGPU ${sampler ? "experimental" : "unavailable"}`;
     });
   }
   scheduleFrame(startedGen);
