@@ -54,7 +54,7 @@
         <div class="stage-bottom" id="stage-bottom">
           <div class="selection-summary" id="selection-summary" hidden></div>
           <div class="send-controls" id="send-controls" hidden>
-            <label class="speed-control"><span>Speed</span><select id="cfg-fps"><option value="10">10 fps</option><option value="15" selected>15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option><option value="60">60 fps</option><option value="custom">Custom…</option></select><input id="cfg-fps-custom" type="number" min="1" max="480" step="1" value="15" aria-label="Custom frames per second" hidden /></label>
+            <label class="speed-control"><span>Speed</span><select id="cfg-fps"><option value="1">1 fps</option><option value="5">5 fps</option><option value="10">10 fps</option><option value="15" selected>15 fps</option><option value="20">20 fps</option><option value="24">24 fps</option><option value="30">30 fps</option><option value="55">55 fps</option><option value="60">60 fps</option><option value="custom">Custom…</option></select><input id="cfg-fps-custom" type="number" min="1" max="480" step="1" value="15" aria-label="Custom frames per second" hidden /></label>
             <label><span>Size</span><select id="cfg-size"></select></label>
             <label><span>Layout</span><select id="cfg-layout"><option value="single" selected>1:1</option><option value="one-two">1:2</option><option value="two-two">2:2</option><option value="two-three">2:3</option><option value="four-three">3:4</option><option value="three-five">3:5</option></select></label>
             <label><span>Scaling</span><select id="cfg-scaling"><option value="integer">Pixel perfect</option><option value="fit">Fit screen</option></select></label>
@@ -69,11 +69,11 @@
         <div class="receiver-heading"><div class="hint status-line" id="stats"></div></div>
         <button id="start" class="enable-camera" type="button" hidden>Enable camera</button>
         <details class="settings receiver-settings">
-          <summary>Advanced camera</summary>
+          <summary>Settings</summary>
           <div class="row">
-            <label><span>Resolution</span><select id="camera-resolution"><option value="640x480">640×480 — Performance</option><option value="960x720">960×720 — Fast</option><option value="1280x960" selected>1280×960 — Balanced</option><option value="1920x1080">1920×1080 — High detail</option></select></label>
-            <label><span>Frame rate</span><select id="camera-fps"><option value="auto">Auto</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
-            <label><span>Decode workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
+            <label><span>Resolution</span><select id="camera-resolution"><option value="640x480">640×480</option><option value="960x720">960×720</option><option value="1280x960" selected>1280×960</option><option value="1920x1080">1920×1080</option></select></label>
+            <label><span>FPS</span><select id="camera-fps"><option value="auto">Auto</option><option value="30" selected>30</option><option value="60">60</option></select></label>
+            <label><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
             <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture scan</button>
           </div>
           <p class="settings-actual" id="camera-actual"></p>

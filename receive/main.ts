@@ -85,9 +85,9 @@ const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 // four independent WASM instances has only increased contention on phones.
 const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
-autoWorkerOption.textContent = `Auto (${autoWorkerCount} worker${autoWorkerCount === 1 ? "" : "s"})`;
+autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
-  decodeWorkers.add(new Option(`${count} worker${count === 1 ? "" : "s"}`, String(count)));
+  decodeWorkers.add(new Option(String(count), String(count)));
 }
 function selectedWorkerCount(): number {
   return decodeWorkers.value === "auto"
