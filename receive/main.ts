@@ -230,11 +230,12 @@ interface Region extends SymbolBox {
    * they may draw feedback, but cannot make a stale decode-proven region live. */
   decodedSeen?: number;
   sightedSeen?: number;
-  /** Recent distinct sender symbols inferred from sequence changes. Repeated
-   * camera reads of one displayed symbol are neutral, not extra successes. */
-  outcomes: boolean[];
-  lastSeq?: number;
+  /** Distinct sender symbols seen recently. Keeping the sequence itself makes
+   * late worker replies harmless: an older frame can fill a gap instead of
+   * being discarded merely because a newer worker finished first. */
+  sequenceSamples: { seq: number; at: number }[];
   seqStep?: number;
+  qualityLevel: number;
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
   drift?: number;
@@ -293,32 +294,34 @@ function notePipelineEvent(kind: string, value = 0): void {
   ]);
 }
 
-function noteOutcome(region: Region, success: boolean): void {
-  region.outcomes.push(success);
-  if (region.outcomes.length > 20) region.outcomes.shift();
+const QUALITY_WINDOW_MS = 3000;
+
+function pruneSequenceSamples(region: Region, now: number): void {
+  while (region.sequenceSamples.length && region.sequenceSamples[0]!.at < now - QUALITY_WINDOW_MS) {
+    region.sequenceSamples.shift();
+  }
 }
 
-function noteSequence(region: Region, seq: number): void {
+function noteSequence(region: Region, seq: number, now: number): void {
   // Sequence numbers are global across the grid, so one cell normally advances
   // by the number of cells. The high-water count is stable through a temporary
   // lost region and is 1 for the common single-code sender.
   const step = Math.max(1, expectedRegions);
-  if (region.lastSeq === undefined || region.seqStep !== step) {
-    region.lastSeq = seq;
+  if (region.seqStep !== step) {
     region.seqStep = step;
-    region.outcomes.length = 0;
-    // One decode establishes that the code exists; it does not establish a
-    // 100% read rate. Start at the lowest quality color and let subsequent
-    // distinct sender sequences earn the outline upward.
-    noteOutcome(region, false);
-    return;
+    region.sequenceSamples.length = 0;
+    region.qualityLevel = 0;
   }
-  if (seq <= region.lastSeq) return; // repeated camera read of one sender frame
-  const delta = seq - region.lastSeq;
-  const skipped = Math.min(20, Math.max(0, Math.round(delta / step) - 1));
-  for (let i = 0; i < skipped; i++) noteOutcome(region, false);
-  noteOutcome(region, true);
-  region.lastSeq = seq;
+  pruneSequenceSamples(region, now);
+  // Camera frames are pipelined through several workers and can complete out of
+  // order. Retain every distinct sequence in the window so a late completion
+  // fills the gap that it actually fills. Re-reading one displayed symbol is
+  // neutral: it proves the image still decodes, but not that another sender
+  // frame was caught.
+  if (!region.sequenceSamples.some((sample) => sample.seq === seq)) {
+    region.sequenceSamples.push({ seq, at: now });
+    region.sequenceSamples.sort((a, b) => a.at - b.at);
+  }
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
@@ -466,7 +469,8 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     decoded,
     decodedSeen: decoded ? now : undefined,
     sightedSeen: now,
-    outcomes: [],
+    sequenceSamples: [],
+    qualityLevel: 0,
     quad: info?.quad,
     dim: info?.modules,
     crc32: info?.crc32,
@@ -502,17 +506,50 @@ window.addEventListener("resize", syncPreviewAspect);
 // soon as the answer stops being yes, while the crop tracker keeps trying.
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
+const MAX_QR_MODULES = 177;
+const BLUE_MIN_PIXELS_PER_MODULE = 4.5;
 const overlayCtx = overlay.getContext("2d")!;
-function captureQualityRate(region: Region): number {
-  return region.outcomes.reduce((sum, ok) => sum + Number(ok), 0) / region.outcomes.length;
+
+function captureQualityRate(region: Region, now: number): number {
+  pruneSequenceSamples(region, now);
+  if (region.sequenceSamples.length < 2) return 0;
+  const sequences = region.sequenceSamples.map((sample) => sample.seq);
+  const span = Math.max(...sequences) - Math.min(...sequences);
+  const opportunities = Math.max(1, Math.round(span / Math.max(1, region.seqStep ?? 1)) + 1);
+  // One prior miss makes a newly found code earn confidence instead of turning
+  // blue from two lucky frames. Its influence naturally vanishes during a
+  // sustained run, unlike the old fixed 20-result history.
+  return Math.min(1, region.sequenceSamples.length / (opportunities + 1));
 }
 
-function captureQualityColor(rate: number): string {
-  if (rate === 1) return "#42e8ff"; // every recent attempt decoded
-  if (rate >= 0.9) return "#35d66f"; // strong lock
-  if (rate >= 0.65) return "#a9c93d";
-  if (rate >= 0.35) return "#ffb23e";
-  return "#ff665c"; // detected, but rarely decoded
+function hasDensityHeadroom(region: Region): boolean {
+  if (!region.quad || !region.dim || region.dim >= MAX_QR_MODULES) return false;
+  const corners = [
+    region.quad.topLeft,
+    region.quad.topRight,
+    region.quad.bottomRight,
+    region.quad.bottomLeft,
+  ];
+  let shortestEdge = Infinity;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i]!;
+    const b = corners[(i + 1) % corners.length]!;
+    shortestEdge = Math.min(shortestEdge, Math.hypot(a.x - b.x, a.y - b.y));
+  }
+  return shortestEdge / region.dim >= BLUE_MIN_PIXELS_PER_MODULE;
+}
+
+function captureQualityColor(region: Region, rate: number): string {
+  const headroom = hasDensityHeadroom(region);
+  // Separate enter/leave thresholds keep an established indication from
+  // flickering on one miss while still allowing a serious gap to fall quickly.
+  let level = 0;
+  if ((rate >= 0.95 || (region.qualityLevel === 4 && rate >= 0.9)) && headroom) level = 4;
+  else if (rate >= 0.9 || (region.qualityLevel >= 3 && rate >= 0.84)) level = 3;
+  else if (rate >= 0.75 || (region.qualityLevel >= 2 && rate >= 0.68)) level = 2;
+  else if (rate >= 0.4 || (region.qualityLevel >= 1 && rate >= 0.33)) level = 1;
+  region.qualityLevel = level;
+  return ["#ff665c", "#ffb23e", "#a9c93d", "#35d66f", "#42e8ff"][level]!;
 }
 
 /** Grid-layout reading order: rows first, columns within a row. Two boxes are
@@ -556,8 +593,8 @@ function drawOverlay(now: number) {
     const successful = decodedAge <= INDICATOR_FADE_MS;
     if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
 
-    const quality = captureQualityRate(r);
-    const color = captureQualityColor(quality);
+    const quality = captureQualityRate(r, now);
+    const color = captureQualityColor(r, quality);
     overlayCtx.strokeStyle = color;
     overlayCtx.shadowColor = color;
     overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
@@ -1160,9 +1197,10 @@ function captureFrame() {
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
+  const decodedAt = performance.now();
   const parsed = parseFrame(bytes);
   const hasFrameCRC = Boolean(parsed && bytes.length === HEADER_LEN + parsed.header.blockLen + FRAME_CRC_LEN);
-  if (box) noteRegion(box, performance.now(), true, { ...info, crc32: info?.crc32 ?? hasFrameCRC });
+  if (box) noteRegion(box, decodedAt, true, { ...info, crc32: info?.crc32 ?? hasFrameCRC });
   if (done) return;
   if (!parsed) {
     // Once a fountain decoder exists, unrelated normal QRs can never replace
@@ -1185,7 +1223,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const { header, block } = parsed;
   if (box) {
     const region = regionAt(box);
-    if (region) noteSequence(region, header.seq);
+    if (region) noteSequence(region, header.seq, decodedAt);
   }
   // streamIdentity() covers every header field that has to hold constant, not
   // just the session id — see the note on it in protocol.ts.
