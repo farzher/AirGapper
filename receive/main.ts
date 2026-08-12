@@ -57,8 +57,7 @@ const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
-const receiverVersion = document.getElementById("receiver-version")!;
-const APP_VERSION = "0.1.7";
+const APP_VERSION = "0.1.8";
 const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
 let webgpuRequested = false;
 try {
@@ -69,7 +68,6 @@ try {
   webgpuRequested = false;
 }
 webgpuMode.value = webgpuRequested ? "on" : "off";
-receiverVersion.textContent = `v${APP_VERSION} · custom codec`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -852,8 +850,8 @@ async function start() {
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
   cameraActual.textContent = activeCamera?.frameRate
-    ? `${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
-    : activeSize;
+    ? `${activeSize} · ${Math.round(activeCamera.frameRate)} fps · v${APP_VERSION}`
+    : `${activeSize} · v${APP_VERSION}`;
   syncPreviewAspect();
   setStatus("");
 
