@@ -87,7 +87,12 @@ function downloadOffline(): void {
 document.getElementById("download-offline")!.addEventListener("click", downloadOffline);
 
 (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend = () => {
-  if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
+  // The Android document picker pauses the Activity while saving a completed
+  // transfer. Preserve that result screen and its in-memory file until the
+  // picker returns; only a live sender/receiver needs suspension teardown.
+  if (active !== "home" && !document.body.classList.contains("receive-complete")) {
+    window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
+  }
 };
 
 document.addEventListener("visibilitychange", () => {

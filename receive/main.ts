@@ -690,10 +690,10 @@ function captureFrame() {
     grab.height = vh;
   }
   const ctx = grab.getContext("2d", { willReadFrequently: true })!;
-  ctx.drawImage(video, 0, 0);
   if (fullScanDue) {
     lastFullScan = now;
     fullScans++;
+    ctx.drawImage(video, 0, 0);
     const img = ctx.getImageData(0, 0, vw, vh);
     pool.submit(
       { id: frameId++, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
@@ -702,8 +702,10 @@ function captureFrame() {
     return;
   }
   // One crop per known code, rotated so a short worker pool doesn't starve
-  // the same tail region every frame. Submitting stops when the pool is full;
-  // the fountain absorbs whatever gets dropped.
+  // the same tail region every frame. Draw each source crop directly into the
+  // canvas origin instead of copying the entire 1.2 MP video first. On old
+  // Android WebViews that full-frame GPU readback was the capture bottleneck,
+  // even on frames where acquisition was idle and no pixels were submitted.
   for (let i = 0; i < regions.length; i++) {
     const r = regions[(i + cropRotate) % regions.length]!;
     // The pad leads a moving target: base margin plus twice the displacement
@@ -717,7 +719,8 @@ function captureFrame() {
     const w = Math.min(vw - x, Math.ceil(r.w + 2 * pad));
     const h = Math.min(vh - y, Math.ceil(r.h + 2 * pad));
     if (w < 32 || h < 32) continue;
-    const img = ctx.getImageData(x, y, w, h);
+    ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
     // The quad + dimension arm the worker's tracked fast path (detection
     // skipped entirely, 2× at V40); absent — or stale after a miss — the
     // worker falls back to the stock decoder on the same buffer.
