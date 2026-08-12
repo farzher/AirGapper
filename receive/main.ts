@@ -49,15 +49,28 @@ import {
   saveFileOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
+import { WebGpuQrSampler } from "./webgpu-sampler";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
+const webgpuMode = document.getElementById("webgpu-mode") as HTMLSelectElement;
 const cameraActual = document.getElementById("camera-actual")!;
 const receiverVersion = document.getElementById("receiver-version")!;
-const APP_VERSION = "0.1.5";
-receiverVersion.textContent = `v${APP_VERSION} · stable codec`;
+const APP_VERSION = "0.1.6";
+const WEBGPU_SETTING_KEY = "airgapper:webgpu:v1";
+let webgpuRequested = false;
+try {
+  // URL flags from older experimental builds must not silently survive as the
+  // production setting. Only this visible control can enable WebGPU.
+  webgpuRequested = localStorage.getItem(WEBGPU_SETTING_KEY) === "on";
+} catch {
+  webgpuRequested = false;
+}
+webgpuMode.value = webgpuRequested ? "on" : "off";
+receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
+cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
 const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
@@ -275,6 +288,13 @@ let trackingInvalidations = 0;
 let completedJobs = 0;
 let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
+let gpuWasmFrames = 0;
+let wasmParseTotalMs = 0;
+let wasmRsTotalMs = 0;
+let wasmTotalMs = 0;
+let wasmRsFallbacks = 0;
+let gpuConsecutiveMisses = 0;
+let gpuCooldownUntil = 0;
 let lastDistinctArrivalAt = 0;
 let maxSequenceGapMs = 0;
 const pipelineEvents: [number, string, number][] = [];
@@ -321,6 +341,21 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
+  if (completion.gpuSampled && completion.wasmMetrics) {
+    gpuWasmFrames++;
+    gpuConsecutiveMisses = completion.symbolCount ? 0 : gpuConsecutiveMisses + 1;
+    // Never let a marginal GPU matrix starve the proven CPU tracked path. A
+    // short cooldown re-anchors geometry without launching generic detection
+    // for every QR or permanently disabling acceleration.
+    if (gpuConsecutiveMisses >= 3) {
+      gpuCooldownUntil = performance.now() + 1000;
+      gpuConsecutiveMisses = 0;
+    }
+    wasmParseTotalMs += completion.wasmMetrics.parseMs;
+    wasmRsTotalMs += completion.wasmMetrics.rsMs;
+    wasmTotalMs += completion.wasmMetrics.totalMs;
+    wasmRsFallbacks += completion.wasmMetrics.rsFallbacks;
+  }
   if (completion.error) {
     decodeExceptions++;
     notePipelineEvent("decode-exception", decodeExceptions);
@@ -603,6 +638,15 @@ const changeCameraSettings = () => {
 cameraResolution.addEventListener("change", changeCameraSettings);
 cameraFps.addEventListener("change", changeCameraSettings);
 decodeWorkers.addEventListener("change", changeCameraSettings);
+webgpuMode.addEventListener("change", () => {
+  webgpuRequested = webgpuMode.value === "on";
+  try { localStorage.setItem(WEBGPU_SETTING_KEY, webgpuRequested ? "on" : "off"); } catch { /* optional */ }
+  receiverVersion.textContent = `v${APP_VERSION} · WebGPU ${webgpuRequested ? "ON" : "OFF"}`;
+  if (stream && !done) {
+    stopReceiver();
+    void start();
+  }
+});
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -642,6 +686,8 @@ function stopReceiver(): void {
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -673,6 +719,13 @@ function stopReceiver(): void {
   completedJobs = 0;
   workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
+  gpuWasmFrames = 0;
+  wasmParseTotalMs = 0;
+  wasmRsTotalMs = 0;
+  wasmTotalMs = 0;
+  wasmRsFallbacks = 0;
+  gpuConsecutiveMisses = 0;
+  gpuCooldownUntil = 0;
   lastDistinctArrivalAt = 0;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
@@ -695,7 +748,7 @@ function stopReceiver(): void {
   plainQrPolicy.reset();
   result.replaceChildren();
   preview.style.display = "none";
-  cameraActual.textContent = "";
+  cameraActual.textContent = `WebGPU ${webgpuRequested ? "requested" : "off (safe mode)"}`;
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -801,8 +854,8 @@ async function start() {
     ? `${activeCamera.width}×${activeCamera.height}`
     : "Camera active";
   const cameraLabel = activeCamera?.frameRate
-    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps`
-    : `Active: ${activeSize}`;
+    ? `Active: ${activeSize} · ${Math.round(activeCamera.frameRate)} fps · WebGPU ${webgpuRequested ? "requested" : "OFF"}`
+    : `Active: ${activeSize} · WebGPU ${webgpuRequested ? "requested" : "OFF"}`;
   cameraActual.textContent = cameraLabel;
   syncPreviewAspect();
   setStatus("");
@@ -813,6 +866,20 @@ async function start() {
   cameraStartedTs = performance.now();
   captureGen++;
   const startedGen = captureGen;
+  // External-texture compute stalls the camera compositor on several older
+  // Android WebGPU drivers. Keep the implementation available for controlled
+  // profiling (?webgpu=1), but never select it merely because the API exists.
+  // The established VideoFrame/CPU tracked sampler remains the production path.
+  if (webgpuRequested) {
+    void WebGpuQrSampler.create().then((sampler) => {
+      if (startedGen !== captureGen || done) {
+        sampler?.destroy();
+        return;
+      }
+      webgpuSampler = sampler;
+      cameraActual.textContent = `${cameraLabel} · WebGPU ${sampler ? "experimental" : "unavailable"}`;
+    });
+  }
   scheduleFrame(startedGen);
   if (isAndroidApp()) {
     // Permission revocation fixes this phone because Android kills the stale
@@ -855,6 +922,7 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 let frameId = 0;
+let webgpuSampler: WebGpuQrSampler | null = null;
 
 // GPU-side capture: createImageBitmap(video, crop) hands each worker a
 // transferable bitmap with NO main-thread pixel readback — the worker draws
@@ -871,9 +939,9 @@ const BITMAP_CAPTURE =
   new URLSearchParams(window.location.search).get("capture") === "bitmap" &&
   typeof createImageBitmap === "function" &&
   typeof OffscreenCanvas !== "undefined";
-// Constructing a VideoFrame from the live <video> can wedge the camera
-// compositor after first lock in both Android WebViews and Chrome PWAs. Do not
-// infer safety from API presence; the bounded crop path works on both.
+// Live VideoFrame construction is intentionally disabled: on the target phone
+// it wedges the camera compositor immediately after the first QR lock. WebGPU
+// remains opt-in and the safe path uses bounded QR-sized crop readback.
 const DIRECT_Y_CAPTURE = false;
 
 /** Fire-and-forget submit of a GPU-cropped frame. The bitmap resolves async;
@@ -969,6 +1037,20 @@ function captureFrame() {
   const tracks = regions.flatMap((r) => r.decoded && r.quad && r.dim
     ? [{ id: r.id, quad: r.quad, dim: r.dim, crc32: Boolean(r.crc32) }]
     : []);
+
+  if (!fullScanDue && tracks.length && webgpuSampler && now >= gpuCooldownUntil) {
+    const accepted = webgpuSampler.submit(video, tracks, ({ packed, tracks: sampledTracks, wordsPerMatrix }) => {
+      const id = frameId++;
+      if (!done && pool.submit({
+        id, gpuPacked: packed, full: false, tracks: sampledTracks, wordsPerMatrix,
+      }, [packed])) return;
+      poolBusyTimes.push(performance.now());
+    });
+    if (accepted) {
+      cropsSubmitted += tracks.length;
+      return;
+    }
+  }
 
   if (!fullScanDue && tracks.length && DIRECT_Y_CAPTURE) {
     try {
@@ -1166,6 +1248,8 @@ function finishPlainQr(text: string): void {
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   preview.style.display = "none";
   metricsEl.style.display = "none";
   document.body.classList.add("receive-complete");
@@ -1219,7 +1303,13 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       },
       codes: peakRegions,
       pipeline: {
-        captureMode: BITMAP_CAPTURE ? "bitmap" : DIRECT_Y_CAPTURE ? "video-frame-y" : "readback",
+        captureMode: webgpuSampler ? "webgpu-external-texture" : BITMAP_CAPTURE ? "bitmap" : DIRECT_Y_CAPTURE ? "video-frame-y" : "readback",
+        webgpu: webgpuSampler?.metrics ?? { enabled: false },
+        wasmGpuFrames: gpuWasmFrames,
+        wasmParseMeanMs: gpuWasmFrames ? Number((wasmParseTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmRsMeanMs: gpuWasmFrames ? Number((wasmRsTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmTotalMeanMs: gpuWasmFrames ? Number((wasmTotalMs / gpuWasmFrames).toFixed(3)) : 0,
+        wasmRsFallbacks,
         captures: totalCaptures,
         capturesDroppedPoolBusy: capturesDropped,
         cropsSubmitted,
@@ -1280,6 +1370,8 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   // decode pool. Each worker holds its own ~940 KB zxing WASM instance, which
   // is worth reclaiming on a phone the moment the last frame is in.
   stream?.getTracks().forEach((t) => t.stop());
+  webgpuSampler?.destroy();
+  webgpuSampler = null;
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -1524,8 +1616,11 @@ function updateStats() {
   metric("m-dec").textContent = `${perSecond(qrReadTimes).toFixed(1)} QR/s`;
   const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const limit = metric("m-limit");
-  limit.textContent = `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
-  limit.classList.toggle("cpu-bound", busyRate >= 0.15);
+  const gpuMetrics = webgpuSampler?.metrics;
+  limit.textContent = gpuMetrics?.submitted
+    ? `GPU ${gpuMetrics.lastGpuMs.toFixed(1)} ms · CPU ${Math.min(100, Math.round(busyRate * 100))}%`
+    : `CPU ${Math.min(100, Math.round(busyRate * 100))}%`;
+  limit.classList.toggle("cpu-bound", !gpuMetrics?.submitted && busyRate >= 0.15);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
