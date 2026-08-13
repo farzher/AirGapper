@@ -1,7 +1,7 @@
 {
   "name": "airgapper",
   "private": true,
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "Offline file and text transfer using fountain-coded animated QR codes.",
   "type": "module",
   "scripts": {
@@ -9,8 +9,9 @@
     "serve": "npm run build && vite preview",
     "diagnostics": "vite --mode diagnostics --open /app.html",
     "build": "tsc && tsc -p tsconfig.node.json && vite build",
-    "apk:debug": "npm run build && android\\gradlew.bat -p android assembleDebug",
-    "apk:release": "npm run build && android\\gradlew.bat -p android assembleRelease && node -e \"require('node:fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','AirGapper.apk')\""
+    "build:apk": "tsc && tsc -p tsconfig.node.json && vite build --mode apk",
+    "apk:debug": "npm run build:apk && android\\gradlew.bat -p android assembleDebug",
+    "apk:release": "npm run build:apk && android\\gradlew.bat -p android assembleRelease && node -e \"require('node:fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','AirGapper.apk')\""
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

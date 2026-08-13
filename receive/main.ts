@@ -488,9 +488,8 @@ const FULL_SCAN_INTERVAL_MS = 1500;
 // sample). Ten per second keeps acquisition feeling instant — ≤100 ms added
 // to first lock — and cuts the aiming burn ~85%.
 const ACQUISITION_SCAN_MS = 100;
+const DEGRADED_SCAN_INTERVAL_MS = 250;
 const ACQUISITION_REDUCED_EDGE = 960;
-const ACQUISITION_COLLAPSED_FPS = 12;
-const ACQUISITION_SLOW_LATENCY_MS = 550;
 // Most cold frames contain no QR. Frequent scans use ZXing's cheap single-pass
 // detector; this cadence retains the exhaustive try-harder + sighting pass for
 // difficult first lock without paying for it on every miss.
@@ -505,8 +504,8 @@ const REGION_PAD = 0.35;
 let cropRotate = 0;
 let lastFullScan = 0;
 let lastThoroughFullScan = -Infinity;
-// Full detector jobs are tracked separately from cheap crop work. Acquisition
-// may use two fresh frames, while locked and reacquisition states permit one.
+// Full detector jobs are tracked separately from cheap crop work. Only one may
+// run at once so detector work cannot contend with camera delivery and crops.
 const fullScanIds = new Set<number>();
 const fullScanJobs = new Map<number, { thorough: boolean; native: boolean; reacquire: boolean }>();
 let currentScanningState: ScanningState = "SEARCH";
@@ -1583,15 +1582,6 @@ function scanningState(gridNeedsDiscovery: boolean): ScanningState {
   return "LOCKED";
 }
 
-function acquisitionConcurrency(now: number): number {
-  if (hardwareThreadCount < 6 || pool.size < 3) return 1;
-  let recentCallbacks = 0;
-  for (let i = captureTimes.length - 1; i >= 0 && captureTimes[i]! > now - 1000; i--) recentCallbacks++;
-  const cameraCollapsed = now - cameraStartedTs > 750 && recentCallbacks < ACQUISITION_COLLAPSED_FPS;
-  const averageFullLatency = fullLatencyCount ? fullLatencyTotalMs / fullLatencyCount : 0;
-  return cameraCollapsed || averageFullLatency > ACQUISITION_SLOW_LATENCY_MS ? 1 : 2;
-}
-
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
 // shift the stripe between two captures of the SAME displayed frame — 452
@@ -1641,9 +1631,8 @@ function captureFrame() {
   const state = scanningState(gridNeedsDiscovery);
   currentScanningState = state;
   const scanInterval = state === "SEARCH" ? ACQUISITION_SCAN_MS
-    : state === "REACQUIRE" ? 300
-      : state === "PARTIAL_LOCK" ? 900
-        : FULL_SCAN_INTERVAL_MS;
+    : state === "REACQUIRE" || state === "PARTIAL_LOCK" ? DEGRADED_SCAN_INTERVAL_MS
+      : FULL_SCAN_INTERVAL_MS;
   const captureHasTrackedWork = gridLattice.active
     ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh))
     : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
@@ -1652,17 +1641,14 @@ function captureFrame() {
       (!region.decoded ? region.decodeAttempts === 0 : region.consecutiveMisses === 3 || region.consecutiveMisses === 6))
     .sort((a, b) => b.consecutiveMisses - a.consecutiveMisses)[0];
   const reacquireExpanded = !localCandidate || localCandidate.consecutiveMisses >= 6;
-  const fullLimit = state === "SEARCH" ? Math.min(acquisitionConcurrency(now), Math.max(1, pool.size - 1)) : 1;
-  const freshSecondSearchFrame = state === "SEARCH" && fullScanIds.size === 1 && now - lastFullScan > 8;
   const preferLocal = Boolean(localCandidate && fullScanIds.size === 0 && localReacquireIds.size === 0);
-  const fullScanDue = localReacquireIds.size === 0 && !preferLocal && (state !== "REACQUIRE" || reacquireExpanded) && fullScanIds.size < fullLimit && (captureNextScan
+  const fullScanDue = localReacquireIds.size === 0 && !preferLocal && (state !== "REACQUIRE" || reacquireExpanded) && fullScanIds.size === 0 && (captureNextScan
     ? !captureHasTrackedWork
-    : (fullScans === 0 && fullScanIds.size === 0) || freshSecondSearchFrame || now - lastFullScan > scanInterval);
+    : fullScans === 0 || now - lastFullScan > scanInterval);
 
   if (fullScanDue) {
-    // The first search is immediate, native and thorough. A capable phone may
-    // concurrently search the next fresh frame, but that second job is cheap
-    // and reduced. Detector work never occupies the whole normal worker pool.
+    // The first search is immediate, native and thorough. Later cheap reduced
+    // scans remain serialized so detector work never competes with itself.
     const thoroughInFlight = [...fullScanJobs.values()].some((job) => job.thorough);
     const thorough = captureNextScan || (!thoroughInFlight && now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
     const native = thorough;

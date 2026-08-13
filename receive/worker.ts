@@ -174,12 +174,32 @@ ctx.onmessage = async (e: MessageEvent) => {
           tracked: true, crc32: track.crc32,
         });
       }
-      // Batch tracking is deliberately detector-free. Missing transforms are
-      // recovered by one scheduler-owned local or global job while successful
-      // slots keep flowing through this fast path.
+      // Tracking is opportunistic. On a complete miss, reacquire from this
+      // already-copied bounded crop instead of discarding the camera frame and
+      // waiting several misses for a separate scheduler job.
+      let fallbackAttempted = false;
+      if (symbols.length === 0) {
+        fallbackAttempted = true;
+        const results = zx.readFull(ptr, pw, ph, true, 16, false);
+        try {
+          for (let i = 0; i < results.size(); i++) {
+            const result = results.get(i);
+            if (!result.valid || result.bytes.length === 0) continue;
+            symbols.push({
+              bytes: result.bytes,
+              box: boundsOf(result.position, ox, oy),
+              quad: shifted(result.position, ox, oy),
+              modules: result.modules,
+              tracked: false,
+            });
+          }
+        } finally {
+          results.delete();
+        }
+      }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
-        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted: false,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
         latencyMs: performance.now() - startedAt,
       });
       return;
@@ -209,7 +229,7 @@ ctx.onmessage = async (e: MessageEvent) => {
       }
     }
 
-    if (full || reacquire) {
+    if (full || reacquire || (trackedAttempted && !trackedHit)) {
       fallbackAttempted = !full;
       const appendResults = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
         try {

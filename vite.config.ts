@@ -14,7 +14,7 @@ const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"))
 
 const TOKENS = { SITE_URL };
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: "./",
   plugins: [
     htmlTokens(TOKENS),
@@ -55,13 +55,13 @@ export default defineConfig({
   ],
   worker: { format: "iife", plugins: () => [inlineCodecWasm()] },
   build: {
-    // Keep the self-contained APK runnable on the receiver's older WebView.
-    // The codec requires BigInt (Chrome 67), but not newer JavaScript syntax.
-    target: "chrome67",
+    // The hosted app keeps the fast native syntax used by the known-good web
+    // build. Only the APK needs downlevel output for its older WebView.
+    target: mode === "apk" ? "chrome67" : "es2022",
     outDir: "dist",
     assetsInlineLimit: Number.MAX_SAFE_INTEGER,
     rollupOptions: { input: resolve(__dirname, "app.html") },
   },
   server: { host: true },
   preview: { host: true },
-});
+}));
