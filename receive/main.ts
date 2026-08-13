@@ -7,8 +7,8 @@
 //   the next one — a generation counter prevents zombie capture loops.
 // - Progress must track frames COLLECTED: LT peeling back-loads its solve
 //   cascade, so blocks-solved looks stalled and then teleports to done.
-// - Android Chrome exposes torch / focusMode / frameRate.max through
-//   getCapabilities; iOS Safari exposes none of them. shared/platform.ts owns
+// - Android Chrome exposes focusMode / frameRate.max through getCapabilities;
+//   iOS Safari exposes neither. shared/platform.ts owns
 //   the probing, so everything here is capability-gated rather than UA-gated.
 
 import { LTDecoder } from "../shared/fountain";
@@ -55,8 +55,6 @@ const cameraResolutionLabel = document.getElementById("camera-resolution-label")
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
-const cameraTorchControl = document.getElementById("camera-torch-control")!;
-const cameraTorch = document.getElementById("camera-torch") as HTMLInputElement;
 const cameraExposureControl = document.getElementById("camera-exposure-control")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
@@ -710,12 +708,10 @@ function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
 }
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
-    torch?: boolean;
     exposureCompensation?: { min: number; max: number; step?: number };
   }) | undefined;
   cameraResolutionLabel.textContent = "Mode";
   if (!caps?.width || !caps.height) return;
-  cameraTorchControl.hidden = caps.torch !== true;
   cameraExposureControl.hidden = !caps.exposureCompensation;
   if (caps.exposureCompensation) {
     cameraExposure.min = String(caps.exposureCompensation.min);
@@ -938,10 +934,6 @@ const changeCameraSettings = async () => {
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
-cameraTorch.addEventListener("change", () => {
-  const track = stream?.getVideoTracks()[0];
-  if (track) void applyAdvancedConstraint(track, { torch: cameraTorch.checked });
-});
 cameraExposure.addEventListener("input", () => {
   const track = stream?.getVideoTracks()[0];
   if (track) void applyAdvancedConstraint(track, { exposureCompensation: Number(cameraExposure.value) });
