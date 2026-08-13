@@ -1516,13 +1516,6 @@ interface ReceiverFrame {
   image?: ImageData;
 }
 
-function fullLiveImage(width: number, height: number): ImageData {
-  if (grab.width !== width || grab.height !== height) { grab.width = width; grab.height = height; }
-  const ctx = grab.getContext("2d", { willReadFrequently: true })!;
-  ctx.drawImage(video, 0, 0, width, height);
-  return ctx.getImageData(0, 0, width, height);
-}
-
 async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
   if (benchmarkRecorder !== recorder) return;
   benchmarkRecorder = undefined;
@@ -1572,7 +1565,7 @@ function scheduleFrame(gen: number) {
         expectedDisplayTimeMs: frame.expectedDisplayTimeMs, callbackTimeMs: frame.callbackTimeMs,
         width, height, stride: width * 4, orientation,
       };
-      if (!recorder.addVideo(frameMeta, video)) recorder.add(frameMeta, fullLiveImage(width, height));
+      recorder.addVideo(frameMeta, video);
       recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1000))}s`;
       // Corpus capture owns the camera readback. Running production decoding at
       // the same time would only steal callbacks; its decisions are recreated
@@ -2983,8 +2976,9 @@ function missedReason(trace: BenchmarkFrameTrace, slot: number | undefined): str
   if (trace.decision === "worker busy") return "worker busy";
   const predicted = trace.predicted.find((item) => item.slot === slot);
   if (predicted?.state === "OFFSCREEN") return "offscreen threshold";
-  if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track";
   if (!trace.jobs.length) return trace.decision;
+  if (trace.jobs.some((job) => job.kind === "FULL FRAME")) return "full-frame decoder miss";
+  if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track";
   const submitted = trace.jobs.some((job) => slot !== undefined && job.tracks.includes(slot));
   if (!submitted && trace.jobs.some((job) => job.kind !== "FULL FRAME")) return "crop excluded slot";
   if (trace.jobs.some((job) => job.trackedMisses)) {
