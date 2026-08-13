@@ -128,7 +128,7 @@ export class GridLattice {
   private frameWidth = 1;
   private frameHeight = 1;
 
-  get active(): boolean { return this.state !== "SEARCH" && this.state !== "REACQUIRE"; }
+  get active(): boolean { return this.state !== "SEARCH"; }
   get locked(): boolean { return this.state === "GRID_LOCK" || this.state === "TRACK" || this.state === "PARTIAL_LOSS"; }
 
   reset(): void {
@@ -179,11 +179,11 @@ export class GridLattice {
   }
 
   tick(now: number): GridSnapshot | null {
-    if (this.active && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
+    if (this.active && this.state !== "REACQUIRE" && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
+      // Keep the last coherent transform while reacquiring. It provides the
+      // bounded expanding ROIs; a new decoded packet will replace it.
       this.state = "REACQUIRE";
-      this.candidate = undefined;
-      this.observations = [];
-      return null;
+      return this.candidate ? this.snapshot() : null;
     }
     if (this.state === "GRID_HYPOTHESIS" && now - this.switchedAt > HYPOTHESIS_DWELL_MS && this.ranked.length > 1) {
       this.hypothesisIndex = (this.hypothesisIndex + 1) % this.ranked.length;
@@ -197,6 +197,10 @@ export class GridLattice {
   noteMissing(anyMissing: boolean): void {
     if (!this.locked) return;
     this.state = anyMissing ? "PARTIAL_LOSS" : "TRACK";
+  }
+
+  beginReacquire(): void {
+    if (this.candidate) this.state = "REACQUIRE";
   }
 
   private rankCandidates(): void {

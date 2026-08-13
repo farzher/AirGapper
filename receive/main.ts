@@ -210,11 +210,12 @@ const pool = new DecodeWorkerPool(
   // creation) because failed quads are often junk — but a plausible one lets
   // the crop path go decode what the full frame could not.
   (box) => {
-    // Detector-only geometry is never lattice evidence. It may seed cold
-    // acquisition, but is ignored once predicted slots exist.
+    // Detector-only geometry is never lattice evidence. Cold sightings seed
+    // one bounded native-resolution decode crop; predicted slots take over as
+    // soon as an AirGapper packet declares its lattice.
     if (!gridLattice.active) noteRegion(box, performance.now(), false);
   },
-  () => trackedAttempts++,
+  () => undefined,
   (id, completion) => noteDecodeCompleted(id, completion),
 );
 const captureTimes: number[] = [];
@@ -223,6 +224,7 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
+const scanSubmissionTimes: number[] = [];
 const scanCompletionTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
@@ -235,6 +237,10 @@ const usefulFrameTimes: number[] = [];
 let totalCaptures = 0;
 let totalDecodes = 0;
 let fullScans = 0;
+let cheapFullScans = 0;
+let thoroughFullScans = 0;
+let localReacquisitions = 0;
+let globalReacquisitions = 0;
 let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
 let cropsSubmitted = 0;
@@ -316,6 +322,8 @@ let lastDecodedRegionSize = 0;
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 type CropAttempt = { region: Region; quad?: SymbolQuad };
 const cropAttempts = new Map<number, CropAttempt[]>();
+const scanCapturedAt = new Map<number, number>();
+const localReacquireIds = new Set<number>();
 function regionInflightCount(region: Region): number {
   let count = 0;
   for (const attempts of cropAttempts.values()) {
@@ -336,9 +344,13 @@ let lastDecodeError = "";
 let regionExpiries = 0;
 let regionCreations = 0;
 let trackingInvalidations = 0;
+let submittedJobs = 0;
 let completedJobs = 0;
 let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
+let fullLatencyTotalMs = 0;
+let fullLatencyCount = 0;
+let lastFullLatencyMs = 0;
 let lastDistinctArrivalAt = 0;
 // Any valid packet refreshes this, including a duplicate. It gates deliberate
 // sender/layout handover without letting stale pipelined replies steal a live
@@ -388,11 +400,20 @@ function noteSequence(region: Region, seq: number, now: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
+  const fullJob = fullScanJobs.get(id);
   fullScanIds.delete(id);
+  fullScanJobs.delete(id);
+  localReacquireIds.delete(id);
+  scanCapturedAt.delete(id);
   scanCompletionTimes.push(performance.now());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
+  if (fullJob) {
+    lastFullLatencyMs = completion.latencyMs;
+    fullLatencyTotalMs += completion.latencyMs;
+    fullLatencyCount++;
+  }
   if (completion.error) {
     decodeExceptions++;
     lastDecodeError = completion.error;
@@ -414,6 +435,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts) return;
+  if (completion.trackedAttempted) trackedAttempts += attempts.length;
   // Attribute misses per slot. In a multi-track reply, one successful QR must
   // not hide every missing neighbor or move/contract their independent ROIs.
   for (const attempt of attempts) {
@@ -446,23 +468,19 @@ const SIGHTING_REGION_TTL_MS = 3000;
 // Keep acquisition sparse enough not to disrupt preview, but frequent enough
 // that one early decode cannot masquerade as the complete layout.
 const FULL_SCAN_INTERVAL_MS = 1500;
-// A grid sender shows several codes; when fewer regions are live than the
-// stream has shown simultaneously, one of them is MISSING — glare, focus, a
-// borderline density. Crops can't find it (they only look where codes were),
-// so rescan the whole frame hard until it's back. The relaxed cadence would
-// leave a missing code dark for 1.5 s at a time, which on a 2-code stream
-// halves throughput and single-threads the fountain's systematic sweep.
-const FULL_SCAN_DEGRADED_MS = 250;
 // With no lock at all the receiver used to full-scan EVERY capture — sixty
 // 1.2 MP tryHarder decodes per second for the whole aiming phase, the app's
 // hottest loop (fullScans regularly passed 100 before the first timeline
 // sample). Ten per second keeps acquisition feeling instant — ≤100 ms added
 // to first lock — and cuts the aiming burn ~85%.
 const ACQUISITION_SCAN_MS = 100;
+const ACQUISITION_REDUCED_EDGE = 960;
+const ACQUISITION_COLLAPSED_FPS = 12;
+const ACQUISITION_SLOW_LATENCY_MS = 550;
 // Most cold frames contain no QR. Frequent scans use ZXing's cheap single-pass
 // detector; this cadence retains the exhaustive try-harder + sighting pass for
 // difficult first lock without paying for it on every miss.
-const THOROUGH_SCAN_INTERVAL_MS = 750;
+const THOROUGH_SCAN_INTERVAL_MS = 1800;
 // The high-water mark ages out: a sender restarted with a smaller layout
 // would otherwise keep this receiver rescanning for codes that no longer
 // exist until the transfer ends.
@@ -473,10 +491,11 @@ const REGION_PAD = 0.35;
 let cropRotate = 0;
 let lastFullScan = 0;
 let lastThoroughFullScan = -Infinity;
-// A second full-frame acquisition cannot add useful freshness while the first
-// is still decoding. Keeping it out of the general worker queue prevents cold
-// 1440p scanning from occupying every core and starving camera delivery.
+// Full detector jobs are tracked separately from cheap crop work. Acquisition
+// may use two fresh frames, while locked and reacquisition states permit one.
 const fullScanIds = new Set<number>();
+const fullScanJobs = new Map<number, { thorough: boolean; native: boolean; reacquire: boolean }>();
+let currentScanningState: ScanningState = "SEARCH";
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
 
@@ -512,16 +531,18 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       // Half-life blend of per-decode displacement: steady hands decay it to
       // zero, a moving hand keeps the crop padding wide (see captureFrame).
       r.drift = 0.5 * (r.drift ?? 0) + 0.5 * Math.hypot(dx, dy);
-      Object.assign(r, box, { seen: now });
+      const geometryIsFresh = info?.scanId === undefined || info.scanId >= (r.lastHitScanId ?? -1);
+      if (geometryIsFresh) Object.assign(r, box);
+      r.seen = now;
       r.decoded = true;
       r.decodedSeen = now;
       r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
-      if (info?.quad) r.quad = info.quad;
-      if (info?.modules) r.dim = info.modules;
-      if (info?.crc32 !== undefined) r.crc32 = info.crc32;
+      if (geometryIsFresh && info?.quad) r.quad = info.quad;
+      if (geometryIsFresh && info?.modules) r.dim = info.modules;
+      if (geometryIsFresh && info?.crc32 !== undefined) r.crc32 = info.crc32;
       r.consecutiveMisses = 0;
-      if (info?.scanId !== undefined) r.lastHitScanId = info.scanId;
+      if (geometryIsFresh && info?.scanId !== undefined) r.lastHitScanId = info.scanId;
       return;
     }
   }
@@ -533,9 +554,15 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     // acquisition then, and phantom regions would only starve them.
     const reference = regions.find((r) => r.decoded);
     const referenceSize = reference ? Math.max(reference.w, reference.h) : lastDecodedRegionSize;
-    if (!referenceSize) return;
-    const ratio = Math.max(box.w, box.h) / referenceSize;
-    if (ratio < 0.5 || ratio > 2) return;
+    if (referenceSize) {
+      const ratio = Math.max(box.w, box.h) / referenceSize;
+      if (ratio < 0.5 || ratio > 2) return;
+    } else {
+      // A reduced acquisition scan may locate geometry without enough pixels to
+      // decode it. Retain one plausible cold candidate for a native crop.
+      if (box.w < 24 || box.h < 24 || box.w * box.h > video.videoWidth * video.videoHeight * 0.8) return;
+      if (regions.some((region) => !region.decoded)) return;
+    }
     // Error-result quads wobble and split while a display transition is in
     // flight. Never draw more probationary regions than the number of codes
     // currently missing from the layout high-water mark; for a single sender
@@ -635,7 +662,7 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
       region.decodeConfidence = 1;
       region.decodeSuccesses++;
       region.crc32 = info?.crc32 ?? true;
-      if (info?.scanId !== undefined) region.lastHitScanId = info.scanId;
+      if (info?.scanId !== undefined) region.lastHitScanId = Math.max(region.lastHitScanId ?? -1, info.scanId);
       decodedRegion = region;
     }
   }
@@ -990,7 +1017,17 @@ cameraExposure.addEventListener("change", () => {
     }
   });
 });
-decodeWorkers.addEventListener("change", () => { saveCameraSettings(); if (stream && !done) pool.resize(selectedWorkerCount()); });
+decodeWorkers.addEventListener("change", () => {
+  saveCameraSettings();
+  if (!stream || done) return;
+  minimumAcceptedScanId = frameId;
+  cropAttempts.clear();
+  fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  scanCapturedAt.clear();
+  pool.resize(selectedWorkerCount());
+});
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -1055,9 +1092,14 @@ function stopReceiver(): void {
   lastFullScan = 0;
   lastThoroughFullScan = -Infinity;
   fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  currentScanningState = "SEARCH";
+  scanCapturedAt.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
+  scanSubmissionTimes.length = 0;
   scanCompletionTimes.length = 0;
   cropAttempts.clear();
   cropRotate = 0;
@@ -1071,9 +1113,13 @@ function stopReceiver(): void {
   regionExpiries = 0;
   regionCreations = 0;
   trackingInvalidations = 0;
+  submittedJobs = 0;
   completedJobs = 0;
   workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
+  fullLatencyTotalMs = 0;
+  fullLatencyCount = 0;
+  lastFullLatencyMs = 0;
   lastDistinctArrivalAt = 0;
   lastStreamDecodeAt = 0;
   maxSequenceGapMs = 0;
@@ -1082,6 +1128,10 @@ function stopReceiver(): void {
   totalCaptures = 0;
   totalDecodes = 0;
   fullScans = 0;
+  cheapFullScans = 0;
+  thoroughFullScans = 0;
+  localReacquisitions = 0;
+  globalReacquisitions = 0;
   peakRegions = 0;
   capturesDropped = 0;
   cropsSubmitted = 0;
@@ -1150,6 +1200,9 @@ function pauseReceiver(): void {
   pool.resize(0);
   cropAttempts.clear();
   fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  scanCapturedAt.clear();
   minimumAcceptedScanId = frameId;
 }
 
@@ -1471,6 +1524,24 @@ function readBoundedVideoCrop(x: number, y: number, w: number, h: number): Image
   return ctx.getImageData(0, 0, w, h);
 }
 
+type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
+
+function scanningState(gridNeedsDiscovery: boolean): ScanningState {
+  if (gridLattice.state === "REACQUIRE") return "REACQUIRE";
+  if (!gridLattice.active && decodedCount() === 0) return "SEARCH";
+  if (!gridLattice.locked || gridNeedsDiscovery) return "PARTIAL_LOCK";
+  return "LOCKED";
+}
+
+function acquisitionConcurrency(now: number): number {
+  if (hardwareThreadCount < 6 || pool.size < 3) return 1;
+  let recentCallbacks = 0;
+  for (let i = captureTimes.length - 1; i >= 0 && captureTimes[i]! > now - 1000; i--) recentCallbacks++;
+  const cameraCollapsed = now - cameraStartedTs > 750 && recentCallbacks < ACQUISITION_COLLAPSED_FPS;
+  const averageFullLatency = fullLatencyCount ? fullLatencyTotalMs / fullLatencyCount : 0;
+  return cameraCollapsed || averageFullLatency > ACQUISITION_SLOW_LATENCY_MS ? 1 : 2;
+}
+
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
 // shift the stripe between two captures of the SAME displayed frame — 452
@@ -1502,12 +1573,8 @@ function captureFrame() {
   }
   const latticeSnapshot = gridLattice.tick(now);
   if (latticeSnapshot) syncGrid(latticeSnapshot, now);
-  else if (gridLattice.state === "REACQUIRE") {
-    for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot !== undefined) regions.splice(i, 1);
-    gridShape = "";
-  }
-  // Decode confidence is separate from the lattice lock: undecoded slots stay
-  // alive and search locally instead of disappearing from the global model.
+  // Decode confidence is separate from lattice geometry: predicted slots stay
+  // alive through motion and expand locally before global detection runs.
   const live = decodedCount();
   peakRegions = Math.max(peakRegions, live);
   if (live >= expectedRegions || now - expectedRegionsAt > EXPECTED_REGIONS_DECAY_MS) {
@@ -1515,76 +1582,117 @@ function captureFrame() {
     expectedRegionsAt = now;
   }
   const visibleGridSlots = classifyGridSlots(vw, vh);
-  const gridNeedsDiscovery = visibleGridSlots.some((region) =>
-    !region.decoded || region.slotState === "LOST");
-  const trackingUnhealthy = regions.some((region) => region.gridSlot === undefined && region.decoded && region.consecutiveMisses >= 4);
-  gridLattice.noteMissing(gridNeedsDiscovery);
-  const scanInterval =
-    live === 0
-      ? ACQUISITION_SCAN_MS
-      : live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery
-        ? FULL_SCAN_DEGRADED_MS
+  const missingGridSlots = visibleGridSlots.filter((region) => !region.decoded || region.consecutiveMisses >= 3);
+  const gridNeedsDiscovery = missingGridSlots.length > 0;
+  const widespreadFailure = visibleGridSlots.length >= 2 &&
+    missingGridSlots.filter((region) => region.consecutiveMisses >= 3).length >= Math.ceil(visibleGridSlots.length / 2);
+  if (widespreadFailure) gridLattice.beginReacquire();
+  else gridLattice.noteMissing(gridNeedsDiscovery);
+  const state = scanningState(gridNeedsDiscovery);
+  currentScanningState = state;
+  const scanInterval = state === "SEARCH" ? ACQUISITION_SCAN_MS
+    : state === "REACQUIRE" ? 300
+      : state === "PARTIAL_LOCK" ? 900
         : FULL_SCAN_INTERVAL_MS;
-  // A due full scan takes priority over crops, deliberately. The crop loop
-  // below fills every free worker slot each frame, so any "only scan when a
-  // slot is spare" politeness starves the rescan that reacquires a missing
-  // code — tried, and it measurably worsened multi-code lock-on. Scans are
-  // rare (1.5 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
-  // next frame — including crops of probationary sighting regions, which now
-  // run between cold scans instead of being crowded out by them.
-  // Predicted crops are the fast path, never the only path. A single imperfect
-  // anchor, display transition, or missed neighbor must not suppress global
-  // reacquisition forever. Degraded grids rescan quickly; a healthy grid still
-  // gets a sparse scan that can correct motion and discover every visible QR.
-  // A requested diagnostic capture prefers the locked lattice crop, but only
-  // when such a crop actually exists. The previous unconditional suppression
-  // of full scans deadlocked Capture in SEARCH: no regions meant no crop job,
-  // while captureNextScan itself prevented the full-frame job that could finish.
   const captureHasTrackedWork = gridLattice.active
-    ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) &&
-      validTrackedQuad(region, vw, vh))
+    ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh))
     : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
-  const fullScanDue = fullScanIds.size === 0 && (captureNextScan
+  const localCandidate = regions
+    .filter((region) => region.slotState !== "OFFSCREEN" &&
+      (!region.decoded ? region.decodeAttempts === 0 : region.consecutiveMisses === 3 || region.consecutiveMisses === 6))
+    .sort((a, b) => b.consecutiveMisses - a.consecutiveMisses)[0];
+  const reacquireExpanded = !localCandidate || localCandidate.consecutiveMisses >= 6;
+  const fullLimit = state === "SEARCH" ? Math.min(acquisitionConcurrency(now), Math.max(1, pool.size - 1)) : 1;
+  const freshSecondSearchFrame = state === "SEARCH" && fullScanIds.size === 1 && now - lastFullScan > 8;
+  const preferLocal = Boolean(localCandidate && fullScanIds.size === 0 && localReacquireIds.size === 0);
+  const fullScanDue = localReacquireIds.size === 0 && !preferLocal && (state !== "REACQUIRE" || reacquireExpanded) && fullScanIds.size < fullLimit && (captureNextScan
     ? !captureHasTrackedWork
-    : now - lastFullScan > scanInterval);
-  if (!fullScanDue && regions.length === 0) {
-    schedulerNoJobs++;
-    return;
-  }
+    : (fullScans === 0 && fullScanIds.size === 0) || freshSecondSearchFrame || now - lastFullScan > scanInterval);
 
-  // Read back only the bounded work selected above. Full-frame RGBA is used
-  // for sparse acquisition; healthy tracks copy QR-sized crops only.
-  if (grab.width !== vw || grab.height !== vh) {
-    grab.width = vw;
-    grab.height = vh;
-  }
-  const ctx = grab.getContext("2d", { willReadFrequently: true })!;
   if (fullScanDue) {
-    lastFullScan = now;
-    fullScans++;
-    ctx.drawImage(video, 0, 0);
-    const img = ctx.getImageData(0, 0, vw, vh);
-    const thorough = captureNextScan || now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS;
+    // The first search is immediate, native and thorough. A capable phone may
+    // concurrently search the next fresh frame, but that second job is cheap
+    // and reduced. Detector work never occupies the whole normal worker pool.
+    const thoroughInFlight = [...fullScanJobs.values()].some((job) => job.thorough);
+    const thorough = captureNextScan || (!thoroughInFlight && now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
+    const native = thorough;
+    const scale = native ? 1 : Math.min(1, ACQUISITION_REDUCED_EDGE / Math.max(vw, vh));
+    const sw = Math.max(1, Math.round(vw * scale));
+    const sh = Math.max(1, Math.round(vh * scale));
+    if (grab.width !== sw || grab.height !== sh) { grab.width = sw; grab.height = sh; }
+    const ctx = grab.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(video, 0, 0, sw, sh);
+    const img = ctx.getImageData(0, 0, sw, sh);
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
+    const reacquire = state === "REACQUIRE" || (state === "PARTIAL_LOCK" && widespreadFailure);
     if (pool.submit(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough },
+      { id, buf: img.data.buffer, w: sw, h: sh, ox: 0, oy: 0, scaleX: vw / sw, scaleY: vh / sh, full: true, thorough, geometry: !native },
       [img.data.buffer],
     )) {
+      lastFullScan = now;
+      fullScans++;
+      if (thorough) { thoroughFullScans++; lastThoroughFullScan = now; } else cheapFullScans++;
+      if (reacquire) globalReacquisitions++;
       fullScanIds.add(id);
-      if (thorough) lastThoroughFullScan = now;
+      fullScanJobs.set(id, { thorough, native, reacquire });
+      scanCapturedAt.set(id, now);
+      scanSubmissionTimes.push(now);
+      submittedJobs++;
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-    } else if (pendingScanCapture?.id === undefined) {
-      cancelScanCapture();
-    }
+    } else if (pendingScanCapture?.id === undefined) cancelScanCapture();
+    return;
+  }
+  if (state === "SEARCH" && regions.length === 0) {
+    schedulerNoJobs++;
     return;
   }
   for (const region of regions) {
     if (region.gridSlot === undefined && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
+
+  // Repeated isolated misses get exactly one detector crop. It expands in
+  // native coordinates and runs alongside detector-free tracking of healthy
+  // slots, but never overlaps a global detector job.
+  if (localCandidate && fullScanIds.size === 0 && localReacquireIds.size === 0 && pool.busyCount < pool.size) {
+    const bounds = localCandidate.quad ? trackedQuadBounds(localCandidate.quad) : null;
+    const left = bounds?.left ?? localCandidate.x;
+    const top = bounds?.top ?? localCandidate.y;
+    const right = bounds?.right ?? localCandidate.x + localCandidate.w;
+    const bottom = bounds?.bottom ?? localCandidate.y + localCandidate.h;
+    const size = Math.max(right - left, bottom - top);
+    const expansion = 0.45 + Math.min(1.1, localCandidate.consecutiveMisses * 0.14);
+    const pad = Math.max(12, Math.round(size * expansion));
+    const x = Math.floor(left - pad);
+    const y = Math.floor(top - pad);
+    const w = Math.ceil(right + pad) - x;
+    const h = Math.ceil(bottom + pad) - y;
+    if (w >= 32 && h >= 32) {
+      const img = readBoundedVideoCrop(x, y, w, h);
+      captureSubmittedScan(img, x, y, false);
+      const id = frameId++;
+      cropAttempts.set(id, [{ region: localCandidate, quad: localCandidate.quad }]);
+      if (pool.submit(
+        { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, reacquire: true },
+        [img.data.buffer],
+      )) {
+        localReacquireIds.add(id);
+        localReacquisitions++;
+        cropsSubmitted++;
+        scanCapturedAt.set(id, now);
+        scanSubmissionTimes.push(now);
+        submittedJobs++;
+        if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+      } else {
+        cropAttempts.delete(id);
+        if (pendingScanCapture?.id === undefined) cancelScanCapture();
+      }
+    }
+  }
   const batchRegions = (gridLattice.active
     ? visibleGridSlots.filter(isGridDecodeCandidate)
     : regions.filter((region) => region.decoded))
+    .filter((region) => region !== localCandidate || localReacquireIds.size === 0)
     .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh))
     .slice(0, 15);
   const batchTracks = batchRegions.map((region) => ({
@@ -1603,9 +1711,9 @@ function captureFrame() {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    // Padding is based on one QR, not the whole lattice. Grow it briefly under
-    // motion so the fallback detector can re-anchor a shaking camera without
-    // turning the normal locked crop back into a full-frame readback.
+    // Padding is based on one QR, not the whole lattice. It only protects the
+    // direct samplers from modest motion; detector reacquisition is scheduled
+    // separately and cannot be triggered by this batch.
     const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
     const x = Math.floor(minX - pad);
     const y = Math.floor(minY - pad);
@@ -1620,6 +1728,9 @@ function captureFrame() {
         [img.data.buffer],
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
+        scanCapturedAt.set(id, now);
+        scanSubmissionTimes.push(now);
+        submittedJobs++;
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
@@ -1634,11 +1745,13 @@ function captureFrame() {
   // Rank only useful, fully visible lattice slots. The full sender layout is a
   // coordinate system, not a work list: offscreen, clipped, and undersampled
   // slots consume no worker time and do not count as failures.
-  const eligible = gridLattice.active
+  const eligible = (gridLattice.active
     ? visibleGridSlots
       .filter(isGridDecodeCandidate)
       .sort((a, b) => slotUsefulness(b) - slotUsefulness(a))
-    : [...regions];
+    : regions.filter((region) => region.decoded))
+    .filter((region) => region !== localCandidate || localReacquireIds.size === 0)
+    .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh));
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
@@ -1679,6 +1792,9 @@ function captureFrame() {
       poolBusyTimes.push(performance.now());
       break;
     }
+    scanCapturedAt.set(id, now);
+    scanSubmissionTimes.push(now);
+    submittedJobs++;
     if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
     submitted = true;
@@ -1702,6 +1818,13 @@ function resetActiveTransfer(): void {
   expectedRegionsAt = 0;
   lastDecodedRegionSize = 0;
   cropAttempts.clear();
+  fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  scanCapturedAt.clear();
+  currentScanningState = "SEARCH";
+  lastFullScan = 0;
+  lastThoroughFullScan = -Infinity;
   minimumAcceptedScanId = frameId;
   qrReadTimes.length = 0;
   usefulFrameTimes.length = 0;
@@ -1759,7 +1882,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       gridEsi: header.gridEsi,
       layoutId: header.layoutId,
       slotIndex: header.slotIndex,
-      at: decodedAt,
+      at: info.scanId === undefined ? decodedAt : (scanCapturedAt.get(info.scanId) ?? decodedAt),
       scanId: info.scanId ?? -1,
       box,
       quad: info.quad,
@@ -1933,10 +2056,20 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         captures: totalCaptures,
         capturesDroppedPoolBusy: capturesDropped,
         cropsSubmitted,
+        submittedJobs,
+        completedJobs,
         fullScans,
+        cheapFullScans,
+        thoroughFullScans,
+        lastFullScanLatencyMs: Number(lastFullLatencyMs.toFixed(1)),
+        averageFullScanLatencyMs: fullLatencyCount ? Number((fullLatencyTotalMs / fullLatencyCount).toFixed(1)) : 0,
+        localReacquisitions,
+        globalReacquisitions,
+        scanningState: currentScanningState,
         decodes: totalDecodes,
         trackedAttempts,
         trackedDecodes,
+        trackedHitRate: trackedAttempts ? Number((trackedDecodes / trackedAttempts).toFixed(3)) : 0,
         trackedMissFallbacks,
         schedulerNoJobs,
         cropMisses,
@@ -2290,9 +2423,11 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
+  prune(scanSubmissionTimes);
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
+  const submittedRate = perSecond(scanSubmissionTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
   metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
@@ -2304,7 +2439,7 @@ function updateStats() {
     ? `Scanner error: ${lastDecodeError}`
     : stalled
       ? "Scanner stalled"
-      : "";
+      : `${currentScanningState} · ${submittedRate.toFixed(1)}/${scanRate.toFixed(1)} scans/s`;
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;

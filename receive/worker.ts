@@ -12,11 +12,10 @@
 //    is sampled directly. Bench-measured 2.0–2.6× per decode at V40, which is
 //    CPU the phone doesn't burn: the custom build exists for throughput AND
 //    thermals.
-//    Any tracked miss falls back to readFull on the same buffer, which also
-//    re-anchors the quad. Tracked is opportunistic, never load-bearing.
+//    Tracked misses stay cheap. The scheduler requests a bounded detector crop
+//    only after repeated misses, so one bad frame cannot start a fallback storm.
 
 import wasmUrl from "./wasm-url";
-import { shouldRunFullDecode } from "../shared/decode-policy";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec/decimen_codec.js";
 
 const ready: Promise<DecimenModule> = DecimenCodec({
@@ -39,8 +38,8 @@ function boundsOf(p: DecimenQuad, ox: number, oy: number) {
 }
 
 /** The full quad in capture coordinates — the tracked path's anchor. */
-function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
-  const s = (pt: { x: number; y: number }) => ({ x: pt.x + ox, y: pt.y + oy });
+function shifted(p: DecimenQuad, ox: number, oy: number, scaleX = 1, scaleY = 1): DecimenQuad {
+  const s = (pt: { x: number; y: number }) => ({ x: pt.x * scaleX + ox, y: pt.y * scaleY + oy });
   return {
     topLeft: s(p.topLeft),
     topRight: s(p.topRight),
@@ -107,15 +106,19 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, thorough = true, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, thorough = true, geometry = false, reacquire = false, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
     h?: number;
     ox?: number;
     oy?: number;
+    scaleX?: number;
+    scaleY?: number;
     full?: boolean;
     thorough?: boolean;
+    geometry?: boolean;
+    reacquire?: boolean;
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
@@ -171,43 +174,12 @@ ctx.onmessage = async (e: MessageEvent) => {
           tracked: true, crc32: track.crc32,
         });
       }
-      // The batched fast path is opportunistic, just like readTracked below.
-      // If every known transform misses, run stock acquisition on the same
-      // pixels instead of reporting a false hard failure. This also discovers
-      // tracks omitted from an incomplete grid lock.
-      let fallbackAttempted = false;
-      if (symbols.length === 0) {
-        fallbackAttempted = true;
-        const appendFallback = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
-          try {
-            for (let i = 0; i < vec.size(); i++) {
-              const result = vec.get(i);
-              if (result.valid && result.bytes.length > 0) {
-                symbols.push({
-                  bytes: result.bytes,
-                  box: boundsOf(result.position, ox, oy),
-                  quad: shifted(result.position, ox, oy),
-                  modules: result.modules,
-                  tracked: false,
-                });
-              } else if (includeErrors) {
-                const box = boundsOf(result.position, ox, oy);
-                if (box.w > 0 && box.h > 0) sightings.push(box);
-              }
-            }
-          } finally {
-            vec.delete();
-          }
-        };
-        // A lattice crop can hold all 15 dense symbols. Its tracks already
-        // provide every position, so error-only detector results add no
-        // information. Avoiding that second exhaustive pass keeps a complete
-        // motion miss cheap enough for the next fresh camera frame to relock.
-        appendFallback(zx.readFull(ptr, pw, ph, true, 16, false), false);
-      }
+      // Batch tracking is deliberately detector-free. Missing transforms are
+      // recovered by one scheduler-owned local or global job while successful
+      // slots keep flowing through this fast path.
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
-        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted: false,
         latencyMs: performance.now() - startedAt,
       });
       return;
@@ -237,7 +209,7 @@ ctx.onmessage = async (e: MessageEvent) => {
       }
     }
 
-    if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+    if (full || reacquire) {
       fallbackAttempted = !full;
       const appendResults = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
         try {
@@ -246,15 +218,15 @@ ctx.onmessage = async (e: MessageEvent) => {
             if (r.valid && r.bytes.length > 0) {
               symbols.push({
                 bytes: r.bytes,
-                box: boundsOf(r.position, ox, oy),
-                quad: shifted(r.position, ox, oy),
+                box: boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0),
+                quad: shifted(r.position, ox, oy, scaleX, scaleY),
                 modules: r.modules,
                 tracked: false,
               });
             } else if (includeErrors) {
               // A symbol zxing DETECTED but could not decode (glare or noise
               // past ECC) still supplies a useful crop position.
-              const box = boundsOf(r.position, ox, oy);
+              const box = boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0);
               if (box.w > 0 && box.h > 0) sightings.push(box);
             }
           }
@@ -263,12 +235,10 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       };
       if (full) {
-        // Most acquisition frames are misses. The frequent path performs one
-        // normal detector pass; periodically (and for explicit scan captures)
-        // `thorough` enables downscale/try-harder and the second sighting pass.
-        // This preserves difficult lock-on without exhaustively proving that a
-        // blank 1440p frame is blank several times per second.
-        appendResults(zx.readFull(ptr, pw, ph, thorough, 16, false), false);
+        // Most acquisition frames are misses. Reduced frames return detector
+        // geometry so the scheduler can decode a bounded native crop; periodic
+        // native `thorough` scans retain the difficult/small-symbol fallback.
+        appendResults(zx.readFull(ptr, pw, ph, thorough, 16, geometry), geometry);
         // Error results count against ZXing's symbol limit. Only a thorough
         // total miss pays for this pass, which seeds a bounded recovery crop.
         if (thorough && symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
