@@ -1,5 +1,5 @@
 import type { SymbolBox, SymbolQuad } from "../shared/worker-pool";
-import { GRID_LAYOUTS, gridLayoutById, type GridLayout } from "../shared/grid-layout";
+import { GRID_LAYOUTS, GRID_MARGIN_MODULES, gridLayoutById, type GridLayout } from "../shared/grid-layout";
 
 export type GridState = "SEARCH" | "GRID_HYPOTHESIS" | "GRID_LOCK" | "TRACK" | "PARTIAL_LOSS" | "REACQUIRE";
 
@@ -43,7 +43,7 @@ function corners(quad: SymbolQuad): Point[] {
   return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
 }
 
-function validGeometry(detection: GridDetection): boolean {
+function validGeometry(detection: GridDetection, frameWidth: number, frameHeight: number): boolean {
   if (detection.modules < 21 || detection.modules > 177 || detection.modules % 4 !== 1) return false;
   const points = corners(detection.quad);
   if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
@@ -51,7 +51,21 @@ function validGeometry(detection: GridDetection): boolean {
   const shortest = Math.min(...edges);
   const longest = Math.max(...edges);
   const area = Math.abs(points.reduce((sum, p, i) => sum + p.x * points[(i + 1) % 4]!.y - p.y * points[(i + 1) % 4]!.x, 0) / 2);
-  return shortest >= 20 && longest / shortest < 2.25 && area > shortest * shortest * 0.35;
+  if (shortest < 20 || longest / shortest >= 2.25 || area <= shortest * shortest * 0.35) return false;
+
+  const quadBounds = bounds(detection.quad);
+  const boxValues = [detection.box.x, detection.box.y, detection.box.w, detection.box.h];
+  if (boxValues.some((value) => !Number.isFinite(value)) || detection.box.w <= 0 || detection.box.h <= 0) return false;
+  const boxCenterX = detection.box.x + detection.box.w / 2;
+  const boxCenterY = detection.box.y + detection.box.h / 2;
+  const quadCenterX = quadBounds.x + quadBounds.w / 2;
+  const quadCenterY = quadBounds.y + quadBounds.h / 2;
+  const size = Math.max(quadBounds.w, quadBounds.h, detection.box.w, detection.box.h);
+  return Math.abs(boxCenterX - quadCenterX) <= size * 0.2 &&
+    Math.abs(boxCenterY - quadCenterY) <= size * 0.2 &&
+    quadBounds.x >= -frameWidth * 0.25 && quadBounds.y >= -frameHeight * 0.25 &&
+    quadBounds.x + quadBounds.w <= frameWidth * 1.25 &&
+    quadBounds.y + quadBounds.h <= frameHeight * 1.25;
 }
 
 function solve(rows: number[][], values: number[]): number[] | null {
@@ -101,7 +115,7 @@ function project(h: Homography, point: Point): Point {
 }
 
 function slotWorld(layout: Layout, modules: number, slot: number): Point[] {
-  const stride = modules + 1; // sender's known one-module shared spacing
+  const stride = modules + GRID_MARGIN_MODULES;
   const x = (slot % layout.cols) * stride;
   const y = Math.floor(slot / layout.cols) * stride;
   return [{ x, y }, { x: x + modules, y }, { x: x + modules, y: y + modules }, { x, y: y + modules }];
@@ -142,7 +156,7 @@ export class GridLattice {
   }
 
   accept(detection: GridDetection, frameWidth: number, frameHeight: number): GridSnapshot | null {
-    if (!validGeometry(detection)) return null;
+    if (!validGeometry(detection, frameWidth, frameHeight)) return null;
     const declaredLayout = detection.layoutId === undefined ? undefined : gridLayoutById(detection.layoutId);
     if (detection.layoutId !== undefined && (!declaredLayout || detection.slotIndex === undefined ||
       detection.slotIndex >= declaredLayout.cols * declaredLayout.rows || detection.gridEsi === undefined ||
@@ -151,6 +165,9 @@ export class GridLattice {
     if (!this.identity) this.identity = detection.identity;
     this.frameWidth = Math.max(1, frameWidth);
     this.frameHeight = Math.max(1, frameHeight);
+    // Packet bytes from late worker replies remain useful, but their old
+    // camera coordinates must not replace a transform from a newer frame.
+    if (this.candidate && detection.at < this.lastHitAt) return this.snapshot();
     this.lastHitAt = detection.at;
     this.observations.push(detection);
     this.observations = this.observations.filter((item) => detection.at - item.at < 2500 && item.modules === detection.modules).slice(-32);
