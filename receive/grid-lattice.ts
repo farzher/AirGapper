@@ -220,6 +220,43 @@ export class GridLattice {
     if (this.candidate) this.state = "REACQUIRE";
   }
 
+  /** Re-anchor a known slot from detector geometry even when its bytes did not
+   * decode. This is the cheap motion lock: finder geometry updates the global
+   * plane, then tracked sampling can read data at the new positions. */
+  alignSlot(slot: number, quad: SymbolQuad, at: number): GridSnapshot | null {
+    const candidate = this.candidate;
+    if (!candidate || slot < 0 || slot >= candidate.layout.cols * candidate.layout.rows) return null;
+    const modules = candidate.observations[0]?.modules;
+    if (!modules) return null;
+    const box = bounds(quad);
+    if (!validGeometry({
+      identity: this.identity, seq: 0, at, scanId: -1, box, quad, modules,
+    }, this.frameWidth, this.frameHeight)) return null;
+
+    const predicted = bounds({
+      topLeft: project(candidate.transform, slotWorld(candidate.layout, modules, slot)[0]!),
+      topRight: project(candidate.transform, slotWorld(candidate.layout, modules, slot)[1]!),
+      bottomRight: project(candidate.transform, slotWorld(candidate.layout, modules, slot)[2]!),
+      bottomLeft: project(candidate.transform, slotWorld(candidate.layout, modules, slot)[3]!),
+    });
+    const predictedSize = Math.max(predicted.w, predicted.h);
+    const observedSize = Math.max(box.w, box.h);
+    const centerDistance = Math.hypot(
+      box.x + box.w / 2 - predicted.x - predicted.w / 2,
+      box.y + box.h / 2 - predicted.y - predicted.h / 2,
+    );
+    if (observedSize < predictedSize * 0.65 || observedSize > predictedSize * 1.55 ||
+        centerDistance > predictedSize * 0.6) return null;
+
+    const world = slotWorld(candidate.layout, modules, slot);
+    const transform = fitHomography(world.map((point, index) => ({ world: point, image: corners(quad)[index]! })));
+    if (!transform) return null;
+    this.candidate = { ...candidate, transform, error: 0 };
+    this.lastHitAt = at;
+    this.state = "TRACK";
+    return this.snapshot();
+  }
+
   private rankCandidates(): void {
     const declared = this.observations.at(-1)?.layoutId;
     const layouts: Layout[] = declared === undefined

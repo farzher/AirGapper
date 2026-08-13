@@ -131,7 +131,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     const pw = w;
     const ph = h;
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
-    const sightings: object[] = [];
+    const sightings: { x: number; y: number; w: number; h: number; quad?: DecimenQuad; modules?: number }[] = [];
 
     if (!full && tracks?.length) {
       batchBuffers(zx, tracks.length);
@@ -174,32 +174,15 @@ ctx.onmessage = async (e: MessageEvent) => {
           tracked: true, crc32: track.crc32,
         });
       }
-      // Tracking is opportunistic. On a complete miss, reacquire from this
-      // already-copied bounded crop instead of discarding the camera frame and
-      // waiting several misses for a separate scheduler job.
-      let fallbackAttempted = false;
-      if (symbols.length === 0) {
-        fallbackAttempted = true;
-        const results = zx.readFull(ptr, pw, ph, true, 16, false);
-        try {
-          for (let i = 0; i < results.size(); i++) {
-            const result = results.get(i);
-            if (!result.valid || result.bytes.length === 0) continue;
-            symbols.push({
-              bytes: result.bytes,
-              box: boundsOf(result.position, ox, oy),
-              quad: shifted(result.position, ox, oy),
-              modules: result.modules,
-              tracked: false,
-            });
-          }
-        } finally {
-          results.delete();
-        }
-      }
+      // Never run the generic detector over the union of several neighboring
+      // tracks. That recreates the dense finder-pattern ambiguity tracking was
+      // designed to avoid, and its error quad can pull the whole lattice onto
+      // the wrong QR. Per-slot native detector crops are scheduled after three
+      // misses; those contain exactly one expected symbol and can safely
+      // re-anchor the grid even before payload decoding succeeds.
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
-        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted: false,
         latencyMs: performance.now() - startedAt,
       });
       return;
@@ -245,9 +228,13 @@ ctx.onmessage = async (e: MessageEvent) => {
               });
             } else if (includeErrors) {
               // A symbol zxing DETECTED but could not decode (glare or noise
-              // past ECC) still supplies a useful crop position.
-              const box = boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0);
-              if (box.w > 0 && box.h > 0) sightings.push(box);
+              // past ECC) still supplies the geometry needed to move an
+              // already-identified lattice before data decoding catches up.
+              const resultQuad = shifted(r.position, ox, oy, scaleX, scaleY);
+              const box = boundsOf(resultQuad, 0, 0);
+              if (box.w > 0 && box.h > 0) sightings.push({
+                ...box, quad: resultQuad, modules: r.modules || undefined,
+              });
             }
           }
         } finally {
@@ -273,7 +260,7 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       } else {
         // Crop fallback stays in the cheapest detector configuration.
-        appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
+        appendResults(zx.readFull(ptr, pw, ph, true, 4, true), true);
       }
     }
     ctx.postMessage({

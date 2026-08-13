@@ -33,6 +33,11 @@ export interface SymbolQuad {
   bottomLeft: { x: number; y: number };
 }
 
+export interface SymbolSighting extends SymbolBox {
+  quad?: SymbolQuad;
+  modules?: number;
+}
+
 /** Decode metadata that rides along with the bytes. */
 export interface SymbolInfo {
   /** Worker submission that produced this symbol. Symbols sharing this id came
@@ -54,7 +59,7 @@ interface DecodeMessage {
   symbols: { bytes: Uint8Array; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean; crc32?: boolean }[];
   /** Codes DETECTED but not decoded — no bytes, but the position is real.
    *  The receiver uses these to aim crops at codes the full frame lost. */
-  sightings?: SymbolBox[];
+  sightings?: SymbolSighting[];
   /** True when this reply's crop went through the tracked fast path first —
    *  paired with per-symbol `tracked`, the receiver derives the hit rate. */
   trackedAttempted?: boolean;
@@ -74,7 +79,7 @@ export interface DecodeCompletion {
   fallbackAttempted: boolean;
   latencyMs: number;
   symbols: { box?: SymbolBox; quad?: SymbolQuad }[];
-  sightings: SymbolBox[];
+  sightings: SymbolSighting[];
   error?: string;
 }
 
@@ -90,7 +95,7 @@ export class DecodeWorkerPool {
   constructor(
     private readonly create: () => PoolWorker,
     private readonly onDecoded: (bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) => void,
-    private readonly onSighted?: (box: SymbolBox) => void,
+    private readonly onSighted?: (sighting: SymbolSighting, scanId: number) => void,
     private readonly onTrackedAttempt?: () => void,
     private readonly onCompleted?: (id: number, completion: DecodeCompletion) => void,
   ) {}
@@ -142,7 +147,7 @@ export class DecodeWorkerPool {
             crc32: symbol.crc32,
           });
         }
-        if (this.onSighted) for (const box of sightings) this.onSighted(box);
+        if (this.onSighted) for (const sighting of sightings) this.onSighted(sighting, message.id);
       } finally {
         this.onCompleted?.(message.id, completion);
       }

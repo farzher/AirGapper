@@ -45,7 +45,7 @@ ctx.onmessage = async (event: MessageEvent) => {
     ptr = zx._malloc(pixels.byteLength);
     zx.HEAPU8.set(pixels, ptr);
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: false }[] = [];
-    const sightings: object[] = [];
+    const sightings: { x: number; y: number; w: number; h: number; quad?: DecimenQuad; modules?: number }[] = [];
     const appendResults = (results: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
       try {
         for (let index = 0; index < results.size(); index++) {
@@ -63,8 +63,11 @@ ctx.onmessage = async (event: MessageEvent) => {
               tracked: false,
             });
           } else if (includeErrors) {
-            const box = boundsOf(result.position);
-            if (box.w > 0 && box.h > 0) sightings.push(box);
+            const quad = plainQuad(result.position);
+            const box = boundsOf(quad);
+            if (box.w > 0 && box.h > 0) sightings.push({
+              ...box, quad, modules: result.modules || undefined,
+            });
           }
         }
       } finally {

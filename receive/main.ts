@@ -27,6 +27,7 @@ import {
   type SymbolBox,
   type SymbolInfo,
   type SymbolQuad,
+  type SymbolSighting,
 } from "../shared/worker-pool";
 import { PlainQrPolicy } from "../shared/plain-qr-policy";
 import { isSnippet, snippetText } from "../shared/snippet";
@@ -233,11 +234,10 @@ const pool = new DecodeWorkerPool(
   // Heavily gated in noteRegion (refresh-only on matches, size-checked on
   // creation) because failed quads are often junk — but a plausible one lets
   // the crop path go decode what the full frame could not.
-  (box) => {
-    // Detector-only geometry is never lattice evidence. Cold sightings seed
-    // one bounded native-resolution decode crop; predicted slots take over as
-    // soon as an AirGapper packet declares its lattice.
-    if (!gridLattice.active) noteRegion(box, performance.now(), false);
+  (sighting, scanId) => {
+    const now = performance.now();
+    if (gridLattice.active) noteGridSighting(sighting, scanId, now);
+    else noteRegion(sighting, now, false);
   },
   () => undefined,
   (id, completion) => noteDecodeCompleted(id, completion),
@@ -352,6 +352,29 @@ type CropAttempt = { region: Region; quad?: SymbolQuad };
 const cropAttempts = new Map<number, CropAttempt[]>();
 const scanCapturedAt = new Map<number, number>();
 const localReacquireIds = new Set<number>();
+
+function noteGridSighting(sighting: SymbolSighting, scanId: number, now: number): void {
+  if (!sighting.quad) return;
+  const attempted = cropAttempts.get(scanId)?.map(({ region }) => region) ?? [];
+  const candidates = (attempted.length ? attempted : regions)
+    .filter((region) => region.gridSlot !== undefined && region.quad);
+  if (!candidates.length) return;
+  const cx = sighting.x + sighting.w / 2;
+  const cy = sighting.y + sighting.h / 2;
+  const region = candidates.reduce((best, candidate) => {
+    const distance = Math.hypot(cx - candidate.x - candidate.w / 2, cy - candidate.y - candidate.h / 2);
+    const bestDistance = Math.hypot(cx - best.x - best.w / 2, cy - best.y - best.h / 2);
+    return distance < bestDistance ? candidate : best;
+  });
+  const capturedAt = scanCapturedAt.get(scanId) ?? now;
+  const snapshot = gridLattice.alignSlot(region.gridSlot!, sighting.quad, capturedAt);
+  if (!snapshot) return;
+  syncGrid(snapshot, now);
+  const aligned = regions.find((candidate) => candidate.gridSlot === region.gridSlot);
+  if (aligned) aligned.sightedSeen = now;
+  notePipelineEvent("grid-geometry-aligned", region.gridSlot!);
+}
+
 type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; accepted: number };
 const scanOutcomes = new Map<number, ScanOutcome>();
 function noteScanOutcome(scanId: number | undefined, kind: keyof ScanOutcome): void {
@@ -1861,7 +1884,10 @@ function captureFrame() {
     const right = bounds?.right ?? localCandidate.x + localCandidate.w;
     const bottom = bounds?.bottom ?? localCandidate.y + localCandidate.h;
     const size = Math.max(right - left, bottom - top);
-    const expansion = 0.45 + Math.min(1.1, localCandidate.consecutiveMisses * 0.14);
+    // Keep detector reacquisition local. A one-module grid gutter means a
+    // crop expanded by nearly a full QR contains several complete neighboring
+    // finder sets and can snap this slot onto the next cell.
+    const expansion = 0.18 + Math.min(0.24, localCandidate.consecutiveMisses * 0.04);
     const pad = Math.max(12, Math.round(size * expansion));
     const x = Math.floor(left - pad);
     const y = Math.floor(top - pad);
