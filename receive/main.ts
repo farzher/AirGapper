@@ -224,10 +224,11 @@ interface BenchmarkJob {
   id: number; kind: BenchmarkJobKind; pixels: number; bytes: number; width: number; height: number; x: number; y: number;
   tracks: number[]; submittedAt: number; workerWaitMs?: number; decodeMs?: number; symbols?: number;
   trackedHits?: number; trackedMisses?: number; readFullAttempts?: number; fallbackAttempts?: number; fallbackSuccesses?: number;
+  targetedAttempts?: number; targetedPixels?: number; targetedSuccesses?: number;
 }
 interface BenchmarkFrameTrace {
   sequence: number; timestampMs: number; stateBefore: string; stateAfter: string; decision: string; workerBusyFraction: number;
-  jobs: BenchmarkJob[]; decoded: { slot?: number; esi: number; quad?: SymbolQuad }[]; sightings: SymbolBox[];
+  jobs: BenchmarkJob[]; decoded: { slot?: number; esi: number; bytes: number; quad?: SymbolQuad }[]; sightings: SymbolBox[];
   reference: { slot?: number; esi: number; quad?: SymbolQuad }[];
   predicted: { slot: number; state?: string; quad?: SymbolQuad; submitted: boolean }[];
   transitions: { from: string; to: string; reason: string; at: number }[];
@@ -489,6 +490,9 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   if (benchmarkJob) {
     benchmarkTrace!.sightings.push(...completion.sightings);
     benchmarkJob.workerWaitMs = completion.workerWaitMs;
+    benchmarkJob.targetedAttempts = completion.targetedAttempts;
+    benchmarkJob.targetedPixels = completion.targetedPixels;
+    benchmarkJob.targetedSuccesses = completion.targetedSuccesses;
     benchmarkJob.decodeMs = completion.latencyMs;
     benchmarkJob.symbols = completion.symbolCount;
     benchmarkJob.trackedHits = completion.trackedHit ? completion.symbolCount : 0;
@@ -2065,7 +2069,8 @@ function captureFrame(source: ReceiverFrame) {
     .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh))
     .slice(0, 15);
   const batchTracks = batchRegions.map((region) => ({
-    id: region.id, quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
+    id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
+    quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
   if (batchTracks.length > 1) {
     // One readback and one worker message per camera frame. Four independent
@@ -2244,7 +2249,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const { header, block } = parsed;
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
-    slot: header.slotIndex, esi: header.gridEsi ?? header.seq, quad: info?.quad,
+    slot: header.slotIndex, esi: header.gridEsi ?? header.seq, bytes: header.blockLen, quad: info?.quad,
   });
   const identity = streamIdentity(header);
   // A live stream is sticky against stray codes and out-of-order worker
@@ -3178,14 +3183,25 @@ async function runReceiverBenchmark(): Promise<void> {
       const production = new Set(trace.decoded.map((item) => item.esi));
       return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size;
     }, 0);
-    const uniqueUseful = new Set(productionPackets.map((item) => item.esi)).size;
+    const uniquePackets = new Map<number, (typeof productionPackets)[number]>();
+    for (const packet of productionPackets) if (!uniquePackets.has(packet.esi)) uniquePackets.set(packet.esi, packet);
+    const uniqueUseful = uniquePackets.size;
+    const uniqueUsefulBytes = [...uniquePackets.values()].reduce((sum, packet) => sum + packet.bytes, 0);
+    const extraPackets = benchmarkTraces.flatMap((trace) => {
+      const reference = new Set(trace.reference.map((item) => item.esi));
+      return trace.decoded.filter((item) => !reference.has(item.esi));
+    });
+    const extraUniqueSymbols = new Set(extraPackets.map((item) => item.esi)).size;
+    const workerCpuSeconds = Math.max(0.001, decodeLatencies.reduce((sum, value) => sum + value, 0) / 1000);
+    const processedPixels = jobs.reduce((sum, job) => sum + job.pixels + (job.targetedPixels ?? 0), 0);
     const byKind = Object.fromEntries((["FULL FRAME", "SHARED TRACKED BATCH CROP", "INDIVIDUAL TRACKED CROP"] as BenchmarkJobKind[]).map((kind) => {
       const selected = jobs.filter((job) => job.kind === kind);
       return [kind, {
-        jobs: selected.length, pixels: selected.reduce((sum, job) => sum + job.pixels, 0),
-        bytes: selected.reduce((sum, job) => sum + job.bytes, 0), tracks: selected.reduce((sum, job) => sum + job.tracks.length, 0),
+        jobs: selected.length, pixels: selected.reduce((sum, job) => sum + job.pixels, 0), processedPixels: selected.reduce((sum, job) => sum + job.pixels + (job.targetedPixels ?? 0), 0),
+        bytes: selected.reduce((sum, job) => sum + job.bytes, 0), tracks: selected.reduce((sum, job) => sum + job.tracks.length, 0), outputSymbols: selected.reduce((sum, job) => sum + (job.symbols ?? 0), 0),
         hits: selected.reduce((sum, job) => sum + (job.trackedHits ?? 0), 0), misses: selected.reduce((sum, job) => sum + (job.trackedMisses ?? 0), 0),
         readFullAttempts: selected.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0), fallbackAttempts: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0), fallbackSuccesses: selected.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0), fallbackFailures: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0) - (job.fallbackSuccesses ?? 0), 0),
+        targetedAttempts: selected.reduce((sum, job) => sum + (job.targetedAttempts ?? 0), 0), targetedPixels: selected.reduce((sum, job) => sum + (job.targetedPixels ?? 0), 0), targetedSuccesses: selected.reduce((sum, job) => sum + (job.targetedSuccesses ?? 0), 0),
       }];
     }));
     const failures = benchmarkTraces.flatMap((trace, index) => {
@@ -3199,8 +3215,8 @@ async function runReceiverBenchmark(): Promise<void> {
       corpus: corpus.header, replay: { mode: replayMode.value, workers: pool.size, device: navigator.userAgent },
       acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference]!.sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction]!.sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction]!.timestampMs - benchmarkTraces[firstReference]!.timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout]!.sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock]!.sequence },
       recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss]!.sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery]!.sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery]!.sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered]!.sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored]!.sequence },
-      throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
-      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), decodeP50Ms: percentile(decodeLatencies, .5), decodeP95Ms: percentile(decodeLatencies, .95), oracleP50Ms: percentile(oracleLatencies, .5), workerBusyDrops: capturesDropped, byKind },
+      throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
+      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(0.001, processedPixels / 1_000_000), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(0.001, processedPixels / 1_000_000), decodeP50Ms: percentile(decodeLatencies, .5), decodeP95Ms: percentile(decodeLatencies, .95), oracleP50Ms: percentile(oracleLatencies, .5), workerBusyDrops: capturesDropped, byKind },
       transitions, failures, frames: benchmarkTraces,
     };
     benchmarkSummary.textContent = `opportunities  ${captured}/${opportunities} (${(opportunities ? captured / opportunities * 100 : 0).toFixed(1)}%)\nQR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}\nuseful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}\nverified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}\ndecode p50/95 ${percentile(decodeLatencies, .5).toFixed(1)} / ${percentile(decodeLatencies, .95).toFixed(1)} ms\nbusy drops    ${capturesDropped}\npixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}\nmisses        ${failures.length}`;

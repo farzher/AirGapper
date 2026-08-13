@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
-const [corpus, referenceFile, output] = process.argv.slice(2);
-if (!corpus || !referenceFile) throw new Error("usage: node scripts/cdp-benchmark.mjs corpus.agcap reference.json [output.json]");
+const [corpus, referenceFile, output, workers = "4"] = process.argv.slice(2);
+if (!corpus || !referenceFile || !/^[1-9]\d*$/.test(workers)) throw new Error("usage: node scripts/cdp-benchmark.mjs corpus.agcap reference.json [output.json] [workers]");
 const referenceResult = JSON.parse(fs.readFileSync(referenceFile, "utf8"));
 const reference = referenceResult.frames.map(({ sequence, reference }) => ({ sequence, reference }));
 const downloadDir = `${process.env.TEMP}\\airgapper-bench-downloads`;
@@ -61,7 +61,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadDir, eventsEnabled: true });
-  await evaluate(`window.__airgapperBenchmarkReference=${JSON.stringify(reference)}; document.getElementById("decode-workers").value="4"; document.getElementById("replay-mode").value="performance"`);
+  await evaluate(`window.__airgapperBenchmarkReference=${JSON.stringify(reference)}; document.getElementById("decode-workers").value=${JSON.stringify(workers)}; document.getElementById("replay-mode").value="performance"`);
   const { root } = await send("DOM.getDocument", { depth: -1, pierce: true });
   const { nodeId } = await send("DOM.querySelector", { nodeId: root.nodeId, selector: "#corpus-file" });
   await send("DOM.setFileInputFiles", { nodeId, files: [corpus] });

@@ -68,6 +68,9 @@ interface DecodeMessage {
   fallbackSucceeded?: boolean;
   readFullAttempts?: number;
   workerWaitMs?: number;
+  targetedAttempts?: number;
+  targetedPixels?: number;
+  targetedSuccesses?: number;
   full?: boolean;
   latencyMs?: number;
   error?: string;
@@ -83,6 +86,9 @@ export interface DecodeCompletion {
   fallbackSucceeded: boolean;
   readFullAttempts: number;
   workerWaitMs: number;
+  targetedAttempts: number;
+  targetedPixels: number;
+  targetedSuccesses: number;
   latencyMs: number;
   symbols: { box?: SymbolBox; quad?: SymbolQuad }[];
   sightings: SymbolSighting[];
@@ -140,6 +146,9 @@ export class DecodeWorkerPool {
         fallbackSucceeded: Boolean(message.fallbackSucceeded),
         readFullAttempts: message.readFullAttempts ?? 0,
         workerWaitMs: message.workerWaitMs ?? 0,
+        targetedAttempts: message.targetedAttempts ?? 0,
+        targetedPixels: message.targetedPixels ?? 0,
+        targetedSuccesses: message.targetedSuccesses ?? 0,
         latencyMs: message.latencyMs ?? 0,
         symbols,
         sightings,
@@ -183,6 +192,9 @@ export class DecodeWorkerPool {
         fallbackSucceeded: false,
         readFullAttempts: 0,
         workerWaitMs: 0,
+        targetedAttempts: 0,
+        targetedPixels: 0,
+        targetedSuccesses: 0,
         latencyMs: 0,
         symbols: [],
         sightings: [],
@@ -245,6 +257,7 @@ export class DecodeWorkerPool {
           full, symbolCount: 0, sightingCount: 0,
           trackedAttempted: false, trackedHit: false, fallbackAttempted: false,
           fallbackSucceeded: false, readFullAttempts: 0, workerWaitMs: 0,
+          targetedAttempts: 0, targetedPixels: 0, targetedSuccesses: 0,
           latencyMs: WORKER_JOB_TIMEOUT_MS, symbols: [], sightings: [],
           error: "Decode worker timed out",
         });
@@ -269,6 +282,9 @@ export class DecodeWorkerPool {
         fallbackSucceeded: false,
         readFullAttempts: 0,
         workerWaitMs: 0,
+        targetedAttempts: 0,
+        targetedPixels: 0,
+        targetedSuccesses: 0,
         latencyMs: 0,
         symbols: [],
         sightings: [],

@@ -9,9 +9,9 @@
 //    error results carry positions (the receiver's crop-seeding sightings).
 //  - readTracked: single-code crops with a cached quad + module count skip
 //    detection entirely. Any miss falls back to readFull on the same buffer.
-//    Dense lattice crops go straight to readFull: field corpora measured zero
-//    batched sampler hits while the same crop's detector recovered 87–98% of
-//    exact opportunities, so sampling all 15 tracks first was pure latency.
+//    Dense lattice crops run readFull first: field corpora measured zero
+//    batched sampler hits. One repeatedly weak cell may then get an isolated
+//    generic retry, avoiding sampler overhead across all 15 tracks.
 
 import wasmUrl from "./wasm-url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
@@ -64,6 +64,8 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
 
 interface BatchTrack {
   id: number;
+  slot?: number;
+  misses: number;
   quad: DecimenQuad;
   dim: number;
   crc32: boolean;
@@ -233,16 +235,18 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (!full && tracks?.length) {
-      // The shared crop already excludes the rest of the camera frame and can
-      // contain every visible grid symbol. Decode it once with the mechanism
-      // that succeeds on real camera frames instead of first running the
-      // measured-zero-hit persistent sampler over every predicted slot.
+      // Decode the shared crop first with the mechanism that succeeds on real
+      // camera frames instead of running the measured-zero-hit persistent
+      // sampler over every predicted slot.
       readFullAttempts++;
       const decoded = zx.readFull(ptr, pw, ph, true, 16, false);
+      const decodedSlots = new Set<number>();
       try {
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
           if (!result.valid || !result.bytes.length) continue;
+          const packet = parseFrame(result.bytes);
+          if (packet?.header.slotIndex !== undefined) decodedSlots.add(packet.header.slotIndex);
           symbols.push({
             bytes: result.bytes,
             box: boundsOf(result.position, ox, oy),
@@ -254,10 +258,73 @@ ctx.onmessage = async (e: MessageEvent) => {
       } finally {
         decoded.delete();
       }
+
+      // The broad detector usually finds nearly the whole lattice. Give one
+      // repeatedly weak cell an isolated quiet-zone retry instead
+      // of rediscovering every healthy finder pattern again.
+      let targetedAttempts = 0;
+      let targetedPixels = 0;
+      let targetedSuccesses = 0;
+      const targetedTracks = tracks.length >= 10
+        ? [...tracks]
+          .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot) && candidate.misses > 0)
+          .sort((a, b) => b.misses - a.misses)
+          .slice(0, 1)
+        : [];
+      for (const track of targetedTracks) {
+        const expected = boundsOf(track.quad, -ox, -oy);
+        const moduleSize = Math.max(expected.w, expected.h) / track.dim;
+        const sourcePad = Math.max(2, Math.round(moduleSize));
+        const quiet = Math.max(8, Math.round(moduleSize * 5));
+        const cx = Math.max(0, Math.floor(expected.x - sourcePad));
+        const cy = Math.max(0, Math.floor(expected.y - sourcePad));
+        const cr = Math.min(pw, Math.ceil(expected.x + expected.w + sourcePad));
+        const cb = Math.min(ph, Math.ceil(expected.y + expected.h + sourcePad));
+        const sw = cr - cx, sh = cb - cy;
+        if (sw < 24 || sh < 24) continue;
+        const cw = sw + quiet * 2, ch = sh + quiet * 2;
+        targetedPixels += cw * ch;
+        const crop = new Uint8Array(cw * ch * 4);
+        crop.fill(255);
+        for (let row = 0; row < sh; row++) {
+          crop.set(
+            pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4),
+            ((row + quiet) * cw + quiet) * 4,
+          );
+        }
+        const cropPtr = zx._malloc(crop.length);
+        zx.HEAPU8.set(crop, cropPtr);
+        readFullAttempts++;
+        targetedAttempts++;
+        const retried = zx.readFull(cropPtr, cw, ch, true, 2, false);
+        try {
+          for (let i = 0; i < retried.size(); i++) {
+            const result = retried.get(i);
+            if (!result.valid || !result.bytes.length) continue;
+            const packet = parseFrame(result.bytes);
+            if (packet?.header.slotIndex !== track.slot || decodedSlots.has(track.slot!)) continue;
+            decodedSlots.add(track.slot!);
+            targetedSuccesses++;
+            const shiftX = ox + cx - quiet, shiftY = oy + cy - quiet;
+            symbols.push({
+              bytes: result.bytes,
+              box: boundsOf(result.position, shiftX, shiftY),
+              quad: shifted(result.position, shiftX, shiftY),
+              modules: result.modules,
+              tracked: false,
+            });
+          }
+        } finally {
+          retried.delete();
+          zx._free(cropPtr);
+        }
+      }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: false,
-        trackedHit: false, fallbackAttempted: false, fallbackSucceeded: false,
-        readFullAttempts, workerWaitMs, latencyMs: performance.now() - startedAt,
+        trackedHit: false, fallbackAttempted: targetedAttempts > 0,
+        fallbackSucceeded: targetedSuccesses > 0,
+        readFullAttempts, workerWaitMs, targetedAttempts, targetedPixels, targetedSuccesses,
+        latencyMs: performance.now() - startedAt,
       });
       return;
     }
