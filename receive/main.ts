@@ -45,6 +45,7 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
+  isLegacyAndroidApp,
   saveFileOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
@@ -82,18 +83,22 @@ const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
+const legacyAndroidApp = isLegacyAndroidApp();
+document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-// Full-frame acquisition is memory-bandwidth-heavy, while tracked decoding
-// scales only until camera delivery and canvas readback lose their CPU budget.
-// Four workers is the useful ceiling measured on 8-thread phones; explicit
-// settings remain available for profiling unusual hardware.
-const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
+// A 32-bit WebView shares its limited renderer address space with the live
+// camera. Starting multiple WASM decoders as that surface is allocated can
+// kill the process on older phones; modern 64-bit devices keep the fast pool.
+const autoWorkerCount = legacyAndroidApp
+  ? 1
+  : Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
   decodeWorkers.add(new Option(String(count), String(count)));
 }
 function selectedWorkerCount(): number {
+  if (legacyAndroidApp) return 1;
   return decodeWorkers.value === "auto"
     ? autoWorkerCount
     : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
@@ -182,7 +187,7 @@ function showRequestedCameraSettings(): void {
     ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps`;
   cameraResolutionLabel.textContent = "Mode";
   captureScanBtn.hidden = false;
-  decodeWorkersControl.hidden = false;
+  decodeWorkersControl.hidden = legacyAndroidApp;
   video.hidden = false;
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
@@ -1314,7 +1319,19 @@ async function start() {
   };
   let acquiredStream: MediaStream;
   try {
-    if (cameraResolution.value === "auto") {
+    if (legacyAndroidApp) {
+      // Some 32-bit Android camera providers crash or remain wedged when
+      // Chromium forwards exact dimensions or any frame-rate constraint.
+      // Make one broadly satisfiable request; never retry a rejected mode.
+      acquiredStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: "environment",
+          width: { ideal: captureWidth },
+          height: { ideal: captureHeight },
+        },
+      });
+    } else if (cameraResolution.value === "auto") {
       acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } },

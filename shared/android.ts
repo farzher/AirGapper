@@ -4,6 +4,7 @@ interface AndroidBridge {
   finishDownload(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
+  is64BitProcess?(): boolean;
 }
 
 function bridge(): AndroidBridge | undefined {
@@ -12,6 +13,11 @@ function bridge(): AndroidBridge | undefined {
 
 export function isAndroidApp(): boolean {
   return bridge() !== undefined;
+}
+
+export function isLegacyAndroidApp(): boolean {
+  const android = bridge();
+  return android !== undefined && android.is64BitProcess?.() === false;
 }
 
 export function saveFileOnAndroid(name: string, type: string, bytes: Uint8Array): boolean {

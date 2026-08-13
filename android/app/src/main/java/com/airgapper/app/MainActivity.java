@@ -295,6 +295,11 @@ public final class MainActivity extends Activity {
                 else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             });
         }
+
+        @JavascriptInterface
+        public boolean is64BitProcess() {
+            return android.os.Process.is64Bit();
+        }
     }
 
     private synchronized void discardPendingDownload() {
