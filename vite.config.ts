@@ -49,11 +49,24 @@ export default defineConfig({
       },
     }),
     inlineCodecWasm(),
+    inlineCodecWasm(
+      "virtual:android-codec-wasm-data-url",
+      "../vendor/decimen-codec-android/decimen_codec.wasm",
+    ),
     viteSingleFile(),
     appArtifact(__dirname),
     diagnosticsEndpoint(pkg.version),
   ],
-  worker: { format: "iife", plugins: () => [inlineCodecWasm()] },
+  worker: {
+    format: "iife",
+    plugins: () => [
+      inlineCodecWasm(),
+      inlineCodecWasm(
+        "virtual:android-codec-wasm-data-url",
+        "../vendor/decimen-codec-android/decimen_codec.wasm",
+      ),
+    ],
+  },
   build: {
     target: "es2022",
     outDir: "dist",
