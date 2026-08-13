@@ -821,8 +821,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const exposureMax = exposure ? Math.min(300, exposure.max) : 0;
   cameraExposureControl.hidden = !exposure || exposureMin >= exposureMax;
   if (exposure && exposureMin < exposureMax) {
-    const settings = track.getSettings() as MediaTrackSettings & { exposureTime?: number };
-    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime ?? settings.exposureTime ?? exposureMin));
+    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime ?? 100));
     preferredExposureTime = current;
     cameraExposure.min = String(exposureMin);
     cameraExposure.max = String(exposureMax);
