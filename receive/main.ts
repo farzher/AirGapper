@@ -2113,10 +2113,20 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (file.type === "application/vnd.airgapper.files+zip") {
       const entries = readStoredZip(file.bytes);
       for (const entry of entries) await appendReceivedFile(entry, result);
-      const archiveActions = document.createElement("div");
-      archiveActions.className = "note-actions archive-actions";
-      archiveActions.append(downloadLink(file.name, "application/zip", file.bytes, `Save ZIP · ${file.name}`));
-      result.append(archiveActions);
+      const archive = document.createElement("section");
+      archive.className = "received-file received-archive";
+      const archiveType = document.createElement("span");
+      archiveType.className = "received-file-type";
+      archiveType.textContent = "ZIP";
+      const archiveRow = document.createElement("div");
+      archiveRow.className = "received-file-download";
+      const archiveLink = downloadLink(file.name, "application/zip", file.bytes, file.name);
+      archiveLink.title = file.name;
+      const archiveSize = document.createElement("span");
+      archiveSize.textContent = formatBytes(file.bytes.length);
+      archiveRow.append(archiveLink, archiveSize);
+      archive.append(archiveType, archiveRow);
+      result.append(archive);
     } else {
       await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type);
     }
@@ -2182,6 +2192,7 @@ async function appendReceivedFile(
     image.className = "received";
     image.alt = `Received file preview: ${entry.name}`;
     image.src = url;
+    enableMediaInspection(image);
     container.append(image);
   } else if (type.startsWith("video/") || type.startsWith("audio/")) {
     const player = document.createElement(type.startsWith("video/") ? "video" : "audio");
@@ -2193,6 +2204,7 @@ async function appendReceivedFile(
     const src = await servableMediaUrl(entry.bytes, type, url);
     if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true });
     player.src = src;
+    if (player instanceof HTMLVideoElement) enableMediaInspection(player);
     container.append(player);
   }
   const downloadRow = document.createElement("div");
@@ -2204,6 +2216,35 @@ async function appendReceivedFile(
   downloadRow.append(link, fileSize);
   container.append(downloadRow);
   parent.append(container);
+}
+
+function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void {
+  media.classList.add("inspectable");
+  media.tabIndex = 0;
+  media.title = "View full screen";
+  const open = async (): Promise<void> => {
+    if (document.fullscreenElement === media) return;
+    if (media instanceof HTMLVideoElement) {
+      const iosVideo = media as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) {
+        iosVideo.webkitEnterFullscreen();
+        void media.play();
+        return;
+      }
+    }
+    if (media.requestFullscreen) {
+      await media.requestFullscreen().catch(() => undefined);
+      if (media instanceof HTMLVideoElement) void media.play();
+      return;
+    }
+    window.open(media.currentSrc || media.src, "_blank", "noopener");
+  };
+  media.addEventListener("click", () => void open());
+  media.addEventListener("keydown", (event) => {
+    if (!(event instanceof KeyboardEvent) || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    void open();
+  });
 }
 
 /** A playable URL for received media. iOS Safari will not reliably play media
