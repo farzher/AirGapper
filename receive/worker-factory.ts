@@ -9,15 +9,15 @@ function supportsWasmSimd(): boolean {
   try {
     return WebAssembly.validate(new Uint8Array([
       0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
-      3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 11,
+      3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 15, 11,
     ]));
   } catch {
     return false;
   }
 }
 
-const useScalarDecoder = isLegacyAndroidApp() || !supportsWasmSimd();
+export const usesSimpleDecodeWorker = isLegacyAndroidApp() || !supportsWasmSimd();
 
 export function createDecodeWorker(): Worker {
-  return useScalarDecoder ? new LegacyAndroidDecodeWorker() : new InlineDecodeWorker();
+  return usesSimpleDecodeWorker ? new LegacyAndroidDecodeWorker() : new InlineDecodeWorker();
 }
