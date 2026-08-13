@@ -2,10 +2,14 @@ interface AndroidBridge {
   beginDownload(name: string, type: string): void;
   appendDownloadChunk(base64: string): void;
   finishDownload(): void;
-  showScanCaptureMenu?(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
-  is64BitProcess?(): boolean;
+  getNativeCameraCapabilities(): string;
+  setNativePreviewBounds(left: number, top: number, width: number, height: number): void;
+  startNativeCamera(mode: string): void;
+  stopNativeCamera(): void;
+  setNativeTorch(enabled: boolean): void;
+  setNativeExposure(value: number): void;
 }
 
 function bridge(): AndroidBridge | undefined {
@@ -14,11 +18,6 @@ function bridge(): AndroidBridge | undefined {
 
 export function isAndroidApp(): boolean {
   return bridge() !== undefined;
-}
-
-export function isLegacyAndroidApp(): boolean {
-  const android = bridge();
-  return android !== undefined && android.is64BitProcess?.() === false;
 }
 
 export function saveFileOnAndroid(name: string, type: string, bytes: Uint8Array): boolean {
@@ -36,13 +35,6 @@ export function saveFileOnAndroid(name: string, type: string, bytes: Uint8Array)
   return true;
 }
 
-export function showScanCaptureMenuOnAndroid(): boolean {
-  const android = bridge();
-  if (!android?.showScanCaptureMenu) return false;
-  android.showScanCaptureMenu();
-  return true;
-}
-
 export function copyTextOnAndroid(text: string): boolean {
   const android = bridge();
   if (!android) return false;
@@ -53,3 +45,54 @@ export function copyTextOnAndroid(text: string): boolean {
 export function setAndroidKeepScreenOn(enabled: boolean): void {
   bridge()?.setKeepScreenOn(enabled);
 }
+
+export interface NativeCameraMode {
+  key: string;
+  cameraId: string;
+  width: number;
+  height: number;
+  fpsMin: number;
+  fpsMax: number;
+  highSpeed: boolean;
+  preview: boolean;
+  analysis: boolean;
+  autofocus: boolean;
+  torch: boolean;
+  stabilization: boolean;
+  exposureMin: number;
+  exposureMax: number;
+}
+
+export interface NativeCameraCapabilities {
+  decoderAvailable: boolean;
+  error?: string;
+  modes: NativeCameraMode[];
+}
+
+export function nativeCameraCapabilities(): NativeCameraCapabilities | undefined {
+  const android = bridge();
+  if (!android?.getNativeCameraCapabilities) return undefined;
+  try {
+    return JSON.parse(android.getNativeCameraCapabilities()) as NativeCameraCapabilities;
+  } catch {
+    return undefined;
+  }
+}
+
+export function setNativePreviewBounds(rect: DOMRect): void {
+  bridge()?.setNativePreviewBounds(
+    Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height),
+  );
+}
+
+export function startNativeCamera(mode: string): void {
+  bridge()?.startNativeCamera(mode);
+}
+
+export function stopNativeCamera(): void {
+  bridge()?.stopNativeCamera();
+}
+
+export function setNativeTorch(enabled: boolean): void { bridge()?.setNativeTorch(enabled); }
+export function setNativeExposure(value: number): void { bridge()?.setNativeExposure(value); }
+

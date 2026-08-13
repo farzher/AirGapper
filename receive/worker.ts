@@ -12,10 +12,11 @@
 //    is sampled directly. Bench-measured 2.0–2.6× per decode at V40, which is
 //    CPU the phone doesn't burn: the custom build exists for throughput AND
 //    thermals.
-//    Tracked misses stay cheap. The scheduler requests a bounded detector crop
-//    only after repeated misses, so one bad frame cannot start a fallback storm.
+//    Any tracked miss falls back to readFull on the same buffer, which also
+//    re-anchors the quad. Tracked is opportunistic, never load-bearing.
 
 import wasmUrl from "./wasm-url";
+import { shouldRunFullDecode } from "../shared/decode-policy";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec/decimen_codec.js";
 
 const ready: Promise<DecimenModule> = DecimenCodec({
@@ -38,8 +39,8 @@ function boundsOf(p: DecimenQuad, ox: number, oy: number) {
 }
 
 /** The full quad in capture coordinates — the tracked path's anchor. */
-function shifted(p: DecimenQuad, ox: number, oy: number, scaleX = 1, scaleY = 1): DecimenQuad {
-  const s = (pt: { x: number; y: number }) => ({ x: pt.x * scaleX + ox, y: pt.y * scaleY + oy });
+function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
+  const s = (pt: { x: number; y: number }) => ({ x: pt.x + ox, y: pt.y + oy });
   return {
     topLeft: s(p.topLeft),
     topRight: s(p.topRight),
@@ -106,18 +107,14 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, thorough = true, reacquire = false, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
     h?: number;
     ox?: number;
     oy?: number;
-    scaleX?: number;
-    scaleY?: number;
     full?: boolean;
-    thorough?: boolean;
-    reacquire?: boolean;
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
@@ -130,7 +127,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     const pw = w;
     const ph = h;
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
-    const sightings: { x: number; y: number; w: number; h: number; quad?: DecimenQuad; modules?: number }[] = [];
+    const sightings: object[] = [];
 
     if (!full && tracks?.length) {
       batchBuffers(zx, tracks.length);
@@ -173,15 +170,43 @@ ctx.onmessage = async (e: MessageEvent) => {
           tracked: true, crc32: track.crc32,
         });
       }
-      // Never run the generic detector over the union of several neighboring
-      // tracks. That recreates the dense finder-pattern ambiguity tracking was
-      // designed to avoid, and its error quad can pull the whole lattice onto
-      // the wrong QR. Per-slot native detector crops are scheduled after three
-      // misses; those contain exactly one expected symbol and can safely
-      // re-anchor the grid even before payload decoding succeeds.
+      // The batched fast path is opportunistic, just like readTracked below.
+      // If every known transform misses, run stock acquisition on the same
+      // pixels instead of reporting a false hard failure. This also discovers
+      // tracks omitted from an incomplete grid lock.
+      let fallbackAttempted = false;
+      if (symbols.length === 0) {
+        fallbackAttempted = true;
+        const appendFallback = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
+          try {
+            for (let i = 0; i < vec.size(); i++) {
+              const result = vec.get(i);
+              if (result.valid && result.bytes.length > 0) {
+                symbols.push({
+                  bytes: result.bytes,
+                  box: boundsOf(result.position, ox, oy),
+                  quad: shifted(result.position, ox, oy),
+                  modules: result.modules,
+                  tracked: false,
+                });
+              } else if (includeErrors) {
+                const box = boundsOf(result.position, ox, oy);
+                if (box.w > 0 && box.h > 0) sightings.push(box);
+              }
+            }
+          } finally {
+            vec.delete();
+          }
+        };
+        // A lattice crop can hold all 15 dense symbols. Its tracks already
+        // provide every position, so error-only detector results add no
+        // information. Avoiding that second exhaustive pass keeps a complete
+        // motion miss cheap enough for the next fresh camera frame to relock.
+        appendFallback(zx.readFull(ptr, pw, ph, true, 16, false), false);
+      }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
-        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted: false,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
         latencyMs: performance.now() - startedAt,
       });
       return;
@@ -211,7 +236,7 @@ ctx.onmessage = async (e: MessageEvent) => {
       }
     }
 
-    if (full || reacquire || (trackedAttempted && !trackedHit)) {
+    if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       fallbackAttempted = !full;
       const appendResults = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
         try {
@@ -220,20 +245,16 @@ ctx.onmessage = async (e: MessageEvent) => {
             if (r.valid && r.bytes.length > 0) {
               symbols.push({
                 bytes: r.bytes,
-                box: boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0),
-                quad: shifted(r.position, ox, oy, scaleX, scaleY),
+                box: boundsOf(r.position, ox, oy),
+                quad: shifted(r.position, ox, oy),
                 modules: r.modules,
                 tracked: false,
               });
             } else if (includeErrors) {
               // A symbol zxing DETECTED but could not decode (glare or noise
-              // past ECC) still supplies the geometry needed to move an
-              // already-identified lattice before data decoding catches up.
-              const resultQuad = shifted(r.position, ox, oy, scaleX, scaleY);
-              const box = boundsOf(resultQuad, 0, 0);
-              if (box.w > 0 && box.h > 0) sightings.push({
-                ...box, quad: resultQuad, modules: r.modules || undefined,
-              });
+              // past ECC) still supplies a useful crop position.
+              const box = boundsOf(r.position, ox, oy);
+              if (box.w > 0 && box.h > 0) sightings.push(box);
             }
           }
         } finally {
@@ -241,20 +262,19 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       };
       if (full) {
-        // Acquisition needs one packet, not an inventory of the whole dense
-        // lattice: that packet declares every slot. A high multi-symbol limit
-        // makes ZXing combine finder patterns across neighboring QRs and can
-        // turn an obvious frame into seconds of false candidates. Try the
-        // cheap single-symbol reader first, then the exhaustive variant only
-        // when this is the deliberately infrequent thorough job.
-        appendResults(zx.readFull(ptr, pw, ph, false, 1, false), false);
-        if (symbols.length === 0 && thorough) {
-          appendResults(zx.readFull(ptr, pw, ph, true, 1, false), false);
-        }
+        // Error results count against ZXing's symbol limit. Dense neighboring
+        // QRs can produce dozens of plausible finder triples, previously
+        // filling all 16 entries before obvious valid codes were considered.
+        // Decode valid symbols without error noise first. Only a total miss
+        // pays for a high-capacity detector pass to seed recovery crops.
+        appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
+        // Acquisition only needs a plausible seed crop, not every bad finder
+        // triple in a dense frame. Bounding error output prevents a no-decode
+        // capture from monopolizing an older phone's worker for seconds.
+        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
       } else {
-        // A local detector crop may decode a packet, but error positions are
-        // not correspondence evidence and can never move the lattice.
-        appendResults(zx.readFull(ptr, pw, ph, true, 1, false), false);
+        // Crop fallback stays in the cheapest detector configuration.
+        appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
       }
     }
     ctx.postMessage({

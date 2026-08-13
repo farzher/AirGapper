@@ -19,7 +19,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="%SITE_URL%?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v%VERSION%</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.1.34</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -79,9 +79,10 @@
           <summary>Settings <span class="settings-actual" id="camera-actual"></span></summary>
           <div class="row">
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
+            <label id="camera-fps-control"><span>FPS</span><select id="camera-fps"></select></label>
             <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
-            <label id="camera-exposure-control" class="exposure-auto" hidden><span>Exposure</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
-            <label id="camera-exposure-manual" class="exposure-manual" hidden><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" /><output id="camera-exposure-value"></output></label>
+            <label id="camera-torch-control" hidden><span>Torch</span><input id="camera-torch" type="checkbox" /></label>
+            <label id="camera-exposure-control" hidden><span>Exposure</span><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" /></label>
             <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button>
           </div>
         </details>
@@ -89,10 +90,10 @@
           <div class="transfer-progress" id="progress-status">
             <div class="transfer-summary">
               <div class="progress-amount"><strong id="progress-label">0%</strong></div>
-              <div class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></div>
+              <div class="speed-feedback" id="speed-feedback"><strong id="m-rate">— KB/s</strong></div>
             </div>
             <div class="progress" id="progress" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
-            <div class="transfer-meta"><span class="transfer-estimate"><span id="transfer-size-label"></span><span id="eta-label"></span></span><div class="pipeline-metrics" id="pipeline-metrics"><span id="m-limit"></span><span><strong id="m-cap">— fps</strong></span><span><strong id="m-dec">— QR/s</strong></span></div></div>
+            <div class="transfer-meta"><span class="transfer-estimate"><span id="eta-label">Waiting for QR</span><span id="transfer-size-label"></span></span><div class="pipeline-metrics" id="pipeline-metrics"><span id="m-limit"></span><span><strong id="m-cap">— fps</strong></span><span><strong id="m-dec">— QR/s</strong></span></div></div>
           </div>
         </section>
       </section>

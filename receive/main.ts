@@ -7,8 +7,8 @@
 //   the next one — a generation counter prevents zombie capture loops.
 // - Progress must track frames COLLECTED: LT peeling back-loads its solve
 //   cascade, so blocks-solved looks stalled and then teleports to done.
-// - Android Chrome exposes focusMode / frameRate.max through getCapabilities;
-//   iOS Safari exposes neither. shared/platform.ts owns
+// - Android Chrome exposes torch / focusMode / frameRate.max through
+//   getCapabilities; iOS Safari exposes none of them. shared/platform.ts owns
 //   the probing, so everything here is capability-gated rather than UA-gated.
 
 import { LTDecoder } from "../shared/fountain";
@@ -19,7 +19,7 @@ import {
   expectedFountainOverhead,
   formatDuration,
 } from "../shared/progress";
-import { createDecodeWorker, usesSimpleDecodeWorker } from "./worker-factory";
+import { createDecodeWorker } from "./worker-factory";
 import { GridLattice, type GridSnapshot } from "./grid-lattice";
 import {
   DecodeWorkerPool,
@@ -45,23 +45,29 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
-  isLegacyAndroidApp,
+  nativeCameraCapabilities,
   saveFileOnAndroid,
-  showScanCaptureMenuOnAndroid,
+  setNativeExposure,
+  setNativePreviewBounds,
+  setNativeTorch,
+  startNativeCamera,
+  stopNativeCamera,
+  type NativeCameraMode,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraResolutionLabel = document.getElementById("camera-resolution-label")!;
+const cameraFpsControl = document.getElementById("camera-fps-control")!;
+const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
+const cameraTorchControl = document.getElementById("camera-torch-control")!;
+const cameraTorch = document.getElementById("camera-torch") as HTMLInputElement;
 const cameraExposureControl = document.getElementById("camera-exposure-control")!;
-const cameraExposureAuto = document.getElementById("camera-exposure-auto") as HTMLInputElement;
-const cameraExposureManual = document.getElementById("camera-exposure-manual")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
-const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
@@ -72,6 +78,8 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
+const showDetectionOverlay = !isAndroidApp();
+overlay.hidden = !showDetectionOverlay;
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
@@ -84,13 +92,10 @@ const metricsEl = document.getElementById("metrics")!;
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
-const legacyAndroidApp = isLegacyAndroidApp();
-document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-// A 32-bit WebView shares its limited renderer address space with the live
-// camera. Starting multiple WASM decoders as that surface is allocated can
-// kill the process on older phones; modern 64-bit devices keep the fast pool.
-const autoWorkerCount = legacyAndroidApp
+// Leave cores for camera delivery, compositing, and the main thread. More than
+// four independent WASM instances has only increased contention on phones.
+const autoWorkerCount = isAndroidApp()
   ? 1
   : Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
@@ -99,7 +104,10 @@ for (let count = 1; count <= hardwareThreadCount; count++) {
   decodeWorkers.add(new Option(String(count), String(count)));
 }
 function selectedWorkerCount(): number {
-  if (legacyAndroidApp) return 1;
+  // A 32-bit Android WebView shares a tight renderer address space with the
+  // live camera. Keep one WASM decoder there instead of starting several at
+  // the exact moment the camera surface is allocated.
+  if (isAndroidApp()) return 1;
   return decodeWorkers.value === "auto"
     ? autoWorkerCount
     : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
@@ -113,20 +121,23 @@ const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
 ] as const;
+const STANDARD_FPS = [24, 30, 60, 90, 120, 240, 480];
+const nativeCapabilities = isAndroidApp() ? nativeCameraCapabilities() : undefined;
+const advertisedNativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
+const standardSizeKeys = new Set<string>(STANDARD_RESOLUTIONS.map(([width, height]) => `${width}x${height}`));
+// Camera2 reports many implementation-detail sizes (for example 720×540 and
+// 144×176). Receiver choices stay useful: standard video sizes plus any
+// explicitly advertised constrained-high-speed size.
+const nativeModes = advertisedNativeModes.filter((mode) =>
+  standardSizeKeys.has(`${mode.width}x${mode.height}`) || mode.highSpeed);
+let backend: "native" | "webview" | "browser" = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
+let nativeFallbackUsed = false;
+let activeNativeFps = 0;
+let selectedNativeMode: NativeCameraMode | undefined;
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
-let automaticExposure = true;
-let preferredExposureTime: number | undefined;
-let exposureApplyGeneration = 0;
-let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
-function formatCameraSize(width: number, height: number): string {
-  return `${Math.max(width, height)}×${Math.min(width, height)}`;
-}
-function formatCameraMode(width: number, height: number, fps: number): string {
-  return `${formatCameraSize(width, height)} · ${fps} fps`;
-}
 const browserModeResults = loadBrowserModeResults();
 let browserModes: BrowserMode[] = [];
 let automaticBrowserMode: BrowserMode | undefined;
@@ -141,61 +152,105 @@ function saveBrowserModeResult(key: string, supported: boolean): void {
   catch { /* Validation still applies for this session. */ }
 }
 
+function resolutionKey(width: number, height: number): string { return `${width}x${height}`; }
+function nativeModesForResolution(value = cameraResolution.value): NativeCameraMode[] {
+  return nativeModes.filter((mode) => resolutionKey(mode.width, mode.height) === value);
+}
+function populateFpsOptions(preferred?: string): void {
+  if (nativeModes.length) {
+    const candidates = nativeModesForResolution().sort((a, b) => a.fpsMax - b.fpsMax || a.fpsMin - b.fpsMin);
+    const modes = [...new Map(candidates.map((mode) => [`${mode.fpsMax}:${mode.highSpeed}`, mode])).values()];
+    cameraFps.replaceChildren(...modes.map((mode) => new Option(
+      `${mode.fpsMin === mode.fpsMax ? mode.fpsMax : `${mode.fpsMin}–${mode.fpsMax}`}${mode.highSpeed ? " · High speed" : ""}`,
+      mode.key,
+    )));
+    const wanted = modes.find((mode) => mode.key === preferred)
+      ?? modes.find((mode) => mode.fpsMax === 60 && !mode.highSpeed)
+      ?? [...modes].reverse().find((mode) => !mode.highSpeed)
+      ?? modes[modes.length - 1];
+    if (wanted) cameraFps.value = wanted.key;
+    return;
+  }
+  cameraFps.replaceChildren(...STANDARD_FPS.map((fps) => new Option(String(fps), String(fps))));
+  cameraFps.value = preferred && STANDARD_FPS.includes(Number(preferred) as (typeof STANDARD_FPS)[number])
+    ? preferred : "60";
+}
 function standardBrowserModes(): BrowserMode[] {
   return STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
-    key: `${width}x${height}@${fps}`, width, height, fps, label: formatCameraMode(width, height, fps),
+    key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
   }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
 }
 function populateCameraOptions(): void {
-  browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
-  cameraResolution.replaceChildren(
-    new Option("Auto", "auto"),
-    ...browserModes.map((mode) => new Option(
-      `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
-    )),
-  );
-  cameraResolution.value = "auto";
+  if (!nativeModes.length) {
+    browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
+    cameraResolution.replaceChildren(
+      new Option("Auto", "auto"),
+      ...browserModes.map((mode) => new Option(
+        `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
+      )),
+    );
+    cameraFps.replaceChildren(new Option("Auto", "auto"));
+    cameraResolution.value = "auto";
+    return;
+  }
+  const sizes = [...new Map(nativeModes.map((mode) => [resolutionKey(mode.width, mode.height), [mode.width, mode.height] as const])).values()]
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  cameraResolution.replaceChildren(...sizes.map(([width, height]) => {
+    const maxFps = Math.max(...nativeModes.filter((mode) => mode.width === width && mode.height === height).map((mode) => mode.fpsMax), 0);
+    return new Option(`${width}×${height}${maxFps > 60 ? ` · up to ${maxFps} fps` : ""}`, resolutionKey(width, height));
+  }));
+  const safeDefault = [...sizes].reverse().find(([w, h]) => w * h <= 1280 * 960) ?? sizes[0]!;
+  cameraResolution.value = sizes.some(([w, h]) => w === 1280 && h === 960)
+    ? "1280x960" : resolutionKey(safeDefault[0], safeDefault[1]);
+  populateFpsOptions();
 }
 function restoreCameraSettings(): void {
   try {
-    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
-      resolution?: string; workers?: string; automaticExposure?: boolean; exposureTime?: number;
-    } | null;
+    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; fps?: string; workers?: string } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
+      if (nativeModes.length) populateFpsOptions(saved.fps);
     }
     const savedWorkers = Number(saved.workers);
     if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) decodeWorkers.value = saved.workers!;
-    if (typeof saved.automaticExposure === "boolean") automaticExposure = saved.automaticExposure;
-    if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
-  try {
-    localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
-      resolution: cameraResolution.value,
-      workers: decodeWorkers.value,
-      automaticExposure,
-      exposureTime: preferredExposureTime,
-    }));
-  } catch { /* Storage is optional. */ }
+  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, fps: cameraFps.value, workers: decodeWorkers.value })); }
+  catch { /* Storage is optional. */ }
 }
 function readRequestedCameraSettings(): void {
+  selectedNativeMode = nativeModes.find((mode) => mode.key === cameraFps.value);
   const browserMode = browserModes.find((mode) => mode.key === cameraResolution.value);
-  if (!browserMode) return;
-  requestedWidth = browserMode.width;
-  requestedHeight = browserMode.height;
-  requestedFps = browserMode.fps;
+  if (browserMode) {
+    requestedWidth = browserMode.width;
+    requestedHeight = browserMode.height;
+    requestedFps = browserMode.fps;
+  } else if (cameraResolution.value !== "auto") {
+    [requestedWidth, requestedHeight] = cameraResolution.value.split("x").map(Number) as [number, number];
+    requestedFps = selectedNativeMode?.fpsMax ?? Number(cameraFps.value);
+  }
+  cameraTorchControl.hidden = !selectedNativeMode?.torch;
+  cameraExposureControl.hidden = !selectedNativeMode || selectedNativeMode.exposureMin === selectedNativeMode.exposureMax;
+  if (selectedNativeMode) {
+    cameraExposure.min = String(selectedNativeMode.exposureMin);
+    cameraExposure.max = String(selectedNativeMode.exposureMax);
+    cameraExposure.value = String(Math.max(selectedNativeMode.exposureMin, Math.min(selectedNativeMode.exposureMax, Number(cameraExposure.value))));
+  }
 }
 function showRequestedCameraSettings(): void {
   readRequestedCameraSettings();
-  cameraActual.textContent = cameraResolution.value === "auto"
-    ? "Auto" : formatCameraMode(requestedWidth, requestedHeight, requestedFps);
-  cameraResolutionLabel.textContent = "Mode";
-  captureScanBtn.hidden = false;
-  decodeWorkersControl.hidden = legacyAndroidApp;
-  video.hidden = false;
+  const speed = selectedNativeMode?.highSpeed ? " · High speed" : "";
+  const requested = cameraResolution.value === "auto" ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps${speed}`;
+  cameraActual.textContent = requested;
+  cameraResolutionLabel.textContent = backend === "native" ? "Resolution" : "Mode";
+  cameraFpsControl.hidden = backend !== "native";
+  captureScanBtn.hidden = backend === "native";
+  decodeWorkersControl.hidden = backend === "native";
+  cameraTorchControl.hidden = backend === "native" || !selectedNativeMode?.torch;
+  cameraExposureControl.hidden = true;
+  video.hidden = backend === "native";
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
@@ -233,12 +288,12 @@ const pool = new DecodeWorkerPool(
   // Heavily gated in noteRegion (refresh-only on matches, size-checked on
   // creation) because failed quads are often junk — but a plausible one lets
   // the crop path go decode what the full frame could not.
-  (sighting) => {
-    // Detector errors may seed one cold native crop, but only a decoded,
-    // protocol-valid packet is allowed to move an established lattice.
-    if (!gridLattice.active) noteRegion(sighting, performance.now(), false);
+  (box) => {
+    // Detector-only geometry is never lattice evidence. It may seed cold
+    // acquisition, but is ignored once predicted slots exist.
+    if (!gridLattice.active) noteRegion(box, performance.now(), false);
   },
-  () => undefined,
+  () => trackedAttempts++,
   (id, completion) => noteDecodeCompleted(id, completion),
 );
 const captureTimes: number[] = [];
@@ -247,11 +302,6 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
-const scanSubmissionTimes: number[] = [];
-// Camera frames that actually reached the decoder. This is the useful upper
-// bound for sender fps; camera callbacks alone can run much faster while the
-// worker pool is saturated.
-const scanFrameTimes: number[] = [];
 const scanCompletionTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
@@ -264,10 +314,6 @@ const usefulFrameTimes: number[] = [];
 let totalCaptures = 0;
 let totalDecodes = 0;
 let fullScans = 0;
-let cheapFullScans = 0;
-let thoroughFullScans = 0;
-let localReacquisitions = 0;
-let globalReacquisitions = 0;
 let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
 let cropsSubmitted = 0;
@@ -349,17 +395,6 @@ let lastDecodedRegionSize = 0;
 // invalidate stale tracked geometry without clobbering a newer worker's hit.
 type CropAttempt = { region: Region; quad?: SymbolQuad };
 const cropAttempts = new Map<number, CropAttempt[]>();
-const scanCapturedAt = new Map<number, number>();
-const localReacquireIds = new Set<number>();
-
-type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; accepted: number };
-const scanOutcomes = new Map<number, ScanOutcome>();
-function noteScanOutcome(scanId: number | undefined, kind: keyof ScanOutcome): void {
-  if (scanId === undefined) return;
-  const outcome = scanOutcomes.get(scanId) ?? { rejected: 0, stale: 0, otherStream: 0, duplicate: 0, accepted: 0 };
-  outcome[kind]++;
-  scanOutcomes.set(scanId, outcome);
-}
 function regionInflightCount(region: Region): number {
   let count = 0;
   for (const attempts of cropAttempts.values()) {
@@ -376,17 +411,12 @@ let fullDetectorMisses = 0;
 let fullSightings = 0;
 let trackedMissFallbacks = 0;
 let decodeExceptions = 0;
-let lastDecodeError = "";
 let regionExpiries = 0;
 let regionCreations = 0;
 let trackingInvalidations = 0;
-let submittedJobs = 0;
 let completedJobs = 0;
 let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
-let fullLatencyTotalMs = 0;
-let fullLatencyCount = 0;
-let lastFullLatencyMs = 0;
 let lastDistinctArrivalAt = 0;
 // Any valid packet refreshes this, including a duplicate. It gates deliberate
 // sender/layout handover without letting stale pipelined replies steal a live
@@ -436,26 +466,13 @@ function noteSequence(region: Region, seq: number, now: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
-  const fullJob = fullScanJobs.get(id);
-  fullScanIds.delete(id);
-  fullScanJobs.delete(id);
-  localReacquireIds.delete(id);
-  scanCapturedAt.delete(id);
   scanCompletionTimes.push(performance.now());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
-  if (fullJob) {
-    lastFullLatencyMs = completion.latencyMs;
-    fullLatencyTotalMs += completion.latencyMs;
-    fullLatencyCount++;
-  }
   if (completion.error) {
     decodeExceptions++;
-    lastDecodeError = completion.error;
     notePipelineEvent("decode-exception", decodeExceptions);
-  } else if (completion.symbolCount > 0) {
-    lastDecodeError = "";
   }
   if (completion.full) {
     fullSightings += completion.sightingCount;
@@ -468,11 +485,9 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   }
 
   finishScanCapture(id, completion);
-  scanOutcomes.delete(id);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts) return;
-  if (completion.trackedAttempted) trackedAttempts += attempts.length;
   // Attribute misses per slot. In a multi-track reply, one successful QR must
   // not hide every missing neighbor or move/contract their independent ROIs.
   for (const attempt of attempts) {
@@ -488,10 +503,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     // quad. Scan ids, unlike object identity, distinguish a genuine newer hit
     // from that routine geometry refresh, so missing slots actually age into
     // expanded-crop and reacquisition states.
-    if (!hit && (region.lastHitScanId ?? -1) <= id) {
-      region.consecutiveMisses++;
-      if (region.consecutiveMisses >= 3) region.decoded = false;
-    }
+    if (!hit && (region.lastHitScanId ?? -1) <= id) region.consecutiveMisses++;
   }
 }
 
@@ -508,18 +520,19 @@ const SIGHTING_REGION_TTL_MS = 3000;
 // Keep acquisition sparse enough not to disrupt preview, but frequent enough
 // that one early decode cannot masquerade as the complete layout.
 const FULL_SCAN_INTERVAL_MS = 1500;
+// A grid sender shows several codes; when fewer regions are live than the
+// stream has shown simultaneously, one of them is MISSING — glare, focus, a
+// borderline density. Crops can't find it (they only look where codes were),
+// so rescan the whole frame hard until it's back. The relaxed cadence would
+// leave a missing code dark for 1.5 s at a time, which on a 2-code stream
+// halves throughput and single-threads the fountain's systematic sweep.
+const FULL_SCAN_DEGRADED_MS = 250;
 // With no lock at all the receiver used to full-scan EVERY capture — sixty
 // 1.2 MP tryHarder decodes per second for the whole aiming phase, the app's
 // hottest loop (fullScans regularly passed 100 before the first timeline
 // sample). Ten per second keeps acquisition feeling instant — ≤100 ms added
 // to first lock — and cuts the aiming burn ~85%.
 const ACQUISITION_SCAN_MS = 100;
-const DEGRADED_SCAN_INTERVAL_MS = 250;
-const ACQUISITION_REDUCED_EDGE = 960;
-// Most cold frames contain no QR. Frequent scans use ZXing's cheap single-pass
-// detector; this cadence retains the exhaustive try-harder + sighting pass for
-// difficult first lock without paying for it on every miss.
-const THOROUGH_SCAN_INTERVAL_MS = 1800;
 // The high-water mark ages out: a sender restarted with a smaller layout
 // would otherwise keep this receiver rescanning for codes that no longer
 // exist until the transfer ends.
@@ -529,12 +542,6 @@ const MAX_REGIONS = 15;
 const REGION_PAD = 0.35;
 let cropRotate = 0;
 let lastFullScan = 0;
-let lastThoroughFullScan = -Infinity;
-// Full detector jobs are tracked separately from cheap crop work. Only one may
-// run at once so detector work cannot contend with camera delivery and crops.
-const fullScanIds = new Set<number>();
-const fullScanJobs = new Map<number, { thorough: boolean; native: boolean; reacquire: boolean }>();
-let currentScanningState: ScanningState = "SEARCH";
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
 
@@ -570,18 +577,16 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       // Half-life blend of per-decode displacement: steady hands decay it to
       // zero, a moving hand keeps the crop padding wide (see captureFrame).
       r.drift = 0.5 * (r.drift ?? 0) + 0.5 * Math.hypot(dx, dy);
-      const geometryIsFresh = info?.scanId === undefined || info.scanId >= (r.lastHitScanId ?? -1);
-      if (geometryIsFresh) Object.assign(r, box);
-      r.seen = now;
+      Object.assign(r, box, { seen: now });
       r.decoded = true;
       r.decodedSeen = now;
       r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
-      if (geometryIsFresh && info?.quad) r.quad = info.quad;
-      if (geometryIsFresh && info?.modules) r.dim = info.modules;
-      if (geometryIsFresh && info?.crc32 !== undefined) r.crc32 = info.crc32;
+      if (info?.quad) r.quad = info.quad;
+      if (info?.modules) r.dim = info.modules;
+      if (info?.crc32 !== undefined) r.crc32 = info.crc32;
       r.consecutiveMisses = 0;
-      if (geometryIsFresh && info?.scanId !== undefined) r.lastHitScanId = info.scanId;
+      if (info?.scanId !== undefined) r.lastHitScanId = info.scanId;
       return;
     }
   }
@@ -593,21 +598,9 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
     // acquisition then, and phantom regions would only starve them.
     const reference = regions.find((r) => r.decoded);
     const referenceSize = reference ? Math.max(reference.w, reference.h) : lastDecodedRegionSize;
-    if (referenceSize) {
-      const ratio = Math.max(box.w, box.h) / referenceSize;
-      if (ratio < 0.5 || ratio > 2) return;
-    } else {
-      // A reduced acquisition scan may locate geometry without enough pixels to
-      // decode it. Retain one plausible cold candidate for a native crop, but
-      // reject the small square error boxes produced by individual finder
-      // patterns in a dense lattice—they are not QR bounds and send the crop
-      // path to exactly the wrong place and scale.
-      const coldMinSize = Math.max(24, Math.min(video.videoWidth, video.videoHeight) * 0.06);
-      if (box.w < coldMinSize || box.h < coldMinSize ||
-          Math.max(box.w / box.h, box.h / box.w) > 2.25 ||
-          box.w * box.h > video.videoWidth * video.videoHeight * 0.8) return;
-      if (regions.some((region) => !region.decoded)) return;
-    }
+    if (!referenceSize) return;
+    const ratio = Math.max(box.w, box.h) / referenceSize;
+    if (ratio < 0.5 || ratio > 2) return;
     // Error-result quads wobble and split while a display transition is in
     // flight. Never draw more probationary regions than the number of codes
     // currently missing from the layout high-water mark; for a single sender
@@ -707,7 +700,7 @@ function syncGrid(snapshot: GridSnapshot, now: number, decodedSlot?: number, inf
       region.decodeConfidence = 1;
       region.decodeSuccesses++;
       region.crc32 = info?.crc32 ?? true;
-      if (info?.scanId !== undefined) region.lastHitScanId = Math.max(region.lastHitScanId ?? -1, info.scanId);
+      if (info?.scanId !== undefined) region.lastHitScanId = info.scanId;
       decodedRegion = region;
     }
   }
@@ -782,81 +775,36 @@ function gridDebugSummary(): string {
  *  negotiate a different shape, so metadata replaces that estimate with the
  *  stream's real dimensions. With the aspect matched, contain shows every
  *  capture pixel edge to edge. */
+function syncNativePreviewBounds(): void {
+  if (backend === "native") setNativePreviewBounds(cameraBox.getBoundingClientRect());
+}
 function syncPreviewAspect() {
   if (video.videoWidth && video.videoHeight) cameraBox.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+  syncNativePreviewBounds();
 }
 function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
   const active = track.getSettings();
-  const size = active.width && active.height ? formatCameraSize(active.width, active.height) : "Camera active";
+  const size = active.width && active.height ? `${active.width}×${active.height}` : "Camera active";
   cameraActual.textContent = `${prefix ? `${prefix} · ` : ""}${size}${active.frameRate ? ` · ${Math.round(active.frameRate)} fps` : ""}`;
 }
 function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
   return (a.width === b.width && a.height === b.height) || (a.width === b.height && a.height === b.width);
 }
-function showExposureTime(value: number): void {
-  cameraExposureValue.value = `${Number(value.toPrecision(3))} ms`;
-}
-function syncExposureControls(): void {
-  cameraExposureAuto.checked = automaticExposure;
-  cameraExposureManual.hidden = automaticExposure || cameraExposureControl.hidden;
-}
-async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
-  const generation = ++exposureApplyGeneration;
-  if (automaticExposure) {
-    await applyAdvancedConstraint(track, { exposureMode: "continuous" });
-    return;
-  }
-  const requested = preferredExposureTime;
-  if (requested === undefined) return;
-
-  // Several Android camera providers silently ignore a time bundled with the
-  // mode switch. Put the camera in manual first, then send the value by itself.
-  await applyAdvancedConstraint(track, { exposureMode: "manual" });
-  await applyAdvancedConstraint(track, { exposureTime: requested });
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-
-  type ExposureSettings = MediaTrackSettings & { exposureMode?: string; exposureTime?: number };
-  let active = track.getSettings() as ExposureSettings;
-  const step = Number(cameraExposure.step) || 0.1;
-  if ((active.exposureMode && active.exposureMode !== "manual") ||
-      (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
-    await applyAdvancedConstraint(track, { exposureMode: "manual", exposureTime: requested });
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    if (generation !== exposureApplyGeneration) return;
-    active = track.getSettings() as ExposureSettings;
-  }
-  if (active.exposureTime !== undefined) {
-    preferredExposureTime = active.exposureTime;
-    cameraExposure.value = String(active.exposureTime);
-    showExposureTime(active.exposureTime);
-    saveCameraSettings();
-  }
-}
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
-    exposureMode?: string[];
-    exposureTime?: { min: number; max: number; step?: number };
+    torch?: boolean;
+    exposureCompensation?: { min: number; max: number; step?: number };
   }) | undefined;
   cameraResolutionLabel.textContent = "Mode";
+  cameraFpsControl.hidden = true;
   if (!caps?.width || !caps.height) return;
-  const hasExposureModes = caps.exposureMode?.includes("continuous") && caps.exposureMode.includes("manual");
-  const exposure = hasExposureModes ? caps.exposureTime : undefined;
-  const exposureMin = exposure ? Math.max(1, exposure.min) : 1;
-  const exposureMax = exposure ? Math.min(300, exposure.max) : 0;
-  cameraExposureControl.hidden = !exposure || exposureMin >= exposureMax;
-  if (exposure && exposureMin < exposureMax) {
-    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime ?? 100));
-    preferredExposureTime = current;
-    cameraExposure.min = String(exposureMin);
-    cameraExposure.max = String(exposureMax);
-    cameraExposure.step = String(Math.max(exposure.step ?? 0, 0.1));
-    cameraExposure.value = String(current);
-    showExposureTime(current);
-    syncExposureControls();
-    void applyExposureSetting(track);
-  } else {
-    cameraExposureManual.hidden = true;
+  cameraTorchControl.hidden = caps.torch !== true;
+  cameraExposureControl.hidden = !caps.exposureCompensation;
+  if (caps.exposureCompensation) {
+    cameraExposure.min = String(caps.exposureCompensation.min);
+    cameraExposure.max = String(caps.exposureCompensation.max);
+    cameraExposure.step = String(caps.exposureCompensation.step ?? 1);
+    cameraExposure.value = "0";
   }
   const widthMin = caps.width.min ?? 0;
   const widthMax = caps.width.max ?? Infinity;
@@ -869,7 +817,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     const fps = Math.round(active.frameRate ?? 30);
     automaticBrowserMode = {
       key: "auto", width: active.width, height: active.height, fps,
-      label: formatCameraMode(active.width, active.height, fps),
+      label: `${active.width}×${active.height} · ${fps} fps`,
     };
   }
   browserModes = standardBrowserModes().filter((mode) =>
@@ -877,24 +825,12 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false &&
     !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
   const prior = cameraResolution.value;
-  const options = browserModes.map((mode) => ({
-    width: mode.width,
-    height: mode.height,
-    fps: mode.fps,
-    option: new Option(`${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key),
-  }));
-  if (automaticBrowserMode) {
-    options.push({
-      width: automaticBrowserMode.width,
-      height: automaticBrowserMode.height,
-      fps: automaticBrowserMode.fps,
-      option: new Option(`${automaticBrowserMode.label} · Auto`, "auto"),
-    });
-    options.sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
-  } else {
-    options.unshift({ width: 0, height: 0, fps: 0, option: new Option("Auto", "auto") });
-  }
-  cameraResolution.replaceChildren(...options.map(({ option }) => option));
+  cameraResolution.replaceChildren(
+    new Option(`${automaticBrowserMode ? `${automaticBrowserMode.label} · ` : ""}Auto`, "auto"),
+    ...browserModes.map((mode) => new Option(
+      `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
+    )),
+  );
   cameraResolution.value = browserModes.some((mode) => mode.key === prior) ? prior : "auto";
   readRequestedCameraSettings();
   saveCameraSettings();
@@ -947,16 +883,14 @@ function hasDensityHeadroom(region: Region): boolean {
 function captureQualityColor(region: Region, rate: number): string {
   const headroom = hasDensityHeadroom(region);
   // Separate enter/leave thresholds keep an established indication from
-  // flickering on one miss. Red is reserved for near-total capture failure;
-  // sustained 95% capture gets its own unmistakably bright blue.
+  // flickering on one miss while still allowing a serious gap to fall quickly.
   let level = 0;
-  if ((rate >= 0.95 || (region.qualityLevel === 5 && rate >= 0.9)) && headroom) level = 5;
-  else if ((rate >= 0.8 || (region.qualityLevel >= 4 && rate >= 0.72)) && headroom) level = 4;
-  else if (rate >= 0.6 || (region.qualityLevel >= 3 && rate >= 0.52)) level = 3;
-  else if (rate >= 0.35 || (region.qualityLevel >= 2 && rate >= 0.28)) level = 2;
-  else if (rate >= 0.12 || (region.qualityLevel >= 1 && rate >= 0.08)) level = 1;
+  if ((rate >= 0.95 || (region.qualityLevel === 4 && rate >= 0.9)) && headroom) level = 4;
+  else if (rate >= 0.9 || (region.qualityLevel >= 3 && rate >= 0.84)) level = 3;
+  else if (rate >= 0.75 || (region.qualityLevel >= 2 && rate >= 0.68)) level = 2;
+  else if (rate >= 0.4 || (region.qualityLevel >= 1 && rate >= 0.33)) level = 1;
   region.qualityLevel = level;
-  return ["#ff665c", "#ffb23e", "#d5d936", "#35d66f", "#42a5ff", "#00efff"][level]!;
+  return ["#ff665c", "#ffb23e", "#a9c93d", "#35d66f", "#42e8ff"][level]!;
 }
 
 /** Grid-layout reading order: rows first, columns within a row. Two boxes are
@@ -1038,9 +972,16 @@ function drawOverlay(now: number) {
   overlayCtx.setLineDash([]);
 }
 startBtn.onclick = () => void start();
-const changeCameraSettings = async () => {
+const changeCameraSettings = async (resolutionChanged = false) => {
+  if (resolutionChanged && backend === "native") populateFpsOptions();
   showRequestedCameraSettings();
   saveCameraSettings();
+  if (backend === "native" && !done) {
+    stopNativeCamera();
+    syncNativePreviewBounds();
+    startNativeCamera(selectedNativeMode?.key ?? "");
+    return;
+  }
   const track = stream?.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
@@ -1065,51 +1006,32 @@ const changeCameraSettings = async () => {
     saveBrowserModeResult(attempted.key, true);
     const option = [...cameraResolution.options].find((candidate) => candidate.value === attempted.key);
     if (option) option.textContent = attempted.label;
-    populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
     cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)?.remove();
     cameraResolution.value = "auto";
-    populateBrowserCapabilities(track);
     showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
     saveCameraSettings();
   }
 };
-cameraResolution.addEventListener("change", () => void changeCameraSettings());
-cameraExposureAuto.addEventListener("change", () => {
-  automaticExposure = cameraExposureAuto.checked;
-  clearTimeout(exposureApplyTimer);
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream?.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-function queueExposureChange(immediate = false): void {
-  preferredExposureTime = Number(cameraExposure.value);
-  showExposureTime(preferredExposureTime);
-  saveCameraSettings();
-  clearTimeout(exposureApplyTimer);
-  const apply = () => {
+cameraResolution.addEventListener("change", () => void changeCameraSettings(true));
+cameraFps.addEventListener("change", () => void changeCameraSettings());
+cameraTorch.addEventListener("change", () => {
+  if (backend === "native") setNativeTorch(cameraTorch.checked);
+  else {
     const track = stream?.getVideoTracks()[0];
-    if (track && !automaticExposure) void applyExposureSetting(track);
-  };
-  if (immediate) apply();
-  else exposureApplyTimer = setTimeout(apply, 80);
-}
-cameraExposure.addEventListener("input", () => queueExposureChange());
-cameraExposure.addEventListener("change", () => queueExposureChange(true));
-decodeWorkers.addEventListener("change", () => {
-  saveCameraSettings();
-  if (!stream || done) return;
-  minimumAcceptedScanId = frameId;
-  cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  pool.resize(selectedWorkerCount());
+    if (track) void applyAdvancedConstraint(track, { torch: cameraTorch.checked });
+  }
 });
+cameraExposure.addEventListener("input", () => {
+  if (backend === "native") setNativeExposure(Number(cameraExposure.value));
+  else {
+    const track = stream?.getVideoTracks()[0];
+    if (track) void applyAdvancedConstraint(track, { exposureCompensation: Number(cameraExposure.value) });
+  }
+});
+decodeWorkers.addEventListener("change", () => { saveCameraSettings(); if (stream && !done) pool.resize(selectedWorkerCount()); });
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
@@ -1155,6 +1077,7 @@ function stopReceiver(): void {
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
+  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -1172,18 +1095,9 @@ function stopReceiver(): void {
   expectedRegions = 0;
   expectedRegionsAt = 0;
   lastFullScan = 0;
-  lastThoroughFullScan = -Infinity;
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  currentScanningState = "SEARCH";
-  scanCapturedAt.clear();
-  scanOutcomes.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
-  scanSubmissionTimes.length = 0;
-  scanFrameTimes.length = 0;
   scanCompletionTimes.length = 0;
   cropAttempts.clear();
   cropRotate = 0;
@@ -1193,17 +1107,12 @@ function stopReceiver(): void {
   fullSightings = 0;
   trackedMissFallbacks = 0;
   decodeExceptions = 0;
-  lastDecodeError = "";
   regionExpiries = 0;
   regionCreations = 0;
   trackingInvalidations = 0;
-  submittedJobs = 0;
   completedJobs = 0;
   workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
-  fullLatencyTotalMs = 0;
-  fullLatencyCount = 0;
-  lastFullLatencyMs = 0;
   lastDistinctArrivalAt = 0;
   lastStreamDecodeAt = 0;
   maxSequenceGapMs = 0;
@@ -1212,10 +1121,6 @@ function stopReceiver(): void {
   totalCaptures = 0;
   totalDecodes = 0;
   fullScans = 0;
-  cheapFullScans = 0;
-  thoroughFullScans = 0;
-  localReacquisitions = 0;
-  globalReacquisitions = 0;
   peakRegions = 0;
   capturesDropped = 0;
   cropsSubmitted = 0;
@@ -1242,21 +1147,19 @@ function stopReceiver(): void {
   if (scanDialog.open) scanDialog.close();
   scanCapture.width = 0;
   scanCapture.height = 0;
-  lastRawScanImage = null;
-  cancelScanHold();
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
   transferSizeLabel.textContent = "";
-  etaLabel.textContent = "";
+  etaLabel.textContent = "Waiting for QR";
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
-  metric("m-rate").textContent = "👀";
+  metric("m-rate").textContent = "— KB/s";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
   if (diagnosticsEl) {
@@ -1269,6 +1172,9 @@ function stopReceiver(): void {
   startBtn.hidden = false;
   startBtn.style.display = "";
   startBtn.textContent = "Enable camera";
+  backend = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
+  nativeFallbackUsed = false;
+  activeNativeFps = 0;
   setStatus("");
 }
 function pauseReceiver(): void {
@@ -1281,14 +1187,11 @@ function pauseReceiver(): void {
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
+  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
   cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
   minimumAcceptedScanId = frameId;
 }
 
@@ -1314,6 +1217,40 @@ window.addEventListener("airgapper:resume-mode", () => {
 const localCameraMessage =
   "This browser does not allow camera access from a local file. Use the installed offline PWA for receiving.";
 
+type NativeWindow = Window & {
+  airgapperNativeQr?: (base64: string, points: number[], timestampNs: number) => void;
+  airgapperNativeCameraStatus?: (status: string, detail: string, mode?: NativeCameraMode) => void;
+};
+const nativeWindow = window as NativeWindow;
+nativeWindow.airgapperNativeQr = (base64) => {
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  totalCaptures++;
+  qrReadTimes.push(performance.now());
+  onDecoded(bytes);
+};
+nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
+  if (status === "active" && mode) {
+    preview.classList.remove("camera-loading");
+    activeNativeFps = mode.fpsMax;
+    cameraActual.textContent = `${mode.width}×${mode.height} · ${mode.fpsMax} fps${mode.highSpeed ? " · High speed" : ""}`;
+    setStatus("");
+    return;
+  }
+  if (status === "fallback" && !nativeFallbackUsed) {
+    nativeFallbackUsed = true;
+    backend = "webview";
+    captureScanBtn.hidden = false;
+    decodeWorkersControl.hidden = false;
+    video.hidden = false;
+    stopNativeCamera();
+    clearInterval(statsTimer);
+    statsTimer = undefined;
+    cameraActual.textContent = `Camera fallback (${detail})`;
+    void start();
+  } else if (status !== "starting") setStatus(`${status}: ${detail}`);
+};
+
 async function start() {
   const startAttempt = cameraStartGen;
   // Materialize the complete receiver layout before camera permission or
@@ -1325,6 +1262,17 @@ async function start() {
   progressStatus.style.display = "block";
   progressEl.style.display = "block";
   showRequestedCameraSettings();
+  if (backend === "native") {
+    startBtn.disabled = true;
+    startBtn.style.display = "none";
+    pool.resize(0);
+    cameraStartedTs = performance.now();
+    syncNativePreviewBounds();
+    startNativeCamera(selectedNativeMode?.key ?? "");
+    statsTimer = setInterval(updateStats, STATS_TICK_MS);
+    await requestScreenWakeLock();
+    return;
+  }
   if (!navigator.mediaDevices?.getUserMedia) {
     // Mobile browsers commonly omit the API entirely for file:// origins.
     offerRetry(
@@ -1346,19 +1294,7 @@ async function start() {
   };
   let acquiredStream: MediaStream;
   try {
-    if (legacyAndroidApp) {
-      // Some 32-bit Android camera providers crash or remain wedged when
-      // Chromium forwards exact dimensions or any frame-rate constraint.
-      // Make one broadly satisfiable request; never retry a rejected mode.
-      acquiredStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: "environment",
-          width: { ideal: captureWidth },
-          height: { ideal: captureHeight },
-        },
-      });
-    } else if (cameraResolution.value === "auto") {
+    if (cameraResolution.value === "auto") {
       acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } },
@@ -1450,7 +1386,7 @@ function scheduleFrame(gen: number) {
   const next = () => {
     if (done || gen !== captureGen) return;
     captureFrame();
-    drawOverlay(performance.now());
+    if (showDetectionOverlay) drawOverlay(performance.now());
     scheduleFrame(gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
@@ -1472,68 +1408,7 @@ let pendingScanCapture: {
   oy: number;
   full: boolean;
   tracks: SymbolQuad[];
-  scaleX: number;
-  scaleY: number;
 } | null = null;
-let lastRawScanImage: ImageData | null = null;
-const scanSaveCanvas = document.createElement("canvas");
-let scanHoldTimer: ReturnType<typeof setTimeout> | undefined;
-let scanHoldStart: { x: number; y: number } | undefined;
-let scanSaveInProgress = false;
-
-async function saveRawScan(): Promise<void> {
-  const image = lastRawScanImage;
-  if (!image || scanSaveInProgress) return;
-  scanSaveInProgress = true;
-  try {
-    scanSaveCanvas.width = image.width;
-    scanSaveCanvas.height = image.height;
-    scanSaveCanvas.getContext("2d")!.putImageData(image, 0, 0);
-    const blob = await new Promise<Blob | null>((resolve) => scanSaveCanvas.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const name = `airgapper-scan-${stamp}.png`;
-    if (!saveFileOnAndroid(name, "image/png", bytes)) {
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = name;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-    }
-  } finally {
-    scanSaveInProgress = false;
-  }
-}
-
-function cancelScanHold(): void {
-  clearTimeout(scanHoldTimer);
-  scanHoldTimer = undefined;
-  scanHoldStart = undefined;
-}
-scanCapture.addEventListener("pointerdown", (event) => {
-  if (!lastRawScanImage || event.button !== 0 || !isAndroidApp()) return;
-  cancelScanHold();
-  scanHoldStart = { x: event.clientX, y: event.clientY };
-  scanHoldTimer = setTimeout(() => {
-    cancelScanHold();
-    navigator.vibrate?.(30);
-    showScanCaptureMenuOnAndroid();
-  }, 550);
-});
-scanCapture.addEventListener("pointermove", (event) => {
-  if (scanHoldStart && Math.hypot(event.clientX - scanHoldStart.x, event.clientY - scanHoldStart.y) > 12) cancelScanHold();
-});
-scanCapture.addEventListener("pointerup", cancelScanHold);
-scanCapture.addEventListener("pointercancel", cancelScanHold);
-scanCapture.addEventListener("contextmenu", (event) => {
-  if (!lastRawScanImage || !isAndroidApp()) return;
-  event.preventDefault();
-  cancelScanHold();
-  showScanCaptureMenuOnAndroid();
-});
-(window as Window & { airgapperSaveRawScan?: () => void }).airgapperSaveRawScan = () => void saveRawScan();
-
 captureScanBtn.addEventListener("click", () => {
   if (captureNextScan || pendingScanCapture) return;
   captureNextScan = true;
@@ -1541,7 +1416,6 @@ captureScanBtn.addEventListener("click", () => {
   captureScanBtn.disabled = true;
   scanCapture.width = 0;
   scanCapture.height = 0;
-  lastRawScanImage = null;
   scanDialogStatus.textContent = "Capturing the next fresh camera frame…";
   scanSightingLegend.hidden = true;
   if (!scanDialog.open) scanDialog.showModal();
@@ -1598,8 +1472,6 @@ function captureSubmittedScan(
   oy: number,
   full: boolean,
   tracks: SymbolQuad[] = [],
-  scaleX = 1,
-  scaleY = 1,
 ): void {
   if (!captureNextScan) return;
   captureNextScan = false;
@@ -1608,7 +1480,7 @@ function captureSubmittedScan(
   // Capture button feel hung on full-resolution frames.
   pendingScanCapture = {
     image: new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
-    ox, oy, full, tracks, scaleX, scaleY,
+    ox, oy, full, tracks,
   };
   scanCapture.width = image.width;
   scanCapture.height = image.height;
@@ -1631,7 +1503,6 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const capture = pendingScanCapture;
   if (!capture || capture.id !== id) return;
   cancelScanCapture();
-  lastRawScanImage = capture.image;
   scanCapture.width = capture.image.width;
   scanCapture.height = capture.image.height;
   const ctx = scanCapture.getContext("2d")!;
@@ -1640,8 +1511,8 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
     ctx.beginPath();
     points.forEach((point, index) => {
-      const x = (point.x - capture.ox) / capture.scaleX;
-      const y = (point.y - capture.oy) / capture.scaleY;
+      const x = point.x - capture.ox;
+      const y = point.y - capture.oy;
       if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.closePath();
@@ -1653,12 +1524,7 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   for (const symbol of completion.symbols) if (symbol.quad) drawQuad(symbol.quad, "#20c969", 5);
   ctx.strokeStyle = "#f2a51a";
   ctx.lineWidth = 4;
-  for (const box of completion.sightings) ctx.strokeRect(
-    (box.x - capture.ox) / capture.scaleX,
-    (box.y - capture.oy) / capture.scaleY,
-    box.w / capture.scaleX,
-    box.h / capture.scaleY,
-  );
+  for (const box of completion.sightings) ctx.strokeRect(box.x - capture.ox, box.y - capture.oy, box.w, box.h);
   const tracked = !capture.full;
   const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
   scanDialogStatus.textContent = completion.error
@@ -1666,17 +1532,6 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     : tracked
       ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded${completion.fallbackAttempted ? ` · fallback searched${completion.sightingCount ? ` · ${completion.sightingCount} found` : ""}` : ""}`
       : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
-  const outcome = scanOutcomes.get(id);
-  if (outcome && completion.symbolCount > 0) {
-    const details = [
-      outcome.accepted && `${outcome.accepted} accepted`,
-      outcome.duplicate && `${outcome.duplicate} duplicate`,
-      outcome.rejected && `${outcome.rejected} rejected`,
-      outcome.stale && `${outcome.stale} stale`,
-      outcome.otherStream && `${outcome.otherStream} other stream`,
-    ].filter(Boolean).join(" · ");
-    if (details) scanDialogStatus.textContent += ` · ${details}`;
-  }
   const gridSummary = gridDebugSummary();
   if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
@@ -1703,15 +1558,6 @@ function readBoundedVideoCrop(x: number, y: number, w: number, h: number): Image
   return ctx.getImageData(0, 0, w, h);
 }
 
-type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
-
-function scanningState(gridNeedsDiscovery: boolean): ScanningState {
-  if (gridLattice.state === "REACQUIRE") return "REACQUIRE";
-  if (!gridLattice.active && decodedCount() === 0) return "SEARCH";
-  if (!gridLattice.locked || gridNeedsDiscovery) return "PARTIAL_LOCK";
-  return "LOCKED";
-}
-
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
 // shift the stripe between two captures of the SAME displayed frame — 452
@@ -1724,52 +1570,11 @@ function captureFrame() {
   const vh = video.videoHeight;
   if (!vw || !vh) return;
   const now = performance.now();
-  let scanFrameSubmitted = false;
-  const noteScanSubmission = () => {
-    scanSubmissionTimes.push(now);
-    if (!scanFrameSubmitted) {
-      scanFrameTimes.push(now);
-      scanFrameSubmitted = true;
-    }
-  };
   captureTimes.push(now);
   totalCaptures++;
   if (pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
-    return;
-  }
-
-  if (usesSimpleDecodeWorker) {
-    // The compatibility scalar decoder is reliable on native full frames, but
-    // the modern reduced-acquisition → lattice-tracking handoff can leave it
-    // repeatedly decoding geometry without collecting packets. Keep this
-    // compatibility path deliberately simple: submit the same thorough frame
-    // that the working Capture button uses whenever its sole worker is free.
-    if (grab.width !== vw || grab.height !== vh) {
-      grab.width = vw;
-      grab.height = vh;
-    }
-    const ctx = grab.getContext("2d", { willReadFrequently: true })!;
-    ctx.drawImage(video, 0, 0, vw, vh);
-    const img = ctx.getImageData(0, 0, vw, vh);
-    captureSubmittedScan(img, 0, 0, true);
-    const id = frameId++;
-    if (pool.submit(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough: true },
-      [img.data.buffer],
-    )) {
-      fullScans++;
-      thoroughFullScans++;
-      fullScanIds.add(id);
-      fullScanJobs.set(id, { thorough: true, native: true, reacquire: false });
-      scanCapturedAt.set(id, now);
-      noteScanSubmission();
-      submittedJobs++;
-      if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-    } else if (pendingScanCapture?.id === undefined) {
-      cancelScanCapture();
-    }
     return;
   }
 
@@ -1784,8 +1589,12 @@ function captureFrame() {
   }
   const latticeSnapshot = gridLattice.tick(now);
   if (latticeSnapshot) syncGrid(latticeSnapshot, now);
-  // Decode confidence is separate from lattice geometry: predicted slots stay
-  // alive through motion and expand locally before global detection runs.
+  else if (gridLattice.state === "REACQUIRE") {
+    for (let i = regions.length - 1; i >= 0; i--) if (regions[i]!.gridSlot !== undefined) regions.splice(i, 1);
+    gridShape = "";
+  }
+  // Decode confidence is separate from the lattice lock: undecoded slots stay
+  // alive and search locally instead of disappearing from the global model.
   const live = decodedCount();
   peakRegions = Math.max(peakRegions, live);
   if (live >= expectedRegions || now - expectedRegionsAt > EXPECTED_REGIONS_DECAY_MS) {
@@ -1793,118 +1602,73 @@ function captureFrame() {
     expectedRegionsAt = now;
   }
   const visibleGridSlots = classifyGridSlots(vw, vh);
-  const missingGridSlots = visibleGridSlots.filter((region) => !region.decoded || region.consecutiveMisses >= 3);
-  const gridNeedsDiscovery = missingGridSlots.length > 0;
-  const widespreadFailure = visibleGridSlots.length >= 2 &&
-    missingGridSlots.filter((region) => region.consecutiveMisses >= 3).length >= Math.ceil(visibleGridSlots.length / 2);
-  if (widespreadFailure) gridLattice.beginReacquire();
-  else gridLattice.noteMissing(gridNeedsDiscovery);
-  const state = scanningState(gridNeedsDiscovery);
-  currentScanningState = state;
-  const scanInterval = state === "SEARCH" ? ACQUISITION_SCAN_MS
-    : state === "REACQUIRE" || state === "PARTIAL_LOCK" ? DEGRADED_SCAN_INTERVAL_MS
-      : FULL_SCAN_INTERVAL_MS;
+  const gridNeedsDiscovery = visibleGridSlots.some((region) =>
+    !region.decoded || region.slotState === "LOST");
+  const trackingUnhealthy = regions.some((region) => region.gridSlot === undefined && region.decoded && region.consecutiveMisses >= 4);
+  gridLattice.noteMissing(gridNeedsDiscovery);
+  const scanInterval =
+    live === 0
+      ? ACQUISITION_SCAN_MS
+      : live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery
+        ? FULL_SCAN_DEGRADED_MS
+        : FULL_SCAN_INTERVAL_MS;
+  // A due full scan takes priority over crops, deliberately. The crop loop
+  // below fills every free worker slot each frame, so any "only scan when a
+  // slot is spare" politeness starves the rescan that reacquires a missing
+  // code — tried, and it measurably worsened multi-code lock-on. Scans are
+  // rare (1.5 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
+  // next frame — including crops of probationary sighting regions, which now
+  // run between cold scans instead of being crowded out by them.
+  // Predicted crops are the fast path, never the only path. A single imperfect
+  // anchor, display transition, or missed neighbor must not suppress global
+  // reacquisition forever. Degraded grids rescan quickly; a healthy grid still
+  // gets a sparse scan that can correct motion and discover every visible QR.
+  // A requested diagnostic capture prefers the locked lattice crop, but only
+  // when such a crop actually exists. The previous unconditional suppression
+  // of full scans deadlocked Capture in SEARCH: no regions meant no crop job,
+  // while captureNextScan itself prevented the full-frame job that could finish.
   const captureHasTrackedWork = gridLattice.active
-    ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh))
+    ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) &&
+      validTrackedQuad(region, vw, vh))
     : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
-  const localCandidate = regions
-    .filter((region) => region.slotState !== "OFFSCREEN" &&
-      (!region.decoded ? region.decodeAttempts === 0 : region.consecutiveMisses === 3 || region.consecutiveMisses === 6))
-    .sort((a, b) => b.consecutiveMisses - a.consecutiveMisses)[0];
-  const reacquireExpanded = !localCandidate || localCandidate.consecutiveMisses >= 6;
-  const preferLocal = Boolean(localCandidate && fullScanIds.size === 0 && localReacquireIds.size === 0);
-  const fullScanDue = localReacquireIds.size === 0 && !preferLocal && (state !== "REACQUIRE" || reacquireExpanded) && fullScanIds.size === 0 && (captureNextScan
+  const fullScanDue = captureNextScan
     ? !captureHasTrackedWork
-    : fullScans === 0 || now - lastFullScan > scanInterval);
-
-  if (fullScanDue) {
-    // Acquisition needs one packet, so the first frame is native but the
-    // worker stops after one symbol. Later reduced passes stay cheap, with a
-    // periodic native retry for difficult scenes.
-    const thoroughInFlight = [...fullScanJobs.values()].some((job) => job.thorough);
-    const thorough = captureNextScan || fullScans === 0 || (!thoroughInFlight &&
-      now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
-    const native = thorough;
-    const scale = native ? 1 : Math.min(1, ACQUISITION_REDUCED_EDGE / Math.max(vw, vh));
-    const sw = Math.max(1, Math.round(vw * scale));
-    const sh = Math.max(1, Math.round(vh * scale));
-    if (grab.width !== sw || grab.height !== sh) { grab.width = sw; grab.height = sh; }
-    const ctx = grab.getContext("2d", { willReadFrequently: true })!;
-    ctx.drawImage(video, 0, 0, sw, sh);
-    const img = ctx.getImageData(0, 0, sw, sh);
-    captureSubmittedScan(img, 0, 0, true, [], vw / sw, vh / sh);
-    const id = frameId++;
-    const reacquire = state === "REACQUIRE" || (state === "PARTIAL_LOCK" && widespreadFailure);
-    if (pool.submit(
-      { id, buf: img.data.buffer, w: sw, h: sh, ox: 0, oy: 0, scaleX: vw / sw, scaleY: vh / sh, full: true, thorough },
-      [img.data.buffer],
-    )) {
-      lastFullScan = now;
-      fullScans++;
-      if (thorough) { thoroughFullScans++; lastThoroughFullScan = now; } else cheapFullScans++;
-      if (reacquire) globalReacquisitions++;
-      fullScanIds.add(id);
-      fullScanJobs.set(id, { thorough, native, reacquire });
-      scanCapturedAt.set(id, now);
-      noteScanSubmission();
-      submittedJobs++;
-      if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-    } else if (pendingScanCapture?.id === undefined) cancelScanCapture();
+    : now - lastFullScan > scanInterval;
+  if (!fullScanDue && regions.length === 0) {
+    schedulerNoJobs++;
     return;
   }
-  if (state === "SEARCH" && regions.length === 0) {
-    schedulerNoJobs++;
+
+  // Read back only the bounded work selected above. Full-frame RGBA is used
+  // for sparse acquisition; healthy tracks copy QR-sized crops only.
+  if (grab.width !== vw || grab.height !== vh) {
+    grab.width = vw;
+    grab.height = vh;
+  }
+  const ctx = grab.getContext("2d", { willReadFrequently: true })!;
+  if (fullScanDue) {
+    lastFullScan = now;
+    fullScans++;
+    ctx.drawImage(video, 0, 0);
+    const img = ctx.getImageData(0, 0, vw, vh);
+    captureSubmittedScan(img, 0, 0, true);
+    const id = frameId++;
+    if (pool.submit(
+      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+      [img.data.buffer],
+    )) {
+      if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+    } else if (pendingScanCapture?.id === undefined) {
+      cancelScanCapture();
+    }
     return;
   }
   for (const region of regions) {
     if (region.gridSlot === undefined && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-
-  // Repeated isolated misses get exactly one detector crop. It expands in
-  // native coordinates and runs alongside detector-free tracking of healthy
-  // slots, but never overlaps a global detector job.
-  if (localCandidate && fullScanIds.size === 0 && localReacquireIds.size === 0 && pool.busyCount < pool.size) {
-    const bounds = localCandidate.quad ? trackedQuadBounds(localCandidate.quad) : null;
-    const left = bounds?.left ?? localCandidate.x;
-    const top = bounds?.top ?? localCandidate.y;
-    const right = bounds?.right ?? localCandidate.x + localCandidate.w;
-    const bottom = bounds?.bottom ?? localCandidate.y + localCandidate.h;
-    const size = Math.max(right - left, bottom - top);
-    // Keep detector reacquisition local. A one-module grid gutter means a
-    // crop expanded by nearly a full QR contains several complete neighboring
-    // finder sets and can snap this slot onto the next cell.
-    const expansion = 0.18 + Math.min(0.24, localCandidate.consecutiveMisses * 0.04);
-    const pad = Math.max(12, Math.round(size * expansion));
-    const x = Math.floor(left - pad);
-    const y = Math.floor(top - pad);
-    const w = Math.ceil(right + pad) - x;
-    const h = Math.ceil(bottom + pad) - y;
-    if (w >= 32 && h >= 32) {
-      const img = readBoundedVideoCrop(x, y, w, h);
-      captureSubmittedScan(img, x, y, false);
-      const id = frameId++;
-      cropAttempts.set(id, [{ region: localCandidate, quad: localCandidate.quad }]);
-      if (pool.submit(
-        { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, reacquire: true },
-        [img.data.buffer],
-      )) {
-        localReacquireIds.add(id);
-        localReacquisitions++;
-        cropsSubmitted++;
-        scanCapturedAt.set(id, now);
-        noteScanSubmission();
-        submittedJobs++;
-        if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-      } else {
-        cropAttempts.delete(id);
-        if (pendingScanCapture?.id === undefined) cancelScanCapture();
-      }
-    }
-  }
   const batchRegions = (gridLattice.active
     ? visibleGridSlots.filter(isGridDecodeCandidate)
     : regions.filter((region) => region.decoded))
-    .filter((region) => region !== localCandidate || localReacquireIds.size === 0)
     .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh))
     .slice(0, 15);
   const batchTracks = batchRegions.map((region) => ({
@@ -1923,9 +1687,9 @@ function captureFrame() {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    // Padding is based on one QR, not the whole lattice. It only protects the
-    // direct samplers from modest motion; detector reacquisition is scheduled
-    // separately and cannot be triggered by this batch.
+    // Padding is based on one QR, not the whole lattice. Grow it briefly under
+    // motion so the fallback detector can re-anchor a shaking camera without
+    // turning the normal locked crop back into a full-frame readback.
     const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
     const x = Math.floor(minX - pad);
     const y = Math.floor(minY - pad);
@@ -1940,9 +1704,6 @@ function captureFrame() {
         [img.data.buffer],
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
-        scanCapturedAt.set(id, now);
-        noteScanSubmission();
-        submittedJobs++;
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
@@ -1957,13 +1718,11 @@ function captureFrame() {
   // Rank only useful, fully visible lattice slots. The full sender layout is a
   // coordinate system, not a work list: offscreen, clipped, and undersampled
   // slots consume no worker time and do not count as failures.
-  const eligible = (gridLattice.active
+  const eligible = gridLattice.active
     ? visibleGridSlots
       .filter(isGridDecodeCandidate)
       .sort((a, b) => slotUsefulness(b) - slotUsefulness(a))
-    : regions.filter((region) => region.decoded))
-    .filter((region) => region !== localCandidate || localReacquireIds.size === 0)
-    .filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh));
+    : [...regions];
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
@@ -2004,9 +1763,6 @@ function captureFrame() {
       poolBusyTimes.push(performance.now());
       break;
     }
-    scanCapturedAt.set(id, now);
-    noteScanSubmission();
-    submittedJobs++;
     if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
     submitted = true;
@@ -2030,14 +1786,6 @@ function resetActiveTransfer(): void {
   expectedRegionsAt = 0;
   lastDecodedRegionSize = 0;
   cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  scanOutcomes.clear();
-  currentScanningState = "SEARCH";
-  lastFullScan = 0;
-  lastThoroughFullScan = -Infinity;
   minimumAcceptedScanId = frameId;
   qrReadTimes.length = 0;
   usefulFrameTimes.length = 0;
@@ -2048,24 +1796,18 @@ function resetActiveTransfer(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
   transferSizeLabel.textContent = "";
-  etaLabel.textContent = "";
-  metric("m-rate").textContent = "👀";
-  speedFeedback.className = "speed-feedback";
+  etaLabel.textContent = "Waiting for QR";
   plainQrPolicy.reset();
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
-  if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) {
-    noteScanOutcome(info.scanId, "stale");
-    return;
-  }
+  if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) return;
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   const decodedAt = performance.now();
   const parsed = parseFrame(bytes);
   if (done) return;
   if (!parsed) {
-    noteScanOutcome(info?.scanId, "rejected");
     // Finder-pattern sightings and arbitrary binary decodes never become
     // tracks. A fully decoded UTF-8 QR may retain the legacy single-code path.
     if (decoder) return;
@@ -2086,10 +1828,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   // sender or layout starts a clean transfer. Sender settings restart with a
   // new session, so layout changes recover without reloading the receiver.
   if (decoder && streamKey !== identity) {
-    if (decodedAt - lastStreamDecodeAt < 1800) {
-      noteScanOutcome(info?.scanId, "otherStream");
-      return;
-    }
+    if (decodedAt - lastStreamDecodeAt < 1800) return;
     resetActiveTransfer();
   }
   lastStreamDecodeAt = decodedAt;
@@ -2104,7 +1843,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       gridEsi: header.gridEsi,
       layoutId: header.layoutId,
       slotIndex: header.slotIndex,
-      at: info.scanId === undefined ? decodedAt : (scanCapturedAt.get(info.scanId) ?? decodedAt),
+      at: decodedAt,
       scanId: info.scanId ?? -1,
       box,
       quad: info.quad,
@@ -2139,7 +1878,6 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = performance.now();
-  noteScanOutcome(info?.scanId, decoder.framesNew > framesNewBefore ? "accepted" : "duplicate");
   if (decoder.framesNew > framesNewBefore) {
     qrReadTimes.push(receivedAt);
     if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
@@ -2199,6 +1937,7 @@ function finishPlainQr(text: string): void {
   releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
+  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -2279,20 +2018,10 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         captures: totalCaptures,
         capturesDroppedPoolBusy: capturesDropped,
         cropsSubmitted,
-        submittedJobs,
-        completedJobs,
         fullScans,
-        cheapFullScans,
-        thoroughFullScans,
-        lastFullScanLatencyMs: Number(lastFullLatencyMs.toFixed(1)),
-        averageFullScanLatencyMs: fullLatencyCount ? Number((fullLatencyTotalMs / fullLatencyCount).toFixed(1)) : 0,
-        localReacquisitions,
-        globalReacquisitions,
-        scanningState: currentScanningState,
         decodes: totalDecodes,
         trackedAttempts,
         trackedDecodes,
-        trackedHitRate: trackedAttempts ? Number((trackedDecodes / trackedAttempts).toFixed(3)) : 0,
         trackedMissFallbacks,
         schedulerNoJobs,
         cropMisses,
@@ -2346,6 +2075,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   // decode pool. Each worker holds its own ~940 KB zxing WASM instance, which
   // is worth reclaiming on a phone the moment the last frame is in.
   stream?.getTracks().forEach((t) => t.stop());
+  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -2499,99 +2229,23 @@ async function appendReceivedFile(
 function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void {
   media.classList.add("inspectable");
   media.tabIndex = 0;
-  media.title = media instanceof HTMLImageElement ? "Tap to view and zoom" : "Tap to view full screen";
-
+  media.title = "View full screen";
   const open = async (): Promise<void> => {
+    if (document.fullscreenElement === media) return;
     if (media instanceof HTMLVideoElement) {
       const iosVideo = media as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
-      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) iosVideo.webkitEnterFullscreen();
-      else if (media.requestFullscreen) await media.requestFullscreen().catch(() => undefined);
-      else window.open(media.currentSrc || media.src, "_blank", "noopener");
-      void media.play();
+      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) {
+        iosVideo.webkitEnterFullscreen();
+        void media.play();
+        return;
+      }
+    }
+    if (media.requestFullscreen) {
+      await media.requestFullscreen().catch(() => undefined);
+      if (media instanceof HTMLVideoElement) void media.play();
       return;
     }
-
-    const placeholder = document.createComment("received image");
-    media.replaceWith(placeholder);
-    const inspector = document.createElement("div");
-    inspector.className = "media-inspector";
-    inspector.setAttribute("role", "dialog");
-    inspector.setAttribute("aria-label", "Image viewer");
-    const closeButton = document.createElement("button");
-    closeButton.className = "media-inspector-close";
-    closeButton.type = "button";
-    closeButton.setAttribute("aria-label", "Close image");
-    closeButton.textContent = "×";
-    inspector.append(media, closeButton);
-    document.body.append(inspector);
-    document.body.classList.add("media-inspecting");
-
-    let scale = 1;
-    let x = 0;
-    let y = 0;
-    const pointers = new Map<number, { x: number; y: number }>();
-    const render = (): void => {
-      media.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
-    };
-    const zoomAt = (nextScale: number, clientX: number, clientY: number): void => {
-      const clamped = Math.max(1, Math.min(6, nextScale));
-      const ratio = clamped / scale;
-      x = clientX - innerWidth / 2 - (clientX - innerWidth / 2 - x) * ratio;
-      y = clientY - innerHeight / 2 - (clientY - innerHeight / 2 - y) * ratio;
-      scale = clamped;
-      if (scale === 1) x = y = 0;
-      render();
-    };
-    const close = async (): Promise<void> => {
-      if (!inspector.isConnected) return;
-      if (document.fullscreenElement === inspector) await document.exitFullscreen().catch(() => undefined);
-      inspector.remove();
-      media.removeAttribute("style");
-      placeholder.replaceWith(media);
-      document.body.classList.remove("media-inspecting");
-      media.focus();
-    };
-    closeButton.addEventListener("click", () => void close());
-    inspector.addEventListener("pointerdown", (event) => {
-      if (event.target === closeButton) return;
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      inspector.setPointerCapture(event.pointerId);
-      media.classList.add("dragging");
-    });
-    inspector.addEventListener("pointermove", (event) => {
-      const previous = pointers.get(event.pointerId);
-      if (!previous) return;
-      if (pointers.size === 1) {
-        if (scale > 1) { x += event.clientX - previous.x; y += event.clientY - previous.y; render(); }
-      } else {
-        const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)?.[1];
-        if (other) {
-          const oldDistance = Math.hypot(previous.x - other.x, previous.y - other.y);
-          const newDistance = Math.hypot(event.clientX - other.x, event.clientY - other.y);
-          zoomAt(scale * newDistance / Math.max(1, oldDistance), (event.clientX + other.x) / 2, (event.clientY + other.y) / 2);
-        }
-      }
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    });
-    const releasePointer = (event: PointerEvent): void => {
-      pointers.delete(event.pointerId);
-      if (!pointers.size) media.classList.remove("dragging");
-    };
-    inspector.addEventListener("pointerup", releasePointer);
-    inspector.addEventListener("pointercancel", releasePointer);
-    inspector.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      zoomAt(scale * Math.exp(-event.deltaY * .002), event.clientX, event.clientY);
-    }, { passive: false });
-    inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
-    const onFullscreenChange = (): void => {
-      if (document.fullscreenElement !== inspector && inspector.isConnected) void close();
-      document.removeEventListener("fullscreenchange", onFullscreenChange);
-    };
-    if (inspector.requestFullscreen) {
-      await inspector.requestFullscreen().catch(() => undefined);
-      if (document.fullscreenElement === inspector) document.addEventListener("fullscreenchange", onFullscreenChange);
-    }
+    window.open(media.currentSrc || media.src, "_blank", "noopener");
   };
   media.addEventListener("click", () => void open());
   media.addEventListener("keydown", (event) => {
@@ -2715,25 +2369,18 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
-  prune(scanSubmissionTimes);
-  prune(scanFrameTimes);
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
-  const scannerFrameRate = perSecond(scanFrameTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${scannerFrameRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${backend === "native" && activeNativeFps ? activeNativeFps : cameraRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError
-    ? `Scanner error: ${lastDecodeError}`
-    : stalled
-      ? "Scanner stalled"
-      : "";
-  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
+  limit.textContent = stalled ? "Scanner stalled" : "";
+  limit.classList.toggle("scanner-bound", stalled);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
@@ -2754,8 +2401,8 @@ function updateStats() {
       decoder.solvedCount,
       liveNow,
       regions.length,
-      Number(cameraRate.toFixed(1)),
-      Number(qrRate.toFixed(1)),
+      Number(perSecond(captureTimes).toFixed(1)),
+      Number(perSecond(qrReadTimes).toFixed(1)),
       fullScans,
     ]);
   }
