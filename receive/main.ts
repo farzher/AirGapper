@@ -66,6 +66,8 @@ const cameraExposureValue = document.getElementById("camera-exposure-value") as 
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
 const recordCorpusBtn = document.getElementById("record-corpus") as HTMLButtonElement;
 const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElement;
+const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
+const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
 const corpusFile = document.getElementById("corpus-file") as HTMLInputElement;
 const benchmarkDialog = document.getElementById("benchmark-dialog") as HTMLDialogElement;
 const closeBenchmarkBtn = document.getElementById("close-benchmark") as HTMLButtonElement;
@@ -214,6 +216,18 @@ function showRequestedCameraSettings(): void {
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
+
+// Keep benchmark tools out of the normal settings UI. Deliberately opening,
+// closing, then reopening Settings within two seconds reveals them for this
+// page session.
+const settingsToggleTimes: number[] = [];
+receiverSettings.addEventListener("toggle", () => {
+  if (!receiverDevActions.hidden) return;
+  const now = performance.now();
+  settingsToggleTimes.push(now);
+  while (settingsToggleTimes.length && settingsToggleTimes[0]! < now - 2000) settingsToggleTimes.shift();
+  if (receiverSettings.open && settingsToggleTimes.length >= 3) receiverDevActions.hidden = false;
+});
 const metric = (id: string) => document.getElementById(id)!;
 
 let replayClock: number | undefined;
@@ -252,14 +266,9 @@ function noteGridTransition(from: string, to: string, reason: string, at: number
   trace?.transitions.push({ from, to, reason, at });
 }
 
-// Sliding window for the capture/decode fps metrics — the per-second rates in
-// updateStats() are derived from this, so the window and the divisor can't
-// drift apart.
-const STATS_WINDOW_MS = 2000;
+// Every live receiver rate uses the same one-second rolling window.
+const STATS_WINDOW_MS = 1000;
 const STATS_TICK_MS = 250;
-const LIVE_RATE_WINDOW_MS = 1000;
-// With a 250 ms UI tick, this guarantees a dead stream reads 0 within 1 s.
-const LIVE_RATE_ZERO_MS = 750;
 
 let stream: MediaStream | null = null;
 let decoder: LTDecoder | null = null;
@@ -2377,14 +2386,12 @@ function finishPlainQr(text: string): void {
 /** One-second information goodput for live aiming feedback. The completed
  * transfer still reports verified original bytes divided by total time. */
 function liveGoodputKbs(now: number): number {
-  while (usefulFrameTimes.length && usefulFrameTimes[0]! <= now - LIVE_RATE_WINDOW_MS) {
+  while (usefulFrameTimes.length && usefulFrameTimes[0]! <= now - STATS_WINDOW_MS) {
     usefulFrameTimes.shift();
   }
   if (!decoder || !usefulFrameTimes.length) return 0;
-  if (now - usefulFrameTimes[usefulFrameTimes.length - 1]! >= LIVE_RATE_ZERO_MS) return 0;
-  const observedSeconds = Math.min(1, Math.max(0.25, (now - startTs) / 1000));
   return usefulFrameTimes.length * decoder.blockLen /
-    expectedFountainOverhead(decoder.k) / 1024 / observedSeconds;
+    expectedFountainOverhead(decoder.k) / 1024 / (STATS_WINDOW_MS / 1000);
 }
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {

@@ -239,6 +239,7 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-settings .settings-actual { min-width: 0; margin-left: 5px; color: var(--muted); font-weight: 400; opacity: .8; }
 .receiver-settings .scan-capture-button { padding: 5px 9px; min-height: 34px; }
 .receiver-dev-actions { grid-column: 4; grid-row: 1; display: flex; gap: 6px; align-items: end; }
+.receiver-dev-actions[hidden] { display: none; }
 .receiver-dev-actions button { padding: 5px 9px; min-height: 34px; }
 .receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; flex-direction: row; align-items: center; gap: 10px; }
 .receiver-settings .exposure-manual input { flex: 1; min-width: 0; }
