@@ -2931,37 +2931,46 @@ interface OracleMessage {
 }
 
 async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
-  const worker = createDecodeWorker();
+  const workers = Array.from(
+    { length: Math.min(corpus.length, selectedWorkerCount()) },
+    () => createDecodeWorker(),
+  );
   const latencies: number[] = [];
+  let nextIndex = 0;
+  let completed = 0;
   try {
-    for (let index = 0; index < corpus.length; index++) {
-      const frame = await corpus.frame(index);
-      benchmarkStatus.textContent = `Reference ${index + 1}/${corpus.length}`;
-      await new Promise(requestAnimationFrame);
-      const reply = await new Promise<OracleMessage>((resolve, reject) => {
-        const id = 1_000_000 + index;
-        worker.onmessage = (event: MessageEvent<OracleMessage>) => {
-          if (event.data.id === -1) return;
-          if (event.data.id === id) resolve(event.data);
-        };
-        worker.onerror = (event) => reject(new Error(event.message || "Reference worker failed"));
-        const pixels = frame.rgba.slice();
-        worker.postMessage({ id, oracle: true, full: true, buf: pixels.buffer, w: frame.meta.width, h: frame.meta.height }, [pixels.buffer]);
-      });
-      if (reply.error) throw new Error(reply.error);
-      latencies.push(reply.latencyMs ?? 0);
-      const trace = benchmarkTraces[index];
-      if (!trace) continue;
-      for (const symbol of reply.symbols ?? []) {
-        const parsed = parseFrame(symbol.bytes);
-        if (!parsed) continue;
-        trace.reference.push({
-          slot: parsed.header.slotIndex, esi: parsed.header.gridEsi ?? parsed.header.seq, quad: symbol.quad,
+    await Promise.all(workers.map(async (worker) => {
+      while (nextIndex < corpus.length) {
+        const index = nextIndex++;
+        const frame = await corpus.frame(index);
+        const reply = await new Promise<OracleMessage>((resolve, reject) => {
+          const id = 1_000_000 + index;
+          worker.onmessage = (event: MessageEvent<OracleMessage>) => {
+            if (event.data.id === -1) return;
+            if (event.data.id === id) resolve(event.data);
+          };
+          worker.onerror = (event) => reject(new Error(event.message || "Reference worker failed"));
+          const pixels = frame.rgba.slice();
+          worker.postMessage({ id, oracle: true, full: true, buf: pixels.buffer, w: frame.meta.width, h: frame.meta.height }, [pixels.buffer]);
         });
+        if (reply.error) throw new Error(reply.error);
+        latencies.push(reply.latencyMs ?? 0);
+        const trace = benchmarkTraces[index];
+        if (trace) {
+          for (const symbol of reply.symbols ?? []) {
+            const parsed = parseFrame(symbol.bytes);
+            if (!parsed) continue;
+            trace.reference.push({
+              slot: parsed.header.slotIndex, esi: parsed.header.gridEsi ?? parsed.header.seq, quad: symbol.quad,
+            });
+          }
+        }
+        benchmarkStatus.textContent = `Reference ${++completed}/${corpus.length}`;
+        await new Promise(requestAnimationFrame);
       }
-    }
+    }));
   } finally {
-    worker.terminate();
+    for (const worker of workers) worker.terminate();
   }
   return latencies;
 }
