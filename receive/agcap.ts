@@ -89,23 +89,53 @@ export class AgcapRecorder {
   get elapsedMs(): number { return performance.now() - this.startedAt; }
   get complete(): boolean { return this.stopped || this.elapsedMs >= this.durationMs; }
 
-  add(meta: AgcapFrameMeta, image: ImageData): void {
+  private begin(meta: AgcapFrameMeta): boolean {
     this.callbacks++;
     this.firstMediaTime ??= meta.mediaTimeMs;
     this.lastMediaTime = meta.mediaTimeMs;
-    // Keep enough queued raw frames to absorb short compression stalls without
-    // risking unbounded memory on an old phone. Every rejected frame is counted.
+    // Keep enough camera surfaces and raw records to absorb short stalls
+    // without risking unbounded memory on an old phone.
     if (this.pending >= 64) {
       this.drops++;
-      return;
+      return false;
     }
-    const record = recordBytes(meta, image.data);
     this.pending++;
+    return true;
+  }
+
+  private enqueue(meta: AgcapFrameMeta, pixels: Uint8ClampedArray): void {
+    const record = recordBytes(meta, pixels);
     this.stored++;
     this.writeTail = this.writeTail
       .then(() => this.writer.write(record))
       .catch(() => { this.drops++; this.stored--; })
       .finally(() => { this.pending--; });
+  }
+
+  add(meta: AgcapFrameMeta, image: ImageData): void {
+    if (this.begin(meta)) this.enqueue(meta, image.data);
+  }
+
+  addVideo(meta: AgcapFrameMeta, video: HTMLVideoElement): boolean {
+    if (typeof VideoFrame === "undefined") return false;
+    if (!this.begin(meta)) return true;
+    let frame: VideoFrame;
+    try {
+      // Construction snapshots this callback's camera image. copyTo then moves
+      // exact RGBA pixels asynchronously, so rVFC can request the next frame
+      // instead of blocking for a synchronous canvas readback.
+      frame = new VideoFrame(video, { timestamp: Math.round(meta.mediaTimeMs * 1000), alpha: "discard" });
+    } catch {
+      this.pending--;
+      this.callbacks--;
+      return false;
+    }
+    const bytes = new Uint8Array(meta.stride * meta.height);
+    void frame.copyTo(bytes, { format: "RGBA", layout: [{ offset: 0, stride: meta.stride }] })
+      .then(() => this.enqueue(meta, new Uint8ClampedArray(bytes.buffer)))
+      .catch(() => { this.pending--; this.drops++; })
+      .finally(() => frame.close());
+    return true;
   }
 
   async finish(): Promise<{ blob: Blob; header: AgcapHeader }> {

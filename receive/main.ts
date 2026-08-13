@@ -1559,21 +1559,20 @@ function scheduleFrame(gen: number) {
     const height = video.videoHeight;
     const sequence = benchmarkRecordingSequence++;
     const recorder = benchmarkRecorder;
-    const image = recorder && width && height ? fullLiveImage(width, height) : undefined;
     const frame: ReceiverFrame = {
       sequence, width, height, callbackTimeMs: callbackTime,
       mediaTimeMs: (metadata.mediaTime ?? callbackTime / 1000) * 1000,
       presentationTimeMs: metadata.presentationTime ?? callbackTime,
       expectedDisplayTimeMs: metadata.expectedDisplayTime ?? callbackTime,
-      image,
     };
-    if (recorder && image) {
+    if (recorder && width && height) {
       const orientation = screen.orientation?.type ?? `${window.orientation ?? 0}`;
-      recorder.add({
+      const frameMeta = {
         sequence, mediaTimeMs: frame.mediaTimeMs, presentationTimeMs: frame.presentationTimeMs,
         expectedDisplayTimeMs: frame.expectedDisplayTimeMs, callbackTimeMs: frame.callbackTimeMs,
         width, height, stride: width * 4, orientation,
-      }, image);
+      };
+      if (!recorder.addVideo(frameMeta, video)) recorder.add(frameMeta, fullLiveImage(width, height));
       recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1000))}s`;
       // Corpus capture owns the camera readback. Running production decoding at
       // the same time would only steal callbacks; its decisions are recreated
