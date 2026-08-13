@@ -38,14 +38,17 @@ export function estimateTransferProgress(
   );
   const expectedRedundancy = expectedFrames - minimumFrames;
 
-  // Fill 97% over the currently predicted completion time, then keep creeping
-  // toward 99% if this run needs more repair. Only verified completion is 100%.
+  // Fountain completion is discrete: the last few missing blocks can require
+  // an unpredictable repair-frame combination. Reach 92% at the nominal
+  // target and creep only to 95%, so a slow tail never looks stuck at 98–99%.
+  // This intentionally makes completion arrive a little earlier than the bar
+  // predicts instead of promising that an unknown final repair is imminent.
   let fraction: number;
   if (uniqueFrames <= expectedFrames) {
-    fraction = 0.97 * (uniqueFrames / expectedFrames);
+    fraction = 0.92 * (uniqueFrames / expectedFrames);
   } else {
     const repairStep = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));
-    fraction = 0.97 + 0.02 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
+    fraction = 0.92 + 0.03 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
   }
   const phase = uniqueFrames < minimumFrames ? "collecting" : "decoding";
   const rate = elapsedSeconds > 0 ? uniqueFrames / elapsedSeconds : 0;
