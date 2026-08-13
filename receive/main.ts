@@ -1316,7 +1316,7 @@ function stopReceiver(): void {
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
-  metric("m-cap").textContent = "— scan/s";
+  metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "👀";
@@ -3273,7 +3273,7 @@ function updateStats() {
   const cameraRate = perSecond(captureTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${scanRate.toFixed(1)} scan/s`;
+  metric("m-cap").textContent = `${scanRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
