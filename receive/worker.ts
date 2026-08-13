@@ -132,7 +132,7 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, sentAt } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, oracleSeeds = [], sentAt } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -144,6 +144,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     dim?: number;
     tracks?: BatchTrack[];
     oracle?: boolean;
+    oracleSeeds?: { quad: DecimenQuad; modules: number; layoutId: number; slot: number }[];
     sentAt?: number;
   }; 
   const workerWaitMs = sentAt === undefined ? 0 : Math.max(0, startedAt - sentAt);
@@ -180,18 +181,24 @@ ctx.onmessage = async (e: MessageEvent) => {
       // Best-known reference: the codec's broad native detector passes first.
       appendValid(zx.readFull(ptr, pw, ph, true, 128, false));
       appendValid(zx.readFull(ptr, pw, ph, true, 128, true));
-      // A CRC-valid modern packet identifies both layout and physical slot.
-      // Project every neighbor from its quad and exhaustively direct-sample it.
-      for (const seed of [...valid]) {
+      // A valid packet identifies the complete lattice. Seeds from this frame
+      // are supplemented by the nearest successful frame in the corpus, so a
+      // weak full-frame detector does not erase otherwise recoverable slots.
+      const seeds = [...valid].flatMap((seed) => {
         const parsed = parseFrame(seed.bytes);
-        const layout = parsed?.header.layoutId === undefined ? undefined : gridLayoutById(parsed.header.layoutId);
-        const seedSlot = parsed?.header.slotIndex;
-        if (!layout || seedSlot === undefined) continue;
-        const sx = seedSlot % layout.cols;
-        const sy = Math.floor(seedSlot / layout.cols);
+        const layoutId = parsed?.header.layoutId;
+        const slot = parsed?.header.slotIndex;
+        return layoutId === undefined || slot === undefined
+          ? [] : [{ quad: seed.quad, modules: seed.modules, layoutId, slot }];
+      });
+      seeds.push(...oracleSeeds);
+      for (const seed of seeds) {
+        const layout = gridLayoutById(seed.layoutId);
+        if (!layout) continue;
+        const sx = seed.slot % layout.cols;
+        const sy = Math.floor(seed.slot / layout.cols);
         const ratio = (seed.modules + 1) / seed.modules;
         for (let slot = 0; slot < layout.cols * layout.rows; slot++) {
-          if (slot === seedSlot) continue;
           const dx = slot % layout.cols - sx;
           const dy = Math.floor(slot / layout.cols) - sy;
           const predicted = projectedNeighbor(seed.quad, dx, dy, ratio);
@@ -209,25 +216,33 @@ ctx.onmessage = async (e: MessageEvent) => {
             }
             continue;
           }
-          // Direct sampling is exact but unforgiving. The oracle also gives the
-          // expected slot a generous isolated detector crop and existing full
-          // fallback, without changing the production acquisition path.
-          const expectedBounds = boundsOf(predicted, 0, 0);
-          const pad = Math.round(Math.max(expectedBounds.w, expectedBounds.h) * 0.45);
-          const cx = Math.max(0, Math.floor(expectedBounds.x - pad));
-          const cy = Math.max(0, Math.floor(expectedBounds.y - pad));
-          const cr = Math.min(pw, Math.ceil(expectedBounds.x + expectedBounds.w + pad));
-          const cb = Math.min(ph, Math.ceil(expectedBounds.y + expectedBounds.h + pad));
-          const cw = cr - cx, ch = cb - cy;
-          if (cw < 32 || ch < 32) continue;
+
+          // Adjacent grid symbols have only a one-module shared gutter. A wide
+          // crop feeds several finder-pattern sets back to the generic detector.
+          // Isolate exactly one predicted cell and synthesize a clean quiet zone.
+          const expected = boundsOf(predicted, 0, 0);
+          const moduleSize = Math.max(expected.w, expected.h) / seed.modules;
+          const sourcePad = Math.max(2, Math.round(moduleSize));
+          const quiet = Math.max(8, Math.round(moduleSize * 5));
+          const cx = Math.max(0, Math.floor(expected.x - sourcePad));
+          const cy = Math.max(0, Math.floor(expected.y - sourcePad));
+          const cr = Math.min(pw, Math.ceil(expected.x + expected.w + sourcePad));
+          const cb = Math.min(ph, Math.ceil(expected.y + expected.h + sourcePad));
+          const sw = cr - cx, sh = cb - cy;
+          const cw = sw + quiet * 2, ch = sh + quiet * 2;
+          if (sw < 24 || sh < 24) continue;
           const crop = new Uint8Array(cw * ch * 4);
-          for (let row = 0; row < ch; row++) {
-            crop.set(pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4), row * cw * 4);
+          crop.fill(255);
+          for (let row = 0; row < sh; row++) {
+            crop.set(
+              pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4),
+              ((row + quiet) * cw + quiet) * 4,
+            );
           }
           const cropPtr = zx._malloc(crop.length);
           zx.HEAPU8.set(crop, cropPtr);
           readFullAttempts++;
-          const fallback = zx.readFull(cropPtr, cw, ch, true, 16, false);
+          const fallback = zx.readFull(cropPtr, cw, ch, true, 4, false);
           try {
             for (let i = 0; i < fallback.size(); i++) {
               const candidate = fallback.get(i);
@@ -237,7 +252,8 @@ ctx.onmessage = async (e: MessageEvent) => {
               const key = Array.from(candidate.bytes as Uint8Array).join(",");
               if (seen.has(key)) continue;
               seen.add(key);
-              valid.push({ bytes: candidate.bytes, box: boundsOf(candidate.position, cx, cy), quad: shifted(candidate.position, cx, cy), modules: candidate.modules, tracked: false });
+              const shiftX = cx - quiet, shiftY = cy - quiet;
+              valid.push({ bytes: candidate.bytes, box: boundsOf(candidate.position, shiftX, shiftY), quad: shifted(candidate.position, shiftX, shiftY), modules: candidate.modules, tracked: false });
             }
           } finally {
             fallback.delete();
