@@ -1,3 +1,8 @@
+/** Shared white gutter between adjacent QR module matrices. The grid-aware
+ * receiver isolates symbols after acquisition, so one module preserves data
+ * density without asking the generic detector to enumerate the whole grid. */
+export const GRID_MARGIN_MODULES = 1;
+
 export interface GridLayout {
   id: number;
   cols: number;

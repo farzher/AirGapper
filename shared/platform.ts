@@ -22,12 +22,14 @@ export const isAndroid: boolean = !!nav && /Android/.test(nav.userAgent);
 type ExtendedCapabilities = MediaTrackCapabilities & {
   torch?: boolean;
   focusMode?: string[];
-  exposureCompensation?: { min: number; max: number; step?: number };
+  exposureMode?: string[];
+  exposureTime?: { min: number; max: number; step?: number };
 };
 type ExtendedConstraintSet = MediaTrackConstraintSet & {
   torch?: boolean;
   focusMode?: string;
-  exposureCompensation?: number;
+  exposureMode?: string;
+  exposureTime?: number;
 };
 
 export interface CameraCapabilities {
@@ -39,7 +41,7 @@ export interface CameraCapabilities {
   maxFrameRate?: number;
   /** Widest capture the camera reports, when it reports one. */
   maxWidth?: number;
-  exposureCompensation?: { min: number; max: number; step?: number };
+  exposureTime?: { min: number; max: number; step?: number };
 }
 
 export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabilities {
@@ -50,7 +52,7 @@ export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabili
     continuousFocus: Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous"),
     maxFrameRate: caps.frameRate?.max,
     maxWidth: caps.width?.max,
-    exposureCompensation: caps.exposureCompensation,
+    exposureTime: caps.exposureMode?.includes("manual") ? caps.exposureTime : undefined,
   };
 }
 

@@ -7,17 +7,17 @@ import { fileURLToPath } from "node:url";
  * handling and Rollup then tries to parse the binary as JavaScript. So the
  * base64 is produced here instead, behind a virtual module.
  */
-export function inlineCodecWasm(): Plugin {
-  const id = "virtual:codec-wasm-data-url";
+export function inlineCodecWasm(
+  id = "virtual:codec-wasm-data-url",
+  file = "../vendor/decimen-codec/decimen_codec.wasm",
+): Plugin {
   const resolved = `\0${id}`;
   return {
     name: "inline-codec-wasm",
     resolveId: (source) => (source === id ? resolved : null),
     load(source) {
       if (source !== resolved) return null;
-      const wasm = readFileSync(
-        fileURLToPath(new URL("../vendor/decimen-codec/decimen_codec.wasm", import.meta.url)),
-      );
+      const wasm = readFileSync(fileURLToPath(new URL(file, import.meta.url)));
       return `export default "data:application/wasm;base64,${wasm.toString("base64")}"`;
     },
   };

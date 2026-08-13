@@ -9,3 +9,8 @@ declare module "virtual:codec-wasm-data-url" {
   const dataUrl: string;
   export default dataUrl;
 }
+
+declare module "virtual:android-codec-wasm-data-url" {
+  const dataUrl: string;
+  export default dataUrl;
+}

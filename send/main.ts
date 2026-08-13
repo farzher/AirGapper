@@ -38,11 +38,10 @@ import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { makeZip } from "../shared/zip";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings";
-import { gridLayoutId } from "../shared/grid-layout";
+import { GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout";
 
 const HEADER_MARGIN = 0;
-// A one-module shared quiet zone was the best-performing tested grid spacing.
-const GRID_MARGIN = 1;
+const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
 // The desktop default carries twelve independent standard QRs. Phones default
 // to one large code; neither choice changes the wire format.
