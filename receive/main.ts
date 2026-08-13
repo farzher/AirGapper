@@ -57,6 +57,7 @@ const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
 const cameraExposureControl = document.getElementById("camera-exposure-control")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
+const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
@@ -706,18 +707,26 @@ function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
 function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
   return (a.width === b.width && a.height === b.height) || (a.width === b.height && a.height === b.width);
 }
+function showExposureTime(value: number): void {
+  cameraExposureValue.value = `${Number(value.toPrecision(3))} ms`;
+}
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
-    exposureCompensation?: { min: number; max: number; step?: number };
+    exposureMode?: string[];
+    exposureTime?: { min: number; max: number; step?: number };
   }) | undefined;
   cameraResolutionLabel.textContent = "Mode";
   if (!caps?.width || !caps.height) return;
-  cameraExposureControl.hidden = !caps.exposureCompensation;
-  if (caps.exposureCompensation) {
-    cameraExposure.min = String(caps.exposureCompensation.min);
-    cameraExposure.max = String(caps.exposureCompensation.max);
-    cameraExposure.step = String(caps.exposureCompensation.step ?? 1);
-    cameraExposure.value = "0";
+  const exposure = caps.exposureMode?.includes("manual") ? caps.exposureTime : undefined;
+  cameraExposureControl.hidden = !exposure || exposure.min === exposure.max;
+  if (exposure) {
+    const settings = track.getSettings() as MediaTrackSettings & { exposureTime?: number };
+    const current = Math.max(exposure.min, Math.min(exposure.max, settings.exposureTime ?? exposure.min));
+    cameraExposure.min = String(exposure.min);
+    cameraExposure.max = String(exposure.max);
+    cameraExposure.step = String(exposure.step ?? "any");
+    cameraExposure.value = String(current);
+    showExposureTime(current);
   }
   const widthMin = caps.width.min ?? 0;
   const widthMax = caps.width.max ?? Infinity;
@@ -934,9 +943,20 @@ const changeCameraSettings = async () => {
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
-cameraExposure.addEventListener("input", () => {
+cameraExposure.addEventListener("input", () => showExposureTime(Number(cameraExposure.value)));
+cameraExposure.addEventListener("change", () => {
   const track = stream?.getVideoTracks()[0];
-  if (track) void applyAdvancedConstraint(track, { exposureCompensation: Number(cameraExposure.value) });
+  if (!track) return;
+  void applyAdvancedConstraint(track, {
+    exposureMode: "manual",
+    exposureTime: Number(cameraExposure.value),
+  }).then(() => {
+    const actual = (track.getSettings() as MediaTrackSettings & { exposureTime?: number }).exposureTime;
+    if (actual !== undefined) {
+      cameraExposure.value = String(actual);
+      showExposureTime(actual);
+    }
+  });
 });
 decodeWorkers.addEventListener("change", () => { saveCameraSettings(); if (stream && !done) pool.resize(selectedWorkerCount()); });
 window.addEventListener("airgapper:enter-receive", () => {
@@ -2239,7 +2259,7 @@ function updateStats() {
     ? `Scanner error: ${lastDecodeError}`
     : stalled
       ? "Scanner stalled"
-      : `${scanRate.toFixed(1)} scans/s`;
+      : "";
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
