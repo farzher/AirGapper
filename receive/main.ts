@@ -143,18 +143,17 @@ function populateCameraOptions(): void {
 }
 function restoreCameraSettings(): void {
   try {
-    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; workers?: string; exposureTime?: number } | null;
+    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; workers?: string } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
     const savedWorkers = Number(saved.workers);
     if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) decodeWorkers.value = saved.workers!;
-    if (Number.isFinite(saved.exposureTime) && saved.exposureTime! >= 1 && saved.exposureTime! <= 300) preferredExposureTime = saved.exposureTime;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
-  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, workers: decodeWorkers.value, exposureTime: preferredExposureTime })); }
+  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, workers: decodeWorkers.value })); }
   catch { /* Storage is optional. */ }
 }
 function readRequestedCameraSettings(): void {
@@ -770,7 +769,9 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     cameraExposure.step = String(Math.max(exposure.step ?? 0, 0.1));
     cameraExposure.value = String(current);
     showExposureTime(current);
-    if (preferredExposureTime !== undefined) void applyAdvancedConstraint(track, {
+    if (preferredExposureTime === undefined && caps.exposureMode?.includes("continuous")) {
+      void applyAdvancedConstraint(track, { exposureMode: "continuous" });
+    } else if (preferredExposureTime !== undefined) void applyAdvancedConstraint(track, {
       exposureMode: "manual",
       exposureTime: current,
     }).then(() => {
