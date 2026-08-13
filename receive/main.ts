@@ -120,6 +120,12 @@ let preferredExposureTime: number | undefined;
 let exposureApplyGeneration = 0;
 let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
+function formatCameraSize(width: number, height: number): string {
+  return `${Math.max(width, height)}×${Math.min(width, height)}`;
+}
+function formatCameraMode(width: number, height: number, fps: number): string {
+  return `${formatCameraSize(width, height)} · ${fps} fps`;
+}
 const browserModeResults = loadBrowserModeResults();
 let browserModes: BrowserMode[] = [];
 let automaticBrowserMode: BrowserMode | undefined;
@@ -136,7 +142,7 @@ function saveBrowserModeResult(key: string, supported: boolean): void {
 
 function standardBrowserModes(): BrowserMode[] {
   return STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
-    key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
+    key: `${width}x${height}@${fps}`, width, height, fps, label: formatCameraMode(width, height, fps),
   }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
 }
 function populateCameraOptions(): void {
@@ -184,7 +190,7 @@ function readRequestedCameraSettings(): void {
 function showRequestedCameraSettings(): void {
   readRequestedCameraSettings();
   cameraActual.textContent = cameraResolution.value === "auto"
-    ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps`;
+    ? "Auto" : formatCameraMode(requestedWidth, requestedHeight, requestedFps);
   cameraResolutionLabel.textContent = "Mode";
   captureScanBtn.hidden = false;
   decodeWorkersControl.hidden = legacyAndroidApp;
@@ -762,7 +768,7 @@ function syncPreviewAspect() {
 }
 function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
   const active = track.getSettings();
-  const size = active.width && active.height ? `${active.width}×${active.height}` : "Camera active";
+  const size = active.width && active.height ? formatCameraSize(active.width, active.height) : "Camera active";
   cameraActual.textContent = `${prefix ? `${prefix} · ` : ""}${size}${active.frameRate ? ` · ${Math.round(active.frameRate)} fps` : ""}`;
 }
 function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
@@ -844,7 +850,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     const fps = Math.round(active.frameRate ?? 30);
     automaticBrowserMode = {
       key: "auto", width: active.width, height: active.height, fps,
-      label: `${active.width}×${active.height} · ${fps} fps`,
+      label: formatCameraMode(active.width, active.height, fps),
     };
   }
   browserModes = standardBrowserModes().filter((mode) =>
