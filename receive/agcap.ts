@@ -4,9 +4,9 @@ const decoder = new TextDecoder();
 
 export interface AgcapHeader {
   format: "AirGapper lossless camera corpus";
-  formatVersion: 1 | 2 | 3;
+  formatVersion: 1 | 2 | 3 | 4;
   pixelFormat: "RGBA8888";
-  compression: "gzip" | "gzip-stream" | "png+gzip-stream" | "none";
+  compression: "gzip" | "gzip-stream" | "png+gzip-stream" | "png" | "none";
   width: number;
   height: number;
   stride: number;
@@ -50,17 +50,6 @@ function u32(value: number): Uint8Array {
   return bytes;
 }
 
-function recordBytes(meta: AgcapFrameMeta, pixels: Uint8ClampedArray): Uint8Array<ArrayBuffer> {
-  const metadata = encoder.encode(JSON.stringify(meta));
-  const record = new Uint8Array(8 + metadata.length + pixels.byteLength);
-  const view = new DataView(record.buffer);
-  view.setUint32(0, metadata.length, true);
-  record.set(metadata, 4);
-  view.setUint32(4 + metadata.length, pixels.byteLength, true);
-  record.set(pixels, 8 + metadata.length);
-  return record;
-}
-
 export class AgcapRecorder {
   readonly startedAt = performance.now();
   callbacks = 0;
@@ -70,22 +59,15 @@ export class AgcapRecorder {
   private stopped = false;
   private firstMediaTime: number | undefined;
   private lastMediaTime: number | undefined;
-  private writeTail: Promise<void> = Promise.resolve();
-  private readonly writer: WritableStreamDefaultWriter<BufferSource>;
-  private readonly compressedBody: Promise<ArrayBuffer>;
+  private readonly records: { meta: AgcapFrameMeta; pixels: Uint8Array }[] = [];
+  private readonly bodyParts: BlobPart[] = [];
   private readonly canvas = document.createElement("canvas");
 
   constructor(
     readonly durationMs: number,
     private readonly base: Omit<AgcapHeader, "format" | "formatVersion" | "pixelFormat" | "compression" |
       "startedAt" | "requestedDurationMs" | "callbacks" | "framesStored" | "recorderDrops" | "estimatedCameraDrops">,
-  ) {
-    // One continuous gzip stream avoids constructing and warming a compressor
-    // for every camera frame. The readable is drained while capture continues.
-    const compressor = new CompressionStream("gzip");
-    this.writer = compressor.writable.getWriter();
-    this.compressedBody = new Response(compressor.readable).arrayBuffer();
-  }
+  ) {}
 
   get elapsedMs(): number { return performance.now() - this.startedAt; }
   get complete(): boolean { return this.stopped || this.elapsedMs >= this.durationMs; }
@@ -104,17 +86,15 @@ export class AgcapRecorder {
     return true;
   }
 
-  private enqueue(meta: AgcapFrameMeta, pixels: Uint8ClampedArray): void {
-    const record = recordBytes(meta, pixels);
+  private enqueue(meta: AgcapFrameMeta, pixels: Uint8Array): void {
+    const metadata = encoder.encode(JSON.stringify(meta));
+    this.records.push({ meta, pixels });
+    this.bodyParts.push(
+      u32(metadata.length) as BlobPart, metadata as BlobPart,
+      u32(pixels.byteLength) as BlobPart, pixels as BlobPart,
+    );
     this.stored++;
-    this.writeTail = this.writeTail
-      .then(() => this.writer.write(record))
-      .catch(() => { this.drops++; this.stored--; })
-      .finally(() => { this.pending--; });
-  }
-
-  add(meta: AgcapFrameMeta, image: ImageData): void {
-    if (this.begin(meta)) this.enqueue(meta, image.data);
+    this.pending--;
   }
 
   addVideo(meta: AgcapFrameMeta, video: HTMLVideoElement): void {
@@ -134,17 +114,14 @@ export class AgcapRecorder {
         return;
       }
       void blob.arrayBuffer()
-        .then((bytes) => this.enqueue(meta, new Uint8ClampedArray(bytes)))
+        .then((bytes) => this.enqueue(meta, new Uint8Array(bytes)))
         .catch(() => { this.pending--; this.drops++; });
     }, "image/png");
   }
 
-  async finish(): Promise<{ blob: Blob; header: AgcapHeader }> {
+  async finish(): Promise<{ blob: Blob; header: AgcapHeader; corpus: AgcapCorpus }> {
     this.stopped = true;
     while (this.pending > 0) await new Promise((resolve) => setTimeout(resolve, 10));
-    await this.writeTail;
-    await this.writer.close();
-    const body = await this.compressedBody;
     const settingsFps = Number(this.base.cameraSettings.frameRate) || 0;
     const mediaDuration = this.firstMediaTime === undefined || this.lastMediaTime === undefined
       ? 0 : Math.max(0, this.lastMediaTime - this.firstMediaTime);
@@ -152,9 +129,9 @@ export class AgcapRecorder {
     const header: AgcapHeader = {
       ...this.base,
       format: "AirGapper lossless camera corpus",
-      formatVersion: 3,
+      formatVersion: 4,
       pixelFormat: "RGBA8888",
-      compression: "png+gzip-stream",
+      compression: "png",
       startedAt: new Date().toISOString(),
       requestedDurationMs: this.durationMs,
       callbacks: this.callbacks,
@@ -165,15 +142,22 @@ export class AgcapRecorder {
     const headerBytes = encoder.encode(JSON.stringify(header));
     return {
       blob: new Blob([
-        MAGIC as BlobPart, u32(headerBytes.length) as BlobPart, headerBytes as BlobPart, body,
+        MAGIC as BlobPart, u32(headerBytes.length) as BlobPart, headerBytes as BlobPart, ...this.bodyParts,
       ], { type: "application/vnd.airgapper.capture" }),
       header,
+      corpus: AgcapCorpus.fromRecords(header, this.records),
     };
   }
 }
 
 export class AgcapCorpus {
-  private constructor(readonly header: AgcapHeader, private readonly records: { meta: AgcapFrameMeta; pixels: Uint8Array }[]) {}
+  private constructor(readonly header: AgcapHeader, private readonly records: { meta: AgcapFrameMeta; pixels: Uint8Array }[]) {
+    records.sort((a, b) => a.meta.sequence - b.meta.sequence);
+  }
+
+  static fromRecords(header: AgcapHeader, records: { meta: AgcapFrameMeta; pixels: Uint8Array }[]): AgcapCorpus {
+    return new AgcapCorpus(header, records);
+  }
 
   static async load(blob: Blob): Promise<AgcapCorpus> {
     const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -184,7 +168,7 @@ export class AgcapCorpus {
     const bodyStart = headerStart + headerLength;
     if (bodyStart > bytes.length) throw new Error("Truncated AirGapper capture");
     const header = JSON.parse(decoder.decode(bytes.subarray(headerStart, bodyStart))) as AgcapHeader;
-    if (![1, 2, 3].includes(header.formatVersion) || header.pixelFormat !== "RGBA8888") {
+    if (![1, 2, 3, 4].includes(header.formatVersion) || header.pixelFormat !== "RGBA8888") {
       throw new Error("Unsupported AirGapper capture");
     }
     const body = header.compression === "gzip-stream" || header.compression === "png+gzip-stream"
@@ -206,7 +190,6 @@ export class AgcapCorpus {
       records.push({ meta, pixels: readPart() });
     }
     if (records.length !== header.framesStored) throw new Error("AirGapper capture frame count mismatch");
-    records.sort((a, b) => a.meta.sequence - b.meta.sequence);
     return new AgcapCorpus(header, records);
   }
 
@@ -215,7 +198,7 @@ export class AgcapCorpus {
 
   async frame(index: number): Promise<AgcapFrame> {
     const record = this.records[index]!;
-    if (this.header.compression === "png+gzip-stream") {
+    if (this.header.compression === "png+gzip-stream" || this.header.compression === "png") {
       const bitmap = await createImageBitmap(new Blob([record.pixels as BlobPart], { type: "image/png" }));
       try {
         const canvas = document.createElement("canvas");

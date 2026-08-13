@@ -1522,9 +1522,9 @@ async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
   recordCorpusBtn.disabled = true;
   recordCorpusBtn.textContent = "Saving…";
   try {
-    const { blob, header } = await recorder.finish();
-    benchmarkPendingBlob = blob;
-    benchmarkCorpus = undefined;
+    const { blob, header, corpus } = await recorder.finish();
+    benchmarkPendingBlob = undefined;
+    benchmarkCorpus = corpus;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
