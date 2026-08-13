@@ -327,7 +327,10 @@ public final class MainActivity extends Activity {
 
         @JavascriptInterface
         public void setNativePreviewBounds(int left, int top, int width, int height) {
-            nativeCamera.setBounds(left, top, width, height);
+            // DOMRect coordinates are CSS pixels; Android View layout uses physical pixels.
+            float density = getResources().getDisplayMetrics().density;
+            nativeCamera.setBounds(Math.round(left * density), Math.round(top * density),
+                    Math.round(width * density), Math.round(height * density));
         }
 
         @JavascriptInterface

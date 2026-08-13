@@ -32,6 +32,7 @@ import com.google.zxing.MultiFormatReader;
 import com.google.zxing.PlanarYUVLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.ResultPoint;
+import com.google.zxing.ResultMetadataType;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.common.HybridBinarizer;
 import com.google.zxing.multi.GenericMultipleBarcodeReader;
@@ -39,6 +40,7 @@ import com.google.zxing.multi.GenericMultipleBarcodeReader;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -353,9 +355,25 @@ final class NativeCameraController {
                 ResultPoint[] rp = result.getResultPoints();
                 float[] points = new float[(rp == null ? 0 : rp.length) * 2];
                 if (rp != null) for (int i = 0; i < rp.length; i++) { points[i * 2] = rp[i].getX(); points[i * 2 + 1] = rp[i].getY(); }
-                listener.onQr(result.getRawBytes(), points, timestamp);
+                listener.onQr(payloadBytes(result), points, timestamp);
             }
         } finally { decoding.set(false); }
+    }
+
+    private static byte[] payloadBytes(Result result) {
+        // QR DecoderResult.rawBytes are corrected QR codewords, not necessarily
+        // the application payload. Binary AirGapper symbols live in BYTE_SEGMENTS.
+        Object metadata = result.getResultMetadata() == null ? null
+                : result.getResultMetadata().get(ResultMetadataType.BYTE_SEGMENTS);
+        if (metadata instanceof Iterable) {
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
+            for (Object segment : (Iterable<?>) metadata) {
+                if (segment instanceof byte[]) payload.write((byte[]) segment, 0, ((byte[]) segment).length);
+            }
+            if (payload.size() > 0) return payload.toByteArray();
+        }
+        byte[] raw = result.getRawBytes();
+        return raw == null ? new byte[0] : raw;
     }
 
     private static Result[] decodeBitmap(MultiFormatReader base, BinaryBitmap bitmap, Map<DecodeHintType, Object> hints) {

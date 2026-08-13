@@ -60,6 +60,7 @@ const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
+const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
 const cameraTorchControl = document.getElementById("camera-torch-control")!;
 const cameraTorch = document.getElementById("camera-torch") as HTMLInputElement;
@@ -113,15 +114,22 @@ function selectedWorkerCount(): number {
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v2";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v3";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
 ] as const;
 const STANDARD_FPS = [24, 30, 60, 90, 120, 240, 480];
 const nativeCapabilities = isAndroidApp() ? nativeCameraCapabilities() : undefined;
-const nativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
+const advertisedNativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
+const standardSizeKeys = new Set<string>(STANDARD_RESOLUTIONS.map(([width, height]) => `${width}x${height}`));
+// Camera2 reports many implementation-detail sizes (for example 720×540 and
+// 144×176). Receiver choices stay useful: standard video sizes plus any
+// explicitly advertised constrained-high-speed size.
+const nativeModes = advertisedNativeModes.filter((mode) =>
+  standardSizeKeys.has(`${mode.width}x${mode.height}`) || mode.highSpeed);
 let backend: "native" | "webview" | "browser" = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
 let nativeFallbackUsed = false;
+let activeNativeFps = 0;
 let selectedNativeMode: NativeCameraMode | undefined;
 let requestedWidth = 1280;
 let requestedHeight = 960;
@@ -133,7 +141,8 @@ function nativeModesForResolution(value = cameraResolution.value): NativeCameraM
 }
 function populateFpsOptions(preferred?: string): void {
   if (nativeModes.length) {
-    const modes = nativeModesForResolution().sort((a, b) => a.fpsMax - b.fpsMax || a.fpsMin - b.fpsMin);
+    const candidates = nativeModesForResolution().sort((a, b) => a.fpsMax - b.fpsMax || a.fpsMin - b.fpsMin);
+    const modes = [...new Map(candidates.map((mode) => [`${mode.fpsMax}:${mode.highSpeed}`, mode])).values()];
     cameraFps.replaceChildren(...modes.map((mode) => new Option(
       `${mode.fpsMin === mode.fpsMax ? mode.fpsMax : `${mode.fpsMin}–${mode.fpsMax}`}${mode.highSpeed ? " · High speed" : ""}`,
       mode.key,
@@ -154,8 +163,10 @@ function populateCameraOptions(): void {
     ? [...new Map(nativeModes.map((mode) => [resolutionKey(mode.width, mode.height), [mode.width, mode.height] as const])).values()]
         .sort((a, b) => a[0] * a[1] - b[0] * b[1])
     : [...STANDARD_RESOLUTIONS];
-  cameraResolution.replaceChildren(...sizes.map(([width, height]) =>
-    new Option(`${width}×${height}`, resolutionKey(width, height))));
+  cameraResolution.replaceChildren(...sizes.map(([width, height]) => {
+    const maxFps = Math.max(...nativeModes.filter((mode) => mode.width === width && mode.height === height).map((mode) => mode.fpsMax), 0);
+    return new Option(`${width}×${height}${maxFps > 60 ? ` · up to ${maxFps} fps` : ""}`, resolutionKey(width, height));
+  }));
   const safeDefault = [...sizes].reverse().find(([w, h]) => w * h <= 1280 * 960) ?? sizes[0]!;
   cameraResolution.value = sizes.some(([w, h]) => w === 1280 && h === 960)
     ? "1280x960" : resolutionKey(safeDefault[0], safeDefault[1]);
@@ -194,7 +205,10 @@ function showRequestedCameraSettings(): void {
   const speed = selectedNativeMode?.highSpeed ? " · High speed" : "";
   cameraActual.textContent = `${backend === "native" ? "Native Camera2" : backend === "webview" ? "WebView" : "Browser"} · ${requestedWidth}×${requestedHeight} · ${requestedFps} fps${speed}`;
   captureScanBtn.hidden = backend === "native";
-  decodeWorkers.disabled = backend === "native";
+  decodeWorkersControl.hidden = backend === "native";
+  cameraTorchControl.hidden = backend === "native" || !selectedNativeMode?.torch;
+  cameraExposureControl.hidden = true;
+  video.hidden = backend === "native";
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
@@ -1083,6 +1097,7 @@ function stopReceiver(): void {
   startBtn.textContent = "Enable camera";
   backend = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
   nativeFallbackUsed = false;
+  activeNativeFps = 0;
   setStatus("");
 }
 window.addEventListener("airgapper:leave-mode", () => {
@@ -1107,6 +1122,7 @@ nativeWindow.airgapperNativeQr = (base64) => {
 nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
   if (status === "active" && mode) {
     preview.classList.remove("camera-loading");
+    activeNativeFps = mode.fpsMax;
     cameraActual.textContent = `Native Camera2 · ${mode.width}×${mode.height} · ${mode.fpsMax} fps${mode.highSpeed ? " · High speed" : ""}`;
     setStatus("");
     return;
@@ -1115,7 +1131,8 @@ nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
     nativeFallbackUsed = true;
     backend = "webview";
     captureScanBtn.hidden = false;
-    decodeWorkers.disabled = false;
+    decodeWorkersControl.hidden = false;
+    video.hidden = false;
     stopNativeCamera();
     clearInterval(statsTimer);
     statsTimer = undefined;
@@ -2193,7 +2210,7 @@ function updateStats() {
   const cameraRate = perSecond(captureTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${backend === "native" && activeNativeFps ? activeNativeFps : cameraRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
