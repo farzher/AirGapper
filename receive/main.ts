@@ -915,15 +915,11 @@ function hasDensityHeadroom(region: Region): boolean {
 
 function captureQualityColor(region: Region, rate: number): string {
   const headroom = hasDensityHeadroom(region);
-  const sequences = region.sequenceSamples.map((sample) => sample.seq);
-  const span = sequences.length ? Math.max(...sequences) - Math.min(...sequences) : 0;
-  const opportunities = Math.max(1, Math.round(span / Math.max(1, region.seqStep ?? 1)) + 1);
-  const perfect = sequences.length >= 6 && sequences.length === opportunities;
   // Separate enter/leave thresholds keep an established indication from
   // flickering on one miss. Red is reserved for near-total capture failure;
-  // perfect sustained capture gets its own unmistakably bright blue.
+  // sustained 95% capture gets its own unmistakably bright blue.
   let level = 0;
-  if (perfect && headroom) level = 5;
+  if ((rate >= 0.95 || (region.qualityLevel === 5 && rate >= 0.9)) && headroom) level = 5;
   else if ((rate >= 0.8 || (region.qualityLevel >= 4 && rate >= 0.72)) && headroom) level = 4;
   else if (rate >= 0.6 || (region.qualityLevel >= 3 && rate >= 0.52)) level = 3;
   else if (rate >= 0.35 || (region.qualityLevel >= 2 && rate >= 0.28)) level = 2;
