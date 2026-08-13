@@ -234,6 +234,7 @@ interface BenchmarkFrameTrace {
 }
 let activeBenchmarkFrame: BenchmarkFrameTrace | undefined;
 let benchmarkCorpus: AgcapCorpus | undefined;
+let benchmarkPendingBlob: Blob | undefined;
 let benchmarkRecorder: AgcapRecorder | undefined;
 let benchmarkRecordingSequence = 0;
 let benchmarkTraces: BenchmarkFrameTrace[] = [];
@@ -1529,19 +1530,23 @@ async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
   recordCorpusBtn.textContent = "Saving…";
   try {
     const { blob, header } = await recorder.finish();
+    benchmarkPendingBlob = blob;
+    benchmarkCorpus = undefined;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = `airgapper-${stamp}.agcap`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 2000);
-    benchmarkStatus.textContent = `${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops`;
+    benchmarkStatus.textContent = `Downloaded ${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops · ready to run`;
+    runBenchmarkBtn.disabled = false;
     benchmarkDialog.showModal();
   } catch (error) {
     showError(error instanceof Error ? error.message : String(error));
   } finally {
     recordCorpusBtn.disabled = false;
     recordCorpusBtn.textContent = "Record";
+    setStatus("");
   }
 }
 
@@ -1569,10 +1574,17 @@ function scheduleFrame(gen: number) {
         expectedDisplayTimeMs: frame.expectedDisplayTimeMs, callbackTimeMs: frame.callbackTimeMs,
         width, height, stride: width * 4, orientation,
       }, image);
+      recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1000))}s`;
+      // Corpus capture owns the camera readback. Running production decoding at
+      // the same time would only steal callbacks; its decisions are recreated
+      // later from these untouched frames during deterministic replay.
+      drawOverlay(receiverNow());
+      if (recorder.complete) void finishCorpusRecording(recorder);
+      scheduleFrame(gen);
+      return;
     }
     captureFrame(frame);
     drawOverlay(receiverNow());
-    if (recorder?.complete) void finishCorpusRecording(recorder);
     scheduleFrame(gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
@@ -2874,7 +2886,10 @@ recordCorpusBtn.addEventListener("click", () => {
     orientation: screen.orientation?.type ?? `${window.orientation ?? 0}`,
     cameraSettings: track.getSettings(), airgapperVersion: version, userAgent: navigator.userAgent,
   });
-  recordCorpusBtn.textContent = "Stop";
+  benchmarkCorpus = undefined;
+  benchmarkPendingBlob = undefined;
+  recordCorpusBtn.textContent = "Stop · 7s";
+  setStatus("Recording lossless frames… decoding paused");
 });
 loadCorpusBtn.addEventListener("click", () => corpusFile.click());
 corpusFile.addEventListener("change", async () => {
@@ -2884,6 +2899,7 @@ corpusFile.addEventListener("change", async () => {
     benchmarkStatus.textContent = "Loading lossless corpus…";
     if (!benchmarkDialog.open) benchmarkDialog.showModal();
     benchmarkCorpus = await AgcapCorpus.load(file);
+    benchmarkPendingBlob = undefined;
     benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} RGBA · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
     runBenchmarkBtn.disabled = false;
   } catch (error) {
@@ -2901,7 +2917,11 @@ saveBenchmarkBtn.addEventListener("click", () => {
   link.href = URL.createObjectURL(blob);
   link.download = `airgapper-benchmark-${Date.now()}.json`;
   link.click();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  saveBenchmarkBtn.textContent = "Downloaded";
+  setTimeout(() => {
+    URL.revokeObjectURL(link.href);
+    saveBenchmarkBtn.textContent = "Save results";
+  }, 1500);
 });
 
 function waitForWorkers(): Promise<void> {
@@ -2925,6 +2945,7 @@ async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
     for (let index = 0; index < corpus.length; index++) {
       const frame = await corpus.frame(index);
       benchmarkStatus.textContent = `Reference ${index + 1}/${corpus.length}`;
+      await new Promise(requestAnimationFrame);
       const reply = await new Promise<OracleMessage>((resolve, reject) => {
         const id = 1_000_000 + index;
         worker.onmessage = (event: MessageEvent<OracleMessage>) => {
@@ -2999,9 +3020,25 @@ async function inspectBenchmarkFrame(index: number): Promise<void> {
 }
 
 async function runReceiverBenchmark(): Promise<void> {
-  const corpus = benchmarkCorpus;
-  if (!corpus || replayRunning) return;
+  if (replayRunning) return;
   runBenchmarkBtn.disabled = true;
+  if (!benchmarkCorpus && benchmarkPendingBlob) {
+    benchmarkStatus.textContent = "Loading recorded frames…";
+    await new Promise(requestAnimationFrame);
+    try {
+      benchmarkCorpus = await AgcapCorpus.load(benchmarkPendingBlob);
+    } catch (error) {
+      benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
+      runBenchmarkBtn.disabled = false;
+      return;
+    }
+  }
+  const corpus = benchmarkCorpus;
+  if (!corpus) {
+    benchmarkStatus.textContent = "Record or load an .agcap first.";
+    runBenchmarkBtn.disabled = false;
+    return;
+  }
   saveBenchmarkBtn.disabled = true;
   stopReceiver();
   replayRunning = true;
@@ -3025,6 +3062,7 @@ async function runReceiverBenchmark(): Promise<void> {
       }
       replayClock = frame.meta.callbackTimeMs;
       benchmarkStatus.textContent = `Production ${index + 1}/${corpus.length}`;
+      if (index % 4 === 0) await new Promise(requestAnimationFrame);
       captureFrame({
         sequence: frame.meta.sequence, width: frame.meta.width, height: frame.meta.height,
         callbackTimeMs: frame.meta.callbackTimeMs, mediaTimeMs: frame.meta.mediaTimeMs,
