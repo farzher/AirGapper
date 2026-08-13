@@ -1838,9 +1838,7 @@ function captureFrame() {
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
       [img.data.buffer],
     )) {
-      scanCapturedAt.set(id, now);
       noteScanSubmission();
-      submittedJobs++;
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
@@ -1888,9 +1886,7 @@ function captureFrame() {
         [img.data.buffer],
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
-        scanCapturedAt.set(id, now);
         noteScanSubmission();
-        submittedJobs++;
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
@@ -1950,9 +1946,7 @@ function captureFrame() {
       poolBusyTimes.push(performance.now());
       break;
     }
-    scanCapturedAt.set(id, now);
     noteScanSubmission();
-    submittedJobs++;
     if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
     submitted = true;
