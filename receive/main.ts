@@ -2029,17 +2029,11 @@ function updateStats() {
   const qrRate = perSecond(qrReadTimes);
   metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
-  const busyRate = poolBusyTimes.length / Math.max(1, captureTimes.length);
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
-  const saturated = busyRate >= 0.15;
   const limit = metric("m-limit");
-  limit.textContent = stalled
-    ? "Scanner stalled"
-    : saturated
-      ? `Decoder ${Math.min(100, Math.round(busyRate * 100))}%`
-      : "";
-  limit.classList.toggle("scanner-bound", stalled || saturated);
+  limit.textContent = stalled ? "Scanner stalled" : "";
+  limit.classList.toggle("scanner-bound", stalled);
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing
