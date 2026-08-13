@@ -10,10 +10,10 @@ android {
         applicationId "com.airgapper.app"
         minSdk 23
         targetSdk 29
-        versionCode 31
-        versionName "0.1.31"
+        versionCode 32
+        versionName "0.1.32"
         ndk {
-            abiFilters "armeabi-v7a"
+            abiFilters "armeabi-v7a", "arm64-v8a"
         }
     }
 
@@ -40,6 +40,10 @@ android {
     sourceSets {
         main.assets.srcDir("$buildDir/generated/webAssets")
     }
+}
+
+dependencies {
+    implementation "com.google.zxing:core:3.5.3"
 }
 
 def syncWebApp = tasks.register("syncWebApp", Copy) {

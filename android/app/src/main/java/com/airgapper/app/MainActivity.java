@@ -16,6 +16,7 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -24,6 +25,9 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -39,6 +43,9 @@ public final class MainActivity extends Activity {
     private static final int SAVE_REQUEST = 12;
 
     private WebView webView;
+    private FrameLayout root;
+    private NativeCameraController nativeCamera;
+    private String pendingNativeMode;
     private PermissionRequest cameraRequest;
     private ValueCallback<Uri[]> fileCallback;
     private View fullscreenView;
@@ -54,9 +61,23 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
 
+        root = new FrameLayout(this);
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(247, 247, 245));
-        setContentView(webView);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+        nativeCamera = new NativeCameraController(this, root, new NativeCameraController.Listener() {
+            @Override public void onQr(byte[] bytes, float[] points, long timestampNs) {
+                runOnUiThread(() -> evaluate("window.airgapperNativeQr&&window.airgapperNativeQr(" +
+                        JSONObject.quote(Base64.encodeToString(bytes, Base64.NO_WRAP)) + "," +
+                        pointsJson(points) + "," + timestampNs + ")"));
+            }
+            @Override public void onStatus(String status, String detail, String modeJson) {
+                runOnUiThread(() -> evaluate("window.airgapperNativeCameraStatus&&window.airgapperNativeCameraStatus(" +
+                        JSONObject.quote(status) + "," + JSONObject.quote(detail) + "," + modeJson + ")"));
+            }
+        });
 
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -85,6 +106,13 @@ public final class MainActivity extends Activity {
                 }
             }
             return null;
+        }
+
+        @Override
+        public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+            nativeCamera.stop();
+            // Recovery stays in-page/bounded: never kill or restart the Activity process.
+            return true;
         }
 
         @Override
@@ -175,13 +203,19 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode != CAMERA_REQUEST || cameraRequest == null) return;
-        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-            cameraRequest.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
-        } else {
-            cameraRequest.deny();
+        if (requestCode != CAMERA_REQUEST) return;
+        boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+        if (cameraRequest != null) {
+            if (granted) cameraRequest.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+            else cameraRequest.deny();
+            cameraRequest = null;
         }
-        cameraRequest = null;
+        if (pendingNativeMode != null) {
+            String mode = pendingNativeMode;
+            pendingNativeMode = null;
+            if (granted) nativeCamera.start(mode);
+            else evaluate("window.airgapperNativeCameraStatus&&window.airgapperNativeCameraStatus('fallback','Camera permission denied',null)");
+        }
     }
 
     @Override
@@ -286,7 +320,38 @@ public final class MainActivity extends Activity {
             });
         }
 
+        @JavascriptInterface
+        public String getNativeCameraCapabilities() {
+            return nativeCamera.capabilitiesJson();
+        }
 
+        @JavascriptInterface
+        public void setNativePreviewBounds(int left, int top, int width, int height) {
+            nativeCamera.setBounds(left, top, width, height);
+        }
+
+        @JavascriptInterface
+        public void startNativeCamera(String mode) {
+            runOnUiThread(() -> {
+                if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    nativeCamera.start(mode);
+                } else {
+                    pendingNativeMode = mode;
+                    requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_REQUEST);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void stopNativeCamera() {
+            nativeCamera.stop();
+        }
+
+        @JavascriptInterface
+        public void setNativeTorch(boolean enabled) { nativeCamera.setTorch(enabled); }
+
+        @JavascriptInterface
+        public void setNativeExposure(int value) { nativeCamera.setExposure(value); }
     }
 
     private synchronized void discardPendingDownload() {
@@ -305,6 +370,17 @@ public final class MainActivity extends Activity {
         return clean.isEmpty() ? "transfer.bin" : clean;
     }
 
+    private static String pointsJson(float[] points) {
+        JSONArray json = new JSONArray();
+        try { for (float point : points) json.put((double) point); }
+        catch (Exception ignored) { return "[]"; }
+        return json.toString();
+    }
+
+    private void evaluate(String script) {
+        if (webView != null) webView.evaluateJavascript(script, null);
+    }
+
     @Override
     public void onBackPressed() {
         if (fullscreenView != null) {
@@ -320,6 +396,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        nativeCamera.pause();
         webView.evaluateJavascript(
                 "window.airgapperSuspend && window.airgapperSuspend()",
                 ignored -> webView.onPause());
@@ -335,6 +412,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         discardPendingDownload();
+        nativeCamera.destroy();
         webView.destroy();
         super.onDestroy();
     }
