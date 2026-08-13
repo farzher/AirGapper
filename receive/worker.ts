@@ -106,7 +106,7 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, thorough = true, geometry = false, reacquire = false, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, thorough = true, reacquire = false, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -117,7 +117,6 @@ ctx.onmessage = async (e: MessageEvent) => {
     scaleY?: number;
     full?: boolean;
     thorough?: boolean;
-    geometry?: boolean;
     reacquire?: boolean;
     quad?: DecimenQuad;
     dim?: number;
@@ -252,15 +251,10 @@ ctx.onmessage = async (e: MessageEvent) => {
         if (symbols.length === 0 && thorough) {
           appendResults(zx.readFull(ptr, pw, ph, true, 1, false), false);
         }
-        // Reduced scans retain a bounded detector-only pass so an undecodable
-        // position can seed a native crop. Keep this separate from acquisition
-        // decoding: error fragments must not consume its one result slot.
-        if (symbols.length === 0 && geometry) {
-          appendResults(zx.readFull(ptr, pw, ph, false, 8, true), true);
-        }
       } else {
-        // Crop fallback stays in the cheapest detector configuration.
-        appendResults(zx.readFull(ptr, pw, ph, true, 4, true), true);
+        // A local detector crop may decode a packet, but error positions are
+        // not correspondence evidence and can never move the lattice.
+        appendResults(zx.readFull(ptr, pw, ph, true, 1, false), false);
       }
     }
     ctx.postMessage({

@@ -80,7 +80,6 @@ ctx.onmessage = async (event: MessageEvent) => {
     // multi-second apparent lock-up on dense sender grids.
     appendResults(zx.readFull(ptr, w, h, false, 1, false), false);
     if (symbols.length === 0) appendResults(zx.readFull(ptr, w, h, true, 1, false), false);
-    if (symbols.length === 0) appendResults(zx.readFull(ptr, w, h, false, 8, true), true);
     ctx.postMessage({
       id, symbols, sightings, full: true,
       latencyMs: performance.now() - startedAt,

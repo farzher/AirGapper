@@ -27,7 +27,6 @@ import {
   type SymbolBox,
   type SymbolInfo,
   type SymbolQuad,
-  type SymbolSighting,
 } from "../shared/worker-pool";
 import { PlainQrPolicy } from "../shared/plain-qr-policy";
 import { isSnippet, snippetText } from "../shared/snippet";
@@ -234,10 +233,10 @@ const pool = new DecodeWorkerPool(
   // Heavily gated in noteRegion (refresh-only on matches, size-checked on
   // creation) because failed quads are often junk — but a plausible one lets
   // the crop path go decode what the full frame could not.
-  (sighting, scanId) => {
-    const now = performance.now();
-    if (gridLattice.active) noteGridSighting(sighting, scanId, now);
-    else noteRegion(sighting, now, false);
+  (sighting) => {
+    // Detector errors may seed one cold native crop, but only a decoded,
+    // protocol-valid packet is allowed to move an established lattice.
+    if (!gridLattice.active) noteRegion(sighting, performance.now(), false);
   },
   () => undefined,
   (id, completion) => noteDecodeCompleted(id, completion),
@@ -352,28 +351,6 @@ type CropAttempt = { region: Region; quad?: SymbolQuad };
 const cropAttempts = new Map<number, CropAttempt[]>();
 const scanCapturedAt = new Map<number, number>();
 const localReacquireIds = new Set<number>();
-
-function noteGridSighting(sighting: SymbolSighting, scanId: number, now: number): void {
-  if (!sighting.quad) return;
-  const attempted = cropAttempts.get(scanId)?.map(({ region }) => region) ?? [];
-  const candidates = (attempted.length ? attempted : regions)
-    .filter((region) => region.gridSlot !== undefined && region.quad);
-  if (!candidates.length) return;
-  const cx = sighting.x + sighting.w / 2;
-  const cy = sighting.y + sighting.h / 2;
-  const region = candidates.reduce((best, candidate) => {
-    const distance = Math.hypot(cx - candidate.x - candidate.w / 2, cy - candidate.y - candidate.h / 2);
-    const bestDistance = Math.hypot(cx - best.x - best.w / 2, cy - best.y - best.h / 2);
-    return distance < bestDistance ? candidate : best;
-  });
-  const capturedAt = scanCapturedAt.get(scanId) ?? now;
-  const snapshot = gridLattice.alignSlot(region.gridSlot!, sighting.quad, capturedAt);
-  if (!snapshot) return;
-  syncGrid(snapshot, now);
-  const aligned = regions.find((candidate) => candidate.gridSlot === region.gridSlot);
-  if (aligned) aligned.sightedSeen = now;
-  notePipelineEvent("grid-geometry-aligned", region.gridSlot!);
-}
 
 type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; accepted: number };
 const scanOutcomes = new Map<number, ScanOutcome>();
@@ -511,7 +488,10 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     // quad. Scan ids, unlike object identity, distinguish a genuine newer hit
     // from that routine geometry refresh, so missing slots actually age into
     // expanded-crop and reacquisition states.
-    if (!hit && (region.lastHitScanId ?? -1) <= id) region.consecutiveMisses++;
+    if (!hit && (region.lastHitScanId ?? -1) <= id) {
+      region.consecutiveMisses++;
+      if (region.consecutiveMisses >= 3) region.decoded = false;
+    }
   }
 }
 
@@ -1492,6 +1472,8 @@ let pendingScanCapture: {
   oy: number;
   full: boolean;
   tracks: SymbolQuad[];
+  scaleX: number;
+  scaleY: number;
 } | null = null;
 let lastRawScanImage: ImageData | null = null;
 const scanSaveCanvas = document.createElement("canvas");
@@ -1616,6 +1598,8 @@ function captureSubmittedScan(
   oy: number,
   full: boolean,
   tracks: SymbolQuad[] = [],
+  scaleX = 1,
+  scaleY = 1,
 ): void {
   if (!captureNextScan) return;
   captureNextScan = false;
@@ -1624,7 +1608,7 @@ function captureSubmittedScan(
   // Capture button feel hung on full-resolution frames.
   pendingScanCapture = {
     image: new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
-    ox, oy, full, tracks,
+    ox, oy, full, tracks, scaleX, scaleY,
   };
   scanCapture.width = image.width;
   scanCapture.height = image.height;
@@ -1656,8 +1640,8 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
     ctx.beginPath();
     points.forEach((point, index) => {
-      const x = point.x - capture.ox;
-      const y = point.y - capture.oy;
+      const x = (point.x - capture.ox) / capture.scaleX;
+      const y = (point.y - capture.oy) / capture.scaleY;
       if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.closePath();
@@ -1669,7 +1653,12 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   for (const symbol of completion.symbols) if (symbol.quad) drawQuad(symbol.quad, "#20c969", 5);
   ctx.strokeStyle = "#f2a51a";
   ctx.lineWidth = 4;
-  for (const box of completion.sightings) ctx.strokeRect(box.x - capture.ox, box.y - capture.oy, box.w, box.h);
+  for (const box of completion.sightings) ctx.strokeRect(
+    (box.x - capture.ox) / capture.scaleX,
+    (box.y - capture.oy) / capture.scaleY,
+    box.w / capture.scaleX,
+    box.h / capture.scaleY,
+  );
   const tracked = !capture.full;
   const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
   scanDialogStatus.textContent = completion.error
@@ -1829,14 +1818,11 @@ function captureFrame() {
     : fullScans === 0 || now - lastFullScan > scanInterval);
 
   if (fullScanDue) {
-    // Start with the reduced single-pass detector: asking the exhaustive QR
-    // reader to enumerate a dense full-resolution lattice can monopolize a
-    // worker for seconds. One decoded packet identifies the complete layout,
-    // while detector-only geometry immediately seeds a native crop. Retain a
-    // delayed native exhaustive pass only as the difficult-scene fallback.
+    // Acquisition needs one packet, so the first frame is native but the
+    // worker stops after one symbol. Later reduced passes stay cheap, with a
+    // periodic native retry for difficult scenes.
     const thoroughInFlight = [...fullScanJobs.values()].some((job) => job.thorough);
-    const thorough = captureNextScan || (!thoroughInFlight &&
-      now - cameraStartedTs >= THOROUGH_SCAN_INTERVAL_MS &&
+    const thorough = captureNextScan || fullScans === 0 || (!thoroughInFlight &&
       now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
     const native = thorough;
     const scale = native ? 1 : Math.min(1, ACQUISITION_REDUCED_EDGE / Math.max(vw, vh));
@@ -1846,11 +1832,11 @@ function captureFrame() {
     const ctx = grab.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(video, 0, 0, sw, sh);
     const img = ctx.getImageData(0, 0, sw, sh);
-    captureSubmittedScan(img, 0, 0, true);
+    captureSubmittedScan(img, 0, 0, true, [], vw / sw, vh / sh);
     const id = frameId++;
     const reacquire = state === "REACQUIRE" || (state === "PARTIAL_LOCK" && widespreadFailure);
     if (pool.submit(
-      { id, buf: img.data.buffer, w: sw, h: sh, ox: 0, oy: 0, scaleX: vw / sw, scaleY: vh / sh, full: true, thorough, geometry: !native },
+      { id, buf: img.data.buffer, w: sw, h: sh, ox: 0, oy: 0, scaleX: vw / sw, scaleY: vh / sh, full: true, thorough },
       [img.data.buffer],
     )) {
       lastFullScan = now;
