@@ -4,8 +4,6 @@ interface AndroidBridge {
   finishDownload(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
-  cameraHealthy(): void;
-  recoverCamera(): void;
 }
 
 function bridge(): AndroidBridge | undefined {
@@ -42,10 +40,3 @@ export function setAndroidKeepScreenOn(enabled: boolean): void {
   bridge()?.setKeepScreenOn(enabled);
 }
 
-export function reportAndroidCameraHealthy(): void {
-  bridge()?.cameraHealthy();
-}
-
-export function recoverAndroidCamera(): void {
-  bridge()?.recoverCamera();
-}

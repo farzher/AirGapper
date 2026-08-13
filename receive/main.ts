@@ -45,8 +45,6 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
-  recoverAndroidCamera,
-  reportAndroidCameraHealthy,
   saveFileOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
@@ -214,7 +212,6 @@ let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
 // the fork's real hit rate; zero attempts means the quad/dim plumbing broke
 let cameraStartedTs = 0; // acquisition latency = first decode − camera start
-let cameraHealthyReported = false;
 let zeroRegionMs = 0; // transfer time spent with tracking fully collapsed
 let degradedMs = 0; // transfer time spent below the expected code count
 let minSeq = Infinity; // seq span ≈ what the sender emitted while we watched;
@@ -917,7 +914,6 @@ function stopReceiver(): void {
   trackedDecodes = 0;
   trackedAttempts = 0;
   cameraStartedTs = 0;
-  cameraHealthyReported = false;
   zeroRegionMs = 0;
   degradedMs = 0;
   minSeq = Infinity;
@@ -1002,15 +998,12 @@ async function start() {
     height: { ideal: captureHeight },
   };
   try {
-    if (isAndroidApp() || captureFps === undefined) {
-      // Use exactly one request in the APK: some old Android camera providers
-      // wedge after either a rejected request or a live applyConstraints call.
-      // `ideal` asks for browser-equivalent throughput without making the
-      // selected fps fatal. Auto omits the frame-rate constraint entirely.
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: captureFps === undefined ? base : { ...base, frameRate: { ideal: captureFps } },
-      });
+    if (isAndroidApp()) {
+      // Keep the APK request broad. Older Android camera providers can fail
+      // before producing a frame when Chromium forwards frame-rate constraints.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
+    } else if (captureFps === undefined) {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
     } else {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -1058,16 +1051,7 @@ async function start() {
 
   cameraStartedTs = performance.now();
   captureGen++;
-  const startedGen = captureGen;
-  scheduleFrame(startedGen);
-  if (isAndroidApp()) {
-    // Permission revocation fixes this phone because Android kills the stale
-    // camera client. If a granted stream delivers no frame at all, recycle the
-    // app process once to get the same camera-service cleanup automatically.
-    setTimeout(() => {
-      if (!done && startedGen === captureGen && totalCaptures === 0) recoverAndroidCamera();
-    }, 5000);
-  }
+  scheduleFrame(captureGen);
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
@@ -1276,10 +1260,6 @@ function captureFrame() {
   const vh = video.videoHeight;
   if (!vw || !vh) return;
   const now = performance.now();
-  if (!cameraHealthyReported && isAndroidApp()) {
-    cameraHealthyReported = true;
-    reportAndroidCameraHealthy();
-  }
   captureTimes.push(now);
   totalCaptures++;
   if (pool.busyCount === pool.size) {

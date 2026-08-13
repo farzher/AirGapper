@@ -2,8 +2,6 @@ package com.airgapper.app;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlarmManager;
-import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -12,8 +10,6 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.Process;
-import android.os.SystemClock;
 import android.util.Base64;
 import android.view.View;
 import android.view.ViewGroup;
@@ -290,30 +286,6 @@ public final class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface
-        public void cameraHealthy() {
-            getSharedPreferences("camera", MODE_PRIVATE).edit()
-                    .putBoolean("recoveryPending", false).apply();
-        }
-
-        @JavascriptInterface
-        public void recoverCamera() {
-            if (getSharedPreferences("camera", MODE_PRIVATE)
-                    .getBoolean("recoveryPending", false)) return;
-            getSharedPreferences("camera", MODE_PRIVATE).edit()
-                    .putBoolean("recoveryPending", true).commit();
-            Intent launch = new Intent(MainActivity.this, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            PendingIntent pending = PendingIntent.getActivity(
-                    MainActivity.this, 19, launch,
-                    PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            AlarmManager alarm = (AlarmManager) getSystemService(ALARM_SERVICE);
-            alarm.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 500, pending);
-            runOnUiThread(() -> {
-                finishAffinity();
-                Process.killProcess(Process.myPid());
-            });
-        }
 
     }
 
