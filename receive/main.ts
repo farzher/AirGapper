@@ -594,8 +594,14 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       if (ratio < 0.5 || ratio > 2) return;
     } else {
       // A reduced acquisition scan may locate geometry without enough pixels to
-      // decode it. Retain one plausible cold candidate for a native crop.
-      if (box.w < 24 || box.h < 24 || box.w * box.h > video.videoWidth * video.videoHeight * 0.8) return;
+      // decode it. Retain one plausible cold candidate for a native crop, but
+      // reject the small square error boxes produced by individual finder
+      // patterns in a dense lattice—they are not QR bounds and send the crop
+      // path to exactly the wrong place and scale.
+      const coldMinSize = Math.max(24, Math.min(video.videoWidth, video.videoHeight) * 0.06);
+      if (box.w < coldMinSize || box.h < coldMinSize ||
+          Math.max(box.w / box.h, box.h / box.w) > 2.25 ||
+          box.w * box.h > video.videoWidth * video.videoHeight * 0.8) return;
       if (regions.some((region) => !region.decoded)) return;
     }
     // Error-result quads wobble and split while a display transition is in
@@ -1736,10 +1742,15 @@ function captureFrame() {
     : fullScans === 0 || now - lastFullScan > scanInterval);
 
   if (fullScanDue) {
-    // The first search is immediate, native and thorough. Later cheap reduced
-    // scans remain serialized so detector work never competes with itself.
+    // Start with the reduced single-pass detector: asking the exhaustive QR
+    // reader to enumerate a dense full-resolution lattice can monopolize a
+    // worker for seconds. One decoded packet identifies the complete layout,
+    // while detector-only geometry immediately seeds a native crop. Retain a
+    // delayed native exhaustive pass only as the difficult-scene fallback.
     const thoroughInFlight = [...fullScanJobs.values()].some((job) => job.thorough);
-    const thorough = captureNextScan || (!thoroughInFlight && now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
+    const thorough = captureNextScan || (!thoroughInFlight &&
+      now - cameraStartedTs >= THOROUGH_SCAN_INTERVAL_MS &&
+      now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS);
     const native = thorough;
     const scale = native ? 1 : Math.min(1, ACQUISITION_REDUCED_EDGE / Math.max(vw, vh));
     const sw = Math.max(1, Math.round(vw * scale));

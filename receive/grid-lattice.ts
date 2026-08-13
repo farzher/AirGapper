@@ -43,7 +43,7 @@ function corners(quad: SymbolQuad): Point[] {
   return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
 }
 
-function validGeometry(detection: GridDetection): boolean {
+function validGeometry(detection: GridDetection, frameWidth: number, frameHeight: number): boolean {
   if (detection.modules < 21 || detection.modules > 177 || detection.modules % 4 !== 1) return false;
   const points = corners(detection.quad);
   if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
@@ -51,7 +51,24 @@ function validGeometry(detection: GridDetection): boolean {
   const shortest = Math.min(...edges);
   const longest = Math.max(...edges);
   const area = Math.abs(points.reduce((sum, p, i) => sum + p.x * points[(i + 1) % 4]!.y - p.y * points[(i + 1) % 4]!.x, 0) / 2);
-  return shortest >= 20 && longest / shortest < 2.25 && area > shortest * shortest * 0.35;
+  if (shortest < 20 || longest / shortest >= 2.25 || area <= shortest * shortest * 0.35) return false;
+
+  // A corrupt/freed native position can still be finite and roughly square.
+  // Reject it before one decoded packet projects an entire blue lattice from
+  // bad coordinates. The independently returned box must agree with the quad,
+  // and a real camera symbol cannot live far outside the captured frame.
+  const quadBounds = bounds(detection.quad);
+  const boxCenterX = detection.box.x + detection.box.w / 2;
+  const boxCenterY = detection.box.y + detection.box.h / 2;
+  const quadCenterX = quadBounds.x + quadBounds.w / 2;
+  const quadCenterY = quadBounds.y + quadBounds.h / 2;
+  const size = Math.max(quadBounds.w, quadBounds.h, detection.box.w, detection.box.h);
+  return detection.box.w > 0 && detection.box.h > 0 &&
+    Math.abs(boxCenterX - quadCenterX) <= size * 0.2 &&
+    Math.abs(boxCenterY - quadCenterY) <= size * 0.2 &&
+    quadBounds.x >= -frameWidth * 0.25 && quadBounds.y >= -frameHeight * 0.25 &&
+    quadBounds.x + quadBounds.w <= frameWidth * 1.25 &&
+    quadBounds.y + quadBounds.h <= frameHeight * 1.25;
 }
 
 function solve(rows: number[][], values: number[]): number[] | null {
@@ -142,7 +159,7 @@ export class GridLattice {
   }
 
   accept(detection: GridDetection, frameWidth: number, frameHeight: number): GridSnapshot | null {
-    if (!validGeometry(detection)) return null;
+    if (!validGeometry(detection, frameWidth, frameHeight)) return null;
     const declaredLayout = detection.layoutId === undefined ? undefined : gridLayoutById(detection.layoutId);
     if (detection.layoutId !== undefined && (!declaredLayout || detection.slotIndex === undefined ||
       detection.slotIndex >= declaredLayout.cols * declaredLayout.rows || detection.gridEsi === undefined ||

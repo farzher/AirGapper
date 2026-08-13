@@ -44,32 +44,40 @@ ctx.onmessage = async (event: MessageEvent) => {
     const pixels = new Uint8Array(buf);
     ptr = zx._malloc(pixels.byteLength);
     zx.HEAPU8.set(pixels, ptr);
-    const results = zx.readFull(ptr, w, h, true, 16, true);
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: false }[] = [];
     const sightings: object[] = [];
-    try {
-      for (let index = 0; index < results.size(); index++) {
-        const result = results.get(index);
-        if (result.valid && result.bytes.length > 0) {
-          // Copy every embind value while the result is alive. Keeping the
-          // position proxy after results.delete() produced wild overlay quads
-          // and poisoned tracking on old WebViews.
-          const quad = plainQuad(result.position);
-          symbols.push({
-            bytes: Uint8Array.from(result.bytes),
-            box: boundsOf(quad),
-            quad,
-            modules: result.modules,
-            tracked: false,
-          });
-        } else {
-          const box = boundsOf(result.position);
-          if (box.w > 0 && box.h > 0) sightings.push(box);
+    const appendResults = (results: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
+      try {
+        for (let index = 0; index < results.size(); index++) {
+          const result = results.get(index);
+          if (result.valid && result.bytes.length > 0) {
+            // Copy every embind value while the result is alive. Keeping the
+            // position proxy after results.delete() produced wild overlay quads
+            // and poisoned tracking on old WebViews.
+            const quad = plainQuad(result.position);
+            symbols.push({
+              bytes: Uint8Array.from(result.bytes),
+              box: boundsOf(quad),
+              quad,
+              modules: result.modules,
+              tracked: false,
+            });
+          } else if (includeErrors) {
+            const box = boundsOf(result.position);
+            if (box.w > 0 && box.h > 0) sightings.push(box);
+          }
         }
+      } finally {
+        results.delete();
       }
-    } finally {
-      results.delete();
-    }
+    };
+    // One valid packet declares the entire QR lattice. Limiting acquisition
+    // to one symbol avoids the combinatorial multi-detector search through
+    // finder patterns from neighboring codes, which was the source of the
+    // multi-second apparent lock-up on dense sender grids.
+    appendResults(zx.readFull(ptr, w, h, false, 1, false), false);
+    if (symbols.length === 0) appendResults(zx.readFull(ptr, w, h, true, 1, false), false);
+    if (symbols.length === 0) appendResults(zx.readFull(ptr, w, h, false, 8, true), true);
     ctx.postMessage({
       id, symbols, sightings, full: true,
       latencyMs: performance.now() - startedAt,

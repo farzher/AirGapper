@@ -255,13 +255,22 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       };
       if (full) {
-        // Most acquisition frames are misses. Reduced frames return detector
-        // geometry so the scheduler can decode a bounded native crop; periodic
-        // native `thorough` scans retain the difficult/small-symbol fallback.
-        appendResults(zx.readFull(ptr, pw, ph, thorough, 16, geometry), geometry);
-        // Error results count against ZXing's symbol limit. Only a thorough
-        // total miss pays for this pass, which seeds a bounded recovery crop.
-        if (thorough && symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+        // Acquisition needs one packet, not an inventory of the whole dense
+        // lattice: that packet declares every slot. A high multi-symbol limit
+        // makes ZXing combine finder patterns across neighboring QRs and can
+        // turn an obvious frame into seconds of false candidates. Try the
+        // cheap single-symbol reader first, then the exhaustive variant only
+        // when this is the deliberately infrequent thorough job.
+        appendResults(zx.readFull(ptr, pw, ph, false, 1, false), false);
+        if (symbols.length === 0 && thorough) {
+          appendResults(zx.readFull(ptr, pw, ph, true, 1, false), false);
+        }
+        // Reduced scans retain a bounded detector-only pass so an undecodable
+        // position can seed a native crop. Keep this separate from acquisition
+        // decoding: error fragments must not consume its one result slot.
+        if (symbols.length === 0 && geometry) {
+          appendResults(zx.readFull(ptr, pw, ph, false, 8, true), true);
+        }
       } else {
         // Crop fallback stays in the cheapest detector configuration.
         appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
