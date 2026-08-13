@@ -915,15 +915,21 @@ function hasDensityHeadroom(region: Region): boolean {
 
 function captureQualityColor(region: Region, rate: number): string {
   const headroom = hasDensityHeadroom(region);
+  const sequences = region.sequenceSamples.map((sample) => sample.seq);
+  const span = sequences.length ? Math.max(...sequences) - Math.min(...sequences) : 0;
+  const opportunities = Math.max(1, Math.round(span / Math.max(1, region.seqStep ?? 1)) + 1);
+  const perfect = sequences.length >= 6 && sequences.length === opportunities;
   // Separate enter/leave thresholds keep an established indication from
-  // flickering on one miss while still allowing a serious gap to fall quickly.
+  // flickering on one miss. Red is reserved for near-total capture failure;
+  // perfect sustained capture gets its own unmistakably bright blue.
   let level = 0;
-  if ((rate >= 0.95 || (region.qualityLevel === 4 && rate >= 0.9)) && headroom) level = 4;
-  else if (rate >= 0.9 || (region.qualityLevel >= 3 && rate >= 0.84)) level = 3;
-  else if (rate >= 0.75 || (region.qualityLevel >= 2 && rate >= 0.68)) level = 2;
-  else if (rate >= 0.4 || (region.qualityLevel >= 1 && rate >= 0.33)) level = 1;
+  if (perfect && headroom) level = 5;
+  else if ((rate >= 0.8 || (region.qualityLevel >= 4 && rate >= 0.72)) && headroom) level = 4;
+  else if (rate >= 0.6 || (region.qualityLevel >= 3 && rate >= 0.52)) level = 3;
+  else if (rate >= 0.35 || (region.qualityLevel >= 2 && rate >= 0.28)) level = 2;
+  else if (rate >= 0.12 || (region.qualityLevel >= 1 && rate >= 0.08)) level = 1;
   region.qualityLevel = level;
-  return ["#ff665c", "#ffb23e", "#a9c93d", "#35d66f", "#42e8ff"][level]!;
+  return ["#ff665c", "#ffb23e", "#d5d936", "#35d66f", "#42a5ff", "#00efff"][level]!;
 }
 
 /** Grid-layout reading order: rows first, columns within a row. Two boxes are
