@@ -108,6 +108,7 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
+let preferredExposureTime: number | undefined;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
 const browserModeResults = loadBrowserModeResults();
 let browserModes: BrowserMode[] = [];
@@ -140,17 +141,18 @@ function populateCameraOptions(): void {
 }
 function restoreCameraSettings(): void {
   try {
-    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; workers?: string } | null;
+    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; workers?: string; exposureTime?: number } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
     const savedWorkers = Number(saved.workers);
     if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) decodeWorkers.value = saved.workers!;
+    if (Number.isFinite(saved.exposureTime) && saved.exposureTime! >= 1 && saved.exposureTime! <= 300) preferredExposureTime = saved.exposureTime;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
-  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, workers: decodeWorkers.value })); }
+  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, workers: decodeWorkers.value, exposureTime: preferredExposureTime })); }
   catch { /* Storage is optional. */ }
 }
 function readRequestedCameraSettings(): void {
@@ -723,12 +725,22 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
   cameraExposureControl.hidden = !exposure || exposureMin >= exposureMax;
   if (exposure && exposureMin < exposureMax) {
     const settings = track.getSettings() as MediaTrackSettings & { exposureTime?: number };
-    const current = Math.max(exposureMin, Math.min(exposureMax, settings.exposureTime ?? exposureMin));
+    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime ?? settings.exposureTime ?? exposureMin));
     cameraExposure.min = String(exposureMin);
     cameraExposure.max = String(exposureMax);
     cameraExposure.step = String(Math.max(exposure.step ?? 0, 0.1));
     cameraExposure.value = String(current);
     showExposureTime(current);
+    if (preferredExposureTime !== undefined) void applyAdvancedConstraint(track, {
+      exposureMode: "manual",
+      exposureTime: current,
+    }).then(() => {
+      const actual = (track.getSettings() as MediaTrackSettings & { exposureTime?: number }).exposureTime;
+      if (actual !== undefined) {
+        cameraExposure.value = String(actual);
+        showExposureTime(actual);
+      }
+    });
   }
   const widthMin = caps.width.min ?? 0;
   const widthMax = caps.width.max ?? Infinity;
@@ -935,11 +947,13 @@ const changeCameraSettings = async () => {
     saveBrowserModeResult(attempted.key, true);
     const option = [...cameraResolution.options].find((candidate) => candidate.value === attempted.key);
     if (option) option.textContent = attempted.label;
+    populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
     cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)?.remove();
     cameraResolution.value = "auto";
+    populateBrowserCapabilities(track);
     showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
     saveCameraSettings();
   }
@@ -947,16 +961,20 @@ const changeCameraSettings = async () => {
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
 cameraExposure.addEventListener("input", () => showExposureTime(Number(cameraExposure.value)));
 cameraExposure.addEventListener("change", () => {
+  preferredExposureTime = Number(cameraExposure.value);
+  saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
   if (!track) return;
   void applyAdvancedConstraint(track, {
     exposureMode: "manual",
-    exposureTime: Number(cameraExposure.value),
+    exposureTime: preferredExposureTime,
   }).then(() => {
     const actual = (track.getSettings() as MediaTrackSettings & { exposureTime?: number }).exposureTime;
     if (actual !== undefined) {
+      preferredExposureTime = actual;
       cameraExposure.value = String(actual);
       showExposureTime(actual);
+      saveCameraSettings();
     }
   });
 });
