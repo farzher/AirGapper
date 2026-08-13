@@ -175,15 +175,26 @@ function populateFpsOptions(preferred?: string): void {
   cameraFps.value = preferred && STANDARD_FPS.includes(Number(preferred) as (typeof STANDARD_FPS)[number])
     ? preferred : "60";
 }
+function standardBrowserModes(): BrowserMode[] {
+  return STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
+    key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
+  }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
+}
 function populateCameraOptions(): void {
   if (!nativeModes.length) {
-    cameraResolution.replaceChildren(new Option("Auto", "auto"));
+    browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
+    cameraResolution.replaceChildren(
+      new Option("Auto", "auto"),
+      ...browserModes.map((mode) => new Option(
+        `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
+      )),
+    );
     cameraFps.replaceChildren(new Option("Auto", "auto"));
     cameraResolution.value = "auto";
     return;
   }
   const sizes = [...new Map(nativeModes.map((mode) => [resolutionKey(mode.width, mode.height), [mode.width, mode.height] as const])).values()]
-    .sort((a, b) => a[0] * a[1] - b[0] * b[1]);
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   cameraResolution.replaceChildren(...sizes.map(([width, height]) => {
     const maxFps = Math.max(...nativeModes.filter((mode) => mode.width === width && mode.height === height).map((mode) => mode.fpsMax), 0);
     return new Option(`${width}×${height}${maxFps > 60 ? ` · up to ${maxFps} fps` : ""}`, resolutionKey(width, height));
@@ -809,10 +820,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
       label: `${active.width}×${active.height} · ${fps} fps`,
     };
   }
-  const candidates: BrowserMode[] = STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
-    key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
-  })));
-  browserModes = candidates.filter((mode) =>
+  browserModes = standardBrowserModes().filter((mode) =>
     mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax &&
     mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false &&
     !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
