@@ -84,11 +84,9 @@ const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-// Auto is a throughput setting, not "all logical CPUs": camera delivery,
-// canvas readback, compositing, and the main thread need headroom too. Four
-// decoders has been the useful ceiling on 8-thread phones; users can still
-// select every advertised logical thread explicitly.
-const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
+// Reserve one logical thread for camera delivery, canvas readback, compositing,
+// and the main thread; use the rest for decoding.
+const autoWorkerCount = Math.max(1, hardwareThreadCount - 1);
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
