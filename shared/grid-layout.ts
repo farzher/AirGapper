@@ -11,6 +11,7 @@ export const GRID_LAYOUTS: readonly GridLayout[] = [
   { id: 3, cols: 2, rows: 3 },
   { id: 4, cols: 3, rows: 4 },
   { id: 5, cols: 3, rows: 5 },
+  { id: 6, cols: 5, rows: 3 },
 ];
 
 export function gridLayoutById(id: number): GridLayout | undefined {
