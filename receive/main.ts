@@ -825,12 +825,24 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false &&
     !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
   const prior = cameraResolution.value;
-  cameraResolution.replaceChildren(
-    new Option(`${automaticBrowserMode ? `${automaticBrowserMode.label} · ` : ""}Auto`, "auto"),
-    ...browserModes.map((mode) => new Option(
-      `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
-    )),
-  );
+  const options = browserModes.map((mode) => ({
+    width: mode.width,
+    height: mode.height,
+    fps: mode.fps,
+    option: new Option(`${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key),
+  }));
+  if (automaticBrowserMode) {
+    options.push({
+      width: automaticBrowserMode.width,
+      height: automaticBrowserMode.height,
+      fps: automaticBrowserMode.fps,
+      option: new Option(`${automaticBrowserMode.label} · Auto`, "auto"),
+    });
+    options.sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
+  } else {
+    options.unshift({ width: 0, height: 0, fps: 0, option: new Option("Auto", "auto") });
+  }
+  cameraResolution.replaceChildren(...options.map(({ option }) => option));
   cameraResolution.value = browserModes.some((mode) => mode.key === prior) ? prior : "auto";
   readRequestedCameraSettings();
   saveCameraSettings();
