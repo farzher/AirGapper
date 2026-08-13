@@ -3,7 +3,10 @@ import fs from "node:fs";
 const [corpus, referenceFile, output, workers = "4"] = process.argv.slice(2);
 if (!corpus || !referenceFile || !/^[1-9]\d*$/.test(workers)) throw new Error("usage: node scripts/cdp-benchmark.mjs corpus.agcap reference.json [output.json] [workers]");
 const referenceResult = JSON.parse(fs.readFileSync(referenceFile, "utf8"));
-const reference = referenceResult.frames.map(({ sequence, reference }) => ({ sequence, reference }));
+const reference = {
+  corpus: Object.fromEntries(["width", "height", "startedAt", "framesStored"].map((key) => [key, referenceResult.corpus[key]])),
+  frames: referenceResult.frames.map(({ sequence, reference }) => ({ sequence, reference })),
+};
 const downloadDir = `${process.env.TEMP}\\airgapper-bench-downloads`;
 fs.mkdirSync(downloadDir, { recursive: true });
 for (const file of fs.readdirSync(downloadDir)) fs.rmSync(`${downloadDir}\\${file}`);

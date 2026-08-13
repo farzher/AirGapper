@@ -2965,8 +2965,13 @@ interface SavedBenchmarkReference {
   reference: { slot?: number; esi: number; quad?: SymbolQuad }[];
 }
 
+interface SavedBenchmarkReferenceSet {
+  corpus: { width: number; height: number; startedAt: string; framesStored: number };
+  frames: SavedBenchmarkReference[];
+}
+
 declare global {
-  interface Window { __airgapperBenchmarkReference?: SavedBenchmarkReference[] }
+  interface Window { __airgapperBenchmarkReference?: SavedBenchmarkReferenceSet }
 }
 
 async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
@@ -3149,14 +3154,30 @@ async function runReceiverBenchmark(): Promise<void> {
     }
     await waitForWorkers();
     const savedReference = window.__airgapperBenchmarkReference;
+    const savedCorpus = savedReference?.corpus;
+    const savedFrames = savedReference?.frames;
     let oracleLatencies: number[] = [];
-    if (savedReference?.length === benchmarkTraces.length && savedReference.every((item, index) => item.sequence === benchmarkTraces[index]!.sequence)) {
+    if (savedCorpus?.width === corpus.header.width && savedCorpus.height === corpus.header.height &&
+        savedCorpus.startedAt === corpus.header.startedAt && savedCorpus.framesStored === corpus.header.framesStored &&
+        savedFrames?.length === benchmarkTraces.length && savedFrames.every((item, index) => item.sequence === benchmarkTraces[index]!.sequence)) {
       for (let index = 0; index < benchmarkTraces.length; index++) {
-        benchmarkTraces[index]!.reference = savedReference[index]!.reference;
+        benchmarkTraces[index]!.reference = savedFrames[index]!.reference;
       }
       benchmarkStatus.textContent = "Reference map reused";
     } else {
       oracleLatencies = await runOracle(corpus);
+    }
+    // The reference is a lower bound, not ground truth: every protocol-valid
+    // production packet is direct proof that a QR was available in that frame.
+    // Fold those discoveries back into the map so a stronger production path
+    // improves the corpus oracle instead of being mislabeled as an "extra".
+    for (const trace of benchmarkTraces) {
+      const known = new Set(trace.reference.map((item) => item.esi));
+      for (const packet of trace.decoded) {
+        if (known.has(packet.esi)) continue;
+        known.add(packet.esi);
+        trace.reference.push({ slot: packet.slot, esi: packet.esi, quad: packet.quad });
+      }
     }
     const durationSeconds = Math.max(0.001, ((corpus.meta(corpus.length - 1)?.callbackTimeMs ?? firstTime) - firstTime) / 1000);
     const productionPackets = benchmarkTraces.flatMap((trace) => trace.decoded);

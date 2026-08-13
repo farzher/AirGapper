@@ -10,8 +10,8 @@
 //  - readTracked: single-code crops with a cached quad + module count skip
 //    detection entirely. Any miss falls back to readFull on the same buffer.
 //    Dense lattice crops run readFull first: field corpora measured zero
-//    batched sampler hits. One repeatedly weak cell may then get an isolated
-//    generic retry, avoiding sampler overhead across all 15 tracks.
+//    batched sampler hits. Missing cells then get a bounded isolated generic
+//    retry, recovering valid QRs hidden by neighboring finder patterns.
 
 import wasmUrl from "./wasm-url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
@@ -60,6 +60,16 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
   inputPtr = zx._malloc(bytes);
   inputCapacity = bytes;
   return inputPtr;
+}
+
+let retryPtr = 0;
+let retryCapacity = 0;
+function retryBuffer(zx: DecimenModule, bytes: number): number {
+  if (bytes <= retryCapacity) return retryPtr;
+  if (retryPtr) zx._free(retryPtr);
+  retryPtr = zx._malloc(bytes);
+  retryCapacity = bytes;
+  return retryPtr;
 }
 
 interface BatchTrack {
@@ -259,18 +269,18 @@ ctx.onmessage = async (e: MessageEvent) => {
         decoded.delete();
       }
 
-      // The broad detector usually finds nearly the whole lattice. Give one
-      // repeatedly weak cell an isolated quiet-zone retry instead
-      // of rediscovering every healthy finder pattern again.
+      // A broad multi-code pass can miss an otherwise clean cell when adjacent
+      // finder patterns win detection. Retry missing cells immediately: waiting
+      // for a prior-frame miss left this path unused on alternating displays.
+      // Two tight retries are affordable once neighboring finder patterns make
+      // the broad pass ambiguous. A two-code crop is already isolated enough.
       let targetedAttempts = 0;
       let targetedPixels = 0;
       let targetedSuccesses = 0;
-      const targetedTracks = tracks.length >= 10
-        ? [...tracks]
-          .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot) && candidate.misses > 0)
-          .sort((a, b) => b.misses - a.misses)
-          .slice(0, 1)
-        : [];
+      const targetedTracks = tracks.length < 3 || tracks.length > 6 ? [] : [...tracks]
+        .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
+        .sort((a, b) => b.misses - a.misses)
+        .slice(0, 2);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);
         const moduleSize = Math.max(expected.w, expected.h) / track.dim;
@@ -284,16 +294,15 @@ ctx.onmessage = async (e: MessageEvent) => {
         if (sw < 24 || sh < 24) continue;
         const cw = sw + quiet * 2, ch = sh + quiet * 2;
         targetedPixels += cw * ch;
-        const crop = new Uint8Array(cw * ch * 4);
-        crop.fill(255);
+        const cropBytes = cw * ch * 4;
+        const cropPtr = retryBuffer(zx, cropBytes);
+        zx.HEAPU8.fill(255, cropPtr, cropPtr + cropBytes);
         for (let row = 0; row < sh; row++) {
-          crop.set(
+          zx.HEAPU8.set(
             pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4),
-            ((row + quiet) * cw + quiet) * 4,
+            cropPtr + ((row + quiet) * cw + quiet) * 4,
           );
         }
-        const cropPtr = zx._malloc(crop.length);
-        zx.HEAPU8.set(crop, cropPtr);
         readFullAttempts++;
         targetedAttempts++;
         const retried = zx.readFull(cropPtr, cw, ch, true, 2, false);
@@ -316,7 +325,6 @@ ctx.onmessage = async (e: MessageEvent) => {
           }
         } finally {
           retried.delete();
-          zx._free(cropPtr);
         }
       }
       ctx.postMessage({
