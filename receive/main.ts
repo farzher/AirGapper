@@ -2955,6 +2955,15 @@ interface OracleMessage {
   error?: string;
 }
 
+interface SavedBenchmarkReference {
+  sequence: number;
+  reference: { slot?: number; esi: number; quad?: SymbolQuad }[];
+}
+
+declare global {
+  interface Window { __airgapperBenchmarkReference?: SavedBenchmarkReference[] }
+}
+
 async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
   type OracleSeed = { quad: SymbolQuad; modules: number; layoutId: number; slot: number };
   const latencies: number[] = [];
@@ -3134,7 +3143,16 @@ async function runReceiverBenchmark(): Promise<void> {
       });
     }
     await waitForWorkers();
-    const oracleLatencies = await runOracle(corpus);
+    const savedReference = window.__airgapperBenchmarkReference;
+    let oracleLatencies: number[] = [];
+    if (savedReference?.length === benchmarkTraces.length && savedReference.every((item, index) => item.sequence === benchmarkTraces[index]!.sequence)) {
+      for (let index = 0; index < benchmarkTraces.length; index++) {
+        benchmarkTraces[index]!.reference = savedReference[index]!.reference;
+      }
+      benchmarkStatus.textContent = "Reference map reused";
+    } else {
+      oracleLatencies = await runOracle(corpus);
+    }
     const durationSeconds = Math.max(0.001, ((corpus.meta(corpus.length - 1)?.callbackTimeMs ?? firstTime) - firstTime) / 1000);
     const productionPackets = benchmarkTraces.flatMap((trace) => trace.decoded);
     const opportunities = benchmarkTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0);
