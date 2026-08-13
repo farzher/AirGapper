@@ -48,12 +48,23 @@ const LOOKAHEAD = 3;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 
-type LayoutMode = "single" | "one-two" | "two-two" | "two-three" | "four-three" | "three-five" | "five-three";
+type LayoutMode = "single" | "one-two" | "two-two" | "two-three" | "four-three" | "three-five";
+type GridOrientation = "auto" | "portrait" | "landscape";
 
 function selectedLayout(): LayoutMode {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" ||
-    mode === "three-five" || mode === "five-three" ? mode : "four-three";
+    mode === "three-five" ? mode : "four-three";
+}
+
+function selectedOrientation(): GridOrientation {
+  const orientation = cfgOrientation.value;
+  return orientation === "portrait" || orientation === "landscape" ? orientation : "auto";
+}
+
+function landscapeGrid(): boolean {
+  const orientation = selectedOrientation();
+  return orientation === "landscape" || (orientation === "auto" && window.innerWidth > window.innerHeight);
 }
 
 function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; codes: number } {
@@ -63,7 +74,6 @@ function layoutGrid(mode = selectedLayout()): { cols: number; rows: number; code
     case "two-two": return { cols: 2, rows: 2, codes: 4 };
     case "two-three": return { cols: 2, rows: 3, codes: 6 };
     case "three-five": return { cols: 3, rows: 5, codes: 15 };
-    case "five-three": return { cols: 5, rows: 3, codes: 15 };
     default: return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
   }
 }
@@ -133,6 +143,7 @@ const speedControl = cfgFps.closest(".speed-control")!;
 const cfgSize = document.getElementById("cfg-size") as HTMLSelectElement;
 const cfgScaling = document.getElementById("cfg-scaling") as HTMLSelectElement;
 const cfgLayout = document.getElementById("cfg-layout") as HTMLSelectElement;
+const cfgOrientation = document.getElementById("cfg-orientation") as HTMLSelectElement;
 
 function selectedFps(): number {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
@@ -439,6 +450,7 @@ function restoreSendSettings(): void {
       sizeLevel?: unknown;
       scaling?: unknown;
       layout?: unknown;
+      orientation?: unknown;
     } | null;
     if (!saved) return;
     if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
@@ -448,8 +460,15 @@ function restoreSendSettings(): void {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "five-three") {
+    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five") {
       cfgLayout.value = saved.layout;
+    } else if (saved.layout === "five-three") {
+      // Migrate the old standalone landscape option to shape + orientation.
+      cfgLayout.value = "three-five";
+      cfgOrientation.value = "landscape";
+    }
+    if (saved.orientation === "auto" || saved.orientation === "portrait" || saved.orientation === "landscape") {
+      cfgOrientation.value = saved.orientation;
     }
   } catch {
     // Storage can be disabled, especially for local files. Defaults still work.
@@ -463,6 +482,7 @@ function saveSendSettings(): void {
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
+      orientation: selectedOrientation(),
     }));
   } catch {
     // A blocked or full store must never prevent a transfer.
@@ -511,7 +531,7 @@ async function main() {
   const resizeForViewport = () => resizeDisplay?.();
   window.addEventListener("resize", resizeForViewport);
   window.visualViewport?.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout]) {
+  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgOrientation]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
@@ -616,6 +636,9 @@ async function startStream(revealStage = false) {
     const stride = modules + GRID_MARGIN;
     const totalW = modules * gridCols + GRID_MARGIN * (gridCols + 1);
     const totalH = modules * gridRows + GRID_MARGIN * (gridRows + 1);
+    const landscape = landscapeGrid();
+    const displayW = landscape ? totalH : totalW;
+    const displayH = landscape ? totalW : totalH;
     let budgetW: number;
     let budgetH: number;
     if (document.body.classList.contains("qr-full")) {
@@ -631,7 +654,7 @@ async function startStream(revealStage = false) {
       budgetW = rect.width - Number.parseFloat(stageStyle.paddingLeft) - Number.parseFloat(stageStyle.paddingRight);
       budgetH = rect.height - stageBottom.offsetHeight - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
     }
-    const availableScale = Math.min((budgetW * dpr) / totalW, (budgetH * dpr) / totalH);
+    const availableScale = Math.min((budgetW * dpr) / displayW, (budgetH * dpr) / displayH);
     // Integer scaling must never force scale 1 into a viewport where it does
     // not fit. In that exceptional case use the exact fractional fit: a
     // slightly softened QR is preferable to clipping finder patterns.
@@ -640,13 +663,13 @@ async function startStream(revealStage = false) {
       : Math.floor(availableScale);
     staging.width = totalW;
     staging.height = totalH;
-    canvas.width = Math.max(1, Math.round(totalW * scale));
-    canvas.height = Math.max(1, Math.round(totalH * scale));
+    canvas.width = Math.max(1, Math.round(displayW * scale));
+    canvas.height = Math.max(1, Math.round(displayH * scale));
     // Present the backing raster at exactly its device-pixel size. Integer
     // mode leaves the sub-module remainder unused to keep every edge sharp;
     // Fit screen deliberately spends it by allowing fractional modules.
-    const cssNativeW = (totalW * scale) / dpr;
-    const cssNativeH = (totalH * scale) / dpr;
+    const cssNativeW = (displayW * scale) / dpr;
+    const cssNativeH = (displayH * scale) / dpr;
     canvas.style.width = `${cssNativeW}px`;
     canvas.style.height = `${cssNativeH}px`;
     canvas.style.imageRendering = "pixelated";
@@ -658,7 +681,14 @@ async function startStream(revealStage = false) {
     });
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
+    if (landscape) {
+      // Rotate the logical grid as one image. Its layout and slot IDs stay
+      // unchanged; the receiver's homography accounts for the quarter-turn.
+      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    }
+    ctx.drawImage(staging, 0, 0);
   };
 
   const makeCode = (): ReturnType<typeof QRCode.create> => {
@@ -734,6 +764,8 @@ async function startStream(revealStage = false) {
               gridCodes,
               layout: `${gridCols}×${gridRows}`,
               layoutMode,
+              orientation: selectedOrientation(),
+              landscape: landscapeGrid(),
               static: staticStream,
               sizeLevel,
               gridMargin: GRID_MARGIN,
@@ -783,12 +815,19 @@ async function startStream(revealStage = false) {
     staging.getContext("2d")!.putImageData(img, cx, cy);
     const ctx = canvas.getContext("2d")!;
     ctx.imageSmoothingEnabled = false;
+    const totalW = staging.width;
+    const totalH = staging.height;
+    if (landscapeGrid()) {
+      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    }
     if (fitScaling) {
       // Fractional module scaling can put cell boundaries between device
       // pixels. Repaint the complete grid so partial blits cannot leave seams.
-      ctx.drawImage(staging, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(staging, 0, 0);
     } else {
-      ctx.drawImage(staging, cx, cy, cell, cell, cx * scale, cy * scale, cell * scale, cell * scale);
+      ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
     }
     cellCursor = (cellCursor + 1) % gridCodes;
   };
