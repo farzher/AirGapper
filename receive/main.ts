@@ -70,8 +70,6 @@ const video = document.getElementById("video") as HTMLVideoElement;
 const preview = document.getElementById("preview")!;
 const cameraBox = document.querySelector<HTMLDivElement>(".preview")!;
 const overlay = document.getElementById("detect-overlay") as HTMLCanvasElement;
-const showDetectionOverlay = !isAndroidApp();
-overlay.hidden = !showDetectionOverlay;
 const stats = document.getElementById("stats")!;
 const progressEl = document.getElementById("progress")!;
 const bar = document.getElementById("bar")!;
@@ -1408,7 +1406,7 @@ function scheduleFrame(gen: number) {
   const next = () => {
     if (done || gen !== captureGen) return;
     captureFrame();
-    if (showDetectionOverlay) drawOverlay(performance.now());
+    drawOverlay(performance.now());
     scheduleFrame(gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
