@@ -45,7 +45,6 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
-  nativeCameraCapabilities,
   saveFileOnAndroid,
   setNativeExposure,
   setNativePreviewBounds,
@@ -122,8 +121,10 @@ const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
 ] as const;
 const STANDARD_FPS = [24, 30, 60, 90, 120, 240, 480];
-const nativeCapabilities = isAndroidApp() ? nativeCameraCapabilities() : undefined;
-const advertisedNativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
+// The Camera2/Java decoder can produce a live preview without producing QR
+// payloads on older receivers. Keep APK capture on the proven WebView + compact
+// WASM path; the native implementation remains available for later hardening.
+const advertisedNativeModes: NativeCameraMode[] = [];
 const standardSizeKeys = new Set<string>(STANDARD_RESOLUTIONS.map(([width, height]) => `${width}x${height}`));
 // Camera2 reports many implementation-detail sizes (for example 720×540 and
 // 144×176). Receiver choices stay useful: standard video sizes plus any
@@ -852,6 +853,8 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
 video.addEventListener("resize", syncPreviewAspect);
 video.addEventListener("loadedmetadata", syncPreviewAspect);
 window.addEventListener("resize", syncPreviewAspect);
+const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
+receiverSettings.addEventListener("toggle", () => requestAnimationFrame(syncNativePreviewBounds));
 
 // Viewfinder corner brackets around each code the decoder is tracking, fading
 // out once a region stops producing decodes. Long before REGION_TTL_MS: the
