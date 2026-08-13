@@ -153,7 +153,10 @@ export class DecodeWorkerPool {
       const full = this.activeFull[slot] ?? false;
       clearTimeout(this.jobTimers[slot]);
       this.jobTimers[slot] = undefined;
-      this.busy[slot] = false;
+      // A worker can fail while its script/WASM is initializing, before it has
+      // a job. Do not replace that worker recursively: an unsupported decoder
+      // would otherwise create an unbounded crash loop in an older WebView.
+      this.busy[slot] = id === undefined;
       this.activeIds[slot] = undefined;
       this.activeFull[slot] = false;
       if (id !== undefined) {
@@ -171,9 +174,11 @@ export class DecodeWorkerPool {
         });
       }
       worker.terminate();
-      const replacement = this.create();
-      this.workers[slot] = replacement;
-      this.configureWorker(slot, replacement);
+      if (id !== undefined) {
+        const replacement = this.create();
+        this.workers[slot] = replacement;
+        this.configureWorker(slot, replacement);
+      }
     };
   }
 

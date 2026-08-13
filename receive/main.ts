@@ -81,13 +81,19 @@ const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 // Leave cores for camera delivery, compositing, and the main thread. More than
 // four independent WASM instances has only increased contention on phones.
-const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
+const autoWorkerCount = isAndroidApp()
+  ? 1
+  : Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
   decodeWorkers.add(new Option(String(count), String(count)));
 }
 function selectedWorkerCount(): number {
+  // A 32-bit Android WebView shares a tight renderer address space with the
+  // live camera. Keep one WASM decoder there instead of starting several at
+  // the exact moment the camera surface is allocated.
+  if (isAndroidApp()) return 1;
   return decodeWorkers.value === "auto"
     ? autoWorkerCount
     : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
@@ -116,7 +122,7 @@ function restoreCameraSettings(): void {
     if (typeof saved.resolution === "string" && saved.resolution in CAMERA_RESOLUTIONS) {
       cameraResolution.value = saved.resolution;
     }
-    if (saved.fps === "auto" || saved.fps === "30" || saved.fps === "60") cameraFps.value = saved.fps;
+    if (saved.fps === "30" || saved.fps === "60") cameraFps.value = saved.fps;
     const savedWorkers = Number(saved.workers);
     if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) {
       decodeWorkers.value = String(saved.workers);
@@ -141,10 +147,9 @@ function saveCameraSettings(): void {
 restoreCameraSettings();
 let requestedWidth = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].width;
 let requestedHeight = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution].height;
-let requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
+let requestedFps = Number(cameraFps.value);
 function showRequestedCameraSettings(): void {
-  const fps = requestedFps === undefined ? "auto fps" : `${requestedFps} fps`;
-  cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${fps}`;
+  cameraActual.textContent = `${requestedWidth}×${requestedHeight} · ${requestedFps} fps`;
   // Size the reserved viewfinder from the selected capture shape immediately;
   // metadata will replace this with the negotiated camera shape once available.
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
@@ -812,7 +817,7 @@ const changeCameraSettings = () => {
   const selected = CAMERA_RESOLUTIONS[cameraResolution.value as CameraResolution];
   requestedWidth = selected.width;
   requestedHeight = selected.height;
-  requestedFps = cameraFps.value === "auto" ? undefined : Number(cameraFps.value);
+  requestedFps = Number(cameraFps.value);
   showRequestedCameraSettings();
   saveCameraSettings();
   if (stream && !done) {
@@ -999,11 +1004,12 @@ async function start() {
   };
   try {
     if (isAndroidApp()) {
-      // Keep the APK request broad. Older Android camera providers can fail
-      // before producing a frame when Chromium forwards frame-rate constraints.
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
-    } else if (captureFps === undefined) {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: base });
+      // Keep one non-fatal request in the APK; a rejected exact request can
+      // wedge older camera providers before the ideal fallback runs.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { ...base, frameRate: { ideal: captureFps } },
+      });
     } else {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
