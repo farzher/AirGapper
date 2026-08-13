@@ -1238,6 +1238,8 @@ function stopReceiver(): void {
   if (scanDialog.open) scanDialog.close();
   scanCapture.width = 0;
   scanCapture.height = 0;
+  lastRawScanImage = null;
+  cancelScanHold();
   progressEl.style.display = "none";
   progressEl.setAttribute("aria-valuenow", "0");
   progressStatus.style.display = "none";
@@ -1467,6 +1469,64 @@ let pendingScanCapture: {
   full: boolean;
   tracks: SymbolQuad[];
 } | null = null;
+let lastRawScanImage: ImageData | null = null;
+const scanSaveCanvas = document.createElement("canvas");
+let scanHoldTimer: ReturnType<typeof setTimeout> | undefined;
+let scanHoldStart: { x: number; y: number } | undefined;
+let scanSaveInProgress = false;
+
+async function saveRawScan(): Promise<void> {
+  const image = lastRawScanImage;
+  if (!image || scanSaveInProgress) return;
+  scanSaveInProgress = true;
+  try {
+    scanSaveCanvas.width = image.width;
+    scanSaveCanvas.height = image.height;
+    scanSaveCanvas.getContext("2d")!.putImageData(image, 0, 0);
+    const blob = await new Promise<Blob | null>((resolve) => scanSaveCanvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const name = `airgapper-scan-${stamp}.png`;
+    if (!saveFileOnAndroid(name, "image/png", bytes)) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    }
+  } finally {
+    scanSaveInProgress = false;
+  }
+}
+
+function cancelScanHold(): void {
+  clearTimeout(scanHoldTimer);
+  scanHoldTimer = undefined;
+  scanHoldStart = undefined;
+}
+scanCapture.addEventListener("pointerdown", (event) => {
+  if (!lastRawScanImage || event.button !== 0) return;
+  cancelScanHold();
+  scanHoldStart = { x: event.clientX, y: event.clientY };
+  scanHoldTimer = setTimeout(() => {
+    cancelScanHold();
+    navigator.vibrate?.(30);
+    void saveRawScan();
+  }, 550);
+});
+scanCapture.addEventListener("pointermove", (event) => {
+  if (scanHoldStart && Math.hypot(event.clientX - scanHoldStart.x, event.clientY - scanHoldStart.y) > 12) cancelScanHold();
+});
+scanCapture.addEventListener("pointerup", cancelScanHold);
+scanCapture.addEventListener("pointercancel", cancelScanHold);
+scanCapture.addEventListener("contextmenu", (event) => {
+  if (!lastRawScanImage) return;
+  event.preventDefault();
+  cancelScanHold();
+  void saveRawScan();
+});
+
 captureScanBtn.addEventListener("click", () => {
   if (captureNextScan || pendingScanCapture) return;
   captureNextScan = true;
@@ -1474,6 +1534,7 @@ captureScanBtn.addEventListener("click", () => {
   captureScanBtn.disabled = true;
   scanCapture.width = 0;
   scanCapture.height = 0;
+  lastRawScanImage = null;
   scanDialogStatus.textContent = "Capturing the next fresh camera frame…";
   scanSightingLegend.hidden = true;
   if (!scanDialog.open) scanDialog.showModal();
@@ -1561,6 +1622,7 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   const capture = pendingScanCapture;
   if (!capture || capture.id !== id) return;
   cancelScanCapture();
+  lastRawScanImage = capture.image;
   scanCapture.width = capture.image.width;
   scanCapture.height = capture.image.height;
   const ctx = scanCapture.getContext("2d")!;
