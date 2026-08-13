@@ -296,11 +296,8 @@ const captureTimes: number[] = [];
 // because the camera decoded the same displayed symbol three times.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
-const scanSubmissionTimes: number[] = [];
-// Camera frames that actually reached the decoder. This is the useful upper
-// bound for sender fps; camera callbacks alone can run much faster while the
-// worker pool is saturated.
-const scanFrameTimes: number[] = [];
+// Decoder jobs that actually finished searching a submitted frame or crop,
+// regardless of whether they found a QR code.
 const scanCompletionTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
@@ -1241,8 +1238,6 @@ function stopReceiver(): void {
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
-  scanSubmissionTimes.length = 0;
-  scanFrameTimes.length = 0;
   scanCompletionTimes.length = 0;
   cropAttempts.clear();
   cropRotate = 0;
@@ -1312,7 +1307,7 @@ function stopReceiver(): void {
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
-  metric("m-cap").textContent = "— fps";
+  metric("m-cap").textContent = "— scan/s";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "👀";
@@ -1913,14 +1908,6 @@ function captureFrame(source: ReceiverFrame) {
     jobs: [], decoded: [], sightings: [], reference: [], predicted: [], transitions: [],
   } : undefined;
   if (trace) { benchmarkTraces.push(trace); activeBenchmarkFrame = trace; }
-  let scanFrameSubmitted = false;
-  const noteScanSubmission = () => {
-    scanSubmissionTimes.push(now);
-    if (!scanFrameSubmitted) {
-      scanFrameTimes.push(now);
-      scanFrameSubmitted = true;
-    }
-  };
   captureTimes.push(now);
   totalCaptures++;
   if (pool.busyCount === pool.size) {
@@ -1956,7 +1943,6 @@ function captureFrame(source: ReceiverFrame) {
       fullScanIds.add(id);
       fullScanJobs.set(id, { thorough: true, native: true, reacquire: false });
       scanCapturedAt.set(id, now);
-      noteScanSubmission();
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
@@ -2051,7 +2037,6 @@ function captureFrame(source: ReceiverFrame) {
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
       [img.data.buffer], "FULL FRAME", trace,
     )) {
-      noteScanSubmission();
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
@@ -2107,7 +2092,6 @@ function captureFrame(source: ReceiverFrame) {
         [img.data.buffer], "SHARED TRACKED BATCH CROP", trace, batchRegions,
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
-        noteScanSubmission();
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
       } else {
@@ -2169,7 +2153,6 @@ function captureFrame(source: ReceiverFrame) {
       poolBusyTimes.push(receiverNow());
       break;
     }
-    noteScanSubmission();
     if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
     submitted = true;
@@ -3278,15 +3261,12 @@ function updateStats() {
   prune(captureTimes);
   prune(qrReadTimes);
   prune(poolBusyTimes);
-  prune(scanSubmissionTimes);
-  prune(scanFrameTimes);
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
-  const scannerFrameRate = perSecond(scanFrameTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${scannerFrameRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${scanRate.toFixed(1)} scan/s`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
