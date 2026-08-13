@@ -2428,7 +2428,6 @@ function updateStats() {
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
-  const submittedRate = perSecond(scanSubmissionTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
   metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
@@ -2440,7 +2439,7 @@ function updateStats() {
     ? `Scanner error: ${lastDecodeError}`
     : stalled
       ? "Scanner stalled"
-      : `${currentScanningState} · ${submittedRate.toFixed(1)}/${scanRate.toFixed(1)} scans/s`;
+      : "";
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
