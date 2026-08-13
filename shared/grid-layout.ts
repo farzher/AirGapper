@@ -1,3 +1,8 @@
+/** Shared white gutter between adjacent QR module matrices. Four modules is
+ * the QR-standard quiet zone; smaller gaps make neighboring finder patterns
+ * one combinatorial detector scene instead of independent symbols. */
+export const GRID_MARGIN_MODULES = 4;
+
 export interface GridLayout {
   id: number;
   cols: number;

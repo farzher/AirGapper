@@ -2,6 +2,7 @@ interface AndroidBridge {
   beginDownload(name: string, type: string): void;
   appendDownloadChunk(base64: string): void;
   finishDownload(): void;
+  showScanCaptureMenu?(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
   is64BitProcess?(): boolean;
@@ -32,6 +33,13 @@ export function saveFileOnAndroid(name: string, type: string, bytes: Uint8Array)
     android.appendDownloadChunk(btoa(binary));
   }
   android.finishDownload();
+  return true;
+}
+
+export function showScanCaptureMenuOnAndroid(): boolean {
+  const android = bridge();
+  if (!android?.showScanCaptureMenu) return false;
+  android.showScanCaptureMenu();
   return true;
 }
 

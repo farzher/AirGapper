@@ -47,6 +47,7 @@ import {
   isAndroidApp,
   isLegacyAndroidApp,
   saveFileOnAndroid,
+  showScanCaptureMenuOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
@@ -1506,13 +1507,13 @@ function cancelScanHold(): void {
   scanHoldStart = undefined;
 }
 scanCapture.addEventListener("pointerdown", (event) => {
-  if (!lastRawScanImage || event.button !== 0) return;
+  if (!lastRawScanImage || event.button !== 0 || !isAndroidApp()) return;
   cancelScanHold();
   scanHoldStart = { x: event.clientX, y: event.clientY };
   scanHoldTimer = setTimeout(() => {
     cancelScanHold();
     navigator.vibrate?.(30);
-    void saveRawScan();
+    showScanCaptureMenuOnAndroid();
   }, 550);
 });
 scanCapture.addEventListener("pointermove", (event) => {
@@ -1521,11 +1522,12 @@ scanCapture.addEventListener("pointermove", (event) => {
 scanCapture.addEventListener("pointerup", cancelScanHold);
 scanCapture.addEventListener("pointercancel", cancelScanHold);
 scanCapture.addEventListener("contextmenu", (event) => {
-  if (!lastRawScanImage) return;
+  if (!lastRawScanImage || !isAndroidApp()) return;
   event.preventDefault();
   cancelScanHold();
-  void saveRawScan();
+  showScanCaptureMenuOnAndroid();
 });
+(window as Window & { airgapperSaveRawScan?: () => void }).airgapperSaveRawScan = () => void saveRawScan();
 
 captureScanBtn.addEventListener("click", () => {
   if (captureNextScan || pendingScanCapture) return;

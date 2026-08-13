@@ -1,5 +1,5 @@
 import type { SymbolBox, SymbolQuad } from "../shared/worker-pool";
-import { GRID_LAYOUTS, gridLayoutById, type GridLayout } from "../shared/grid-layout";
+import { GRID_LAYOUTS, GRID_MARGIN_MODULES, gridLayoutById, type GridLayout } from "../shared/grid-layout";
 
 export type GridState = "SEARCH" | "GRID_HYPOTHESIS" | "GRID_LOCK" | "TRACK" | "PARTIAL_LOSS" | "REACQUIRE";
 
@@ -118,7 +118,7 @@ function project(h: Homography, point: Point): Point {
 }
 
 function slotWorld(layout: Layout, modules: number, slot: number): Point[] {
-  const stride = modules + 1; // sender's known one-module shared spacing
+  const stride = modules + GRID_MARGIN_MODULES;
   const x = (slot % layout.cols) * stride;
   const y = Math.floor(slot / layout.cols) * stride;
   return [{ x, y }, { x: x + modules, y }, { x: x + modules, y: y + modules }, { x, y: y + modules }];

@@ -25,6 +25,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import android.widget.PopupMenu;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -278,6 +279,21 @@ public final class MainActivity extends Activity {
                     .setType(downloadType)
                     .putExtra(Intent.EXTRA_TITLE, downloadName);
             runOnUiThread(() -> startActivityForResult(intent, SAVE_REQUEST));
+        }
+
+        @JavascriptInterface
+        public void showScanCaptureMenu() {
+            runOnUiThread(() -> {
+                PopupMenu menu = new PopupMenu(MainActivity.this, webView);
+                menu.getMenu().add("Save raw image");
+                menu.setOnMenuItemClickListener(item -> {
+                    webView.evaluateJavascript(
+                            "window.airgapperSaveRawScan && window.airgapperSaveRawScan()",
+                            null);
+                    return true;
+                });
+                menu.show();
+            });
         }
 
         @JavascriptInterface
