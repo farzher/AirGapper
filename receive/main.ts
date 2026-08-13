@@ -2068,10 +2068,15 @@ function captureFrame(source: ReceiverFrame) {
     // motion so the fallback detector can re-anchor a shaking camera without
     // turning the normal locked crop back into a full-frame readback.
     const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
-    const x = Math.floor(minX - pad);
-    const y = Math.floor(minY - pad);
-    const w = Math.ceil(maxX + pad) - x;
-    const h = Math.ceil(maxY + pad) - y;
+    // Padding outside the sensor is synthetic white and contains no recovery
+    // information. Do not make the batch fallback search it: benchmark crops
+    // were otherwise routinely larger than the native frame.
+    const x = Math.max(0, Math.floor(minX - pad));
+    const y = Math.max(0, Math.floor(minY - pad));
+    const right = Math.min(vw, Math.ceil(maxX + pad));
+    const bottom = Math.min(vh, Math.ceil(maxY + pad));
+    const w = right - x;
+    const h = bottom - y;
     if (w >= 32 && h >= 32) {
       const img = readBoundedVideoCrop(source, x, y, w, h);
       captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
