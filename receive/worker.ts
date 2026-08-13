@@ -7,13 +7,11 @@
 // Two decode paths (see ../../decimen-codec/wrapper/decimen_codec.cpp):
 //  - readFull: stock acquisition. QR-only, invert/rotate sweeps compiled off,
 //    error results carry positions (the receiver's crop-seeding sightings).
-//  - readTracked: crops that arrive with a cached quad + module count skip
-//    detection entirely — the transform is rebuilt from the quad and the grid
-//    is sampled directly. Bench-measured 2.0–2.6× per decode at V40, which is
-//    CPU the phone doesn't burn: the custom build exists for throughput AND
-//    thermals.
-//    Any tracked miss falls back to readFull on the same buffer, which also
-//    re-anchors the quad. Tracked is opportunistic, never load-bearing.
+//  - readTracked: single-code crops with a cached quad + module count skip
+//    detection entirely. Any miss falls back to readFull on the same buffer.
+//    Dense lattice crops go straight to readFull: field corpora measured zero
+//    batched sampler hits while the same crop's detector recovered 87–98% of
+//    exact opportunities, so sampling all 15 tracks first was pure latency.
 
 import wasmUrl from "./wasm-url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
@@ -56,13 +54,6 @@ function shifted(p: DecimenQuad, ox: number, oy: number): DecimenQuad {
 // allocator churn to the hottest path.
 let inputPtr = 0;
 let inputCapacity = 0;
-let batchDecoder = 0;
-let batchResultsPtr = 0;
-let batchOutputPtr = 0;
-let batchMetricsPtr = 0;
-let batchCapacity = 0;
-const batchTrackKeys: string[] = [];
-
 function inputBuffer(zx: DecimenModule, bytes: number): number {
   if (bytes <= inputCapacity) return inputPtr;
   if (inputPtr) zx._free(inputPtr);
@@ -76,27 +67,6 @@ interface BatchTrack {
   quad: DecimenQuad;
   dim: number;
   crc32: boolean;
-}
-
-function batchBuffers(zx: DecimenModule, count: number): void {
-  if (!batchDecoder) {
-    batchDecoder = zx._createTrackedDecoder(15, 177);
-    zx._setTrackedDecoderFallbackBudget(batchDecoder, 2);
-  }
-  if (count <= batchCapacity) return;
-  if (batchResultsPtr) zx._free(batchResultsPtr);
-  if (batchOutputPtr) zx._free(batchOutputPtr);
-  batchResultsPtr = zx._malloc(count * 32);
-  batchOutputPtr = zx._malloc(count * 3000);
-  if (!batchMetricsPtr) batchMetricsPtr = zx._malloc(72);
-  batchCapacity = count;
-}
-
-function trackKey(track: BatchTrack, ox: number, oy: number): string {
-  const q = track.quad;
-  return [track.id, track.dim, Number(track.crc32), ox, oy,
-    q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
-    q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
 }
 
 function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: number): DecimenQuad {
@@ -120,14 +90,6 @@ function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: numbe
   };
   const x = dx * stride, y = dy * stride;
   return { topLeft: project(x, y), topRight: project(x + 1, y), bottomRight: project(x + 1, y + 1), bottomLeft: project(x, y + 1) };
-}
-
-function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
-  const point = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
-  return {
-    topLeft: point(q.topLeft), topRight: point(q.topRight),
-    bottomRight: point(q.bottomRight), bottomLeft: point(q.bottomLeft),
-  };
 }
 
 ctx.onmessage = async (e: MessageEvent) => {
@@ -271,85 +233,30 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (!full && tracks?.length) {
-      batchBuffers(zx, tracks.length);
-      const byId = new Map(tracks.map((track) => [track.id, track]));
-      for (let slot = 0; slot < tracks.length; slot++) {
-        const track = tracks[slot]!;
-        const key = trackKey(track, ox, oy);
-        if (batchTrackKeys[slot] === key) continue;
-        const q = moved(track.quad, -ox, -oy);
-        zx._setTrackedDecoderTrack(
-          batchDecoder, slot, track.id, track.dim,
-          q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
-          q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y,
-        );
-        zx._setTrackedDecoderTrackCRC32(batchDecoder, slot, Number(track.crc32));
-        batchTrackKeys[slot] = key;
-      }
-      for (let slot = tracks.length; slot < batchTrackKeys.length; slot++) {
-        zx._clearTrackedDecoderTrack(batchDecoder, slot);
-        batchTrackKeys[slot] = "";
-      }
-      const count = zx._decodeTrackedBatchRGBA(
-        batchDecoder, ptr, pw, ph, pw * 4, batchResultsPtr, tracks.length,
-        batchOutputPtr, tracks.length * 3000, batchMetricsPtr,
-      );
-      const view = new DataView(zx.HEAPU8.buffer);
-      for (let index = 0; index < count; index++) {
-        const base = batchResultsPtr + index * 32;
-        if (view.getInt32(base + 4, true) !== 1) continue;
-        const track = byId.get(view.getInt32(base, true));
-        if (!track) continue;
-        const byteOffset = view.getInt32(base + 8, true);
-        const byteLength = view.getInt32(base + 12, true);
-        const updatedQuad = moved(
-          track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true),
-        );
-        symbols.push({
-          bytes: zx.HEAPU8.slice(batchOutputPtr + byteOffset, batchOutputPtr + byteOffset + byteLength),
-          box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad, modules: track.dim,
-          tracked: true, crc32: track.crc32,
-        });
-      }
-      // The batched fast path is opportunistic, just like readTracked below.
-      // If every known transform misses, run stock acquisition on the same
-      // pixels instead of reporting a false hard failure. This also discovers
-      // tracks omitted from an incomplete grid lock.
-      let fallbackAttempted = false;
-      if (symbols.length === 0) {
-        fallbackAttempted = true;
-        const appendFallback = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
-          try {
-            for (let i = 0; i < vec.size(); i++) {
-              const result = vec.get(i);
-              if (result.valid && result.bytes.length > 0) {
-                symbols.push({
-                  bytes: result.bytes,
-                  box: boundsOf(result.position, ox, oy),
-                  quad: shifted(result.position, ox, oy),
-                  modules: result.modules,
-                  tracked: false,
-                });
-              } else if (includeErrors) {
-                const box = boundsOf(result.position, ox, oy);
-                if (box.w > 0 && box.h > 0) sightings.push(box);
-              }
-            }
-          } finally {
-            vec.delete();
-          }
-        };
-        // A lattice crop can hold all 15 dense symbols. Its tracks already
-        // provide every position, so error-only detector results add no
-        // information. Avoiding that second exhaustive pass keeps a complete
-        // motion miss cheap enough for the next fresh camera frame to relock.
-        readFullAttempts++;
-        appendFallback(zx.readFull(ptr, pw, ph, true, 16, false), false);
+      // The shared crop already excludes the rest of the camera frame and can
+      // contain every visible grid symbol. Decode it once with the mechanism
+      // that succeeds on real camera frames instead of first running the
+      // measured-zero-hit persistent sampler over every predicted slot.
+      readFullAttempts++;
+      const decoded = zx.readFull(ptr, pw, ph, true, 16, false);
+      try {
+        for (let i = 0; i < decoded.size(); i++) {
+          const result = decoded.get(i);
+          if (!result.valid || !result.bytes.length) continue;
+          symbols.push({
+            bytes: result.bytes,
+            box: boundsOf(result.position, ox, oy),
+            quad: shifted(result.position, ox, oy),
+            modules: result.modules,
+            tracked: false,
+          });
+        }
+      } finally {
+        decoded.delete();
       }
       ctx.postMessage({
-        id, symbols, sightings, full: false, trackedAttempted: true,
-        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
-        fallbackSucceeded: fallbackAttempted && symbols.some((symbol) => !symbol.tracked),
+        id, symbols, sightings, full: false, trackedAttempted: false,
+        trackedHit: false, fallbackAttempted: false, fallbackSucceeded: false,
         readFullAttempts, workerWaitMs, latencyMs: performance.now() - startedAt,
       });
       return;
