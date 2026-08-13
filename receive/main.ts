@@ -3021,6 +3021,13 @@ async function inspectBenchmarkFrame(index: number): Promise<void> {
 async function runReceiverBenchmark(): Promise<void> {
   if (replayRunning) return;
   runBenchmarkBtn.disabled = true;
+  saveBenchmarkBtn.disabled = true;
+  saveBenchmarkBtn.textContent = "Save results";
+  benchmarkResult = undefined;
+  benchmarkSummary.replaceChildren();
+  benchmarkFrame.width = 0;
+  benchmarkFrame.height = 0;
+  benchmarkFrameStatus.textContent = "";
   if (!benchmarkCorpus && benchmarkPendingBlob) {
     benchmarkStatus.textContent = "Loading recorded frames…";
     await new Promise(requestAnimationFrame);
@@ -3038,7 +3045,6 @@ async function runReceiverBenchmark(): Promise<void> {
     runBenchmarkBtn.disabled = false;
     return;
   }
-  saveBenchmarkBtn.disabled = true;
   stopReceiver();
   replayRunning = true;
   benchmarkTraces = [];
@@ -3124,6 +3130,11 @@ async function runReceiverBenchmark(): Promise<void> {
     benchmarkSummary.textContent = `opportunities  ${captured}/${opportunities} (${(opportunities ? captured / opportunities * 100 : 0).toFixed(1)}%)\nQR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}\nuseful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}\nverified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}\ndecode p50/95 ${percentile(decodeLatencies, .5).toFixed(1)} / ${percentile(decodeLatencies, .95).toFixed(1)} ms\nbusy drops    ${capturesDropped}\npixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}\nmisses        ${failures.length}`;
     const buttons = document.createElement("div");
     buttons.className = "benchmark-controls";
+    if (failures.length) {
+      const label = document.createElement("strong");
+      label.textContent = "Missed frames";
+      buttons.append(label);
+    }
     for (const failure of failures.slice(0, 40)) {
       const button = document.createElement("button");
       button.className = "secondary-button";
@@ -3131,8 +3142,8 @@ async function runReceiverBenchmark(): Promise<void> {
       button.addEventListener("click", () => void inspectBenchmarkFrame(failure.frameIndex));
       buttons.append(button);
     }
-    benchmarkSummary.append(buttons);
-    benchmarkStatus.textContent = `Baseline complete · ${selectedWorkerCount()} worker${selectedWorkerCount() === 1 ? "" : "s"}`;
+    if (failures.length) benchmarkSummary.append(buttons);
+    benchmarkStatus.textContent = `Run complete · ${replayMode.selectedOptions[0]?.textContent ?? replayMode.value} · ${selectedWorkerCount()} worker${selectedWorkerCount() === 1 ? "" : "s"} · save this run to compare later`;
     saveBenchmarkBtn.disabled = false;
   } catch (error) {
     benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
