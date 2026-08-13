@@ -2412,30 +2412,99 @@ async function appendReceivedFile(
 function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void {
   media.classList.add("inspectable");
   media.tabIndex = 0;
-  const updateHint = (): void => {
-    media.title = document.fullscreenElement === media ? "Tap to close full screen" : "Tap to view full screen";
-  };
-  updateHint();
-  document.addEventListener("fullscreenchange", updateHint);
+  media.title = media instanceof HTMLImageElement ? "Tap to view and zoom" : "Tap to view full screen";
+
   const open = async (): Promise<void> => {
-    if (document.fullscreenElement === media) {
-      await document.exitFullscreen().catch(() => undefined);
-      return;
-    }
     if (media instanceof HTMLVideoElement) {
       const iosVideo = media as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
-      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) {
-        iosVideo.webkitEnterFullscreen();
-        void media.play();
-        return;
-      }
-    }
-    if (media.requestFullscreen) {
-      await media.requestFullscreen().catch(() => undefined);
-      if (media instanceof HTMLVideoElement) void media.play();
+      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) iosVideo.webkitEnterFullscreen();
+      else if (media.requestFullscreen) await media.requestFullscreen().catch(() => undefined);
+      else window.open(media.currentSrc || media.src, "_blank", "noopener");
+      void media.play();
       return;
     }
-    window.open(media.currentSrc || media.src, "_blank", "noopener");
+
+    const placeholder = document.createComment("received image");
+    media.replaceWith(placeholder);
+    const inspector = document.createElement("div");
+    inspector.className = "media-inspector";
+    inspector.setAttribute("role", "dialog");
+    inspector.setAttribute("aria-label", "Image viewer");
+    const closeButton = document.createElement("button");
+    closeButton.className = "media-inspector-close";
+    closeButton.type = "button";
+    closeButton.setAttribute("aria-label", "Close image");
+    closeButton.textContent = "×";
+    inspector.append(media, closeButton);
+    document.body.append(inspector);
+    document.body.classList.add("media-inspecting");
+
+    let scale = 1;
+    let x = 0;
+    let y = 0;
+    const pointers = new Map<number, { x: number; y: number }>();
+    const render = (): void => {
+      media.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
+    };
+    const zoomAt = (nextScale: number, clientX: number, clientY: number): void => {
+      const clamped = Math.max(1, Math.min(6, nextScale));
+      const ratio = clamped / scale;
+      x = clientX - innerWidth / 2 - (clientX - innerWidth / 2 - x) * ratio;
+      y = clientY - innerHeight / 2 - (clientY - innerHeight / 2 - y) * ratio;
+      scale = clamped;
+      if (scale === 1) x = y = 0;
+      render();
+    };
+    const close = async (): Promise<void> => {
+      if (!inspector.isConnected) return;
+      if (document.fullscreenElement === inspector) await document.exitFullscreen().catch(() => undefined);
+      inspector.remove();
+      media.removeAttribute("style");
+      placeholder.replaceWith(media);
+      document.body.classList.remove("media-inspecting");
+      media.focus();
+    };
+    closeButton.addEventListener("click", () => void close());
+    inspector.addEventListener("pointerdown", (event) => {
+      if (event.target === closeButton) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      inspector.setPointerCapture(event.pointerId);
+      media.classList.add("dragging");
+    });
+    inspector.addEventListener("pointermove", (event) => {
+      const previous = pointers.get(event.pointerId);
+      if (!previous) return;
+      if (pointers.size === 1) {
+        if (scale > 1) { x += event.clientX - previous.x; y += event.clientY - previous.y; render(); }
+      } else {
+        const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)?.[1];
+        if (other) {
+          const oldDistance = Math.hypot(previous.x - other.x, previous.y - other.y);
+          const newDistance = Math.hypot(event.clientX - other.x, event.clientY - other.y);
+          zoomAt(scale * newDistance / Math.max(1, oldDistance), (event.clientX + other.x) / 2, (event.clientY + other.y) / 2);
+        }
+      }
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    });
+    const releasePointer = (event: PointerEvent): void => {
+      pointers.delete(event.pointerId);
+      if (!pointers.size) media.classList.remove("dragging");
+    };
+    inspector.addEventListener("pointerup", releasePointer);
+    inspector.addEventListener("pointercancel", releasePointer);
+    inspector.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      zoomAt(scale * Math.exp(-event.deltaY * .002), event.clientX, event.clientY);
+    }, { passive: false });
+    inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
+    const onFullscreenChange = (): void => {
+      if (document.fullscreenElement !== inspector && inspector.isConnected) void close();
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+    };
+    if (inspector.requestFullscreen) {
+      await inspector.requestFullscreen().catch(() => undefined);
+      if (document.fullscreenElement === inspector) document.addEventListener("fullscreenchange", onFullscreenChange);
+    }
   };
   media.addEventListener("click", () => void open());
   media.addEventListener("keydown", (event) => {
