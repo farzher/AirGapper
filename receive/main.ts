@@ -217,15 +217,23 @@ populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
 
-// Keep benchmark tools out of the normal settings UI. Deliberately opening,
-// closing, then reopening Settings within two seconds reveals them for this
-// page session.
+// Keep benchmark tools out of the normal settings UI. Opening, closing, then
+// reopening Settings within half a second reveals them. A slower close/reopen
+// hides them again.
+const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
 const settingsToggleTimes: number[] = [];
+let previousSettingsToggleAt = 0;
 receiverSettings.addEventListener("toggle", () => {
-  if (!receiverDevActions.hidden) return;
   const now = performance.now();
+  const slowToggle = previousSettingsToggleAt > 0 && now - previousSettingsToggleAt > DEV_SETTINGS_TOGGLE_WINDOW_MS;
+  previousSettingsToggleAt = now;
+  if (!receiverDevActions.hidden) {
+    if (!receiverSettings.open || !slowToggle) return;
+    receiverDevActions.hidden = true;
+    settingsToggleTimes.length = 0;
+  }
   settingsToggleTimes.push(now);
-  while (settingsToggleTimes.length && settingsToggleTimes[0]! < now - 2000) settingsToggleTimes.shift();
+  while (settingsToggleTimes.length && settingsToggleTimes[0]! < now - DEV_SETTINGS_TOGGLE_WINDOW_MS) settingsToggleTimes.shift();
   if (receiverSettings.open && settingsToggleTimes.length >= 3) receiverDevActions.hidden = false;
 });
 const metric = (id: string) => document.getElementById(id)!;

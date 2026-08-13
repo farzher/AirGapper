@@ -1,7 +1,7 @@
 {
   "name": "airgapper",
   "private": true,
-  "version": "0.1.87",
+  "version": "0.1.88",
   "description": "Offline file and text transfer using fountain-coded animated QR codes.",
   "type": "module",
   "scripts": {
