@@ -5,6 +5,7 @@ dist/
 dist-standalone/
 artifacts/
 scratch/
+benchmarking/corpora/
 android/.gradle/
 android/build/
 android/app/build/
