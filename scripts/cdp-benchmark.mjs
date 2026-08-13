@@ -49,6 +49,17 @@ const waitUntil = async (label, predicate, timeoutMs) => {
 try {
   await send("Runtime.enable");
   await send("DOM.enable");
+  await send("Network.enable");
+  await send("Network.setBypassServiceWorker", { bypass: true });
+  await send("Page.enable");
+  await send("Page.reload", { ignoreCache: true });
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      if (await evaluate(`document.readyState === "complete" && Boolean(document.getElementById("corpus-file"))`)) break;
+    } catch { /* The execution context is replaced during navigation. */ }
+    if (attempt === 99) throw new Error("AirGapper page reload timed out");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadDir, eventsEnabled: true });
   await evaluate(`window.__airgapperBenchmarkReference=${JSON.stringify(reference)}; document.getElementById("decode-workers").value="4"; document.getElementById("replay-mode").value="performance"`);
   const { root } = await send("DOM.getDocument", { depth: -1, pierce: true });
