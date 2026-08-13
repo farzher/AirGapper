@@ -231,6 +231,9 @@ let streamKey = "";
 let reportSessionId = 0; // pairs this run with the sender's diagnostics post
 let startTs = 0;
 let captureGen = 0;
+let cameraStartGen = 0;
+let receiverPaused = false;
+let pauseStartedAt = 0;
 let done = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 const plainQrDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -995,7 +998,10 @@ function offerRetry(message: string) {
 
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
+  cameraStartGen++;
   captureGen++;
+  receiverPaused = false;
+  pauseStartedAt = 0;
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
@@ -1100,8 +1106,41 @@ function stopReceiver(): void {
   activeNativeFps = 0;
   setStatus("");
 }
+function pauseReceiver(): void {
+  if (receiverPaused || done) return;
+  receiverPaused = true;
+  pauseStartedAt = performance.now();
+  cameraStartGen++;
+  captureGen++;
+  releaseScreenWakeLock();
+  stream?.getTracks().forEach((track) => track.stop());
+  stream = null;
+  video.srcObject = null;
+  stopNativeCamera();
+  clearInterval(statsTimer);
+  statsTimer = undefined;
+  pool.resize(0);
+  cropAttempts.clear();
+  minimumAcceptedScanId = frameId;
+}
+
+function resumeReceiver(): void {
+  if (!receiverPaused || done) return;
+  const pausedFor = performance.now() - pauseStartedAt;
+  receiverPaused = false;
+  if (startTs) startTs += pausedFor;
+  if (cameraStartedTs) cameraStartedTs += pausedFor;
+  void start();
+}
+
 window.addEventListener("airgapper:leave-mode", () => {
   if (document.getElementById("receiveView")?.classList.contains("active")) stopReceiver();
+});
+window.addEventListener("airgapper:pause-mode", () => {
+  if (document.getElementById("receiveView")?.classList.contains("active")) pauseReceiver();
+});
+window.addEventListener("airgapper:resume-mode", () => {
+  if (document.getElementById("receiveView")?.classList.contains("active")) resumeReceiver();
 });
 
 const localCameraMessage =
@@ -1142,6 +1181,7 @@ nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
 };
 
 async function start() {
+  const startAttempt = cameraStartGen;
   // Materialize the complete receiver layout before camera permission or
   // startup can delay it. Camera readiness should only replace the viewfinder,
   // never determine the size or visibility of the controls below it.
@@ -1181,32 +1221,34 @@ async function start() {
     width: { exact: captureWidth },
     height: { exact: captureHeight },
   };
+  let acquiredStream: MediaStream;
   try {
     if (isAndroidApp()) {
       // Keep one non-fatal request in the APK; a rejected exact request can
       // wedge older camera providers before the ideal fallback runs.
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: captureFps } } });
+        acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: captureFps } } });
       } catch {
-        stream = await navigator.mediaDevices.getUserMedia({
+        acquiredStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } },
         });
       }
     } else {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        acquiredStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: { ...base, frameRate: { exact: captureFps } },
         });
       } catch {
-        stream = await navigator.mediaDevices.getUserMedia({
+        acquiredStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } },
         });
       }
     }
   } catch (err) {
+    if (startAttempt !== cameraStartGen || receiverPaused) return;
     const denied = err instanceof DOMException && err.name === "NotAllowedError";
     offerRetry(
       denied
@@ -1217,6 +1259,11 @@ async function start() {
     );
     return;
   }
+  if (startAttempt !== cameraStartGen || receiverPaused) {
+    acquiredStream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  stream = acquiredStream;
 
   startBtn.style.display = "none";
   // "": back to the stylesheet's flex — the zone centers the camera box.

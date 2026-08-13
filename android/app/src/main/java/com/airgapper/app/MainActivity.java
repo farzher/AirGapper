@@ -410,6 +410,9 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         webView.onResume();
+        webView.evaluateJavascript(
+                "window.airgapperResume && window.airgapperResume()",
+                null);
     }
 
     @Override

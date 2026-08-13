@@ -876,5 +876,15 @@ window.addEventListener("airgapper:leave-mode", () => {
   if (!document.getElementById("sendView")?.classList.contains("active")) return;
   stopTransfer();
 });
+window.addEventListener("airgapper:pause-mode", () => {
+  if (!document.getElementById("sendView")?.classList.contains("active")) return;
+  // Hidden tabs stop receiving animation frames, so the stream naturally
+  // freezes on its current session without generating more QR work.
+  releaseScreenWakeLock();
+});
+window.addEventListener("airgapper:resume-mode", () => {
+  if (!document.getElementById("sendView")?.classList.contains("active") || !selectedFile) return;
+  void requestScreenWakeLock();
+});
 
 void main();

@@ -85,17 +85,21 @@ if (initialParams.has("r") || initialParams.has("receive")) {
 }
 
 window.addEventListener("popstate", () => showView(historyView() ?? "home", "none"));
+let suspended = false;
 (window as Window & { airgapperSuspend?: () => void }).airgapperSuspend = () => {
-  // The Android document picker pauses the Activity while saving a completed
-  // transfer. Preserve that result screen and its in-memory file until the
-  // picker returns; only a live sender/receiver needs suspension teardown.
-  if (active !== "home" && !document.body.classList.contains("receive-complete")) {
-    window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
-  }
+  if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
+  suspended = true;
+  // Backgrounding pauses hot resources without treating it as navigation.
+  // The selected sender payload and partial fountain decoder stay in memory.
+  window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 
 function resumeActiveView(): void {
-  if (document.visibilityState === "visible" && active === "receive" && !document.body.classList.contains("receive-complete")) {
+  if (document.visibilityState !== "visible") return;
+  if (suspended) {
+    suspended = false;
+    window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
+  } else if (active === "receive" && !document.body.classList.contains("receive-complete")) {
     window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   }
 }
@@ -105,6 +109,7 @@ document.addEventListener("visibilitychange", () => {
   else resumeActiveView();
 });
 window.addEventListener("pageshow", resumeActiveView);
+(window as Window & { airgapperResume?: () => void }).airgapperResume = resumeActiveView;
 
 (window as Window & { airgapperHandleBack?: () => boolean }).airgapperHandleBack = () => {
   if (receiverLinkDialog.open) {
