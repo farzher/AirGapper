@@ -12,8 +12,8 @@
 //    is sampled directly. Bench-measured 2.0–2.6× per decode at V40, which is
 //    CPU the phone doesn't burn: the custom build exists for throughput AND
 //    thermals.
-//    Any tracked miss falls back to readFull on the same buffer, which also
-//    re-anchors the quad. Tracked is opportunistic, never load-bearing.
+//    Tracked misses stay cheap. The scheduler requests a bounded detector crop
+//    only after repeated misses, so one bad frame cannot start a fallback storm.
 
 import wasmUrl from "./wasm-url-android";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec-android/decimen_codec.js";
@@ -48,15 +48,65 @@ function shifted(p: DecimenQuad, ox: number, oy: number, scaleX = 1, scaleY = 1)
   };
 }
 
+// Keep one input allocation for this worker's lifetime. Camera crops are
+// similarly sized from frame to frame; malloc/free on every decode only adds
+// allocator churn to the hottest path.
+let inputPtr = 0;
+let inputCapacity = 0;
+let batchDecoder = 0;
+let batchResultsPtr = 0;
+let batchOutputPtr = 0;
+let batchMetricsPtr = 0;
+let batchCapacity = 0;
+const batchTrackKeys: string[] = [];
+
+function inputBuffer(zx: DecimenModule, bytes: number): number {
+  if (bytes <= inputCapacity) return inputPtr;
+  if (inputPtr) zx._free(inputPtr);
+  inputPtr = zx._malloc(bytes);
+  inputCapacity = bytes;
+  return inputPtr;
+}
+
 interface BatchTrack {
+  id: number;
   quad: DecimenQuad;
   dim: number;
-  crc32?: boolean;
+  crc32: boolean;
+}
+
+function batchBuffers(zx: DecimenModule, count: number): void {
+  if (!batchDecoder) {
+    batchDecoder = zx._createTrackedDecoder(15, 177);
+    zx._setTrackedDecoderFallbackBudget(batchDecoder, 2);
+  }
+  if (count <= batchCapacity) return;
+  if (batchResultsPtr) zx._free(batchResultsPtr);
+  if (batchOutputPtr) zx._free(batchOutputPtr);
+  batchResultsPtr = zx._malloc(count * 32);
+  batchOutputPtr = zx._malloc(count * 3000);
+  if (!batchMetricsPtr) batchMetricsPtr = zx._malloc(72);
+  batchCapacity = count;
+}
+
+function trackKey(track: BatchTrack, ox: number, oy: number): string {
+  const q = track.quad;
+  return [track.id, track.dim, Number(track.crc32), ox, oy,
+    q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+    q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
+}
+
+function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
+  const point = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  return {
+    topLeft: point(q.topLeft), topRight: point(q.topRight),
+    bottomRight: point(q.bottomRight), bottomLeft: point(q.bottomLeft),
+  };
 }
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, scaleX = 1, scaleY = 1, full = true, thorough = true, geometry = false, reacquire = false, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -66,80 +116,159 @@ ctx.onmessage = async (e: MessageEvent) => {
     scaleX?: number;
     scaleY?: number;
     full?: boolean;
+    thorough?: boolean;
+    geometry?: boolean;
+    reacquire?: boolean;
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
   };
-  const pixels = new Uint8Array(buf);
-  const pw = w;
-  const ph = h;
-  let zx: DecimenModule | undefined;
-  let ptr = 0;
   try {
-    zx = await ready;
-    ptr = zx._malloc(pw * ph * 4);
+    const pixels = new Uint8Array(buf);
+    const zx = await ready;
+    const ptr = inputBuffer(zx, pixels.byteLength);
     zx.HEAPU8.set(pixels, ptr);
+    const pw = w;
+    const ph = h;
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
     const sightings: object[] = [];
 
-    let trackedHit = false;
-    const candidates: BatchTrack[] = tracks?.length
-      ? tracks
-      : quad && dim ? [{ quad, dim }] : [];
-    const trackedAttempted = !full && candidates.length > 0;
-    if (trackedAttempted) {
-      for (const candidate of candidates) {
-        const q = candidate.quad;
-        const r = zx.readTracked(
-          ptr, pw, ph, candidate.dim,
-          q.topLeft.x - ox, q.topLeft.y - oy,
-          q.topRight.x - ox, q.topRight.y - oy,
-          q.bottomRight.x - ox, q.bottomRight.y - oy,
-          q.bottomLeft.x - ox, q.bottomLeft.y - oy,
+    if (!full && tracks?.length) {
+      batchBuffers(zx, tracks.length);
+      const byId = new Map(tracks.map((track) => [track.id, track]));
+      for (let slot = 0; slot < tracks.length; slot++) {
+        const track = tracks[slot]!;
+        const key = trackKey(track, ox, oy);
+        if (batchTrackKeys[slot] === key) continue;
+        const q = moved(track.quad, -ox, -oy);
+        zx._setTrackedDecoderTrack(
+          batchDecoder, slot, track.id, track.dim,
+          q.topLeft.x, q.topLeft.y, q.topRight.x, q.topRight.y,
+          q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y,
         );
-        if (!r.valid || r.bytes.length === 0) continue;
+        zx._setTrackedDecoderTrackCRC32(batchDecoder, slot, Number(track.crc32));
+        batchTrackKeys[slot] = key;
+      }
+      for (let slot = tracks.length; slot < batchTrackKeys.length; slot++) {
+        zx._clearTrackedDecoderTrack(batchDecoder, slot);
+        batchTrackKeys[slot] = "";
+      }
+      const count = zx._decodeTrackedBatchRGBA(
+        batchDecoder, ptr, pw, ph, pw * 4, batchResultsPtr, tracks.length,
+        batchOutputPtr, tracks.length * 3000, batchMetricsPtr,
+      );
+      const view = new DataView(zx.HEAPU8.buffer);
+      for (let index = 0; index < count; index++) {
+        const base = batchResultsPtr + index * 32;
+        if (view.getInt32(base + 4, true) !== 1) continue;
+        const track = byId.get(view.getInt32(base, true));
+        if (!track) continue;
+        const byteOffset = view.getInt32(base + 8, true);
+        const byteLength = view.getInt32(base + 12, true);
+        const updatedQuad = moved(
+          track.quad, view.getFloat32(base + 24, true), view.getFloat32(base + 28, true),
+        );
+        symbols.push({
+          bytes: zx.HEAPU8.slice(batchOutputPtr + byteOffset, batchOutputPtr + byteOffset + byteLength),
+          box: boundsOf(updatedQuad, 0, 0), quad: updatedQuad, modules: track.dim,
+          tracked: true, crc32: track.crc32,
+        });
+      }
+      // Tracking is opportunistic. On a complete miss, reacquire from this
+      // already-copied bounded crop instead of discarding the camera frame and
+      // waiting several misses for a separate scheduler job.
+      let fallbackAttempted = false;
+      if (symbols.length === 0) {
+        fallbackAttempted = true;
+        const results = zx.readFull(ptr, pw, ph, true, 16, false);
+        try {
+          for (let i = 0; i < results.size(); i++) {
+            const result = results.get(i);
+            if (!result.valid || result.bytes.length === 0) continue;
+            symbols.push({
+              bytes: result.bytes,
+              box: boundsOf(result.position, ox, oy),
+              quad: shifted(result.position, ox, oy),
+              modules: result.modules,
+              tracked: false,
+            });
+          }
+        } finally {
+          results.delete();
+        }
+      }
+      ctx.postMessage({
+        id, symbols, sightings, full: false, trackedAttempted: true,
+        trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
+        latencyMs: performance.now() - startedAt,
+      });
+      return;
+    }
+
+    let trackedHit = false;
+    let trackedAttempted = false;
+    let fallbackAttempted = false;
+    if (!full && quad && dim) {
+      trackedAttempted = true;
+      const r = zx.readTracked(
+        ptr, pw, ph, dim,
+        quad.topLeft.x - ox, quad.topLeft.y - oy,
+        quad.topRight.x - ox, quad.topRight.y - oy,
+        quad.bottomRight.x - ox, quad.bottomRight.y - oy,
+        quad.bottomLeft.x - ox, quad.bottomLeft.y - oy,
+      );
+      if (r.valid && r.bytes.length > 0) {
         symbols.push({
           bytes: r.bytes,
           box: boundsOf(r.position, ox, oy),
           quad: shifted(r.position, ox, oy),
           modules: r.modules,
           tracked: true,
-          crc32: candidate.crc32,
         });
         trackedHit = true;
       }
     }
 
-    if (full || !trackedAttempted || !trackedHit) {
-      // Full scans get returnErrors (sightings live there — error results
-      // COUNT against the symbol cap, hence the headroom above 12 codes) and a
-      // crop fallback stays in the cheapest configuration. tryHarder stays on
-      // everywhere: real marginal captures are where it earns its keep.
-      const vec = zx.readFull(ptr, pw, ph, true, full ? 16 : 2, full);
-      for (let i = 0; i < vec.size(); i++) {
-        const r = vec.get(i);
-        if (r.valid && r.bytes.length > 0) {
-          symbols.push({
-            bytes: r.bytes,
-            box: boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0),
-            quad: shifted(r.position, ox, oy, scaleX, scaleY),
-            modules: r.modules,
-            tracked: false,
-          });
-        } else if (full) {
-          // A symbol zxing DETECTED but could not decode (glare or noise past
-          // the ECC budget) is still a fix on where a code sits — the
-          // receiver aims a crop there, and crops decode where full frames
-          // fail. Positions stay pixel-accurate through a ChecksumError.
-          const box = boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0);
-          if (box.w > 0 && box.h > 0) sightings.push(box);
+    if (full || reacquire || (trackedAttempted && !trackedHit)) {
+      fallbackAttempted = !full;
+      const appendResults = (vec: ReturnType<DecimenModule["readFull"]>, includeErrors: boolean) => {
+        try {
+          for (let i = 0; i < vec.size(); i++) {
+            const r = vec.get(i);
+            if (r.valid && r.bytes.length > 0) {
+              symbols.push({
+                bytes: r.bytes,
+                box: boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0),
+                quad: shifted(r.position, ox, oy, scaleX, scaleY),
+                modules: r.modules,
+                tracked: false,
+              });
+            } else if (includeErrors) {
+              // A symbol zxing DETECTED but could not decode (glare or noise
+              // past ECC) still supplies a useful crop position.
+              const box = boundsOf(shifted(r.position, ox, oy, scaleX, scaleY), 0, 0);
+              if (box.w > 0 && box.h > 0) sightings.push(box);
+            }
+          }
+        } finally {
+          vec.delete();
         }
+      };
+      if (full) {
+        // Most acquisition frames are misses. Reduced frames return detector
+        // geometry so the scheduler can decode a bounded native crop; periodic
+        // native `thorough` scans retain the difficult/small-symbol fallback.
+        appendResults(zx.readFull(ptr, pw, ph, thorough, 16, geometry), geometry);
+        // Error results count against ZXing's symbol limit. Only a thorough
+        // total miss pays for this pass, which seeds a bounded recovery crop.
+        if (thorough && symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+      } else {
+        // Crop fallback stays in the cheapest detector configuration.
+        appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
       }
-      vec.delete();
     }
     ctx.postMessage({
-      id, symbols, sightings, full, trackedAttempted, trackedHit,
-      fallbackAttempted: !full && !trackedHit,
+      id, symbols, sightings, full, trackedAttempted, trackedHit, fallbackAttempted,
       latencyMs: performance.now() - startedAt,
     });
   } catch (error) {
@@ -148,8 +277,6 @@ ctx.onmessage = async (e: MessageEvent) => {
       latencyMs: performance.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
-  } finally {
-    if (zx && ptr) zx._free(ptr);
   }
 };
 

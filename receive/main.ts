@@ -1222,14 +1222,14 @@ function stopReceiver(): void {
   progressStatus.style.display = "none";
   progressLabel.textContent = "0%";
   transferSizeLabel.textContent = "";
-  etaLabel.textContent = "👀";
+  etaLabel.textContent = "";
   bar.style.width = "0";
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
-  metric("m-rate").textContent = "";
+  metric("m-rate").textContent = "👀";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
   if (diagnosticsEl) {
@@ -1901,8 +1901,8 @@ function resetActiveTransfer(): void {
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
   transferSizeLabel.textContent = "";
-  etaLabel.textContent = "👀";
-  metric("m-rate").textContent = "";
+  etaLabel.textContent = "";
+  metric("m-rate").textContent = "👀";
   speedFeedback.className = "speed-feedback";
   plainQrPolicy.reset();
 }
