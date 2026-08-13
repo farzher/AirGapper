@@ -50,7 +50,7 @@ import {
   showScanCaptureMenuOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
-import { AgcapCorpus, AgcapRecorder } from "./agcap";
+import { AgcapCorpus, AgcapRecorder, type AgcapHeader } from "./agcap";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
@@ -1516,6 +1516,23 @@ interface ReceiverFrame {
   image?: ImageData;
 }
 
+const CORPUS_DEVICE_NAMES: Record<string, string> = {
+  "0dc8b7d5f6e84e81cf126349d821a9d948a6db87ea4a810c04a51aec6999401c": "OP5",
+  "5e792630f18c1d6bc5fc26e8ce6d90a27163fd50f32c7631256aa9e7bc7b193e": "OP12R",
+};
+function compactDeviceName(header: AgcapHeader): string {
+  const id = String(header.cameraSettings.deviceId ?? "");
+  return CORPUS_DEVICE_NAMES[id] ?? `D${id.slice(0, 4) || "unk"}`;
+}
+function compactVersionName(version: string): string {
+  return version.replace(/^v?0\./, "v").replace(/^([^v])/, "v$1");
+}
+function compactTimeName(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  const two = (number: number) => String(number).padStart(2, "0");
+  return `${two(date.getUTCMonth() + 1)}${two(date.getUTCDate())}-${two(date.getUTCHours())}${two(date.getUTCMinutes())}`;
+}
+
 async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
   if (benchmarkRecorder !== recorder) return;
   benchmarkRecorder = undefined;
@@ -1525,10 +1542,9 @@ async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
     const { blob, header, corpus } = await recorder.finish();
     benchmarkPendingBlob = undefined;
     benchmarkCorpus = corpus;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `airgapper-${stamp}.agcap`;
+    link.download = `cap-${compactDeviceName(header)}-${compactVersionName(header.airgapperVersion)}-${compactTimeName(header.startedAt)}.agcap`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 2000);
     benchmarkStatus.textContent = `Downloaded ${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops · ready to run`;
@@ -2912,7 +2928,11 @@ saveBenchmarkBtn.addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(benchmarkResult, null, 2)], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `airgapper-benchmark-${Date.now()}.json`;
+  const header = benchmarkCorpus?.header;
+  const device = header ? compactDeviceName(header) : "Dunk";
+  const mode = replayMode.value === "maximum" ? "max" : "dp";
+  const version = compactVersionName(String(benchmarkResult.version ?? "v0"));
+  link.download = `bm-${device}-${version}-${mode}-${compactTimeName(new Date())}.json`;
   link.click();
   saveBenchmarkBtn.textContent = "Downloaded";
   setTimeout(() => {
