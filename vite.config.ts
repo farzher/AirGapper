@@ -12,7 +12,7 @@ import { appArtifact } from "./build/app-artifact";
 const SITE_URL = process.env.VITE_SITE_URL ?? "https://farzher.github.io/AirGapper/";
 const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8")) as { version: string };
 
-const TOKENS = { SITE_URL };
+const TOKENS = { SITE_URL, VERSION: pkg.version };
 
 export default defineConfig(({ mode }) => ({
   base: "./",
