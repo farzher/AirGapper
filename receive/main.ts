@@ -239,6 +239,10 @@ const captureTimes: number[] = [];
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
 const scanSubmissionTimes: number[] = [];
+// Camera frames that actually reached the decoder. This is the useful upper
+// bound for sender fps; camera callbacks alone can run much faster while the
+// worker pool is saturated.
+const scanFrameTimes: number[] = [];
 const scanCompletionTimes: number[] = [];
 // Timestamps of frames that contributed new fountain information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
@@ -1151,6 +1155,7 @@ function stopReceiver(): void {
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
   scanSubmissionTimes.length = 0;
+  scanFrameTimes.length = 0;
   scanCompletionTimes.length = 0;
   cropAttempts.clear();
   cropRotate = 0;
@@ -1596,6 +1601,14 @@ function captureFrame() {
   const vh = video.videoHeight;
   if (!vw || !vh) return;
   const now = performance.now();
+  let scanFrameSubmitted = false;
+  const noteScanSubmission = () => {
+    scanSubmissionTimes.push(now);
+    if (!scanFrameSubmitted) {
+      scanFrameTimes.push(now);
+      scanFrameSubmitted = true;
+    }
+  };
   captureTimes.push(now);
   totalCaptures++;
   if (pool.busyCount === pool.size) {
@@ -1675,7 +1688,7 @@ function captureFrame() {
       fullScanIds.add(id);
       fullScanJobs.set(id, { thorough, native, reacquire });
       scanCapturedAt.set(id, now);
-      scanSubmissionTimes.push(now);
+      noteScanSubmission();
       submittedJobs++;
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) cancelScanCapture();
@@ -1718,7 +1731,7 @@ function captureFrame() {
         localReacquisitions++;
         cropsSubmitted++;
         scanCapturedAt.set(id, now);
-        scanSubmissionTimes.push(now);
+        noteScanSubmission();
         submittedJobs++;
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
       } else {
@@ -1767,7 +1780,7 @@ function captureFrame() {
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
         scanCapturedAt.set(id, now);
-        scanSubmissionTimes.push(now);
+        noteScanSubmission();
         submittedJobs++;
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
         cropsSubmitted += batchTracks.length;
@@ -1831,7 +1844,7 @@ function captureFrame() {
       break;
     }
     scanCapturedAt.set(id, now);
-    scanSubmissionTimes.push(now);
+    noteScanSubmission();
     submittedJobs++;
     if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     cropsSubmitted++;
@@ -2462,12 +2475,14 @@ function updateStats() {
   prune(qrReadTimes);
   prune(poolBusyTimes);
   prune(scanSubmissionTimes);
+  prune(scanFrameTimes);
   prune(scanCompletionTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
+  const scannerFrameRate = perSecond(scanFrameTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${scannerFrameRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
@@ -2498,8 +2513,8 @@ function updateStats() {
       decoder.solvedCount,
       liveNow,
       regions.length,
-      Number(perSecond(captureTimes).toFixed(1)),
-      Number(perSecond(qrReadTimes).toFixed(1)),
+      Number(cameraRate.toFixed(1)),
+      Number(qrRate.toFixed(1)),
       fullScans,
     ]);
   }
