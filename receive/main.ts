@@ -1637,6 +1637,39 @@ function captureFrame() {
     return;
   }
 
+  if (legacyAndroidApp) {
+    // The old scalar WebView decoder is reliable on native full frames, but
+    // the modern reduced-acquisition → lattice-tracking handoff can leave it
+    // repeatedly decoding geometry without collecting packets. Keep this
+    // compatibility path deliberately simple: submit the same thorough frame
+    // that the working Capture button uses whenever its sole worker is free.
+    if (grab.width !== vw || grab.height !== vh) {
+      grab.width = vw;
+      grab.height = vh;
+    }
+    const ctx = grab.getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(video, 0, 0, vw, vh);
+    const img = ctx.getImageData(0, 0, vw, vh);
+    captureSubmittedScan(img, 0, 0, true);
+    const id = frameId++;
+    if (pool.submit(
+      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough: true },
+      [img.data.buffer],
+    )) {
+      fullScans++;
+      thoroughFullScans++;
+      fullScanIds.add(id);
+      fullScanJobs.set(id, { thorough: true, native: true, reacquire: false });
+      scanCapturedAt.set(id, now);
+      noteScanSubmission();
+      submittedJobs++;
+      if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+    } else if (pendingScanCapture?.id === undefined) {
+      cancelScanCapture();
+    }
+    return;
+  }
+
   for (let i = regions.length - 1; i >= 0; i--) {
     const region = regions[i]!;
     const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
