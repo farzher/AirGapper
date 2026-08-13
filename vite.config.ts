@@ -49,11 +49,24 @@ export default defineConfig(({ mode }) => ({
       },
     }),
     inlineCodecWasm(),
+    inlineCodecWasm(
+      "virtual:android-codec-wasm-data-url",
+      "../vendor/decimen-codec-android/decimen_codec.wasm",
+    ),
     viteSingleFile(),
     appArtifact(__dirname),
     diagnosticsEndpoint(pkg.version),
   ],
-  worker: { format: "iife", plugins: () => [inlineCodecWasm()] },
+  worker: {
+    format: "iife",
+    plugins: () => [
+      inlineCodecWasm(),
+      inlineCodecWasm(
+        "virtual:android-codec-wasm-data-url",
+        "../vendor/decimen-codec-android/decimen_codec.wasm",
+      ),
+    ],
+  },
   build: {
     // The hosted app keeps the fast native syntax used by the known-good web
     // build. Only the APK needs downlevel output for its older WebView.
