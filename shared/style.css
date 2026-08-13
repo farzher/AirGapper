@@ -237,8 +237,8 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-settings label,
 .receiver-settings select { min-width: 0; width: 100%; }
 .receiver-settings .settings-actual { min-width: 0; margin-left: 5px; color: var(--muted); font-weight: 400; opacity: .8; }
-.receiver-settings .scan-capture-button { padding: 5px 9px; min-height: 34px; }
-.receiver-settings .exposure-manual { grid-column: 1 / -1; }
+.receiver-settings .scan-capture-button { grid-column: 4; grid-row: 1; padding: 5px 9px; min-height: 34px; }
+.receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; }
 .setting-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 8px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .setting-toggle input { margin: 0; accent-color: #222; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
@@ -405,6 +405,6 @@ dialog::backdrop { background: #0004; }
 
 @media (max-width: 390px) {
   .receiver-settings .row { grid-template-columns: minmax(0, 1.5fr) minmax(62px, .7fr) auto auto; gap: 6px; }
-  .receiver-settings .exposure-manual { grid-column: 1 / -1; }
+  .receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; }
   .receiver-settings { padding-inline: 9px; }
 }
