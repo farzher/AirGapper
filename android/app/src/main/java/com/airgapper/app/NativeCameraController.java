@@ -28,14 +28,16 @@ import android.widget.FrameLayout;
 
 import com.google.zxing.BinaryBitmap;
 import com.google.zxing.DecodeHintType;
-import com.google.zxing.MultiFormatReader;
+import com.google.zxing.LuminanceSource;
 import com.google.zxing.PlanarYUVLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.ResultPoint;
 import com.google.zxing.ResultMetadataType;
 import com.google.zxing.BarcodeFormat;
+import com.google.zxing.common.GlobalHistogramBinarizer;
 import com.google.zxing.common.HybridBinarizer;
-import com.google.zxing.multi.GenericMultipleBarcodeReader;
+import com.google.zxing.multi.qrcode.QRCodeMultiReader;
+import com.google.zxing.qrcode.QRCodeReader;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -85,6 +87,9 @@ final class NativeCameraController {
     private Mode activeMode;
     private boolean paused;
     private long frameCount;
+    private long scanWindowStartedNs;
+    private int scanWindowCount;
+    private int scanWindowHits;
 
     NativeCameraController(Activity activity, FrameLayout root, Listener listener) {
         this.activity = activity;
@@ -222,6 +227,9 @@ final class NativeCameraController {
         if (mode == null) { fail("No usable rear Camera2 mode"); return; }
         activeMode = mode;
         frameCount = 0;
+        scanWindowStartedNs = 0;
+        scanWindowCount = 0;
+        scanWindowHits = 0;
         final int token = ++generation;
         ensureThreads();
         preview.setVisibility(View.VISIBLE);
@@ -341,21 +349,22 @@ final class NativeCameraController {
     private void decode(byte[] y, int width, int height, long timestamp, int token) {
         try {
             PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(y, width, height, 0, 0, width, height, false);
-            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
             Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
             hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
             hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
-            MultiFormatReader base = new MultiFormatReader();
-            base.setHints(hints);
-            Result[] results = decodeBitmap(base, bitmap, hints);
+            hints.put(DecodeHintType.ALSO_INVERTED, Boolean.TRUE);
+            Result[] results = decodeBitmap(source, hints);
             if (results.length == 0 && source.isRotateSupported()) {
-                results = decodeBitmap(base, new BinaryBitmap(new HybridBinarizer(source.rotateCounterClockwise())), hints);
+                results = decodeBitmap(source.rotateCounterClockwise(), hints);
             }
-            if (token == generation) for (Result result : results) {
-                ResultPoint[] rp = result.getResultPoints();
-                float[] points = new float[(rp == null ? 0 : rp.length) * 2];
-                if (rp != null) for (int i = 0; i < rp.length; i++) { points[i * 2] = rp[i].getX(); points[i * 2 + 1] = rp[i].getY(); }
-                listener.onQr(payloadBytes(result), points, timestamp);
+            if (token == generation) {
+                noteScan(timestamp, width, height, results.length);
+                for (Result result : results) {
+                    ResultPoint[] rp = result.getResultPoints();
+                    float[] points = new float[(rp == null ? 0 : rp.length) * 2];
+                    if (rp != null) for (int i = 0; i < rp.length; i++) { points[i * 2] = rp[i].getX(); points[i * 2 + 1] = rp[i].getY(); }
+                    listener.onQr(payloadBytes(result), points, timestamp);
+                }
             }
         } finally { decoding.set(false); }
     }
@@ -376,10 +385,30 @@ final class NativeCameraController {
         return raw == null ? new byte[0] : raw;
     }
 
-    private static Result[] decodeBitmap(MultiFormatReader base, BinaryBitmap bitmap, Map<DecodeHintType, Object> hints) {
-        try { return new GenericMultipleBarcodeReader(base).decodeMultiple(bitmap, hints); }
+    private void noteScan(long timestamp, int width, int height, int hits) {
+        if (scanWindowStartedNs == 0) scanWindowStartedNs = timestamp;
+        scanWindowCount++;
+        scanWindowHits += hits;
+        long elapsed = timestamp - scanWindowStartedNs;
+        if (elapsed < 1_000_000_000L) return;
+        double rate = scanWindowCount * 1_000_000_000d / Math.max(1, elapsed);
+        listener.onStatus("scanning", String.format(java.util.Locale.US,
+                "%.1f scans/s · %dx%d analysis · %d QR", rate, width, height, scanWindowHits), activeMode.json().toString());
+        scanWindowStartedNs = timestamp;
+        scanWindowCount = 0;
+        scanWindowHits = 0;
+    }
+
+    private static Result[] decodeBitmap(LuminanceSource source, Map<DecodeHintType, Object> hints) {
+        Result[] results = decodeBitmap(new BinaryBitmap(new HybridBinarizer(source)), hints);
+        if (results.length == 0) results = decodeBitmap(new BinaryBitmap(new GlobalHistogramBinarizer(source)), hints);
+        return results;
+    }
+
+    private static Result[] decodeBitmap(BinaryBitmap bitmap, Map<DecodeHintType, Object> hints) {
+        try { return new QRCodeMultiReader().decodeMultiple(bitmap, hints); }
         catch (Exception first) {
-            try { base.reset(); base.setHints(hints); return new Result[]{base.decodeWithState(bitmap)}; }
+            try { return new Result[]{new QRCodeReader().decode(bitmap, hints)}; }
             catch (Exception ignored) { return new Result[0]; }
         }
     }

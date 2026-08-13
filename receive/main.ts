@@ -45,6 +45,7 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
+  nativeCameraCapabilities,
   saveFileOnAndroid,
   setNativeExposure,
   setNativePreviewBounds,
@@ -121,16 +122,14 @@ const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
 ] as const;
 const STANDARD_FPS = [24, 30, 60, 90, 120, 240, 480];
-// The Camera2/Java decoder can produce a live preview without producing QR
-// payloads on older receivers. Keep APK capture on the proven WebView + compact
-// WASM path; the native implementation remains available for later hardening.
-const advertisedNativeModes: NativeCameraMode[] = [];
-const standardSizeKeys = new Set<string>(STANDARD_RESOLUTIONS.map(([width, height]) => `${width}x${height}`));
-// Camera2 reports many implementation-detail sizes (for example 720×540 and
-// 144×176). Receiver choices stay useful: standard video sizes plus any
-// explicitly advertised constrained-high-speed size.
-const nativeModes = advertisedNativeModes.filter((mode) =>
-  standardSizeKeys.has(`${mode.width}x${mode.height}`) || mode.highSpeed);
+const nativeCapabilities = isAndroidApp() ? nativeCameraCapabilities() : undefined;
+const advertisedNativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
+// Only modes with a YUV analysis output can feed the decoder. Constrained
+// high-speed Camera2 modes are preview-only on these devices; advertising them
+// produced a live viewport with no scannable frames. Keep every practical
+// analysis mode so the APK exposes more of Camera2 than getUserMedia does.
+const nativeModes = advertisedNativeModes.filter((mode) => mode.analysis &&
+  mode.width >= 480 && mode.height >= 360 && mode.width <= 3840 && mode.height <= 2160);
 let backend: "native" | "webview" | "browser" = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
 let nativeFallbackUsed = false;
 let activeNativeFps = 0;
@@ -249,8 +248,10 @@ function showRequestedCameraSettings(): void {
   cameraFpsControl.hidden = backend !== "native";
   captureScanBtn.hidden = backend === "native";
   decodeWorkersControl.hidden = backend === "native";
-  cameraTorchControl.hidden = backend === "native" || !selectedNativeMode?.torch;
-  cameraExposureControl.hidden = true;
+  cameraTorchControl.hidden = backend === "native" ? !selectedNativeMode?.torch : cameraTorchControl.hidden;
+  cameraExposureControl.hidden = backend === "native"
+    ? !selectedNativeMode || selectedNativeMode.exposureMin === selectedNativeMode.exposureMax
+    : cameraExposureControl.hidden;
   video.hidden = backend === "native";
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
