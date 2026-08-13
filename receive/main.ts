@@ -140,6 +140,7 @@ let requestedFps = 60;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
 const browserModeResults = loadBrowserModeResults();
 let browserModes: BrowserMode[] = [];
+let automaticBrowserMode: BrowserMode | undefined;
 
 function loadBrowserModeResults(): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem(BROWSER_MODE_RESULTS_KEY) ?? "{}") as Record<string, boolean>; }
@@ -176,7 +177,7 @@ function populateFpsOptions(preferred?: string): void {
 }
 function populateCameraOptions(): void {
   if (!nativeModes.length) {
-    cameraResolution.replaceChildren(new Option("Auto · recommended", "auto"));
+    cameraResolution.replaceChildren(new Option("Auto", "auto"));
     cameraFps.replaceChildren(new Option("Auto", "auto"));
     cameraResolution.value = "auto";
     return;
@@ -230,8 +231,8 @@ function readRequestedCameraSettings(): void {
 function showRequestedCameraSettings(): void {
   readRequestedCameraSettings();
   const speed = selectedNativeMode?.highSpeed ? " · High speed" : "";
-  const requested = cameraResolution.value === "auto" ? "Auto · recommended" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps${speed}`;
-  cameraActual.textContent = `${backend === "native" ? "Native Camera2" : backend === "webview" ? "WebView" : "Browser"} · ${requested}`;
+  const requested = cameraResolution.value === "auto" ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps${speed}`;
+  cameraActual.textContent = requested;
   cameraResolutionLabel.textContent = backend === "native" ? "Resolution" : "Mode";
   cameraFpsControl.hidden = backend !== "native";
   captureScanBtn.hidden = backend === "native";
@@ -773,7 +774,10 @@ function syncPreviewAspect() {
 function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
   const active = track.getSettings();
   const size = active.width && active.height ? `${active.width}×${active.height}` : "Camera active";
-  cameraActual.textContent = `${prefix ? `${prefix} · ` : ""}${backend === "webview" ? "WebView" : "Browser"} · ${size}${active.frameRate ? ` · ${Math.round(active.frameRate)} fps` : ""}`;
+  cameraActual.textContent = `${prefix ? `${prefix} · ` : ""}${size}${active.frameRate ? ` · ${Math.round(active.frameRate)} fps` : ""}`;
+}
+function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
+  return (a.width === b.width && a.height === b.height) || (a.width === b.height && a.height === b.width);
 }
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
@@ -797,19 +801,24 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const heightMax = caps.height.max ?? Infinity;
   const fpsMin = caps.frameRate?.min ?? 0;
   const fpsMax = caps.frameRate?.max ?? Infinity;
-  const candidates: BrowserMode[] = [
-    { key: "1280x720@30", width: 1280, height: 720, fps: 30, label: "1280×720 · 30 fps" },
-    { key: "1280x720@60", width: 1280, height: 720, fps: 60, label: "1280×720 · 60 fps" },
-    { key: "1920x1080@30", width: 1920, height: 1080, fps: 30, label: "1920×1080 · 30 fps" },
-    { key: "1920x1080@60", width: 1920, height: 1080, fps: 60, label: "1920×1080 · 60 fps" },
-    { key: "3840x2160@30", width: 3840, height: 2160, fps: 30, label: "3840×2160 · 30 fps" },
-  ];
+  const active = track.getSettings();
+  if (cameraResolution.value === "auto" && active.width && active.height) {
+    const fps = Math.round(active.frameRate ?? 30);
+    automaticBrowserMode = {
+      key: "auto", width: active.width, height: active.height, fps,
+      label: `${active.width}×${active.height} · ${fps} fps`,
+    };
+  }
+  const candidates: BrowserMode[] = STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
+    key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
+  })));
   browserModes = candidates.filter((mode) =>
     mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax &&
-    mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false);
+    mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false &&
+    !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
   const prior = cameraResolution.value;
   cameraResolution.replaceChildren(
-    new Option("Auto · recommended", "auto"),
+    new Option(`${automaticBrowserMode ? `${automaticBrowserMode.label} · ` : ""}Auto`, "auto"),
     ...browserModes.map((mode) => new Option(
       `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
     )),
@@ -968,6 +977,10 @@ const changeCameraSettings = async (resolutionChanged = false) => {
   const track = stream?.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
+    await track.applyConstraints({
+      width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 },
+    }).catch(() => undefined);
+    populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
     return;
   }
@@ -978,8 +991,9 @@ const changeCameraSettings = async (resolutionChanged = false) => {
       width: { exact: attempted.width }, height: { exact: attempted.height }, frameRate: { exact: attempted.fps },
     });
     const active = track.getSettings();
-    const exact = active.width === attempted.width && active.height === attempted.height &&
-      Math.abs((active.frameRate ?? attempted.fps) - attempted.fps) < 1;
+    const exactSize = (active.width === attempted.width && active.height === attempted.height) ||
+      (active.width === attempted.height && active.height === attempted.width);
+    const exact = exactSize && Math.abs((active.frameRate ?? attempted.fps) - attempted.fps) < 1;
     if (!exact) throw new Error("Browser negotiated a different mode");
     saveBrowserModeResult(attempted.key, true);
     const option = [...cameraResolution.options].find((candidate) => candidate.value === attempted.key);
@@ -1211,7 +1225,7 @@ nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
   if (status === "active" && mode) {
     preview.classList.remove("camera-loading");
     activeNativeFps = mode.fpsMax;
-    cameraActual.textContent = `Native Camera2 · ${mode.width}×${mode.height} · ${mode.fpsMax} fps${mode.highSpeed ? " · High speed" : ""}`;
+    cameraActual.textContent = `${mode.width}×${mode.height} · ${mode.fpsMax} fps${mode.highSpeed ? " · High speed" : ""}`;
     setStatus("");
     return;
   }
@@ -1224,7 +1238,7 @@ nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
     stopNativeCamera();
     clearInterval(statsTimer);
     statsTimer = undefined;
-    cameraActual.textContent = `Native unavailable (${detail}) · WebView fallback`;
+    cameraActual.textContent = `Camera fallback (${detail})`;
     void start();
   } else if (status !== "starting") setStatus(`${status}: ${detail}`);
 };
