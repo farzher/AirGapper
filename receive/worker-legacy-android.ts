@@ -16,6 +16,16 @@ const ctx = self as unknown as {
   postMessage(msg: unknown): void;
 };
 
+function plainQuad(quad: DecimenQuad): DecimenQuad {
+  const point = (value: { x: number; y: number }) => ({ x: value.x, y: value.y });
+  return {
+    topLeft: point(quad.topLeft),
+    topRight: point(quad.topRight),
+    bottomRight: point(quad.bottomRight),
+    bottomLeft: point(quad.bottomLeft),
+  };
+}
+
 function boundsOf(quad: DecimenQuad) {
   const xs = [quad.topLeft.x, quad.topRight.x, quad.bottomRight.x, quad.bottomLeft.x];
   const ys = [quad.topLeft.y, quad.topRight.y, quad.bottomRight.y, quad.bottomLeft.y];
@@ -41,12 +51,14 @@ ctx.onmessage = async (event: MessageEvent) => {
       for (let index = 0; index < results.size(); index++) {
         const result = results.get(index);
         if (result.valid && result.bytes.length > 0) {
-          // Copy while the embind result is alive. Older WebViews otherwise
-          // occasionally observe freed WASM vector storage after delete().
+          // Copy every embind value while the result is alive. Keeping the
+          // position proxy after results.delete() produced wild overlay quads
+          // and poisoned tracking on old WebViews.
+          const quad = plainQuad(result.position);
           symbols.push({
             bytes: Uint8Array.from(result.bytes),
-            box: boundsOf(result.position),
-            quad: result.position,
+            box: boundsOf(quad),
+            quad,
             modules: result.modules,
             tracked: false,
           });

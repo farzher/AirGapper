@@ -1496,6 +1496,30 @@ function trackedQuadBounds(quad: SymbolQuad): { left: number; top: number; right
   };
 }
 
+function validDecodedBox(box: SymbolBox | undefined): box is SymbolBox {
+  if (!box) return false;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  return Number.isFinite(box.x) && Number.isFinite(box.y) && Number.isFinite(box.w) && Number.isFinite(box.h) &&
+    box.w >= 16 && box.h >= 16 && box.w <= vw * 1.2 && box.h <= vh * 1.2 &&
+    box.x >= -vw * 0.25 && box.y >= -vh * 0.25 &&
+    box.x + box.w <= vw * 1.25 && box.y + box.h <= vh * 1.25;
+}
+
+function validDecodedGeometry(box: SymbolBox | undefined, info: SymbolInfo | undefined): boolean {
+  if (!validDecodedBox(box) || !info?.quad || !info.modules) return false;
+  const bounds = trackedQuadBounds(info.quad);
+  if (!bounds) return false;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  return width >= 16 && height >= 16 &&
+    Math.max(width / height, height / width) <= 2.5 &&
+    bounds.left >= -vw * 0.25 && bounds.top >= -vh * 0.25 &&
+    bounds.right <= vw * 1.25 && bounds.bottom <= vh * 1.25;
+}
+
 function validTrackedQuad(region: Region, vw: number, vh: number): boolean {
   if (!region.quad) return false;
   const bounds = trackedQuadBounds(region.quad);
@@ -1984,7 +2008,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      if (box) noteRegion(box, decodedAt, true, info);
+      if (validDecodedBox(box)) noteRegion(box, decodedAt, true, info);
       const settled = plainQrPolicy.addPlain(text, info?.scanId ?? -1);
       if (settled) finishPlainQr(settled);
     } catch {
@@ -2010,25 +2034,26 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   plainQrPolicy.noteFramed();
   const hasFrameCRC = bytes.length === HEADER_LEN + header.blockLen + FRAME_CRC_LEN;
   let decodedRegion: Region | undefined;
-  if (box && info?.quad && info.modules) {
+  if (validDecodedGeometry(box, info)) {
+    const geometry = info!;
     const snapshot = gridLattice.accept({
       identity,
       seq: header.seq,
       gridEsi: header.gridEsi,
       layoutId: header.layoutId,
       slotIndex: header.slotIndex,
-      at: info.scanId === undefined ? decodedAt : (scanCapturedAt.get(info.scanId) ?? decodedAt),
-      scanId: info.scanId ?? -1,
-      box,
-      quad: info.quad,
-      modules: info.modules,
+      at: geometry.scanId === undefined ? decodedAt : (scanCapturedAt.get(geometry.scanId) ?? decodedAt),
+      scanId: geometry.scanId ?? -1,
+      box: box!,
+      quad: geometry.quad!,
+      modules: geometry.modules!,
     }, video.videoWidth, video.videoHeight);
     if (snapshot) {
       decodedRegion = syncGrid(
         snapshot,
         decodedAt,
         header.slotIndex ?? header.seq % snapshot.slots.length,
-        { ...info, crc32: info.crc32 ?? hasFrameCRC },
+        { ...geometry, crc32: geometry.crc32 ?? hasFrameCRC },
       );
     }
   }

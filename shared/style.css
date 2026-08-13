@@ -238,10 +238,9 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-settings select { min-width: 0; width: 100%; }
 .receiver-settings .settings-actual { min-width: 0; margin-left: 5px; color: var(--muted); font-weight: 400; opacity: .8; }
 .receiver-settings .scan-capture-button { grid-column: 4; grid-row: 1; padding: 5px 9px; min-height: 34px; }
-.receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; }
-.receiver-settings .exposure-slider { display: flex; align-items: center; gap: 10px; }
-.receiver-settings .exposure-slider input { flex: 1; min-width: 0; }
-.receiver-settings .exposure-slider output { flex: 0 0 62px; color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; text-transform: none; letter-spacing: 0; }
+.receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; flex-direction: row; align-items: center; gap: 10px; }
+.receiver-settings .exposure-manual input { flex: 1; min-width: 0; }
+.receiver-settings .exposure-manual output { flex: 0 0 62px; color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; text-transform: none; letter-spacing: 0; }
 .setting-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 8px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .setting-toggle input { margin: 0; accent-color: #222; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
