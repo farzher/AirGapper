@@ -560,6 +560,18 @@ static bool refineAnchor(PersistentTrack& track, const LumAt& lumAt, AnchorReadi
 		for (int x = -1; x <= 1; ++x)
 			if (x || y)
 				test(originX + float(x), originY + float(y));
+	if (reading.score >= 125 && reading.contrast >= 24)
+		return true;
+
+	// Worker latency can leave a lattice anchor several camera frames behind.
+	// Measured fallback re-anchors differ by 3 px at the median and up to 6 px
+	// at p95, beyond the old ±1 px search despite otherwise matching geometry.
+	// Finder probes are cheap; widen only failed anchors before paying for the
+	// generic detector over the whole shared crop.
+	for (int y = -6; y <= 6; ++y)
+		for (int x = -6; x <= 6; ++x)
+			if (std::abs(x) > 1 || std::abs(y) > 1)
+				test(originX + float(x), originY + float(y));
 	return reading.score >= 125 && reading.contrast >= 24;
 }
 
