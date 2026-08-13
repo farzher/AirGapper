@@ -45,22 +45,13 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   copyTextOnAndroid,
   isAndroidApp,
-  nativeCameraCapabilities,
   saveFileOnAndroid,
-  setNativeExposure,
-  setNativePreviewBounds,
-  setNativeTorch,
-  startNativeCamera,
-  stopNativeCamera,
-  type NativeCameraMode,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
 const cameraResolutionLabel = document.getElementById("camera-resolution-label")!;
-const cameraFpsControl = document.getElementById("camera-fps-control")!;
-const cameraFps = document.getElementById("camera-fps") as HTMLSelectElement;
 const decodeWorkers = document.getElementById("decode-workers") as HTMLSelectElement;
 const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
@@ -121,19 +112,6 @@ const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
 ] as const;
-const STANDARD_FPS = [24, 30, 60, 90, 120, 240, 480];
-const nativeCapabilities = isAndroidApp() ? nativeCameraCapabilities() : undefined;
-const advertisedNativeModes = nativeCapabilities?.decoderAvailable ? nativeCapabilities.modes : [];
-// Only modes with a YUV analysis output can feed the decoder. Constrained
-// high-speed Camera2 modes are preview-only on these devices; advertising them
-// produced a live viewport with no scannable frames. Keep every practical
-// analysis mode so the APK exposes more of Camera2 than getUserMedia does.
-const nativeModes = advertisedNativeModes.filter((mode) => mode.analysis &&
-  mode.width >= 480 && mode.height >= 360 && mode.width <= 3840 && mode.height <= 2160);
-let backend: "native" | "webview" | "browser" = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
-let nativeFallbackUsed = false;
-let activeNativeFps = 0;
-let selectedNativeMode: NativeCameraMode | undefined;
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
@@ -152,107 +130,51 @@ function saveBrowserModeResult(key: string, supported: boolean): void {
   catch { /* Validation still applies for this session. */ }
 }
 
-function resolutionKey(width: number, height: number): string { return `${width}x${height}`; }
-function nativeModesForResolution(value = cameraResolution.value): NativeCameraMode[] {
-  return nativeModes.filter((mode) => resolutionKey(mode.width, mode.height) === value);
-}
-function populateFpsOptions(preferred?: string): void {
-  if (nativeModes.length) {
-    const candidates = nativeModesForResolution().sort((a, b) => a.fpsMax - b.fpsMax || a.fpsMin - b.fpsMin);
-    const modes = [...new Map(candidates.map((mode) => [`${mode.fpsMax}:${mode.highSpeed}`, mode])).values()];
-    cameraFps.replaceChildren(...modes.map((mode) => new Option(
-      `${mode.fpsMin === mode.fpsMax ? mode.fpsMax : `${mode.fpsMin}–${mode.fpsMax}`}${mode.highSpeed ? " · High speed" : ""}`,
-      mode.key,
-    )));
-    const wanted = modes.find((mode) => mode.key === preferred)
-      ?? modes.find((mode) => mode.fpsMax === 60 && !mode.highSpeed)
-      ?? [...modes].reverse().find((mode) => !mode.highSpeed)
-      ?? modes[modes.length - 1];
-    if (wanted) cameraFps.value = wanted.key;
-    return;
-  }
-  cameraFps.replaceChildren(...STANDARD_FPS.map((fps) => new Option(String(fps), String(fps))));
-  cameraFps.value = preferred && STANDARD_FPS.includes(Number(preferred) as (typeof STANDARD_FPS)[number])
-    ? preferred : "60";
-}
 function standardBrowserModes(): BrowserMode[] {
   return STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
     key: `${width}x${height}@${fps}`, width, height, fps, label: `${width}×${height} · ${fps} fps`,
   }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
 }
 function populateCameraOptions(): void {
-  if (!nativeModes.length) {
-    browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
-    cameraResolution.replaceChildren(
-      new Option("Auto", "auto"),
-      ...browserModes.map((mode) => new Option(
-        `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
-      )),
-    );
-    cameraFps.replaceChildren(new Option("Auto", "auto"));
-    cameraResolution.value = "auto";
-    return;
-  }
-  const sizes = [...new Map(nativeModes.map((mode) => [resolutionKey(mode.width, mode.height), [mode.width, mode.height] as const])).values()]
-    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  cameraResolution.replaceChildren(...sizes.map(([width, height]) => {
-    const maxFps = Math.max(...nativeModes.filter((mode) => mode.width === width && mode.height === height).map((mode) => mode.fpsMax), 0);
-    return new Option(`${width}×${height}${maxFps > 60 ? ` · up to ${maxFps} fps` : ""}`, resolutionKey(width, height));
-  }));
-  const safeDefault = [...sizes].reverse().find(([w, h]) => w * h <= 1280 * 960) ?? sizes[0]!;
-  cameraResolution.value = sizes.some(([w, h]) => w === 1280 && h === 960)
-    ? "1280x960" : resolutionKey(safeDefault[0], safeDefault[1]);
-  populateFpsOptions();
+  browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
+  cameraResolution.replaceChildren(
+    new Option("Auto", "auto"),
+    ...browserModes.map((mode) => new Option(
+      `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key,
+    )),
+  );
+  cameraResolution.value = "auto";
 }
 function restoreCameraSettings(): void {
   try {
-    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; fps?: string; workers?: string } | null;
+    const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as { resolution?: string; workers?: string } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
-      if (nativeModes.length) populateFpsOptions(saved.fps);
     }
     const savedWorkers = Number(saved.workers);
     if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) decodeWorkers.value = saved.workers!;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
-  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, fps: cameraFps.value, workers: decodeWorkers.value })); }
+  try { localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({ resolution: cameraResolution.value, workers: decodeWorkers.value })); }
   catch { /* Storage is optional. */ }
 }
 function readRequestedCameraSettings(): void {
-  selectedNativeMode = nativeModes.find((mode) => mode.key === cameraFps.value);
   const browserMode = browserModes.find((mode) => mode.key === cameraResolution.value);
-  if (browserMode) {
-    requestedWidth = browserMode.width;
-    requestedHeight = browserMode.height;
-    requestedFps = browserMode.fps;
-  } else if (cameraResolution.value !== "auto") {
-    [requestedWidth, requestedHeight] = cameraResolution.value.split("x").map(Number) as [number, number];
-    requestedFps = selectedNativeMode?.fpsMax ?? Number(cameraFps.value);
-  }
-  cameraTorchControl.hidden = !selectedNativeMode?.torch;
-  cameraExposureControl.hidden = !selectedNativeMode || selectedNativeMode.exposureMin === selectedNativeMode.exposureMax;
-  if (selectedNativeMode) {
-    cameraExposure.min = String(selectedNativeMode.exposureMin);
-    cameraExposure.max = String(selectedNativeMode.exposureMax);
-    cameraExposure.value = String(Math.max(selectedNativeMode.exposureMin, Math.min(selectedNativeMode.exposureMax, Number(cameraExposure.value))));
-  }
+  if (!browserMode) return;
+  requestedWidth = browserMode.width;
+  requestedHeight = browserMode.height;
+  requestedFps = browserMode.fps;
 }
 function showRequestedCameraSettings(): void {
   readRequestedCameraSettings();
-  const speed = selectedNativeMode?.highSpeed ? " · High speed" : "";
-  const requested = cameraResolution.value === "auto" ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps${speed}`;
-  cameraActual.textContent = requested;
-  cameraResolutionLabel.textContent = backend === "native" ? "Resolution" : "Mode";
-  cameraFpsControl.hidden = backend !== "native";
-  captureScanBtn.hidden = backend === "native";
-  decodeWorkersControl.hidden = backend === "native";
-  cameraTorchControl.hidden = backend === "native" ? !selectedNativeMode?.torch : cameraTorchControl.hidden;
-  cameraExposureControl.hidden = backend === "native"
-    ? !selectedNativeMode || selectedNativeMode.exposureMin === selectedNativeMode.exposureMax
-    : cameraExposureControl.hidden;
-  video.hidden = backend === "native";
+  cameraActual.textContent = cameraResolution.value === "auto"
+    ? "Auto" : `${requestedWidth}×${requestedHeight} · ${requestedFps} fps`;
+  cameraResolutionLabel.textContent = "Mode";
+  captureScanBtn.hidden = false;
+  decodeWorkersControl.hidden = false;
+  video.hidden = false;
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
@@ -413,6 +335,7 @@ let fullDetectorMisses = 0;
 let fullSightings = 0;
 let trackedMissFallbacks = 0;
 let decodeExceptions = 0;
+let lastDecodeError = "";
 let regionExpiries = 0;
 let regionCreations = 0;
 let trackingInvalidations = 0;
@@ -474,7 +397,10 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.error) {
     decodeExceptions++;
+    lastDecodeError = completion.error;
     notePipelineEvent("decode-exception", decodeExceptions);
+  } else if (completion.symbolCount > 0) {
+    lastDecodeError = "";
   }
   if (completion.full) {
     fullSightings += completion.sightingCount;
@@ -777,12 +703,8 @@ function gridDebugSummary(): string {
  *  negotiate a different shape, so metadata replaces that estimate with the
  *  stream's real dimensions. With the aspect matched, contain shows every
  *  capture pixel edge to edge. */
-function syncNativePreviewBounds(): void {
-  if (backend === "native") setNativePreviewBounds(cameraBox.getBoundingClientRect());
-}
 function syncPreviewAspect() {
   if (video.videoWidth && video.videoHeight) cameraBox.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
-  syncNativePreviewBounds();
 }
 function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
   const active = track.getSettings();
@@ -798,7 +720,6 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     exposureCompensation?: { min: number; max: number; step?: number };
   }) | undefined;
   cameraResolutionLabel.textContent = "Mode";
-  cameraFpsControl.hidden = true;
   if (!caps?.width || !caps.height) return;
   cameraTorchControl.hidden = caps.torch !== true;
   cameraExposureControl.hidden = !caps.exposureCompensation;
@@ -854,8 +775,6 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
 video.addEventListener("resize", syncPreviewAspect);
 video.addEventListener("loadedmetadata", syncPreviewAspect);
 window.addEventListener("resize", syncPreviewAspect);
-const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
-receiverSettings.addEventListener("toggle", () => requestAnimationFrame(syncNativePreviewBounds));
 
 // Viewfinder corner brackets around each code the decoder is tracking, fading
 // out once a region stops producing decodes. Long before REGION_TTL_MS: the
@@ -988,16 +907,9 @@ function drawOverlay(now: number) {
   overlayCtx.setLineDash([]);
 }
 startBtn.onclick = () => void start();
-const changeCameraSettings = async (resolutionChanged = false) => {
-  if (resolutionChanged && backend === "native") populateFpsOptions();
+const changeCameraSettings = async () => {
   showRequestedCameraSettings();
   saveCameraSettings();
-  if (backend === "native" && !done) {
-    stopNativeCamera();
-    syncNativePreviewBounds();
-    startNativeCamera(selectedNativeMode?.key ?? "");
-    return;
-  }
   const track = stream?.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
@@ -1031,21 +943,14 @@ const changeCameraSettings = async (resolutionChanged = false) => {
     saveCameraSettings();
   }
 };
-cameraResolution.addEventListener("change", () => void changeCameraSettings(true));
-cameraFps.addEventListener("change", () => void changeCameraSettings());
+cameraResolution.addEventListener("change", () => void changeCameraSettings());
 cameraTorch.addEventListener("change", () => {
-  if (backend === "native") setNativeTorch(cameraTorch.checked);
-  else {
-    const track = stream?.getVideoTracks()[0];
-    if (track) void applyAdvancedConstraint(track, { torch: cameraTorch.checked });
-  }
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyAdvancedConstraint(track, { torch: cameraTorch.checked });
 });
 cameraExposure.addEventListener("input", () => {
-  if (backend === "native") setNativeExposure(Number(cameraExposure.value));
-  else {
-    const track = stream?.getVideoTracks()[0];
-    if (track) void applyAdvancedConstraint(track, { exposureCompensation: Number(cameraExposure.value) });
-  }
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyAdvancedConstraint(track, { exposureCompensation: Number(cameraExposure.value) });
 });
 decodeWorkers.addEventListener("change", () => { saveCameraSettings(); if (stream && !done) pool.resize(selectedWorkerCount()); });
 window.addEventListener("airgapper:enter-receive", () => {
@@ -1093,7 +998,6 @@ function stopReceiver(): void {
   document.body.classList.remove("receive-complete");
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
-  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -1123,6 +1027,7 @@ function stopReceiver(): void {
   fullSightings = 0;
   trackedMissFallbacks = 0;
   decodeExceptions = 0;
+  lastDecodeError = "";
   regionExpiries = 0;
   regionCreations = 0;
   trackingInvalidations = 0;
@@ -1188,9 +1093,6 @@ function stopReceiver(): void {
   startBtn.hidden = false;
   startBtn.style.display = "";
   startBtn.textContent = "Enable camera";
-  backend = nativeModes.length ? "native" : isAndroidApp() ? "webview" : "browser";
-  nativeFallbackUsed = false;
-  activeNativeFps = 0;
   setStatus("");
 }
 function pauseReceiver(): void {
@@ -1203,7 +1105,6 @@ function pauseReceiver(): void {
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
-  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -1233,40 +1134,6 @@ window.addEventListener("airgapper:resume-mode", () => {
 const localCameraMessage =
   "This browser does not allow camera access from a local file. Use the installed offline PWA for receiving.";
 
-type NativeWindow = Window & {
-  airgapperNativeQr?: (base64: string, points: number[], timestampNs: number) => void;
-  airgapperNativeCameraStatus?: (status: string, detail: string, mode?: NativeCameraMode) => void;
-};
-const nativeWindow = window as NativeWindow;
-nativeWindow.airgapperNativeQr = (base64) => {
-  const binary = atob(base64);
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  totalCaptures++;
-  qrReadTimes.push(performance.now());
-  onDecoded(bytes);
-};
-nativeWindow.airgapperNativeCameraStatus = (status, detail, mode) => {
-  if (status === "active" && mode) {
-    preview.classList.remove("camera-loading");
-    activeNativeFps = mode.fpsMax;
-    cameraActual.textContent = `${mode.width}×${mode.height} · ${mode.fpsMax} fps${mode.highSpeed ? " · High speed" : ""}`;
-    setStatus("");
-    return;
-  }
-  if (status === "fallback" && !nativeFallbackUsed) {
-    nativeFallbackUsed = true;
-    backend = "webview";
-    captureScanBtn.hidden = false;
-    decodeWorkersControl.hidden = false;
-    video.hidden = false;
-    stopNativeCamera();
-    clearInterval(statsTimer);
-    statsTimer = undefined;
-    cameraActual.textContent = `Camera fallback (${detail})`;
-    void start();
-  } else if (status !== "starting") setStatus(`${status}: ${detail}`);
-};
-
 async function start() {
   const startAttempt = cameraStartGen;
   // Materialize the complete receiver layout before camera permission or
@@ -1278,17 +1145,6 @@ async function start() {
   progressStatus.style.display = "block";
   progressEl.style.display = "block";
   showRequestedCameraSettings();
-  if (backend === "native") {
-    startBtn.disabled = true;
-    startBtn.style.display = "none";
-    pool.resize(0);
-    cameraStartedTs = performance.now();
-    syncNativePreviewBounds();
-    startNativeCamera(selectedNativeMode?.key ?? "");
-    statsTimer = setInterval(updateStats, STATS_TICK_MS);
-    await requestScreenWakeLock();
-    return;
-  }
   if (!navigator.mediaDevices?.getUserMedia) {
     // Mobile browsers commonly omit the API entirely for file:// origins.
     offerRetry(
@@ -1953,7 +1809,6 @@ function finishPlainQr(text: string): void {
   releaseScreenWakeLock();
   captureGen++;
   stream?.getTracks().forEach((track) => track.stop());
-  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -2091,7 +1946,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   // decode pool. Each worker holds its own ~940 KB zxing WASM instance, which
   // is worth reclaiming on a phone the moment the last frame is in.
   stream?.getTracks().forEach((t) => t.stop());
-  stopNativeCamera();
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
@@ -2390,13 +2244,17 @@ function updateStats() {
   const cameraRate = perSecond(captureTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${backend === "native" && activeNativeFps ? activeNativeFps : cameraRate.toFixed(0)} fps`;
+  metric("m-cap").textContent = `${cameraRate.toFixed(0)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = stalled ? "Scanner stalled" : "";
-  limit.classList.toggle("scanner-bound", stalled);
+  limit.textContent = lastDecodeError
+    ? `Scanner error: ${lastDecodeError}`
+    : stalled
+      ? "Scanner stalled"
+      : `${scanRate.toFixed(1)} scans/s`;
+  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing

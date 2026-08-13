@@ -4,12 +4,6 @@ interface AndroidBridge {
   finishDownload(): void;
   copyText(text: string): void;
   setKeepScreenOn(enabled: boolean): void;
-  getNativeCameraCapabilities(): string;
-  setNativePreviewBounds(left: number, top: number, width: number, height: number): void;
-  startNativeCamera(mode: string): void;
-  stopNativeCamera(): void;
-  setNativeTorch(enabled: boolean): void;
-  setNativeExposure(value: number): void;
 }
 
 function bridge(): AndroidBridge | undefined {
@@ -45,54 +39,3 @@ export function copyTextOnAndroid(text: string): boolean {
 export function setAndroidKeepScreenOn(enabled: boolean): void {
   bridge()?.setKeepScreenOn(enabled);
 }
-
-export interface NativeCameraMode {
-  key: string;
-  cameraId: string;
-  width: number;
-  height: number;
-  fpsMin: number;
-  fpsMax: number;
-  highSpeed: boolean;
-  preview: boolean;
-  analysis: boolean;
-  autofocus: boolean;
-  torch: boolean;
-  stabilization: boolean;
-  exposureMin: number;
-  exposureMax: number;
-}
-
-export interface NativeCameraCapabilities {
-  decoderAvailable: boolean;
-  error?: string;
-  modes: NativeCameraMode[];
-}
-
-export function nativeCameraCapabilities(): NativeCameraCapabilities | undefined {
-  const android = bridge();
-  if (!android?.getNativeCameraCapabilities) return undefined;
-  try {
-    return JSON.parse(android.getNativeCameraCapabilities()) as NativeCameraCapabilities;
-  } catch {
-    return undefined;
-  }
-}
-
-export function setNativePreviewBounds(rect: DOMRect): void {
-  bridge()?.setNativePreviewBounds(
-    Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height),
-  );
-}
-
-export function startNativeCamera(mode: string): void {
-  bridge()?.startNativeCamera(mode);
-}
-
-export function stopNativeCamera(): void {
-  bridge()?.stopNativeCamera();
-}
-
-export function setNativeTorch(enabled: boolean): void { bridge()?.setNativeTorch(enabled); }
-export function setNativeExposure(value: number): void { bridge()?.setNativeExposure(value); }
-

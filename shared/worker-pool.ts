@@ -159,20 +159,18 @@ export class DecodeWorkerPool {
       this.busy[slot] = id === undefined;
       this.activeIds[slot] = undefined;
       this.activeFull[slot] = false;
-      if (id !== undefined) {
-        this.onCompleted?.(id, {
-          full,
-          symbolCount: 0,
-          sightingCount: 0,
-          trackedAttempted: false,
-          trackedHit: false,
-          fallbackAttempted: false,
-          latencyMs: 0,
-          symbols: [],
-          sightings: [],
-          error: event.message || "Decode worker failed",
-        });
-      }
+      this.onCompleted?.(id ?? -1, {
+        full,
+        symbolCount: 0,
+        sightingCount: 0,
+        trackedAttempted: false,
+        trackedHit: false,
+        fallbackAttempted: false,
+        latencyMs: 0,
+        symbols: [],
+        sightings: [],
+        error: event.message || "Decode worker failed to start",
+      });
       worker.terminate();
       if (id !== undefined) {
         const replacement = this.create();
@@ -237,10 +235,23 @@ export class DecodeWorkerPool {
         this.configureWorker(slot, replacement);
       }, WORKER_JOB_TIMEOUT_MS);
       return true;
-    } catch {
+    } catch (error) {
+      const full = this.activeFull[slot] ?? false;
       this.busy[slot] = false;
       this.activeIds[slot] = undefined;
       this.activeFull[slot] = false;
+      if (typeof id === "number") this.onCompleted?.(id, {
+        full,
+        symbolCount: 0,
+        sightingCount: 0,
+        trackedAttempted: false,
+        trackedHit: false,
+        fallbackAttempted: false,
+        latencyMs: 0,
+        symbols: [],
+        sightings: [],
+        error: error instanceof Error ? error.message : "Could not send frame to decode worker",
+      });
       return false;
     }
   }
