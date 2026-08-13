@@ -107,7 +107,7 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, thorough = true, quad, dim, tracks } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -115,6 +115,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     ox?: number;
     oy?: number;
     full?: boolean;
+    thorough?: boolean;
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
@@ -262,16 +263,15 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       };
       if (full) {
-        // Error results count against ZXing's symbol limit. Dense neighboring
-        // QRs can produce dozens of plausible finder triples, previously
-        // filling all 16 entries before obvious valid codes were considered.
-        // Decode valid symbols without error noise first. Only a total miss
-        // pays for a high-capacity detector pass to seed recovery crops.
-        appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
-        // Acquisition only needs a plausible seed crop, not every bad finder
-        // triple in a dense frame. Bounding error output prevents a no-decode
-        // capture from monopolizing an older phone's worker for seconds.
-        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+        // Most acquisition frames are misses. The frequent path performs one
+        // normal detector pass; periodically (and for explicit scan captures)
+        // `thorough` enables downscale/try-harder and the second sighting pass.
+        // This preserves difficult lock-on without exhaustively proving that a
+        // blank 1440p frame is blank several times per second.
+        appendResults(zx.readFull(ptr, pw, ph, thorough, 16, false), false);
+        // Error results count against ZXing's symbol limit. Only a thorough
+        // total miss pays for this pass, which seeds a bounded recovery crop.
+        if (thorough && symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
       } else {
         // Crop fallback stays in the cheapest detector configuration.
         appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);

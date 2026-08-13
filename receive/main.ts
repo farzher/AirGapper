@@ -83,9 +83,11 @@ const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-// Reserve one logical thread for camera delivery, canvas readback, compositing,
-// and the main thread; use the rest for decoding.
-const autoWorkerCount = Math.max(1, hardwareThreadCount - 1);
+// Full-frame acquisition is memory-bandwidth-heavy, while tracked decoding
+// scales only until camera delivery and canvas readback lose their CPU budget.
+// Four workers is the useful ceiling measured on 8-thread phones; explicit
+// settings remain available for profiling unusual hardware.
+const autoWorkerCount = Math.max(1, Math.min(4, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
@@ -386,6 +388,7 @@ function noteSequence(region: Region, seq: number, now: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
+  fullScanIds.delete(id);
   scanCompletionTimes.push(performance.now());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
@@ -456,6 +459,10 @@ const FULL_SCAN_DEGRADED_MS = 250;
 // sample). Ten per second keeps acquisition feeling instant — ≤100 ms added
 // to first lock — and cuts the aiming burn ~85%.
 const ACQUISITION_SCAN_MS = 100;
+// Most cold frames contain no QR. Frequent scans use ZXing's cheap single-pass
+// detector; this cadence retains the exhaustive try-harder + sighting pass for
+// difficult first lock without paying for it on every miss.
+const THOROUGH_SCAN_INTERVAL_MS = 750;
 // The high-water mark ages out: a sender restarted with a smaller layout
 // would otherwise keep this receiver rescanning for codes that no longer
 // exist until the transfer ends.
@@ -465,6 +472,11 @@ const MAX_REGIONS = 15;
 const REGION_PAD = 0.35;
 let cropRotate = 0;
 let lastFullScan = 0;
+let lastThoroughFullScan = -Infinity;
+// A second full-frame acquisition cannot add useful freshness while the first
+// is still decoding. Keeping it out of the general worker queue prevents cold
+// 1440p scanning from occupying every core and starving camera delivery.
+const fullScanIds = new Set<number>();
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
 
@@ -1041,6 +1053,8 @@ function stopReceiver(): void {
   expectedRegions = 0;
   expectedRegionsAt = 0;
   lastFullScan = 0;
+  lastThoroughFullScan = -Infinity;
+  fullScanIds.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
@@ -1135,6 +1149,7 @@ function pauseReceiver(): void {
   statsTimer = undefined;
   pool.resize(0);
   cropAttempts.clear();
+  fullScanIds.clear();
   minimumAcceptedScanId = frameId;
 }
 
@@ -1529,9 +1544,9 @@ function captureFrame() {
     ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) &&
       validTrackedQuad(region, vw, vh))
     : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
-  const fullScanDue = captureNextScan
+  const fullScanDue = fullScanIds.size === 0 && (captureNextScan
     ? !captureHasTrackedWork
-    : now - lastFullScan > scanInterval;
+    : now - lastFullScan > scanInterval);
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
     return;
@@ -1549,12 +1564,15 @@ function captureFrame() {
     fullScans++;
     ctx.drawImage(video, 0, 0);
     const img = ctx.getImageData(0, 0, vw, vh);
+    const thorough = captureNextScan || now - lastThoroughFullScan >= THOROUGH_SCAN_INTERVAL_MS;
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
     if (pool.submit(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough },
       [img.data.buffer],
     )) {
+      fullScanIds.add(id);
+      if (thorough) lastThoroughFullScan = now;
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
