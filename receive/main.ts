@@ -351,6 +351,14 @@ type CropAttempt = { region: Region; quad?: SymbolQuad };
 const cropAttempts = new Map<number, CropAttempt[]>();
 const scanCapturedAt = new Map<number, number>();
 const localReacquireIds = new Set<number>();
+type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; accepted: number };
+const scanOutcomes = new Map<number, ScanOutcome>();
+function noteScanOutcome(scanId: number | undefined, kind: keyof ScanOutcome): void {
+  if (scanId === undefined) return;
+  const outcome = scanOutcomes.get(scanId) ?? { rejected: 0, stale: 0, otherStream: 0, duplicate: 0, accepted: 0 };
+  outcome[kind]++;
+  scanOutcomes.set(scanId, outcome);
+}
 function regionInflightCount(region: Region): number {
   let count = 0;
   for (const attempts of cropAttempts.values()) {
@@ -459,6 +467,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   }
 
   finishScanCapture(id, completion);
+  scanOutcomes.delete(id);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   if (!attempts) return;
@@ -1159,6 +1168,7 @@ function stopReceiver(): void {
   localReacquireIds.clear();
   currentScanningState = "SEARCH";
   scanCapturedAt.clear();
+  scanOutcomes.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
@@ -1574,6 +1584,17 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     : tracked
       ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded${completion.fallbackAttempted ? ` · fallback searched${completion.sightingCount ? ` · ${completion.sightingCount} found` : ""}` : ""}`
       : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
+  const outcome = scanOutcomes.get(id);
+  if (outcome && completion.symbolCount > 0) {
+    const details = [
+      outcome.accepted && `${outcome.accepted} accepted`,
+      outcome.duplicate && `${outcome.duplicate} duplicate`,
+      outcome.rejected && `${outcome.rejected} rejected`,
+      outcome.stale && `${outcome.stale} stale`,
+      outcome.otherStream && `${outcome.otherStream} other stream`,
+    ].filter(Boolean).join(" · ");
+    if (details) scanDialogStatus.textContent += ` · ${details}`;
+  }
   const gridSummary = gridDebugSummary();
   if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
@@ -1926,6 +1947,7 @@ function resetActiveTransfer(): void {
   fullScanJobs.clear();
   localReacquireIds.clear();
   scanCapturedAt.clear();
+  scanOutcomes.clear();
   currentScanningState = "SEARCH";
   lastFullScan = 0;
   lastThoroughFullScan = -Infinity;
@@ -1946,13 +1968,17 @@ function resetActiveTransfer(): void {
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
-  if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) return;
+  if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) {
+    noteScanOutcome(info.scanId, "stale");
+    return;
+  }
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   const decodedAt = performance.now();
   const parsed = parseFrame(bytes);
   if (done) return;
   if (!parsed) {
+    noteScanOutcome(info?.scanId, "rejected");
     // Finder-pattern sightings and arbitrary binary decodes never become
     // tracks. A fully decoded UTF-8 QR may retain the legacy single-code path.
     if (decoder) return;
@@ -1973,7 +1999,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   // sender or layout starts a clean transfer. Sender settings restart with a
   // new session, so layout changes recover without reloading the receiver.
   if (decoder && streamKey !== identity) {
-    if (decodedAt - lastStreamDecodeAt < 1800) return;
+    if (decodedAt - lastStreamDecodeAt < 1800) {
+      noteScanOutcome(info?.scanId, "otherStream");
+      return;
+    }
     resetActiveTransfer();
   }
   lastStreamDecodeAt = decodedAt;
@@ -2023,6 +2052,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = performance.now();
+  noteScanOutcome(info?.scanId, decoder.framesNew > framesNewBefore ? "accepted" : "duplicate");
   if (decoder.framesNew > framesNewBefore) {
     qrReadTimes.push(receivedAt);
     if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
