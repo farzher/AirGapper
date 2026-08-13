@@ -2143,9 +2143,16 @@ async function appendReceivedFile(
 function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void {
   media.classList.add("inspectable");
   media.tabIndex = 0;
-  media.title = "View full screen";
+  const updateHint = (): void => {
+    media.title = document.fullscreenElement === media ? "Tap to close full screen" : "Tap to view full screen";
+  };
+  updateHint();
+  document.addEventListener("fullscreenchange", updateHint);
   const open = async (): Promise<void> => {
-    if (document.fullscreenElement === media) return;
+    if (document.fullscreenElement === media) {
+      await document.exitFullscreen().catch(() => undefined);
+      return;
+    }
     if (media instanceof HTMLVideoElement) {
       const iosVideo = media as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
       if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) {
