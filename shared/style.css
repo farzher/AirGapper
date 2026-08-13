@@ -340,7 +340,7 @@ input[type="range"] { accent-color: #222; }
 }
 .transfer-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 11px; }
 .transfer-estimate { display: flex; white-space: nowrap; font-variant-numeric: tabular-nums; }
-#transfer-size-label:not(:empty)::before { content: "·"; margin: 0 8px; }
+#transfer-size-label:not(:empty)::after { content: "·"; margin: 0 8px; }
 .pipeline-metrics { display: flex; gap: 14px; }
 .pipeline-metrics strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 #m-limit { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
