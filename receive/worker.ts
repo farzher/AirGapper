@@ -17,6 +17,8 @@
 
 import wasmUrl from "./wasm-url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
+import { parseFrame } from "../shared/protocol";
+import { gridLayoutById } from "../shared/grid-layout";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec/decimen_codec.js";
 
 const ready: Promise<DecimenModule> = DecimenCodec({
@@ -97,6 +99,29 @@ function trackKey(track: BatchTrack, ox: number, oy: number): string {
     q.bottomRight.x, q.bottomRight.y, q.bottomLeft.x, q.bottomLeft.y].join(":");
 }
 
+function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: number): DecimenQuad {
+  const p0 = q.topLeft, p1 = q.topRight, p2 = q.bottomRight, p3 = q.bottomLeft;
+  const sx = p0.x - p1.x + p2.x - p3.x;
+  const sy = p0.y - p1.y + p2.y - p3.y;
+  const dx1x = p1.x - p2.x, dx1y = p1.y - p2.y;
+  const dx2x = p3.x - p2.x, dx2y = p3.y - p2.y;
+  const denominator = dx1x * dx2y - dx2x * dx1y;
+  const g = Math.abs(denominator) < 1e-8 ? 0 : (sx * dx2y - dx2x * sy) / denominator;
+  const h = Math.abs(denominator) < 1e-8 ? 0 : (dx1x * sy - sx * dx1y) / denominator;
+  const a = p1.x - p0.x + g * p1.x;
+  const b = p3.x - p0.x + h * p3.x;
+  const c = p0.x;
+  const d = p1.y - p0.y + g * p1.y;
+  const e = p3.y - p0.y + h * p3.y;
+  const f = p0.y;
+  const project = (x: number, y: number) => {
+    const z = g * x + h * y + 1;
+    return { x: (a * x + b * y + c) / z, y: (d * x + e * y + f) / z };
+  };
+  const x = dx * stride, y = dy * stride;
+  return { topLeft: project(x, y), topRight: project(x + 1, y), bottomRight: project(x + 1, y + 1), bottomLeft: project(x, y + 1) };
+}
+
 function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
   const point = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
   return {
@@ -107,7 +132,7 @@ function moved(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, sentAt } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -118,7 +143,11 @@ ctx.onmessage = async (e: MessageEvent) => {
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
-  };
+    oracle?: boolean;
+    sentAt?: number;
+  }; 
+  const workerWaitMs = sentAt === undefined ? 0 : Math.max(0, startedAt - sentAt);
+  let readFullAttempts = 0;
   try {
     const pixels = new Uint8Array(buf);
     const zx = await ready;
@@ -128,6 +157,102 @@ ctx.onmessage = async (e: MessageEvent) => {
     const ph = h;
     const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
     const sightings: object[] = [];
+
+    if (oracle) {
+      const seen = new Set<string>();
+      const valid: typeof symbols = [];
+      const appendValid = (vec: ReturnType<DecimenModule["readFull"]>) => {
+        readFullAttempts++;
+        try {
+          for (let i = 0; i < vec.size(); i++) {
+            const result = vec.get(i);
+            if (!result.valid || !result.bytes.length || !parseFrame(result.bytes)) continue;
+            const key = Array.from(result.bytes as Uint8Array).join(",");
+            if (seen.has(key)) continue;
+            seen.add(key);
+            valid.push({
+              bytes: result.bytes, box: boundsOf(result.position, 0, 0),
+              quad: shifted(result.position, 0, 0), modules: result.modules, tracked: false,
+            });
+          }
+        } finally { vec.delete(); }
+      };
+      // Best-known reference: the codec's broad native detector passes first.
+      appendValid(zx.readFull(ptr, pw, ph, true, 128, false));
+      appendValid(zx.readFull(ptr, pw, ph, true, 128, true));
+      // A CRC-valid modern packet identifies both layout and physical slot.
+      // Project every neighbor from its quad and exhaustively direct-sample it.
+      for (const seed of [...valid]) {
+        const parsed = parseFrame(seed.bytes);
+        const layout = parsed?.header.layoutId === undefined ? undefined : gridLayoutById(parsed.header.layoutId);
+        const seedSlot = parsed?.header.slotIndex;
+        if (!layout || seedSlot === undefined) continue;
+        const sx = seedSlot % layout.cols;
+        const sy = Math.floor(seedSlot / layout.cols);
+        const ratio = (seed.modules + 1) / seed.modules;
+        for (let slot = 0; slot < layout.cols * layout.rows; slot++) {
+          if (slot === seedSlot) continue;
+          const dx = slot % layout.cols - sx;
+          const dy = Math.floor(slot / layout.cols) - sy;
+          const predicted = projectedNeighbor(seed.quad, dx, dy, ratio);
+          const result = zx.readTracked(
+            ptr, pw, ph, seed.modules,
+            predicted.topLeft.x, predicted.topLeft.y, predicted.topRight.x, predicted.topRight.y,
+            predicted.bottomRight.x, predicted.bottomRight.y, predicted.bottomLeft.x, predicted.bottomLeft.y,
+          );
+          const packet = result.valid && result.bytes.length ? parseFrame(result.bytes) : null;
+          if (packet?.header.layoutId === layout.id && packet.header.slotIndex === slot) {
+            const key = Array.from(result.bytes as Uint8Array).join(",");
+            if (!seen.has(key)) {
+              seen.add(key);
+              valid.push({ bytes: result.bytes, box: boundsOf(result.position, 0, 0), quad: shifted(result.position, 0, 0), modules: result.modules, tracked: true });
+            }
+            continue;
+          }
+          // Direct sampling is exact but unforgiving. The oracle also gives the
+          // expected slot a generous isolated detector crop and existing full
+          // fallback, without changing the production acquisition path.
+          const expectedBounds = boundsOf(predicted, 0, 0);
+          const pad = Math.round(Math.max(expectedBounds.w, expectedBounds.h) * 0.45);
+          const cx = Math.max(0, Math.floor(expectedBounds.x - pad));
+          const cy = Math.max(0, Math.floor(expectedBounds.y - pad));
+          const cr = Math.min(pw, Math.ceil(expectedBounds.x + expectedBounds.w + pad));
+          const cb = Math.min(ph, Math.ceil(expectedBounds.y + expectedBounds.h + pad));
+          const cw = cr - cx, ch = cb - cy;
+          if (cw < 32 || ch < 32) continue;
+          const crop = new Uint8Array(cw * ch * 4);
+          for (let row = 0; row < ch; row++) {
+            crop.set(pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4), row * cw * 4);
+          }
+          const cropPtr = zx._malloc(crop.length);
+          zx.HEAPU8.set(crop, cropPtr);
+          readFullAttempts++;
+          const fallback = zx.readFull(cropPtr, cw, ch, true, 16, false);
+          try {
+            for (let i = 0; i < fallback.size(); i++) {
+              const candidate = fallback.get(i);
+              if (!candidate.valid || !candidate.bytes.length) continue;
+              const candidatePacket = parseFrame(candidate.bytes);
+              if (candidatePacket?.header.layoutId !== layout.id || candidatePacket.header.slotIndex !== slot) continue;
+              const key = Array.from(candidate.bytes as Uint8Array).join(",");
+              if (seen.has(key)) continue;
+              seen.add(key);
+              valid.push({ bytes: candidate.bytes, box: boundsOf(candidate.position, cx, cy), quad: shifted(candidate.position, cx, cy), modules: candidate.modules, tracked: false });
+            }
+          } finally {
+            fallback.delete();
+            zx._free(cropPtr);
+          }
+        }
+      }
+      ctx.postMessage({
+        id, symbols: valid, sightings: [], full: true, oracle: true,
+        trackedAttempted: true, trackedHit: valid.some((symbol) => symbol.tracked),
+        fallbackAttempted: true, readFullAttempts, workerWaitMs,
+        latencyMs: performance.now() - startedAt,
+      });
+      return;
+    }
 
     if (!full && tracks?.length) {
       batchBuffers(zx, tracks.length);
@@ -202,12 +327,14 @@ ctx.onmessage = async (e: MessageEvent) => {
         // provide every position, so error-only detector results add no
         // information. Avoiding that second exhaustive pass keeps a complete
         // motion miss cheap enough for the next fresh camera frame to relock.
+        readFullAttempts++;
         appendFallback(zx.readFull(ptr, pw, ph, true, 16, false), false);
       }
       ctx.postMessage({
         id, symbols, sightings, full: false, trackedAttempted: true,
         trackedHit: symbols.some((symbol) => symbol.tracked), fallbackAttempted,
-        latencyMs: performance.now() - startedAt,
+        fallbackSucceeded: fallbackAttempted && symbols.some((symbol) => !symbol.tracked),
+        readFullAttempts, workerWaitMs, latencyMs: performance.now() - startedAt,
       });
       return;
     }
@@ -267,24 +394,30 @@ ctx.onmessage = async (e: MessageEvent) => {
         // filling all 16 entries before obvious valid codes were considered.
         // Decode valid symbols without error noise first. Only a total miss
         // pays for a high-capacity detector pass to seed recovery crops.
+        readFullAttempts++;
         appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
         // Acquisition only needs a plausible seed crop, not every bad finder
         // triple in a dense frame. Bounding error output prevents a no-decode
         // capture from monopolizing an older phone's worker for seconds.
-        if (symbols.length === 0) appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+        if (symbols.length === 0) {
+          readFullAttempts++;
+          appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+        }
       } else {
         // Crop fallback stays in the cheapest detector configuration.
+        readFullAttempts++;
         appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
       }
     }
     ctx.postMessage({
       id, symbols, sightings, full, trackedAttempted, trackedHit, fallbackAttempted,
-      latencyMs: performance.now() - startedAt,
+      fallbackSucceeded: fallbackAttempted && symbols.some((symbol) => !symbol.tracked),
+      readFullAttempts, workerWaitMs, latencyMs: performance.now() - startedAt,
     });
   } catch (error) {
     ctx.postMessage({
       id, symbols: [], sightings: [], full,
-      latencyMs: performance.now() - startedAt,
+      workerWaitMs, readFullAttempts, latencyMs: performance.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
   }

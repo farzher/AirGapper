@@ -118,6 +118,14 @@ function bounds(quad: SymbolQuad): SymbolBox {
 
 export class GridLattice {
   state: GridState = "SEARCH";
+  constructor(private readonly onTransition?: (from: GridState, to: GridState, reason: string, at: number) => void) {}
+
+  private transition(next: GridState, reason: string, at: number): void {
+    if (next === this.state) return;
+    const prior = this.state;
+    this.state = next;
+    this.onTransition?.(prior, next, reason, at);
+  }
   private identity = "";
   private observations: GridDetection[] = [];
   private candidate?: Candidate;
@@ -132,7 +140,7 @@ export class GridLattice {
   get locked(): boolean { return this.state === "GRID_LOCK" || this.state === "TRACK" || this.state === "PARTIAL_LOSS"; }
 
   reset(): void {
-    this.state = "SEARCH";
+    this.transition("SEARCH", "reset", this.lastHitAt);
     this.identity = "";
     this.observations = [];
     this.candidate = undefined;
@@ -158,7 +166,7 @@ export class GridLattice {
     if (this.locked && this.candidate) {
       const updated = this.makeCandidate(this.candidate.layout);
       if (updated) this.candidate = updated;
-      this.state = "TRACK";
+      this.transition("TRACK", "valid packet refreshed locked lattice", detection.at);
     } else {
       this.rankCandidates();
       this.candidate = this.ranked[this.hypothesisIndex % Math.max(1, this.ranked.length)];
@@ -172,15 +180,18 @@ export class GridLattice {
       // of freedom and identifies the entire lattice immediately; waiting for
       // a second QR only traps acquisition behind the no-longer-needed global
       // detector. Legacy packets still earn a lock from repeated evidence.
-      if (declaredLayout || distinct >= 2 || (codeCount === 1 && largeSingle && scanCount >= 2)) this.state = "GRID_LOCK";
-      else this.state = "GRID_HYPOTHESIS";
+      if (declaredLayout || distinct >= 2 || (codeCount === 1 && largeSingle && scanCount >= 2)) {
+        this.transition("GRID_LOCK", declaredLayout ? "packet declared layoutId and slotIndex" : "enough geometric observations", detection.at);
+      } else {
+        this.transition("GRID_HYPOTHESIS", "valid packet seeded ambiguous legacy layout", detection.at);
+      }
     }
     return this.snapshot();
   }
 
   tick(now: number): GridSnapshot | null {
     if (this.active && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
-      this.state = "REACQUIRE";
+      this.transition("REACQUIRE", "whole lattice expired without a valid packet", now);
       this.candidate = undefined;
       this.observations = [];
       return null;
@@ -194,9 +205,9 @@ export class GridLattice {
     return this.candidate ? this.snapshot() : null;
   }
 
-  noteMissing(anyMissing: boolean): void {
+  noteMissing(anyMissing: boolean, now = this.lastHitAt): void {
     if (!this.locked) return;
-    this.state = anyMissing ? "PARTIAL_LOSS" : "TRACK";
+    this.transition(anyMissing ? "PARTIAL_LOSS" : "TRACK", anyMissing ? "one or more predicted slots missing" : "all predicted slots healthy", now);
   }
 
   private rankCandidates(): void {

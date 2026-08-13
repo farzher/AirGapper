@@ -82,7 +82,7 @@
             <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Exposure</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <label id="camera-exposure-manual" class="exposure-manual" hidden><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" /><output id="camera-exposure-value"></output></label>
-            <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button>
+            <div class="receiver-dev-actions"><button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden /></div>
           </div>
         </details>
         <section class="transfer-panel" id="metrics" aria-live="polite">
@@ -107,6 +107,17 @@
     <p class="scan-dialog-status" id="scan-dialog-status"></p>
     <canvas class="scan-capture" id="scan-capture" aria-label="Exact image submitted to the QR decoder with result overlays"></canvas>
     <p class="scan-dialog-legend"><span class="scan-track">Tracked search</span><span class="scan-hit">Decoded</span><span class="scan-sighting" id="scan-sighting-legend">Found by full scan</span></p>
+  </div>
+</dialog>
+
+<dialog class="benchmark-dialog" id="benchmark-dialog" aria-label="Receiver benchmark">
+  <div class="benchmark-card">
+    <div class="scan-dialog-header"><strong>Receiver benchmark</strong><button class="ghost" id="close-benchmark" type="button">Close</button></div>
+    <div class="benchmark-controls"><label>Mode<select id="replay-mode"><option value="correctness">Correctness</option><option value="performance">Device performance</option><option value="maximum">Maximum speed</option></select></label><button class="secondary-button" id="run-benchmark" type="button">Run</button><button class="secondary-button" id="save-benchmark" type="button" disabled>Save results</button></div>
+    <p class="scan-dialog-status" id="benchmark-status"></p>
+    <div id="benchmark-summary"></div>
+    <canvas class="scan-capture" id="benchmark-frame"></canvas>
+    <p class="scan-dialog-status" id="benchmark-frame-status"></p>
   </div>
 </dialog>
 

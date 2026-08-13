@@ -65,6 +65,9 @@ interface DecodeMessage {
   trackedAttempted?: boolean;
   trackedHit?: boolean;
   fallbackAttempted?: boolean;
+  fallbackSucceeded?: boolean;
+  readFullAttempts?: number;
+  workerWaitMs?: number;
   full?: boolean;
   latencyMs?: number;
   error?: string;
@@ -77,6 +80,9 @@ export interface DecodeCompletion {
   trackedAttempted: boolean;
   trackedHit: boolean;
   fallbackAttempted: boolean;
+  fallbackSucceeded: boolean;
+  readFullAttempts: number;
+  workerWaitMs: number;
   latencyMs: number;
   symbols: { box?: SymbolBox; quad?: SymbolQuad }[];
   sightings: SymbolSighting[];
@@ -131,6 +137,9 @@ export class DecodeWorkerPool {
         trackedAttempted: Boolean(message.trackedAttempted),
         trackedHit: Boolean(message.trackedHit),
         fallbackAttempted: Boolean(message.fallbackAttempted),
+        fallbackSucceeded: Boolean(message.fallbackSucceeded),
+        readFullAttempts: message.readFullAttempts ?? 0,
+        workerWaitMs: message.workerWaitMs ?? 0,
         latencyMs: message.latencyMs ?? 0,
         symbols,
         sightings,
@@ -171,6 +180,9 @@ export class DecodeWorkerPool {
         trackedAttempted: false,
         trackedHit: false,
         fallbackAttempted: false,
+        fallbackSucceeded: false,
+        readFullAttempts: 0,
+        workerWaitMs: 0,
         latencyMs: 0,
         symbols: [],
         sightings: [],
@@ -218,6 +230,7 @@ export class DecodeWorkerPool {
     this.activeIds[slot] = typeof id === "number" ? id : undefined;
     this.activeFull[slot] = Boolean((message as { full?: unknown }).full);
     try {
+      if (message && typeof message === "object") (message as { sentAt?: number }).sentAt = performance.now();
       this.workers[slot]!.postMessage(message, transfer);
       this.jobTimers[slot] = setTimeout(() => {
         const activeId = this.activeIds[slot];
@@ -231,6 +244,7 @@ export class DecodeWorkerPool {
         this.onCompleted?.(activeId, {
           full, symbolCount: 0, sightingCount: 0,
           trackedAttempted: false, trackedHit: false, fallbackAttempted: false,
+          fallbackSucceeded: false, readFullAttempts: 0, workerWaitMs: 0,
           latencyMs: WORKER_JOB_TIMEOUT_MS, symbols: [], sightings: [],
           error: "Decode worker timed out",
         });
@@ -252,6 +266,9 @@ export class DecodeWorkerPool {
         trackedAttempted: false,
         trackedHit: false,
         fallbackAttempted: false,
+        fallbackSucceeded: false,
+        readFullAttempts: 0,
+        workerWaitMs: 0,
         latencyMs: 0,
         symbols: [],
         sightings: [],

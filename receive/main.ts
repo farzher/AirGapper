@@ -50,6 +50,7 @@ import {
   showScanCaptureMenuOnAndroid,
 } from "../shared/android";
 import { readStoredZip, type ZipEntry } from "../shared/zip";
+import { AgcapCorpus, AgcapRecorder } from "./agcap";
 
 const startBtn = document.getElementById("start") as HTMLButtonElement;
 const cameraResolution = document.getElementById("camera-resolution") as HTMLSelectElement;
@@ -63,6 +64,18 @@ const cameraExposureManual = document.getElementById("camera-exposure-manual")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
 const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
+const recordCorpusBtn = document.getElementById("record-corpus") as HTMLButtonElement;
+const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElement;
+const corpusFile = document.getElementById("corpus-file") as HTMLInputElement;
+const benchmarkDialog = document.getElementById("benchmark-dialog") as HTMLDialogElement;
+const closeBenchmarkBtn = document.getElementById("close-benchmark") as HTMLButtonElement;
+const runBenchmarkBtn = document.getElementById("run-benchmark") as HTMLButtonElement;
+const saveBenchmarkBtn = document.getElementById("save-benchmark") as HTMLButtonElement;
+const replayMode = document.getElementById("replay-mode") as HTMLSelectElement;
+const benchmarkStatus = document.getElementById("benchmark-status")!;
+const benchmarkSummary = document.getElementById("benchmark-summary")!;
+const benchmarkFrame = document.getElementById("benchmark-frame") as HTMLCanvasElement;
+const benchmarkFrameStatus = document.getElementById("benchmark-frame-status")!;
 const scanDialog = document.getElementById("scan-dialog") as HTMLDialogElement;
 const closeScanBtn = document.getElementById("close-scan") as HTMLButtonElement;
 const scanDialogStatus = document.getElementById("scan-dialog-status")!;
@@ -203,6 +216,40 @@ restoreCameraSettings();
 showRequestedCameraSettings();
 const metric = (id: string) => document.getElementById(id)!;
 
+let replayClock: number | undefined;
+function receiverNow(): number { return replayClock ?? performance.now(); }
+
+type BenchmarkJobKind = "FULL FRAME" | "SHARED TRACKED BATCH CROP" | "INDIVIDUAL TRACKED CROP";
+interface BenchmarkJob {
+  id: number; kind: BenchmarkJobKind; pixels: number; bytes: number; width: number; height: number; x: number; y: number;
+  tracks: number[]; submittedAt: number; workerWaitMs?: number; decodeMs?: number; symbols?: number;
+  trackedHits?: number; trackedMisses?: number; readFullAttempts?: number; fallbackAttempts?: number; fallbackSuccesses?: number;
+}
+interface BenchmarkFrameTrace {
+  sequence: number; timestampMs: number; stateBefore: string; stateAfter: string; decision: string; workerBusyFraction: number;
+  jobs: BenchmarkJob[]; decoded: { slot?: number; esi: number; quad?: SymbolQuad }[]; sightings: SymbolBox[];
+  reference: { slot?: number; esi: number; quad?: SymbolQuad }[];
+  predicted: { slot: number; state?: string; quad?: SymbolQuad; submitted: boolean }[];
+  transitions: { from: string; to: string; reason: string; at: number }[];
+}
+let activeBenchmarkFrame: BenchmarkFrameTrace | undefined;
+let benchmarkCorpus: AgcapCorpus | undefined;
+let benchmarkRecorder: AgcapRecorder | undefined;
+let benchmarkRecordingSequence = 0;
+let benchmarkTraces: BenchmarkFrameTrace[] = [];
+const benchmarkJobFrames = new Map<number, BenchmarkFrameTrace>();
+let benchmarkResult: Record<string, unknown> | undefined;
+let benchmarkVerifiedBytes = 0;
+let benchmarkCompletionChecked = false;
+let replayRunning = false;
+let receiverFrameWidth = 0;
+let receiverFrameHeight = 0;
+
+function noteGridTransition(from: string, to: string, reason: string, at: number): void {
+  const trace = activeBenchmarkFrame ?? benchmarkTraces.at(-1);
+  trace?.transitions.push({ from, to, reason, at });
+}
+
 // Sliding window for the capture/decode fps metrics — the per-second rates in
 // updateStats() are derived from this, so the window and the divisor can't
 // drift apart.
@@ -236,7 +283,7 @@ const pool = new DecodeWorkerPool(
   (sighting) => {
     // Detector errors may seed one cold native crop, but only a decoded,
     // protocol-valid packet is allowed to move an established lattice.
-    if (!gridLattice.active) noteRegion(sighting, performance.now(), false);
+    if (!gridLattice.active) noteRegion(sighting, receiverNow(), false);
   },
   () => undefined,
   (id, completion) => noteDecodeCompleted(id, completion),
@@ -335,7 +382,7 @@ interface Region extends SymbolBox {
   lastAttemptAt?: number;
 }
 const regions: Region[] = [];
-const gridLattice = new GridLattice();
+const gridLattice = new GridLattice(noteGridTransition);
 let gridShape = "";
 let lastGridSnapshot: GridSnapshot | undefined;
 let activeDecodeBudget = 0;
@@ -399,7 +446,7 @@ const PIPELINE_EVENT_LIMIT = 80;
 function notePipelineEvent(kind: string, value = 0): void {
   if (pipelineEvents.length >= PIPELINE_EVENT_LIMIT) return;
   pipelineEvents.push([
-    Number(((performance.now() - cameraStartedTs) / 1000).toFixed(2)),
+    Number(((receiverNow() - cameraStartedTs) / 1000).toFixed(2)),
     kind,
     value,
   ]);
@@ -436,12 +483,26 @@ function noteSequence(region: Region, seq: number, now: number): void {
 }
 
 function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
+  const benchmarkTrace = benchmarkJobFrames.get(id);
+  const benchmarkJob = benchmarkTrace?.jobs.find((job) => job.id === id);
+  if (benchmarkJob) {
+    benchmarkTrace!.sightings.push(...completion.sightings);
+    benchmarkJob.workerWaitMs = completion.workerWaitMs;
+    benchmarkJob.decodeMs = completion.latencyMs;
+    benchmarkJob.symbols = completion.symbolCount;
+    benchmarkJob.trackedHits = completion.trackedHit ? completion.symbolCount : 0;
+    benchmarkJob.trackedMisses = completion.trackedAttempted ? Math.max(0, benchmarkJob.tracks.length - (completion.trackedHit ? completion.symbolCount : 0)) : 0;
+    benchmarkJob.readFullAttempts = completion.readFullAttempts;
+    benchmarkJob.fallbackAttempts = Number(completion.fallbackAttempted);
+    benchmarkJob.fallbackSuccesses = Number(completion.fallbackSucceeded);
+  }
+  benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
   fullScanIds.delete(id);
   fullScanJobs.delete(id);
   localReacquireIds.delete(id);
   scanCapturedAt.delete(id);
-  scanCompletionTimes.push(performance.now());
+  scanCompletionTimes.push(receiverNow());
   completedJobs++;
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -478,7 +539,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
-    region.lastAttemptAt = performance.now();
+    region.lastAttemptAt = receiverNow();
     region.averageDecodeCostMs = region.averageDecodeCostMs
       ? region.averageDecodeCostMs * 0.8 + completion.latencyMs * 0.2
       : completion.latencyMs;
@@ -596,10 +657,10 @@ function noteRegion(box: SymbolBox, now: number, decoded = true, info?: SymbolIn
       // reject the small square error boxes produced by individual finder
       // patterns in a dense lattice—they are not QR bounds and send the crop
       // path to exactly the wrong place and scale.
-      const coldMinSize = Math.max(24, Math.min(video.videoWidth, video.videoHeight) * 0.06);
+      const coldMinSize = Math.max(24, Math.min(receiverFrameWidth, receiverFrameHeight) * 0.06);
       if (box.w < coldMinSize || box.h < coldMinSize ||
           Math.max(box.w / box.h, box.h / box.w) > 2.25 ||
-          box.w * box.h > video.videoWidth * video.videoHeight * 0.8) return;
+          box.w * box.h > receiverFrameWidth * receiverFrameHeight * 0.8) return;
       if (regions.some((region) => !region.decoded)) return;
     }
     // Error-result quads wobble and split while a display transition is in
@@ -769,7 +830,7 @@ function gridDebugSummary(): string {
   const best = [...active].sort((a, b) => slotUsefulness(b) - slotUsefulness(a)).slice(0, activeDecodeBudget);
   const avgPpm = best.length ? best.reduce((sum, region) => sum + region.pixelsPerModule, 0) / best.length : 0;
   const successesPerFrame = totalCaptures ? totalDecodes / totalCaptures : 0;
-  return `sender ${lastGridSnapshot.layout.cols}×${lastGridSnapshot.layout.rows} · visible ${visible.length}/${slots.length} · active ${active.length} · offscreen ${offscreen.length} · partial ${partial.length} · best ${best.map((region) => region.gridSlot).join(",")} · ${avgPpm.toFixed(1)} px/module · budget ${activeDecodeBudget} · ${successesPerFrame.toFixed(1)} QR/frame · ${liveGoodputKbs(performance.now()).toFixed(1)} KB/s`;
+  return `sender ${lastGridSnapshot.layout.cols}×${lastGridSnapshot.layout.rows} · visible ${visible.length}/${slots.length} · active ${active.length} · offscreen ${offscreen.length} · partial ${partial.length} · best ${best.map((region) => region.gridSlot).join(",")} · ${avgPpm.toFixed(1)} px/module · budget ${activeDecodeBudget} · ${successesPerFrame.toFixed(1)} QR/frame · ${liveGoodputKbs(receiverNow()).toFixed(1)} KB/s`;
 }
 
 /** The selected resolution reserves the initial camera box. Cameras can still
@@ -1267,7 +1328,7 @@ function stopReceiver(): void {
 function pauseReceiver(): void {
   if (receiverPaused || done) return;
   receiverPaused = true;
-  pauseStartedAt = performance.now();
+  pauseStartedAt = receiverNow();
   cameraStartGen++;
   captureGen++;
   releaseScreenWakeLock();
@@ -1287,7 +1348,7 @@ function pauseReceiver(): void {
 
 function resumeReceiver(): void {
   if (!receiverPaused || done) return;
-  const pausedFor = performance.now() - pauseStartedAt;
+  const pausedFor = receiverNow() - pauseStartedAt;
   receiverPaused = false;
   if (startTs) startTs += pausedFor;
   if (cameraStartedTs) cameraStartedTs += pausedFor;
@@ -1416,7 +1477,7 @@ async function start() {
   pool.resize(selectedWorkerCount());
   void applyCameraExtras();
 
-  cameraStartedTs = performance.now();
+  cameraStartedTs = receiverNow();
   captureGen++;
   scheduleFrame(captureGen);
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
@@ -1435,22 +1496,91 @@ async function applyCameraExtras() {
   }
 }
 
-type VideoRVFC = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+interface VideoFrameMetadata {
+  mediaTime?: number;
+  presentationTime?: number;
+  expectedDisplayTime?: number;
+}
+type VideoRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number, metadata: VideoFrameMetadata) => void) => number;
+};
+interface ReceiverFrame {
+  sequence: number;
+  width: number;
+  height: number;
+  callbackTimeMs: number;
+  mediaTimeMs: number;
+  presentationTimeMs: number;
+  expectedDisplayTimeMs: number;
+  image?: ImageData;
+}
+
+function fullLiveImage(width: number, height: number): ImageData {
+  if (grab.width !== width || grab.height !== height) { grab.width = width; grab.height = height; }
+  const ctx = grab.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(video, 0, 0, width, height);
+  return ctx.getImageData(0, 0, width, height);
+}
+
+async function finishCorpusRecording(recorder: AgcapRecorder): Promise<void> {
+  if (benchmarkRecorder !== recorder) return;
+  benchmarkRecorder = undefined;
+  recordCorpusBtn.disabled = true;
+  recordCorpusBtn.textContent = "Saving…";
+  try {
+    const { blob, header } = await recorder.finish();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `airgapper-${stamp}.agcap`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+    benchmarkStatus.textContent = `${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops`;
+    benchmarkDialog.showModal();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+  } finally {
+    recordCorpusBtn.disabled = false;
+    recordCorpusBtn.textContent = "Record";
+  }
+}
 
 function scheduleFrame(gen: number) {
   if (done || gen !== captureGen) return;
   const v = video as VideoRVFC;
-  const next = () => {
+  const next = (callbackTime = performance.now(), metadata: VideoFrameMetadata = {}) => {
     if (done || gen !== captureGen) return;
-    captureFrame();
-    drawOverlay(performance.now());
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    const sequence = benchmarkRecordingSequence++;
+    const recorder = benchmarkRecorder;
+    const image = recorder && width && height ? fullLiveImage(width, height) : undefined;
+    const frame: ReceiverFrame = {
+      sequence, width, height, callbackTimeMs: callbackTime,
+      mediaTimeMs: (metadata.mediaTime ?? callbackTime / 1000) * 1000,
+      presentationTimeMs: metadata.presentationTime ?? callbackTime,
+      expectedDisplayTimeMs: metadata.expectedDisplayTime ?? callbackTime,
+      image,
+    };
+    if (recorder && image) {
+      const orientation = screen.orientation?.type ?? `${window.orientation ?? 0}`;
+      recorder.add({
+        sequence, mediaTimeMs: frame.mediaTimeMs, presentationTimeMs: frame.presentationTimeMs,
+        expectedDisplayTimeMs: frame.expectedDisplayTimeMs, callbackTimeMs: frame.callbackTimeMs,
+        width, height, stride: width * 4, orientation,
+      }, image);
+    }
+    captureFrame(frame);
+    drawOverlay(receiverNow());
+    if (recorder?.complete) void finishCorpusRecording(recorder);
     scheduleFrame(gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
-  else requestAnimationFrame(next);
+  else requestAnimationFrame((now) => next(now));
 }
 
 const grab = document.createElement("canvas");
+const replaySourceCanvas = document.createElement("canvas");
 let frameId = 0;
 // A transfer handover invalidates every older in-flight capture. Submission
 // ids are monotonic, so stale asynchronous replies cannot reclaim the lock.
@@ -1676,7 +1806,7 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
   if (!scanDialog.open) scanDialog.showModal();
 }
 
-function readBoundedVideoCrop(x: number, y: number, w: number, h: number): ImageData {
+function readBoundedVideoCrop(source: ReceiverFrame, x: number, y: number, w: number, h: number): ImageData {
   // Keep predicted symbols just outside the sensor represented inside the
   // crop. Filling that narrow missing edge white lets the known-transform QR
   // sampler and Reed–Solomon correction attempt it instead of rejecting
@@ -1688,15 +1818,56 @@ function readBoundedVideoCrop(x: number, y: number, w: number, h: number): Image
   ctx.fillRect(0, 0, w, h);
   const sx = Math.max(0, x);
   const sy = Math.max(0, y);
-  const right = Math.min(video.videoWidth, x + w);
-  const bottom = Math.min(video.videoHeight, y + h);
+  const right = Math.min(source.width, x + w);
+  const bottom = Math.min(source.height, y + h);
   if (right > sx && bottom > sy) {
-    ctx.drawImage(video, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
+    if (source.image) {
+      if (replaySourceCanvas.width !== source.width || replaySourceCanvas.height !== source.height) {
+        replaySourceCanvas.width = source.width;
+        replaySourceCanvas.height = source.height;
+      }
+      replaySourceCanvas.getContext("2d")!.putImageData(source.image, 0, 0);
+      ctx.drawImage(replaySourceCanvas, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
+    } else {
+      ctx.drawImage(video, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
+    }
   }
   return ctx.getImageData(0, 0, w, h);
 }
 
 type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
+
+function submitReceiverJob(
+  message: { id: number; buf: ArrayBuffer; w: number; h: number; full: boolean; [key: string]: unknown },
+  transfer: Transferable[],
+  kind: BenchmarkJobKind,
+  trace: BenchmarkFrameTrace | undefined,
+  trackedRegions: Region[] = [],
+): boolean {
+  const accepted = pool.submit(message, transfer);
+  if (accepted) {
+    submittedJobs++;
+    scanCapturedAt.set(message.id, receiverNow());
+    if (kind === "FULL FRAME") {
+      fullScanIds.add(message.id);
+      fullScanJobs.set(message.id, { thorough: false, native: true, reacquire: gridLattice.state === "REACQUIRE" });
+    }
+  }
+  if (trace) {
+    trace.decision = accepted ? kind : "worker busy";
+    const job: BenchmarkJob = {
+      id: message.id, kind, pixels: message.w * message.h, bytes: message.w * message.h * 4,
+      width: message.w, height: message.h, x: Number(message.ox) || 0, y: Number(message.oy) || 0, tracks: trackedRegions.map((region) => region.gridSlot ?? region.id),
+      submittedAt: receiverNow(),
+    };
+    trace.jobs.push(job);
+    if (accepted) {
+      benchmarkJobFrames.set(message.id, trace);
+      for (const predicted of trace.predicted) if (job.tracks.includes(predicted.slot)) predicted.submitted = true;
+    }
+  }
+  return accepted;
+}
 
 // The stripe-signature dup-skip that used to live here is gone: field runs
 // showed screen captures defeat it (sensor noise plus refresh-phase shimmer
@@ -1705,11 +1876,19 @@ type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
 // thing requiring main-thread pixel access. Duplicates now cost one cheap
 // tracked decode each, which the pool absorbs without noticing.
 
-function captureFrame() {
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+function captureFrame(source: ReceiverFrame) {
+  const vw = source.width;
+  const vh = source.height;
   if (!vw || !vh) return;
-  const now = performance.now();
+  receiverFrameWidth = vw;
+  receiverFrameHeight = vh;
+  const now = receiverNow();
+  const trace: BenchmarkFrameTrace | undefined = replayRunning ? {
+    sequence: source.sequence, timestampMs: now, stateBefore: gridLattice.state, stateAfter: gridLattice.state,
+    decision: "not scheduled", workerBusyFraction: pool.size ? pool.busyCount / pool.size : 0,
+    jobs: [], decoded: [], sightings: [], reference: [], predicted: [], transitions: [],
+  } : undefined;
+  if (trace) { benchmarkTraces.push(trace); activeBenchmarkFrame = trace; }
   let scanFrameSubmitted = false;
   const noteScanSubmission = () => {
     scanSubmissionTimes.push(now);
@@ -1723,6 +1902,8 @@ function captureFrame() {
   if (pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
+    if (trace) { trace.decision = "worker busy"; trace.stateAfter = gridLattice.state; }
+    activeBenchmarkFrame = undefined;
     return;
   }
 
@@ -1737,13 +1918,14 @@ function captureFrame() {
       grab.height = vh;
     }
     const ctx = grab.getContext("2d", { willReadFrequently: true })!;
-    ctx.drawImage(video, 0, 0, vw, vh);
-    const img = ctx.getImageData(0, 0, vw, vh);
+    const img = source.image
+      ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh)
+      : (ctx.drawImage(video, 0, 0, vw, vh), ctx.getImageData(0, 0, vw, vh));
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
-    if (pool.submit(
+    if (submitReceiverJob(
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough: true },
-      [img.data.buffer],
+      [img.data.buffer], "FULL FRAME", trace,
     )) {
       fullScans++;
       thoroughFullScans++;
@@ -1751,11 +1933,12 @@ function captureFrame() {
       fullScanJobs.set(id, { thorough: true, native: true, reacquire: false });
       scanCapturedAt.set(id, now);
       noteScanSubmission();
-      submittedJobs++;
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
     }
+    if (trace) trace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = undefined;
     return;
   }
 
@@ -1783,10 +1966,13 @@ function captureFrame() {
     expectedRegionsAt = now;
   }
   const visibleGridSlots = classifyGridSlots(vw, vh);
+  if (trace) trace.predicted = visibleGridSlots.map((region) => ({
+    slot: region.gridSlot!, state: region.slotState, quad: region.quad, submitted: false,
+  }));
   const gridNeedsDiscovery = visibleGridSlots.some((region) =>
     !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === undefined && region.decoded && region.consecutiveMisses >= 4);
-  gridLattice.noteMissing(gridNeedsDiscovery);
+  gridLattice.noteMissing(gridNeedsDiscovery, now);
   const scanInterval =
     live === 0
       ? ACQUISITION_SCAN_MS
@@ -1817,6 +2003,8 @@ function captureFrame() {
     : now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     schedulerNoJobs++;
+    if (trace) { trace.decision = "full scan throttled"; trace.stateAfter = gridLattice.state; }
+    activeBenchmarkFrame = undefined;
     return;
   }
 
@@ -1830,19 +2018,22 @@ function captureFrame() {
   if (fullScanDue) {
     lastFullScan = now;
     fullScans++;
-    ctx.drawImage(video, 0, 0);
-    const img = ctx.getImageData(0, 0, vw, vh);
+    const img = source.image
+      ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh)
+      : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
-    if (pool.submit(
+    if (submitReceiverJob(
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
-      [img.data.buffer],
+      [img.data.buffer], "FULL FRAME", trace,
     )) {
       noteScanSubmission();
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
       cancelScanCapture();
     }
+    if (trace) trace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = undefined;
     return;
   }
   for (const region of regions) {
@@ -1878,12 +2069,12 @@ function captureFrame() {
     const w = Math.ceil(maxX + pad) - x;
     const h = Math.ceil(maxY + pad) - y;
     if (w >= 32 && h >= 32) {
-      const img = readBoundedVideoCrop(x, y, w, h);
+      const img = readBoundedVideoCrop(source, x, y, w, h);
       captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
       const id = frameId++;
-      if (pool.submit(
+      if (submitReceiverJob(
         { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
-        [img.data.buffer],
+        [img.data.buffer], "SHARED TRACKED BATCH CROP", trace, batchRegions,
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
         noteScanSubmission();
@@ -1895,6 +2086,8 @@ function captureFrame() {
       }
     }
     cropRotate++;
+    if (trace) trace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = undefined;
     return;
   }
 
@@ -1933,17 +2126,17 @@ function captureFrame() {
     const w = Math.ceil(right + pad) - x;
     const h = Math.ceil(bottom + pad) - y;
     if (w < 32 || h < 32) continue;
-    const img = readBoundedVideoCrop(x, y, w, h);
+    const img = readBoundedVideoCrop(source, x, y, w, h);
     captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
-    if (!pool.submit(
+    if (!submitReceiverJob(
       { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
-      [img.data.buffer],
+      [img.data.buffer], "INDIVIDUAL TRACKED CROP", trace, [r],
     )) {
       cropAttempts.delete(id);
       if (pendingScanCapture?.id === undefined) cancelScanCapture();
-      poolBusyTimes.push(performance.now());
+      poolBusyTimes.push(receiverNow());
       break;
     }
     noteScanSubmission();
@@ -1952,8 +2145,13 @@ function captureFrame() {
     submitted = true;
   }
   // Being blocked by per-track limits is scanner saturation too.
-  if (!submitted && scheduledRegions.length > 0) poolBusyTimes.push(now);
+  if (!submitted && scheduledRegions.length > 0) {
+    poolBusyTimes.push(now);
+    if (trace && !trace.jobs.length) trace.decision = "not scheduled: in-flight track limit";
+  }
   cropRotate++;
+  if (trace) trace.stateAfter = gridLattice.state;
+  activeBenchmarkFrame = undefined;
 }
 
 function resetActiveTransfer(): void {
@@ -2000,7 +2198,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
-  const decodedAt = performance.now();
+  const decodedAt = receiverNow();
   const parsed = parseFrame(bytes);
   if (done) return;
   if (!parsed) {
@@ -2019,6 +2217,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     return;
   }
   const { header, block } = parsed;
+  const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
+  if (productionTrace) productionTrace.decoded.push({
+    slot: header.slotIndex, esi: header.gridEsi ?? header.seq, quad: info?.quad,
+  });
   const identity = streamIdentity(header);
   // A live stream is sticky against stray codes and out-of-order worker
   // replies, but after it has been optically silent a valid packet from a new
@@ -2037,6 +2239,8 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const hasFrameCRC = bytes.length === HEADER_LEN + header.blockLen + FRAME_CRC_LEN;
   let decodedRegion: Region | undefined;
   if (box && info?.quad && info.modules) {
+    const priorBenchmarkFrame = activeBenchmarkFrame;
+    if (productionTrace) activeBenchmarkFrame = productionTrace;
     const snapshot = gridLattice.accept({
       identity,
       seq: header.seq,
@@ -2048,7 +2252,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       box,
       quad: info.quad,
       modules: info.modules,
-    }, video.videoWidth, video.videoHeight);
+    }, receiverFrameWidth, receiverFrameHeight);
     if (snapshot) {
       decodedRegion = syncGrid(
         snapshot,
@@ -2057,6 +2261,8 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
         { ...info, crc32: info.crc32 ?? hasFrameCRC },
       );
     }
+    if (productionTrace) productionTrace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = priorBenchmarkFrame;
   }
   if (decodedRegion) noteSequence(decodedRegion, header.gridEsi ?? header.seq, decodedAt);
 
@@ -2067,7 +2273,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     usefulFrameTimes.length = 0;
     streamKey = identity;
     reportSessionId = header.sessionId;
-    startTs = performance.now();
+    startTs = receiverNow();
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
   }
@@ -2077,7 +2283,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const framesNewBefore = decoder.framesNew;
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
-  const receivedAt = performance.now();
+  const receivedAt = receiverNow();
   noteScanOutcome(info?.scanId, decoder.framesNew > framesNewBefore ? "accepted" : "duplicate");
   if (decoder.framesNew > framesNewBefore) {
     qrReadTimes.push(receivedAt);
@@ -2089,9 +2295,15 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   updateProgressEstimate();
 
-  if (decoder.isComplete) {
+  if (decoder.isComplete && replayRunning) {
+    if (!benchmarkCompletionChecked) {
+      benchmarkCompletionChecked = true;
+      const payload = decoder.assemble()!;
+      if (fnv1a(payload) === header.payloadFnv) benchmarkVerifiedBytes = header.totalLen;
+    }
+  } else if (decoder.isComplete) {
     const payload = decoder.assemble()!;
-    const seconds = (performance.now() - startTs) / 1000;
+    const seconds = (receiverNow() - startTs) / 1000;
     const ok = fnv1a(payload) === header.payloadFnv;
     void finish(payload, ok, seconds);
   }
@@ -2099,7 +2311,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
 
 function updateProgressEstimate() {
   if (!decoder) return;
-  const elapsed = Math.max(0, (performance.now() - startTs) / 1000);
+  const elapsed = Math.max(0, (receiverNow() - startTs) / 1000);
   // Progress runs on frames that carried INFORMATION, not raw arrivals. On a
   // lossy multi-code run the carousel re-sweeps blocks this receiver already
   // solved; each re-sweep frame has a fresh seq, so framesNew inflates by the
@@ -2120,7 +2332,7 @@ function updateProgressEstimate() {
   progressLabel.textContent = `${shownPercent}%`;
   const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
   transferSizeLabel.textContent = formatBytes(remainingBytes);
-  const liveKbs = liveGoodputKbs(performance.now());
+  const liveKbs = liveGoodputKbs(receiverNow());
   const liveUsefulFps = liveKbs > 0
     ? liveKbs * 1024 * expectedFountainOverhead(decoder.k) / decoder.blockLen
     : 0;
@@ -2211,7 +2423,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
           return active.length ? Number((active.reduce((sum, region) => sum + region.pixelsPerModule, 0) / active.length).toFixed(2)) : 0;
         })(),
         decodeBudget: activeDecodeBudget,
-        verifiedKbs: Number(liveGoodputKbs(performance.now()).toFixed(2)),
+        verifiedKbs: Number(liveGoodputKbs(receiverNow()).toFixed(2)),
       } : null,
       pipeline: {
         captureMode: "bounded-rgba-crops",
@@ -2301,7 +2513,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
     const file = await unpackFile(container);
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
-    seconds = (performance.now() - startTs) / 1000;
+    seconds = (receiverNow() - startTs) / 1000;
     document.body.classList.add("receive-complete");
     // Restore the root scroller so mobile browsers can use their normal
     // pull-to-refresh gesture on the completed screen.
@@ -2348,7 +2560,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type);
     }
   } catch (error) {
-    sendDiagnostics(false, (performance.now() - startTs) / 1000, 0);
+    sendDiagnostics(false, (receiverNow() - startTs) / 1000, 0);
     // Everything is already torn down by this point, so the only way back to a
     // live receiver is a reload. Offer it: a failed checksum used to leave the
     // page dead with nothing but an error string on it.
@@ -2645,9 +2857,260 @@ function speedQualityClass(rate: number): string {
         : "speed-high";
 }
 
+recordCorpusBtn.addEventListener("click", () => {
+  if (benchmarkRecorder) {
+    void finishCorpusRecording(benchmarkRecorder);
+    return;
+  }
+  const track = stream?.getVideoTracks()[0];
+  if (!track || !video.videoWidth || !video.videoHeight) {
+    showError("Start the camera before recording.");
+    return;
+  }
+  const version = document.querySelector(".app-version")?.textContent?.replace(/^v/, "") ?? "unknown";
+  benchmarkRecordingSequence = 0;
+  benchmarkRecorder = new AgcapRecorder(7000, {
+    width: video.videoWidth, height: video.videoHeight, stride: video.videoWidth * 4,
+    orientation: screen.orientation?.type ?? `${window.orientation ?? 0}`,
+    cameraSettings: track.getSettings(), airgapperVersion: version, userAgent: navigator.userAgent,
+  });
+  recordCorpusBtn.textContent = "Stop";
+});
+loadCorpusBtn.addEventListener("click", () => corpusFile.click());
+corpusFile.addEventListener("change", async () => {
+  const file = corpusFile.files?.[0];
+  if (!file) return;
+  try {
+    benchmarkStatus.textContent = "Loading lossless corpus…";
+    if (!benchmarkDialog.open) benchmarkDialog.showModal();
+    benchmarkCorpus = await AgcapCorpus.load(file);
+    benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} RGBA · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
+    runBenchmarkBtn.disabled = false;
+  } catch (error) {
+    benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    corpusFile.value = "";
+  }
+});
+closeBenchmarkBtn.addEventListener("click", () => benchmarkDialog.close());
+runBenchmarkBtn.addEventListener("click", () => void runReceiverBenchmark());
+saveBenchmarkBtn.addEventListener("click", () => {
+  if (!benchmarkResult) return;
+  const blob = new Blob([JSON.stringify(benchmarkResult, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `airgapper-benchmark-${Date.now()}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
+function waitForWorkers(): Promise<void> {
+  return new Promise((resolve) => {
+    const poll = () => pool.busyCount ? setTimeout(poll, 10) : resolve();
+    poll();
+  });
+}
+
+interface OracleMessage {
+  id: number;
+  symbols?: { bytes: Uint8Array; quad?: SymbolQuad }[];
+  latencyMs?: number;
+  error?: string;
+}
+
+async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
+  const worker = createDecodeWorker();
+  const latencies: number[] = [];
+  try {
+    for (let index = 0; index < corpus.length; index++) {
+      const frame = await corpus.frame(index);
+      benchmarkStatus.textContent = `Reference ${index + 1}/${corpus.length}`;
+      const reply = await new Promise<OracleMessage>((resolve, reject) => {
+        const id = 1_000_000 + index;
+        worker.onmessage = (event: MessageEvent<OracleMessage>) => {
+          if (event.data.id === -1) return;
+          if (event.data.id === id) resolve(event.data);
+        };
+        worker.onerror = (event) => reject(new Error(event.message || "Reference worker failed"));
+        const pixels = frame.rgba.slice();
+        worker.postMessage({ id, oracle: true, full: true, buf: pixels.buffer, w: frame.meta.width, h: frame.meta.height }, [pixels.buffer]);
+      });
+      if (reply.error) throw new Error(reply.error);
+      latencies.push(reply.latencyMs ?? 0);
+      const trace = benchmarkTraces[index];
+      if (!trace) continue;
+      for (const symbol of reply.symbols ?? []) {
+        const parsed = parseFrame(symbol.bytes);
+        if (!parsed) continue;
+        trace.reference.push({
+          slot: parsed.header.slotIndex, esi: parsed.header.gridEsi ?? parsed.header.seq, quad: symbol.quad,
+        });
+      }
+    }
+  } finally {
+    worker.terminate();
+  }
+  return latencies;
+}
+
+function percentile(values: number[], fraction: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))]!;
+}
+
+function missedReason(trace: BenchmarkFrameTrace, slot: number | undefined): string {
+  if (trace.decision === "worker busy") return "worker busy";
+  const predicted = trace.predicted.find((item) => item.slot === slot);
+  if (predicted?.state === "OFFSCREEN") return "offscreen threshold";
+  if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track";
+  if (!trace.jobs.length) return trace.decision;
+  const submitted = trace.jobs.some((job) => slot !== undefined && job.tracks.includes(slot));
+  if (!submitted && trace.jobs.some((job) => job.kind !== "FULL FRAME")) return "crop excluded slot";
+  if (trace.jobs.some((job) => job.trackedMisses)) {
+    return trace.jobs.some((job) => job.fallbackAttempts && !job.fallbackSuccesses) ? "tracked sampler failed; fallback failed" : "tracked sampler failed";
+  }
+  return "decoder miss";
+}
+
+async function inspectBenchmarkFrame(index: number): Promise<void> {
+  if (!benchmarkCorpus) return;
+  const frame = await benchmarkCorpus.frame(index);
+  const trace = benchmarkTraces[index]!;
+  benchmarkFrame.width = frame.meta.width;
+  benchmarkFrame.height = frame.meta.height;
+  const ctx = benchmarkFrame.getContext("2d")!;
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height), 0, 0);
+  const quad = (value: SymbolQuad | undefined, color: string, width: number) => {
+    if (!value) return;
+    const points = [value.topLeft, value.topRight, value.bottomRight, value.bottomLeft];
+    ctx.beginPath();
+    points.forEach((point, i) => i ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
+    ctx.closePath(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+  };
+  for (const job of trace.jobs) { ctx.strokeStyle = "#f2a51a"; ctx.lineWidth = 3; ctx.strokeRect(job.x, job.y, job.width, job.height); }
+  for (const sighting of trace.sightings) { ctx.strokeStyle = "#b87500"; ctx.lineWidth = 3; ctx.strokeRect(sighting.x, sighting.y, sighting.w, sighting.h); }
+  for (const item of trace.predicted) quad(item.quad, item.submitted ? "#248cff" : "#777", 3);
+  for (const item of trace.decoded) quad(item.quad, "#20c969", 5);
+  for (const item of trace.reference) quad(item.quad, "#e43d3d", 5);
+  const production = new Set(trace.decoded.map((item) => item.esi));
+  const missed = trace.reference.filter((item) => !production.has(item.esi));
+  benchmarkFrameStatus.textContent = `frame ${trace.sequence} · ${trace.stateBefore} → ${trace.stateAfter} · ${trace.decision} · missed ${missed.map((item) => `${item.slot ?? "?"}: ${missedReason(trace, item.slot)}`).join(", ") || "none"}`;
+}
+
+async function runReceiverBenchmark(): Promise<void> {
+  const corpus = benchmarkCorpus;
+  if (!corpus || replayRunning) return;
+  runBenchmarkBtn.disabled = true;
+  saveBenchmarkBtn.disabled = true;
+  stopReceiver();
+  replayRunning = true;
+  benchmarkTraces = [];
+  benchmarkJobFrames.clear();
+  benchmarkVerifiedBytes = 0;
+  benchmarkCompletionChecked = false;
+  done = false;
+  pool.resize(selectedWorkerCount());
+  const firstTime = corpus.meta(0)?.callbackTimeMs ?? 0;
+  cameraStartedTs = firstTime;
+  const wallStart = performance.now();
+  const maximum = replayMode.value === "maximum";
+  try {
+    for (let index = 0; index < corpus.length; index++) {
+      const frame = await corpus.frame(index);
+      if (!maximum) {
+        const target = wallStart + frame.meta.callbackTimeMs - firstTime;
+        const delay = target - performance.now();
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      replayClock = frame.meta.callbackTimeMs;
+      benchmarkStatus.textContent = `Production ${index + 1}/${corpus.length}`;
+      captureFrame({
+        sequence: frame.meta.sequence, width: frame.meta.width, height: frame.meta.height,
+        callbackTimeMs: frame.meta.callbackTimeMs, mediaTimeMs: frame.meta.mediaTimeMs,
+        presentationTimeMs: frame.meta.presentationTimeMs, expectedDisplayTimeMs: frame.meta.expectedDisplayTimeMs,
+        image: new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height),
+      });
+    }
+    await waitForWorkers();
+    const oracleLatencies = await runOracle(corpus);
+    const durationSeconds = Math.max(0.001, ((corpus.meta(corpus.length - 1)?.callbackTimeMs ?? firstTime) - firstTime) / 1000);
+    const productionPackets = benchmarkTraces.flatMap((trace) => trace.decoded);
+    const opportunities = benchmarkTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0);
+    const captured = benchmarkTraces.reduce((sum, trace) => {
+      const production = new Set(trace.decoded.map((item) => item.esi));
+      return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size;
+    }, 0);
+    const jobs = benchmarkTraces.flatMap((trace) => trace.jobs);
+    const decodeLatencies = jobs.flatMap((job) => job.decodeMs === undefined ? [] : [job.decodeMs]);
+    const transitions = benchmarkTraces.flatMap((trace) => trace.transitions);
+    const firstReference = benchmarkTraces.findIndex((trace) => trace.reference.length > 0);
+    const firstProduction = benchmarkTraces.findIndex((trace) => trace.decoded.length > 0);
+    const firstLayout = benchmarkTraces.findIndex((trace) => trace.decoded.some((item) => item.slot !== undefined));
+    const firstLock = benchmarkTraces.findIndex((trace) => trace.transitions.some((item) => item.to === "GRID_LOCK"));
+    const lockLoss = benchmarkTraces.findIndex((trace, index) => index > firstLock && trace.transitions.some((item) => item.to === "PARTIAL_LOSS" || item.to === "REACQUIRE"));
+    const localRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "PARTIAL_LOSS"));
+    const globalRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "REACQUIRE"));
+    const firstRecovered = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.decoded.length > 0);
+    const restored = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.transitions.some((item) => item.to === "TRACK"));
+    const lockedTraces = benchmarkTraces.filter((trace) => ["GRID_LOCK", "TRACK", "PARTIAL_LOSS"].includes(trace.stateBefore));
+    const lockedOpportunities = lockedTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0);
+    const lockedCaptured = lockedTraces.reduce((sum, trace) => {
+      const production = new Set(trace.decoded.map((item) => item.esi));
+      return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size;
+    }, 0);
+    const uniqueUseful = new Set(productionPackets.map((item) => item.esi)).size;
+    const byKind = Object.fromEntries((["FULL FRAME", "SHARED TRACKED BATCH CROP", "INDIVIDUAL TRACKED CROP"] as BenchmarkJobKind[]).map((kind) => {
+      const selected = jobs.filter((job) => job.kind === kind);
+      return [kind, {
+        jobs: selected.length, pixels: selected.reduce((sum, job) => sum + job.pixels, 0),
+        bytes: selected.reduce((sum, job) => sum + job.bytes, 0), tracks: selected.reduce((sum, job) => sum + job.tracks.length, 0),
+        hits: selected.reduce((sum, job) => sum + (job.trackedHits ?? 0), 0), misses: selected.reduce((sum, job) => sum + (job.trackedMisses ?? 0), 0),
+        readFullAttempts: selected.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0), fallbackAttempts: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0), fallbackSuccesses: selected.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0), fallbackFailures: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0) - (job.fallbackSuccesses ?? 0), 0),
+      }];
+    }));
+    const failures = benchmarkTraces.flatMap((trace, index) => {
+      const production = new Set(trace.decoded.map((item) => item.esi));
+      return trace.reference.filter((item) => !production.has(item.esi)).map((item) => ({
+        frameIndex: index, frameSequence: trace.sequence, slot: item.slot, esi: item.esi, reason: missedReason(trace, item.slot),
+      }));
+    });
+    benchmarkResult = {
+      format: "AirGapper receiver benchmark", version: document.querySelector(".app-version")?.textContent,
+      corpus: corpus.header, replay: { mode: replayMode.value, workers: pool.size, device: navigator.userAgent },
+      acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference]!.sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction]!.sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction]!.timestampMs - benchmarkTraces[firstReference]!.timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout]!.sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock]!.sequence },
+      recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss]!.sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery]!.sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery]!.sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered]!.sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored]!.sequence },
+      throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
+      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), decodeP50Ms: percentile(decodeLatencies, .5), decodeP95Ms: percentile(decodeLatencies, .95), oracleP50Ms: percentile(oracleLatencies, .5), workerBusyDrops: capturesDropped, byKind },
+      transitions, failures, frames: benchmarkTraces,
+    };
+    benchmarkSummary.textContent = `opportunities  ${captured}/${opportunities} (${(opportunities ? captured / opportunities * 100 : 0).toFixed(1)}%)\nQR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}\nuseful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}\nverified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}\ndecode p50/95 ${percentile(decodeLatencies, .5).toFixed(1)} / ${percentile(decodeLatencies, .95).toFixed(1)} ms\nbusy drops    ${capturesDropped}\npixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}\nmisses        ${failures.length}`;
+    const buttons = document.createElement("div");
+    buttons.className = "benchmark-controls";
+    for (const failure of failures.slice(0, 40)) {
+      const button = document.createElement("button");
+      button.className = "secondary-button";
+      button.textContent = `Frame ${failure.frameSequence} · slot ${failure.slot ?? "?"}`;
+      button.addEventListener("click", () => void inspectBenchmarkFrame(failure.frameIndex));
+      buttons.append(button);
+    }
+    benchmarkSummary.append(buttons);
+    benchmarkStatus.textContent = `Baseline complete · ${selectedWorkerCount()} worker${selectedWorkerCount() === 1 ? "" : "s"}`;
+    saveBenchmarkBtn.disabled = false;
+  } catch (error) {
+    benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    replayRunning = false;
+    replayClock = undefined;
+    activeBenchmarkFrame = undefined;
+    pool.resize(0);
+    runBenchmarkBtn.disabled = false;
+  }
+}
+
 function updateStats() {
   if (done) return;
-  const now = performance.now();
+  const now = receiverNow();
   const prune = (a: number[]) => {
     while (a.length > 0 && a[0]! < now - STATS_WINDOW_MS) a.shift();
   };
