@@ -9,8 +9,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'" />
   <link rel="canonical" href="https://farzher.github.io/AirGapper/" />
   <link rel="apple-touch-icon" href="./assets/icon-192-C1ByXx_Q.png" />
-  <script type="module" crossorigin src="./assets/app-9Dj9wskL.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/app-B1OP4iSG.css">
+  <script type="module" crossorigin src="./assets/app-C49pPj5C.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/app-Drw-V9Cw.css">
 <link rel="manifest" href="./manifest.webmanifest"></head>
 <body>
 <div class="app">
@@ -20,7 +20,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.3</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.4</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -84,9 +84,14 @@
           </div>
         </div>
         <div id="result"></div>
-        <details class="settings receiver-settings">
-          <summary>Settings <span class="settings-actual" id="camera-actual"></span></summary>
-          <div class="row">
+        <section class="transfer-panel" id="metrics" aria-live="polite">
+          <div class="transfer-progress" id="progress-status">
+            <details class="settings receiver-settings">
+              <summary class="transfer-summary">
+                <span class="progress-amount"><strong id="progress-label">0%</strong><span class="settings-prompt"><span class="settings-arrow" aria-hidden="true"></span><b>Settings</b><span class="settings-actual" id="camera-actual"></span></span></span>
+                <span class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></span>
+              </summary>
+              <div class="row">
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <div id="camera-optics-manual" class="optics-manual" hidden>
@@ -104,14 +109,8 @@
                 <pre id="focus-diagnostics"></pre>
               </div>
             </div>
-          </div>
-        </details>
-        <section class="transfer-panel" id="metrics" aria-live="polite">
-          <div class="transfer-progress" id="progress-status">
-            <div class="transfer-summary">
-              <div class="progress-amount"><strong id="progress-label">0%</strong></div>
-              <div class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></div>
-            </div>
+              </div>
+            </details>
             <div class="progress" id="progress" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
             <div class="transfer-meta"><span class="transfer-estimate"><span id="transfer-size-label"></span><span id="eta-label"></span></span><div class="pipeline-metrics" id="pipeline-metrics"><span id="m-limit"></span><span><strong id="m-cap">— fps</strong></span><span><strong id="m-dec">— QR/s</strong></span></div></div>
           </div>

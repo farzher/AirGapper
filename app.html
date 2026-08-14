@@ -83,9 +83,14 @@
           </div>
         </div>
         <div id="result"></div>
-        <details class="settings receiver-settings">
-          <summary>Settings <span class="settings-actual" id="camera-actual"></span></summary>
-          <div class="row">
+        <section class="transfer-panel" id="metrics" aria-live="polite">
+          <div class="transfer-progress" id="progress-status">
+            <details class="settings receiver-settings">
+              <summary class="transfer-summary">
+                <span class="progress-amount"><strong id="progress-label">0%</strong><span class="settings-prompt"><span class="settings-arrow" aria-hidden="true"></span><b>Settings</b><span class="settings-actual" id="camera-actual"></span></span></span>
+                <span class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></span>
+              </summary>
+              <div class="row">
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <div id="camera-optics-manual" class="optics-manual" hidden>
@@ -103,14 +108,8 @@
                 <pre id="focus-diagnostics"></pre>
               </div>
             </div>
-          </div>
-        </details>
-        <section class="transfer-panel" id="metrics" aria-live="polite">
-          <div class="transfer-progress" id="progress-status">
-            <div class="transfer-summary">
-              <div class="progress-amount"><strong id="progress-label">0%</strong></div>
-              <div class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></div>
-            </div>
+              </div>
+            </details>
             <div class="progress" id="progress" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
             <div class="transfer-meta"><span class="transfer-estimate"><span id="transfer-size-label"></span><span id="eta-label"></span></span><div class="pipeline-metrics" id="pipeline-metrics"><span id="m-limit"></span><span><strong id="m-cap">— fps</strong></span><span><strong id="m-dec">— QR/s</strong></span></div></div>
           </div>

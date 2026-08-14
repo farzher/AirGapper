@@ -243,20 +243,11 @@ details.settings {
 details.settings summary { cursor: pointer; color: var(--ink); font-size: 12px; font-weight: 650; }
 details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; }
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-.receiver-settings {
-  flex: none;
-  max-height: 240px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-}
-@media (max-height: 700px) {
-  .receiver-settings { max-height: 180px; }
-}
+.receiver-settings { flex: none; }
 details.receiver-settings .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(70px, .8fr) auto auto; gap: 10px; }
 .receiver-settings label,
 .receiver-settings select { min-width: 0; width: 100%; }
-.receiver-settings .settings-actual { min-width: 0; margin-left: 5px; color: var(--muted); font-weight: 400; opacity: .8; }
+.receiver-settings .settings-actual { min-width: 0; overflow: hidden; color: var(--muted); font-weight: 400; text-overflow: ellipsis; opacity: .8; }
 .receiver-settings .scan-capture-button { padding: 5px 9px; min-height: 34px; }
 .receiver-dev-actions { grid-column: 1 / -1; grid-row: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: end; }
 .receiver-dev-actions[hidden] { display: none; }
@@ -371,10 +362,16 @@ input[type="range"] { accent-color: #222; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; transform: translateZ(0); pointer-events: none; }
 /* Avoid a dedicated GPU texture over WebView video on old 32-bit renderers. */
 .legacy-android-camera .detect-overlay { transform: none; }
-.transfer-panel { flex: none; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
-.transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; white-space: nowrap; }
-.progress-amount { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
-.progress-amount strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.transfer-panel { flex: none; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; cursor: pointer; }
+.transfer-panel details.settings { display: flex; flex-direction: column-reverse; width: auto; margin: 0; padding: 0; overflow: visible; background: transparent; border: 0; border-radius: 0; }
+.transfer-panel details.settings > .row { max-height: min(240px, 40vh); padding: 0 0 12px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; cursor: default; }
+.transfer-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; white-space: nowrap; list-style: none; }
+.transfer-summary::-webkit-details-marker { display: none; }
+.progress-amount { display: flex; align-items: baseline; gap: 10px; min-width: 0; white-space: nowrap; }
+.progress-amount > strong { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.settings-prompt { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 12px; letter-spacing: 0; }
+.settings-arrow { width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 6px solid currentColor; transition: transform .16s ease; }
+.receiver-settings[open] .settings-arrow { transform: rotate(90deg); }
 .progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
 .progress > div.error { background: var(--bad); animation: none; }
@@ -418,7 +415,8 @@ body.media-inspecting { overflow: hidden; }
 body.receive-complete { overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: auto; }
 body.receive-complete .app-main { margin-block: 0; padding: 4px 0 8px; }
 body.receive-complete .receiver-primary { gap: 8px; }
-body.receive-complete .receiver-settings { display: none; }
+body.receive-complete .receiver-settings > .row,
+body.receive-complete .settings-prompt { display: none; }
 body.receive-complete #progress-label { color: var(--good); letter-spacing: -.035em; }
 body.receive-complete #result { min-height: 0; }
 body.receive-complete img.received,

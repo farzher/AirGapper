@@ -126,6 +126,11 @@ const transferSizeLabel = document.getElementById("transfer-size-label")!;
 const etaLabel = document.getElementById("eta-label")!;
 const result = document.getElementById("result")!;
 const metricsEl = document.getElementById("metrics")!;
+metricsEl.addEventListener("click", (event) => {
+  const target = event.target as Element;
+  if (target.closest("summary") || target.closest(".receiver-settings .row")) return;
+  receiverSettings.open = !receiverSettings.open;
+});
 const speedFeedback = document.getElementById("speed-feedback")!;
 const pipelineMetrics = document.getElementById("pipeline-metrics")!;
 const diagnosticsEl: HTMLDetailsElement | null = null;
