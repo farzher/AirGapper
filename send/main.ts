@@ -27,7 +27,6 @@ import { MAX_SNIPPET_BYTES, MAX_SNIPPET_LABEL, packSnippet } from "../shared/sni
 import {
   MAX_FILE_BYTES,
   MAX_FILE_LABEL,
-  encodeGridSequence,
   fnv1a,
   packFile,
   packFrame,
@@ -617,9 +616,8 @@ async function startStream(revealStage = false) {
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
   const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
   const encoder = new LTEncoder(payload, blockLen, sessionId);
-  const header: FrameHeader = {
+  const header: Omit<FrameHeader, "seq" | "slotIndex"> = {
     sessionId,
-    seq: 0,
     layoutId: gridLayoutId(gridCols, gridRows),
     k: encoder.k,
     blockLen,
@@ -711,12 +709,14 @@ async function startStream(revealStage = false) {
         maskPattern: 4,
       });
     }
-    const esiCycle = Math.floor(0x01000000 / gridCodes) * gridCodes;
-    if (nextSeq >= esiCycle) nextSeq = 0;
-    const esi = nextSeq;
-    const slotIndex = esi % gridCodes;
-    const wireEsi = encodeGridSequence(esi, header.layoutId!, slotIndex);
-    const bytes = packFrame({ ...header, seq: wireEsi, gridEsi: esi, slotIndex }, encoder.encode(wireEsi));
+    const sequenceCycle = 0x01000000 * gridCodes;
+    if (nextSeq >= sequenceCycle) nextSeq = 0;
+    const slotIndex = nextSeq % gridCodes;
+    const seq = Math.floor(nextSeq / gridCodes);
+    const bytes = packFrame(
+      { ...header, seq, slotIndex },
+      encoder.encode(seq, slotIndex, gridCodes),
+    );
     nextSeq++;
     // Every code carries the same byte length at the same ECC with the same
     // pinned mask, so once the first one locks the version every later

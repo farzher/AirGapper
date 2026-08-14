@@ -275,12 +275,10 @@ export async function verifyFile(file: OpticalFile): Promise<boolean> {
 
 export interface FrameHeader {
   sessionId: number;
-  /** Fountain ESI. New senders namespace it with grid metadata in this u32. */
+  /** Per-slot fountain sequence number. */
   seq: number;
-  /** Sequential low bits used only to validate physical slot assignment. */
-  gridEsi?: number;
-  layoutId?: number;
-  slotIndex?: number;
+  layoutId: number;
+  slotIndex: number;
   k: number;
   blockLen: number;
   totalLen: number;
@@ -290,7 +288,7 @@ export interface FrameHeader {
 const GRID_META_MARKER = 0x80000000;
 const GRID_ESI_MASK = 0x00ffffff;
 
-export function encodeGridSequence(esi: number, layoutId: number, slotIndex: number): number {
+function encodeGridSequence(esi: number, layoutId: number, slotIndex: number): number {
   return (GRID_META_MARKER | (layoutId & 7) << 28 | (slotIndex & 15) << 24 | (esi & GRID_ESI_MASK)) >>> 0;
 }
 
@@ -299,10 +297,7 @@ export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
   const dv = new DataView(out.buffer);
   dv.setUint8(0, MAGIC);
   dv.setUint16(1, h.sessionId, true);
-  const wireSeq = h.layoutId === undefined || h.slotIndex === undefined
-    ? h.seq >>> 0
-    : encodeGridSequence(h.gridEsi ?? h.seq, h.layoutId, h.slotIndex);
-  dv.setUint32(3, wireSeq, true);
+  dv.setUint32(3, encodeGridSequence(h.seq, h.layoutId, h.slotIndex), true);
   dv.setUint16(7, h.blockLen, true);
   dv.setUint32(9, h.totalLen, true);
   dv.setUint32(13, h.payloadFnv, true);
@@ -320,28 +315,23 @@ export function parseFrame(
   const blockLen = dv.getUint16(7, true);
   const totalLen = dv.getUint32(9, true);
   const wireSeq = dv.getUint32(3, true);
-  const hasGridMeta = Boolean(wireSeq & GRID_META_MARKER);
+  if (!(wireSeq & GRID_META_MARKER)) return null;
   const header: FrameHeader = {
     sessionId: dv.getUint16(1, true),
-    seq: wireSeq,
-    gridEsi: hasGridMeta ? wireSeq & GRID_ESI_MASK : undefined,
-    layoutId: hasGridMeta ? (wireSeq >>> 28) & 7 : undefined,
-    slotIndex: hasGridMeta ? (wireSeq >>> 24) & 15 : undefined,
+    seq: wireSeq & GRID_ESI_MASK,
+    layoutId: (wireSeq >>> 28) & 7,
+    slotIndex: (wireSeq >>> 24) & 15,
     k: Math.ceil(totalLen / blockLen),
     blockLen,
     totalLen,
     payloadFnv: dv.getUint32(13, true),
   };
   if (header.k === 0 || header.k > 0xffff || header.blockLen === 0 || header.totalLen === 0) return null;
-  if (hasGridMeta) {
-    const layout = gridLayoutById(header.layoutId!);
-    if (!layout || header.slotIndex! >= layout.cols * layout.rows ||
-      header.gridEsi! % (layout.cols * layout.rows) !== header.slotIndex) return null;
-  }
+  const layout = gridLayoutById(header.layoutId);
+  if (!layout || header.slotIndex >= layout.cols * layout.rows) return null;
   const packetLength = HEADER_LEN + header.blockLen;
-  if (bytes.length !== packetLength && bytes.length !== packetLength + FRAME_CRC_LEN) return null;
-  if (bytes.length === packetLength + FRAME_CRC_LEN &&
-      dv.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
+  if (bytes.length !== packetLength + FRAME_CRC_LEN) return null;
+  if (dv.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
   return { header, block: bytes.subarray(HEADER_LEN, packetLength) };
 }
 
@@ -359,7 +349,7 @@ export function parseFrame(
  * k, sessionId and seq produce an identical frame.
  */
 export function streamIdentity(h: FrameHeader): string {
-  return `${h.sessionId}:${h.k}:${h.blockLen}:${h.totalLen}:${h.payloadFnv}:${h.layoutId ?? "legacy"}`;
+  return `${h.sessionId}:${h.k}:${h.blockLen}:${h.totalLen}:${h.payloadFnv}:${h.layoutId}`;
 }
 
 export function crc32(bytes: Uint8Array): number {

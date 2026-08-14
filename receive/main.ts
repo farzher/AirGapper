@@ -21,6 +21,7 @@ import {
 } from "../shared/progress";
 import { createDecodeWorker, usesSimpleDecodeWorker } from "./worker-factory";
 import { GridLattice, type GridSnapshot } from "./grid-lattice";
+import { gridLayoutById } from "../shared/grid-layout";
 import {
   DecodeWorkerPool,
   type DecodeCompletion,
@@ -31,8 +32,6 @@ import {
 import { PlainQrPolicy } from "../shared/plain-qr-policy";
 import { isSnippet, snippetText } from "../shared/snippet";
 import {
-  FRAME_CRC_LEN,
-  HEADER_LEN,
   fnv1a,
   parseFrame,
   streamIdentity,
@@ -2256,7 +2255,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (!parsed) {
     noteScanOutcome(info?.scanId, "rejected");
     // Finder-pattern sightings and arbitrary binary decodes never become
-    // tracks. A fully decoded UTF-8 QR may retain the legacy single-code path.
+    // tracks. A fully decoded UTF-8 QR may still be a standard plain snippet.
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
@@ -2271,7 +2270,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const { header, block } = parsed;
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
-    slot: header.slotIndex, esi: header.gridEsi ?? header.seq, bytes: header.blockLen, quad: info?.quad,
+    slot: header.slotIndex, esi: header.seq, bytes: header.blockLen, quad: info?.quad,
   });
   const identity = streamIdentity(header);
   // A live stream is sticky against stray codes and out-of-order worker
@@ -2288,15 +2287,12 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   lastStreamDecodeAt = decodedAt;
 
   plainQrPolicy.noteFramed();
-  const hasFrameCRC = bytes.length === HEADER_LEN + header.blockLen + FRAME_CRC_LEN;
   let decodedRegion: Region | undefined;
   if (box && info?.quad && info.modules) {
     const priorBenchmarkFrame = activeBenchmarkFrame;
     if (productionTrace) activeBenchmarkFrame = productionTrace;
     const snapshot = gridLattice.accept({
       identity,
-      seq: header.seq,
-      gridEsi: header.gridEsi,
       layoutId: header.layoutId,
       slotIndex: header.slotIndex,
       at: info.scanId === undefined ? decodedAt : (scanCapturedAt.get(info.scanId) ?? decodedAt),
@@ -2309,14 +2305,14 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       decodedRegion = syncGrid(
         snapshot,
         decodedAt,
-        header.slotIndex ?? header.seq % snapshot.slots.length,
-        { ...info, crc32: info.crc32 ?? hasFrameCRC },
+        header.slotIndex,
+        { ...info, crc32: true },
       );
     }
     if (productionTrace) productionTrace.stateAfter = gridLattice.state;
     activeBenchmarkFrame = priorBenchmarkFrame;
   }
-  if (decodedRegion) noteSequence(decodedRegion, header.gridEsi ?? header.seq, decodedAt);
+  if (decodedRegion) noteSequence(decodedRegion, header.seq, decodedAt);
 
   // streamIdentity() covers every invariant header field. parseFrame has
   // already checked magic, lengths, field ranges and CRC before this point.
@@ -2329,12 +2325,13 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
   }
-  const sequenceOrdinal = header.gridEsi ?? header.seq;
+  const sequenceOrdinal = header.seq;
   minSeq = Math.min(minSeq, sequenceOrdinal);
   maxSeq = Math.max(maxSeq, sequenceOrdinal);
   const framesNewBefore = decoder.framesNew;
   const usefulBefore = decoder.framesNew - decoder.framesRedundant;
-  decoder.addFrame(header.seq, block);
+  const layout = gridLayoutById(header.layoutId)!;
+  decoder.addFrame(header.seq, header.slotIndex, layout.cols * layout.rows, block);
   const receivedAt = receiverNow();
   noteScanOutcome(info?.scanId, decoder.framesNew > framesNewBefore ? "accepted" : "duplicate");
   if (decoder.framesNew > framesNewBefore) {
@@ -3067,7 +3064,7 @@ async function runOracle(corpus: AgcapCorpus): Promise<number[]> {
             for (const symbol of reply.symbols ?? []) {
               const parsed = parseFrame(symbol.bytes);
               if (!parsed) continue;
-              const esi = parsed.header.gridEsi ?? parsed.header.seq;
+              const esi = parsed.header.seq;
               if (known.has(esi)) continue;
               known.add(esi);
               trace.reference.push({ slot: parsed.header.slotIndex, esi, quad: symbol.quad });

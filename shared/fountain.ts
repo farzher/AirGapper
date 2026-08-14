@@ -8,123 +8,13 @@
 // fountain overhead — and repair frames patch what loss takes, in any order:
 // a dropped frame costs a little time, never correctness. No back-channel,
 // no retransmission, and sender and receiver frame rates don't need to match.
-//
-// Determinism warning that cost a debugging session: sender and receiver
-// must build bit-identical degree distributions, but JavaScript's Math.log
-// is implementation-approximated — V8 (sender) and JavaScriptCore (iPhone
-// receiver) may differ by an ulp and silently desynchronize the streams.
-// dlog() below uses only exactly-specified IEEE-754 ops.
 
 import { splitmix32 } from "./protocol";
-
-const LN2 = 0.6931471805599453;
-
-/**
- * Deterministic natural log: exact-ops range reduction + atanh series.
- *
- * Exported because this is wire format, not a utility: it differs from
- * `Math.log` by up to 1 ulp on roughly a quarter of the inputs solitonCdf()
- * feeds it, which is enough to shift a CDF entry and flip a sampled degree.
- * Swapping it for `Math.log` would desync senders and receivers that do not
- * share a JavaScript engine.
- */
-export function dlog(x: number): number {
-  let e = 0;
-  let m = x;
-  while (m >= 1.5) {
-    m /= 2;
-    e++;
-  }
-  while (m < 0.75) {
-    m *= 2;
-    e--;
-  }
-  const z = (m - 1) / (m + 1);
-  const z2 = z * z;
-  let term = z;
-  let sum = 0;
-  for (let n = 1; n <= 21; n += 2) {
-    sum += term / n;
-    term *= z2;
-  }
-  return e * LN2 + 2 * sum;
-}
-
-const SOLITON_C = 0.1;
-const SOLITON_DELTA = 0.5;
-
-/** Robust-soliton degree CDF for k source blocks. Exported for the same
- *  wire-format pinning reason as dlog() and frameIndices(). */
-export function solitonCdf(k: number): Float64Array {
-  const cdf = new Float64Array(k);
-  if (k === 1) {
-    cdf[0] = 1;
-    return cdf;
-  }
-  const R = Math.max(1, SOLITON_C * dlog(k / SOLITON_DELTA) * Math.sqrt(k));
-  const spike = Math.min(k, Math.ceil(k / R));
-  let total = 0;
-  for (let d = 1; d <= k; d++) {
-    const rho = d === 1 ? 1 / k : 1 / (d * (d - 1));
-    let tau = 0;
-    if (d < spike) tau = R / (d * k);
-    else if (d === spike) tau = (R * Math.max(0, dlog(R / SOLITON_DELTA))) / k;
-    total += rho + tau;
-    cdf[d - 1] = total;
-  }
-  for (let i = 0; i < k; i++) cdf[i] = cdf[i]! / total;
-  cdf[k - 1] = 1;
-  return cdf;
-}
 
 function frameSeed(sessionId: number, seq: number): number {
   let h = (Math.imul(sessionId + 1, 0x9e3779b1) ^ (seq + 0x85ebca6b)) | 0;
   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
   return (h ^ (h >>> 16)) | 0;
-}
-
-/**
- * The block indices XORed into frame `seq` — identical on both ends.
- *
- * Sender and receiver derive this independently and never compare notes, so
- * any change here is a breaking
- * wire-format change: an `airgapper.html` copy saved months ago has to keep
- * agreeing with a current receiver.
- */
-export function frameIndices(
-  k: number,
-  cdf: Float64Array,
-  sessionId: number,
-  seq: number,
-): number[] {
-  const rnd = splitmix32(frameSeed(sessionId, seq));
-  // inverse-CDF sample the degree
-  const u = rnd() * 2 ** -32;
-  let lo = 0;
-  let hi = k - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (cdf[mid]! >= u) hi = mid;
-    else lo = mid + 1;
-  }
-  const d = Math.min(k, lo + 1);
-  if (d > k >> 3) {
-    // large degree: partial Fisher–Yates over an identity array
-    const scratch = new Uint32Array(k);
-    for (let i = 0; i < k; i++) scratch[i] = i;
-    const out: number[] = new Array<number>(d);
-    for (let i = 0; i < d; i++) {
-      const j = i + (rnd() % (k - i));
-      const t = scratch[i]!;
-      scratch[i] = scratch[j]!;
-      scratch[j] = t;
-      out[i] = scratch[i]!;
-    }
-    return out;
-  }
-  const set = new Set<number>();
-  while (set.size < d) set.add(rnd() % k);
-  return [...set];
 }
 
 /** Frames per carousel cycle: one systematic sweep of all k blocks, then k
@@ -167,13 +57,30 @@ function repairIndices(k: number, sessionId: number, seq: number): number[] {
  * Repair frames seed from the ABSOLUTE seq, so every cycle's repair frames
  * draw different subsets — re-watching the carousel never replays them.
  *
- * The older soliton stream (frameIndices, solitonCdf, dlog) is kept above,
- * pinned by its golden vectors, in case a future format wants it back — it is
- * no longer emitted.
+ * Every physical grid slot owns a complete carousel. Systematic frames use an
+ * affine permutation whose stride is the first number at least as large as the
+ * grid that is coprime with k. A lone slot therefore visits every source block,
+ * while a full grid emits distinct neighboring blocks on each display tick.
  */
-export function frameComposition(k: number, sessionId: number, seq: number): number[] {
+function coprimeStride(k: number, gridCodes: number): number {
+  let stride = Math.max(1, gridCodes);
+  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+  while (gcd(stride, k) !== 1) stride++;
+  return stride;
+}
+
+export function frameComposition(
+  k: number,
+  sessionId: number,
+  seq: number,
+  slotIndex: number,
+  gridCodes: number,
+): number[] {
   const pos = seq % cycleLength(k);
-  return pos < k ? [pos] : repairIndices(k, sessionId, seq);
+  const frameKey = ((slotIndex & 15) << 24 | (seq & 0x00ffffff)) >>> 0;
+  return pos < k
+    ? [(pos * coprimeStride(k, gridCodes) + slotIndex) % k]
+    : repairIndices(k, sessionId, frameKey);
 }
 
 function xorInto(dst: Uint32Array, src: Uint32Array): void {
@@ -200,8 +107,8 @@ export class LTEncoder {
     }
   }
 
-  encode(seq: number): Uint8Array {
-    const idx = frameComposition(this.k, this.sessionId, seq);
+  encode(seq: number, slotIndex: number, gridCodes: number): Uint8Array {
+    const idx = frameComposition(this.k, this.sessionId, seq, slotIndex, gridCodes);
     const out = new Uint32Array(this.words);
     for (const b of idx) {
       const off = b * this.words;
@@ -245,16 +152,17 @@ export class LTDecoder {
     return this.solvedCount >= this.k;
   }
 
-  addFrame(seq: number, block: Uint8Array): void {
-    if (this.seen.has(seq)) {
+  addFrame(seq: number, slotIndex: number, gridCodes: number, block: Uint8Array): void {
+    const frameKey = ((slotIndex & 15) << 24 | (seq & 0x00ffffff)) >>> 0;
+    if (this.seen.has(frameKey)) {
       this.framesDup++;
       return;
     }
-    this.seen.add(seq);
+    this.seen.add(frameKey);
     this.framesNew++;
     if (this.isComplete) return;
 
-    const idx = new Set(frameComposition(this.k, this.sessionId, seq));
+    const idx = new Set(frameComposition(this.k, this.sessionId, seq, slotIndex, gridCodes));
     const words = new Uint32Array(this.words);
     new Uint8Array(words.buffer).set(block.subarray(0, this.blockLen));
     for (const b of [...idx]) {

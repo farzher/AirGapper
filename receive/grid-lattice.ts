@@ -1,14 +1,12 @@
 import type { SymbolBox, SymbolQuad } from "../shared/worker-pool";
-import { GRID_LAYOUTS, gridLayoutById, type GridLayout } from "../shared/grid-layout";
+import { gridLayoutById, type GridLayout } from "../shared/grid-layout";
 
-export type GridState = "SEARCH" | "GRID_HYPOTHESIS" | "GRID_LOCK" | "TRACK" | "PARTIAL_LOSS" | "REACQUIRE";
+export type GridState = "SEARCH" | "GRID_LOCK" | "TRACK" | "PARTIAL_LOSS" | "REACQUIRE";
 
 export interface GridDetection {
   identity: string;
-  seq: number;
-  gridEsi?: number;
-  layoutId?: number;
-  slotIndex?: number;
+  layoutId: number;
+  slotIndex: number;
   at: number;
   scanId: number;
   box: SymbolBox;
@@ -36,7 +34,6 @@ type Layout = Pick<GridLayout, "cols" | "rows">;
 type Homography = [number, number, number, number, number, number, number, number];
 type Candidate = { layout: Layout; transform: Homography; observations: GridDetection[]; score: number; error: number };
 
-const HYPOTHESIS_DWELL_MS = 650;
 const WHOLE_GRID_LOSS_MS = 2200;
 
 function corners(quad: SymbolQuad): Point[] {
@@ -129,9 +126,6 @@ export class GridLattice {
   private identity = "";
   private observations: GridDetection[] = [];
   private candidate?: Candidate;
-  private ranked: Candidate[] = [];
-  private hypothesisIndex = 0;
-  private switchedAt = 0;
   private lastHitAt = 0;
   private frameWidth = 1;
   private frameHeight = 1;
@@ -144,17 +138,13 @@ export class GridLattice {
     this.identity = "";
     this.observations = [];
     this.candidate = undefined;
-    this.ranked = [];
-    this.hypothesisIndex = 0;
     this.lastHitAt = 0;
   }
 
   accept(detection: GridDetection, frameWidth: number, frameHeight: number): GridSnapshot | null {
     if (!validGeometry(detection)) return null;
-    const declaredLayout = detection.layoutId === undefined ? undefined : gridLayoutById(detection.layoutId);
-    if (detection.layoutId !== undefined && (!declaredLayout || detection.slotIndex === undefined ||
-      detection.slotIndex >= declaredLayout.cols * declaredLayout.rows || detection.gridEsi === undefined ||
-      detection.gridEsi % (declaredLayout.cols * declaredLayout.rows) !== detection.slotIndex)) return null;
+    const declaredLayout = gridLayoutById(detection.layoutId);
+    if (!declaredLayout || detection.slotIndex >= declaredLayout.cols * declaredLayout.rows) return null;
     if (this.identity && detection.identity !== this.identity) return null;
     if (!this.identity) this.identity = detection.identity;
     this.frameWidth = Math.max(1, frameWidth);
@@ -168,23 +158,11 @@ export class GridLattice {
       if (updated) this.candidate = updated;
       this.transition("TRACK", "valid packet refreshed locked lattice", detection.at);
     } else {
-      this.rankCandidates();
-      this.candidate = this.ranked[this.hypothesisIndex % Math.max(1, this.ranked.length)];
+      this.candidate = this.makeCandidate(declaredLayout) ?? undefined;
       if (!this.candidate) return null;
-      const distinct = this.candidate.observations.length;
-      const codeCount = this.candidate.layout.cols * this.candidate.layout.rows;
-      const largeSingle = Math.max(detection.box.w / this.frameWidth, detection.box.h / this.frameHeight) > 0.38;
-      const scanCount = new Set(this.observations.map((item) => item.scanId)).size;
-      // New senders put the exact layout and physical slot in every CRC-checked
-      // packet. One decoded quad therefore fixes all eight homography degrees
-      // of freedom and identifies the entire lattice immediately; waiting for
-      // a second QR only traps acquisition behind the no-longer-needed global
-      // detector. Legacy packets still earn a lock from repeated evidence.
-      if (declaredLayout || distinct >= 2 || (codeCount === 1 && largeSingle && scanCount >= 2)) {
-        this.transition("GRID_LOCK", declaredLayout ? "packet declared layoutId and slotIndex" : "enough geometric observations", detection.at);
-      } else {
-        this.transition("GRID_HYPOTHESIS", "valid packet seeded ambiguous legacy layout", detection.at);
-      }
+      // Every packet declares its exact layout and physical slot, so one
+      // decoded quad fixes the complete lattice immediately.
+      this.transition("GRID_LOCK", "packet declared layoutId and slotIndex", detection.at);
     }
     return this.snapshot();
   }
@@ -196,12 +174,6 @@ export class GridLattice {
       this.observations = [];
       return null;
     }
-    if (this.state === "GRID_HYPOTHESIS" && now - this.switchedAt > HYPOTHESIS_DWELL_MS && this.ranked.length > 1) {
-      this.hypothesisIndex = (this.hypothesisIndex + 1) % this.ranked.length;
-      this.candidate = this.ranked[this.hypothesisIndex];
-      this.switchedAt = now;
-      return this.snapshot();
-    }
     return this.candidate ? this.snapshot() : null;
   }
 
@@ -210,32 +182,19 @@ export class GridLattice {
     this.transition(anyMissing ? "PARTIAL_LOSS" : "TRACK", anyMissing ? "one or more predicted slots missing" : "all predicted slots healthy", now);
   }
 
-  private rankCandidates(): void {
-    const declared = this.observations.at(-1)?.layoutId;
-    const layouts: Layout[] = declared === undefined
-      ? [...GRID_LAYOUTS]
-      : [gridLayoutById(declared)!];
-    this.ranked = layouts.map((layout) => this.makeCandidate(layout)).filter((candidate): candidate is Candidate => Boolean(candidate));
-    this.ranked.sort((a, b) => b.score - a.score);
-    this.hypothesisIndex = 0;
-    this.switchedAt = this.lastHitAt;
-  }
-
   private makeCandidate(layout: Layout): Candidate | null {
     const count = layout.cols * layout.rows;
     const latest = new Map<number, GridDetection>();
     for (const observation of this.observations) {
-      if (observation.layoutId !== undefined) {
-        const declared = gridLayoutById(observation.layoutId);
-        if (!declared || declared.cols !== layout.cols || declared.rows !== layout.rows) continue;
-      }
-      latest.set(observation.slotIndex ?? observation.seq % count, observation);
+      const declared = gridLayoutById(observation.layoutId);
+      if (!declared || declared.cols !== layout.cols || declared.rows !== layout.rows) continue;
+      latest.set(observation.slotIndex, observation);
     }
     let observations = [...latest.values()];
     if (!observations.length) return null;
     const newest = observations.reduce((a, b) => a.at > b.at ? a : b);
     const pairsFor = (items: GridDetection[]) => items.flatMap((observation) => {
-      const slot = observation.slotIndex ?? observation.seq % count;
+      const slot = observation.slotIndex;
       return slotWorld(layout, observation.modules, slot).map((world, index) => ({ world, image: corners(observation.quad)[index]! }));
     });
     // A moving camera invalidates old image coordinates, not the sender grid.
@@ -244,7 +203,7 @@ export class GridLattice {
     const seed = fitHomography(pairsFor([newest]));
     if (!seed) return null;
     observations = observations.filter((observation) => {
-      const projected = slotWorld(layout, observation.modules, observation.slotIndex ?? observation.seq % count).map((point) => project(seed, point));
+      const projected = slotWorld(layout, observation.modules, observation.slotIndex).map((point) => project(seed, point));
       const image = corners(observation.quad);
       const edge = Math.max(1, Math.sqrt(observation.box.w * observation.box.h));
       const residual = Math.sqrt(projected.reduce((sum, point, index) => sum + (point.x - image[index]!.x) ** 2 + (point.y - image[index]!.y) ** 2, 0) / 4) / edge;
@@ -277,7 +236,7 @@ export class GridLattice {
     const candidate = this.candidate!;
     const count = candidate.layout.cols * candidate.layout.rows;
     const modules = candidate.observations[0]!.modules;
-    const decoded = new Set(candidate.observations.map((observation) => observation.slotIndex ?? observation.seq % count));
+    const decoded = new Set(candidate.observations.map((observation) => observation.slotIndex));
     const slots: GridSlot[] = [];
     for (let index = 0; index < count; index++) {
       const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));

@@ -160,10 +160,9 @@ ctx.onmessage = async (e: MessageEvent) => {
       // weak full-frame detector does not erase otherwise recoverable slots.
       const seeds = [...valid].flatMap((seed) => {
         const parsed = parseFrame(seed.bytes);
-        const layoutId = parsed?.header.layoutId;
-        const slot = parsed?.header.slotIndex;
-        return layoutId === undefined || slot === undefined
-          ? [] : [{ quad: seed.quad, modules: seed.modules, layoutId, slot }];
+        return parsed
+          ? [{ quad: seed.quad, modules: seed.modules, layoutId: parsed.header.layoutId, slot: parsed.header.slotIndex }]
+          : [];
       });
       seeds.push(...oracleSeeds);
       for (const seed of seeds) {
