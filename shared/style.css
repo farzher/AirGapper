@@ -243,7 +243,7 @@ details.settings {
 details.settings summary { cursor: pointer; color: var(--ink); font-size: 12px; font-weight: 650; }
 details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; }
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-.receiver-settings { flex: none; }
+.receiver-settings { flex: none; min-width: 0; }
 details.receiver-settings .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(70px, .8fr) auto auto; gap: 10px; }
 .receiver-settings label,
 .receiver-settings select { min-width: 0; width: 100%; }
@@ -252,6 +252,8 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-dev-actions { grid-column: 1 / -1; grid-row: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: end; }
 .receiver-dev-actions[hidden] { display: none; }
 .receiver-dev-actions button { padding: 5px 9px; min-height: 34px; }
+#optics-auto-actions { display: flex; gap: 6px; }
+#optics-auto-actions[hidden] { display: none; }
 .focus-dev { flex: 1 0 100%; display: grid; grid-template-columns: minmax(130px, 1fr) auto minmax(180px, 2fr); align-items: end; gap: 8px; padding-top: 4px; }
 .focus-dev pre { grid-column: 1 / -1; margin: 0; padding: 8px; overflow: auto; color: var(--muted); background: var(--bg); border-radius: 8px; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .focus-tuning { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
@@ -260,10 +262,12 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .focus-tuning input { width: 100%; }
 .optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .optics-manual[hidden], .optics-manual .axis-control[hidden], .optics-manual [hidden] { display: none !important; }
-.axis-control { display: grid; grid-template-rows: auto 34px; gap: 3px; min-width: 0; }
+.axis-control { position: relative; display: grid; grid-template-rows: auto 34px; gap: 3px; min-width: 0; }
 .axis-heading { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .axis-heading output { color: var(--ink); font-size: 10px; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
 .axis-heading button { padding: 0; color: var(--ink); background: none; border: 0; font: inherit; text-transform: uppercase; cursor: pointer; }
+.axis-control.manual-focus #focus-axis-reset { pointer-events: none; }
+.axis-control.manual-focus #focus-mode { position: absolute; left: 0; top: 0; z-index: 1; width: 42px; min-height: 16px; height: 16px; padding: 0; opacity: 0; cursor: pointer; }
 .axis-control .setting-toggle { flex-direction: row; justify-content: flex-start; width: 100%; }
 .axis-control input[type="range"] { min-width: 0; width: 100%; height: 34px; }
 .axis-control input[type="checkbox"] { margin: 0; accent-color: #222; }
@@ -362,20 +366,19 @@ input[type="range"] { accent-color: #222; }
 .detect-overlay { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; transform: translateZ(0); pointer-events: none; }
 /* Avoid a dedicated GPU texture over WebView video on old 32-bit renderers. */
 .legacy-android-camera .detect-overlay { transform: none; }
-.transfer-panel { flex: none; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; cursor: pointer; }
+.transfer-panel { flex: none; min-width: 0; padding: 12px 14px; overflow-x: hidden; background: var(--card); border: 1px solid var(--line); border-radius: 14px; cursor: pointer; }
 .transfer-panel details.settings { display: flex; flex-direction: column-reverse; width: auto; margin: 0; padding: 0; overflow: visible; background: transparent; border: 0; border-radius: 0; }
-.transfer-panel details.settings > .row { max-height: min(240px, 40vh); padding: 0 0 12px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; cursor: default; }
-.transfer-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 12px; white-space: nowrap; list-style: none; }
+.transfer-panel details.settings > .row { min-width: 0; max-height: min(240px, 40vh); padding: 0 0 12px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; cursor: default; }
+.transfer-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; white-space: nowrap; list-style: none; }
 .transfer-summary::-webkit-details-marker { display: none; }
-.progress-amount { color: var(--ink); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.05em; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.settings-prompt { position: relative; display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; padding: 2px 0 0 11px; font-size: 12px; line-height: 1; letter-spacing: 0; }
-.settings-arrow { position: absolute; left: 0; top: 8px; width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 6px solid currentColor; transition: transform .16s ease; }
-.receiver-settings[open] .settings-arrow { transform: rotate(-90deg); }
+.settings-prompt { position: relative; display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; padding-left: 11px; font-size: 12px; line-height: 1; letter-spacing: 0; }
+.settings-arrow { position: absolute; left: 0; top: 50%; width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 6px solid currentColor; transform: translateY(-50%); transition: transform .16s ease; }
+.receiver-settings[open] .settings-arrow { transform: translateY(-50%) rotate(-90deg); }
 .progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
 .progress > div.error { background: var(--bad); animation: none; }
 @keyframes progress-pulse { 50% { opacity: .68; } }
-.speed-feedback { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; padding-top: 4px; }
+.speed-feedback { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }
 .speed-feedback strong { color: var(--muted); font-size: clamp(20px, 5vw, 28px); line-height: 1; letter-spacing: -.04em; white-space: nowrap; font-variant-numeric: tabular-nums; transition: color .2s; }
 .speed-low strong { color: var(--bad); }
 .speed-mid strong { color: #9a6510; }
@@ -385,9 +388,10 @@ input[type="range"] { accent-color: #222; }
   .camera-spinner { animation-duration: 1.5s; }
   .progress > div { animation: none; }
 }
-.transfer-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 11px; }
-.transfer-estimate { display: flex; white-space: nowrap; font-variant-numeric: tabular-nums; }
-#transfer-size-label:not(:empty)::after { content: "·"; margin: 0 8px; }
+.transfer-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; margin-top: 9px; color: var(--muted); font-size: 11px; }
+.transfer-estimate { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.progress-amount { flex: none; color: var(--ink); font-size: 11px; line-height: 1; letter-spacing: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#transfer-size-label:not(:empty)::after { content: "·"; margin-left: 8px; }
 .pipeline-metrics { display: flex; gap: 14px; }
 .pipeline-metrics strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 #m-limit { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }

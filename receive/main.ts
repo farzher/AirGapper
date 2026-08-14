@@ -87,6 +87,8 @@ const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-s
 const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
 const focusDev = document.getElementById("focus-dev")!;
 const focusMode = document.getElementById("focus-mode") as HTMLSelectElement;
+const focusAxisName = document.getElementById("focus-axis-name")!;
+const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const opticsOptimize = document.getElementById("optics-optimize") as HTMLButtonElement;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
@@ -1049,11 +1051,14 @@ function syncExposureControls(): void {
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
   opticsAutoActions.hidden = !automaticOptics || cameraExposureControl.hidden;
-  progressEl.hidden = !automaticOptics;
   focusMode.value = manualFocusMode;
   const manualFocus = manualFocusMode === "manual";
+  focusDistanceControl.classList.toggle("manual-focus", manualFocus);
+  focusMode.hidden = false;
   focusDistance.hidden = !manualFocus;
   focusDistanceValue.hidden = !manualFocus;
+  focusAxisReset.hidden = !manualFocus;
+  focusAxisName.hidden = manualFocus;
   for (const [automatic, toggle, slider, output, reset, name] of [
     [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName],
     [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName],
