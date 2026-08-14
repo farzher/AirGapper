@@ -254,7 +254,7 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-dev-actions button { padding: 5px 9px; min-height: 34px; }
 #optics-auto-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 #optics-auto-actions[hidden] { display: none; }
-#optics-optimize-status { flex: 1 0 100%; min-height: 1.2em; color: var(--muted); font-size: 12px; }
+#optics-optimize-status { min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .focus-dev { flex: 1 0 100%; display: grid; grid-template-columns: minmax(130px, 1fr) auto minmax(180px, 2fr); align-items: end; gap: 8px; padding-top: 4px; }
 .focus-dev pre { grid-column: 1 / -1; margin: 0; padding: 8px; overflow: auto; color: var(--muted); background: var(--bg); border-radius: 8px; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .focus-tuning { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }

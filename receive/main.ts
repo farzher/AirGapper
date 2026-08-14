@@ -91,6 +91,7 @@ const focusAxisName = document.getElementById("focus-axis-name")!;
 const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const opticsOptimize = document.getElementById("optics-optimize") as HTMLButtonElement;
+const opticsKeep = document.getElementById("optics-keep") as HTMLButtonElement;
 const opticsOptimizeStatus = document.getElementById("optics-optimize-status")!;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
 const focusDistance = document.getElementById("focus-distance") as HTMLInputElement;
@@ -508,6 +509,7 @@ type CandidateEvidence = {
   usefulSymbols: number;
 };
 let candidateEvidence: CandidateEvidence | undefined;
+let optimizeMeasureToken = 0;
 
 function recentCompletionIntervalMs(now: number): number {
   const recent = scanCompletionTimes.filter((at) => at > now - 6000);
@@ -516,6 +518,7 @@ function recentCompletionIntervalMs(now: number): number {
 }
 
 async function measureReceivePerformance(label: string): Promise<ReceivePerformance> {
+  const token = optimizeMeasureToken;
   const startedAt = receiverNow();
   const evidence: CandidateEvidence = {
     boundary: frameId,
@@ -529,12 +532,13 @@ async function measureReceivePerformance(label: string): Promise<ReceivePerforma
   candidateEvidence = evidence;
   const targetAttempts = 8;
   const minCompletions = 4;
-  const minMs = 700;
-  const maxMs = Math.max(2200, Math.min(4200, recentCompletionIntervalMs(startedAt) * targetAttempts * 1.35));
+  const minMs = 900;
+  const maxMs = Math.max(2400, Math.min(4800, recentCompletionIntervalMs(startedAt) * targetAttempts * 1.45));
   try {
     for (;;) {
+      if (token !== optimizeMeasureToken) break;
       const elapsed = receiverNow() - startedAt;
-      opticsOptimizeStatus.textContent = `Optimize: ${label} · collecting ${Math.min(targetAttempts, evidence.qrAttempts)}/${targetAttempts} attempts`;
+      opticsOptimizeStatus.textContent = `${label} · ${Math.min(targetAttempts, evidence.qrAttempts)}/${targetAttempts} attempts`;
       const enoughEvidence = evidence.completedJobs >= minCompletions && evidence.qrAttempts >= targetAttempts;
       if (elapsed >= minMs && enoughEvidence && (evidence.validDecodes > 0 || evidence.qrAttempts >= targetAttempts)) break;
       if (elapsed >= maxMs) break;
@@ -546,7 +550,7 @@ async function measureReceivePerformance(label: string): Promise<ReceivePerforma
   const seconds = Math.max(0.001, (receiverNow() - startedAt) / 1000);
   const validDecodesPerSecond = evidence.validDecodes / seconds;
   const priorBest = focusController.diagnostics().optimizeBestPerformance;
-  opticsOptimizeStatus.textContent = `Optimize: ${label} · ${validDecodesPerSecond.toFixed(1)} valid QR/s${priorBest ? ` · best ${priorBest.validDecodesPerSecond.toFixed(1)}` : ""}`;
+  if (token === optimizeMeasureToken) opticsOptimizeStatus.textContent = `${label} · ${validDecodesPerSecond.toFixed(1)} QR/s${priorBest ? ` · best ${priorBest.validDecodesPerSecond.toFixed(1)}` : ""}`;
   return {
     validDecodesPerSecond,
     usefulSymbolsPerSecond: evidence.usefulSymbols / seconds,
@@ -555,36 +559,91 @@ async function measureReceivePerformance(label: string): Promise<ReceivePerforma
     completedJobs: evidence.completedJobs,
     qrAttempts: evidence.qrAttempts,
     validDecodes: evidence.validDecodes,
+    measurementMs: seconds * 1000,
   };
 }
 
+let optimizeWaiting = false;
+let optimizeRunning = false;
+function beginOptimizeWhenReady(): void {
+  if (!optimizeWaiting || optimizeRunning || !focusController.optimizeEligible()) return;
+  optimizeWaiting = false;
+  optimizeRunning = true;
+  optimizeMeasureToken++;
+  opticsKeep.hidden = true;
+  opticsOptimize.textContent = "Cancel";
+  opticsOptimizeStatus.textContent = "Baseline · starting";
+  void focusController.optimize(measureReceivePerformance).then(() => {
+    const finished = focusController.diagnostics();
+    if (finished.optimizeState === "complete") {
+      opticsOptimizeStatus.textContent = finished.optimizeSummary ?? "Complete";
+      opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
+      opticsKeep.hidden = false;
+    } else if (finished.optimizeState === "cancelled") {
+      opticsOptimizeStatus.textContent = finished.optimizeSummary ?? "Cancelled · best restored";
+    }
+  }).finally(() => {
+    optimizeRunning = false;
+    opticsOptimize.textContent = "Optimize";
+  });
+}
 opticsOptimize.addEventListener("click", () => {
-  const diagnostic = focusController.diagnostics();
-  const state = diagnostic.optimizeState;
-  if (state === "baseline" || state === "focus" || state === "exposure" || state === "iso") {
+  const state = focusController.diagnostics().optimizeState;
+  if (optimizeWaiting && !optimizeRunning) {
+    optimizeWaiting = false;
+    opticsOptimizeStatus.textContent = "Cancelled";
+    return;
+  }
+  if (optimizeRunning || ["baseline", "focus", "exposure", "iso", "verification"].includes(state)) {
+    optimizeWaiting = false;
+    optimizeMeasureToken++;
     focusController.cancelOptimize("Optimize cancelled");
-    opticsOptimizeStatus.textContent = "Optimize cancelled · best restored";
+    opticsOptimizeStatus.textContent = "Cancelled · best restored";
     return;
   }
   if (!automaticOptics) {
-    opticsOptimizeStatus.textContent = "Optimize: enable Auto";
+    opticsOptimizeStatus.textContent = "Enable Auto";
     return;
   }
-  if (diagnostic.state !== "LOCKED") {
-    opticsOptimizeStatus.textContent = "Optimize: waiting for lock";
-    return;
+  opticsKeep.hidden = true;
+  optimizeWaiting = true;
+  opticsOptimizeStatus.textContent = focusController.optimizeEligible() ? "Baseline · starting" : "Need stable QR · waiting";
+  beginOptimizeWhenReady();
+});
+opticsKeep.addEventListener("click", () => {
+  const diagnostic = focusController.diagnostics();
+  if (diagnostic.optimizeState !== "complete") return;
+  const track = stream?.getVideoTracks()[0];
+  if (!track) return;
+  const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+  const acceptedFocusMode = actual.focusMode;
+  if (acceptedFocusMode === "manual" && actual.focusDistance !== undefined) {
+    manualFocusMode = "manual";
+    preferredFocusDistance = actual.focusDistance;
+  } else if (acceptedFocusMode === "continuous" || acceptedFocusMode === "single-shot") {
+    manualFocusMode = acceptedFocusMode;
   }
-  if (!diagnostic.geometryStable) {
-    opticsOptimizeStatus.textContent = "Optimize: waiting for stable target";
-    return;
+  if (actual.exposureMode === "manual" && actual.exposureTime !== undefined) {
+    automaticExposureAxis = false;
+    preferredExposureTime = actual.exposureTime;
+    cameraExposure.value = String(actual.exposureTime);
+    showExposureTime(actual.exposureTime);
+    automaticIsoAxis = actual.iso === undefined;
+    preferredIso = actual.iso;
+    if (actual.iso !== undefined) {
+      cameraIso.value = String(actual.iso);
+      cameraIsoValue.value = String(Number(actual.iso.toPrecision(4)));
+    }
+  } else {
+    automaticExposureAxis = true;
+    automaticIsoAxis = true;
   }
-  opticsOptimize.textContent = "Cancel";
-  opticsOptimizeStatus.textContent = "Optimize: starting";
-  void focusController.optimize(measureReceivePerformance).then(() => {
-    const finished = focusController.diagnostics();
-    if (finished.optimizeState === "cancelled") return;
-    opticsOptimizeStatus.textContent = finished.optimizeSummary ? `Optimize complete · ${finished.optimizeSummary}` : "Optimize complete";
-  }).finally(() => { opticsOptimize.textContent = "Optimize"; });
+  automaticOptics = false;
+  cameraExposureAuto.checked = false;
+  syncExposureControls();
+  saveCameraSettings();
+  focusController.setStrategy(manualFocusMode);
+  void applyExposureSetting(track);
 });
 let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
@@ -1445,16 +1504,18 @@ function renderFocusDiagnostics(): void {
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
   const optical = diagnostic.optical;
-  const optimizing = diagnostic.optimizeState === "baseline" || diagnostic.optimizeState === "focus" || diagnostic.optimizeState === "exposure" || diagnostic.optimizeState === "iso";
+  const optimizing = ["baseline", "focus", "exposure", "iso", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.textContent = optimizing ? "Cancel" : "Optimize";
-  const optimizeEligible = automaticOptics && diagnostic.state === "LOCKED" && diagnostic.geometryStable;
-  opticsOptimize.disabled = !optimizing && !optimizeEligible;
-  if (!optimizing && diagnostic.optimizeState !== "complete" && diagnostic.optimizeState !== "cancelled") {
-    opticsOptimizeStatus.textContent = diagnostic.state !== "LOCKED"
-      ? "Optimize: waiting for lock"
-      : !diagnostic.geometryStable ? "Optimize: waiting for stable target" : "Optimize: ready";
+  opticsOptimize.disabled = !automaticOptics && !optimizing;
+  if (!optimizing && !optimizeWaiting && diagnostic.optimizeState !== "complete" && diagnostic.optimizeState !== "cancelled") {
+    opticsOptimizeStatus.textContent = diagnostic.state === "SEEKING" && diagnostic.lastReason.startsWith("Reacquire requested")
+      ? diagnostic.lastReason.includes("rejected") ? "Reacquire requested · AF/AE rejected" : "Reacquire requested · Hardware AF + AE active"
+      : focusController.optimizeEligible() ? "Ready" : "Need stable QR";
   }
-  focusRefocus.disabled = optimizing;
+  if (optimizeWaiting) opticsOptimizeStatus.textContent = "Need stable QR · waiting";
+  opticsKeep.hidden = diagnostic.optimizeState !== "complete";
+  focusRefocus.disabled = false;
+  beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
   const cameraLine = (value?: CameraPatch) => value
     ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${formatExposureMs(value.exposureTime)} · ISO ${value.iso ?? "—"}`
@@ -1469,7 +1530,8 @@ function renderFocusDiagnostics(): void {
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · candidate ${formatExposureMs(diagnostic.candidateExposureTime)}`,
     `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
-    `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1000).toFixed(1)}s`,
+    `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1000).toFixed(1)}s · decode gap ${diagnostic.recentInterdecodeMs?.toFixed(0) ?? "—"}ms · completion gap ${diagnostic.recentCompletionMs?.toFixed(0) ?? "—"}ms`,
+    `Useful   ${diagnostic.lastUsefulDecodeAt === undefined ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1000).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount} · reacquire ${diagnostic.reacquireCount}`,
     `Optimize ${diagnostic.optimizeState}${diagnostic.optimizeCandidatePerformance ? ` · candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/attempt` : ""}`,
     diagnostic.optimizeBestPerformance ? `Best     ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
@@ -1487,7 +1549,13 @@ focusMode.addEventListener("change", () => {
   saveCameraSettings();
   if (!automaticOptics) focusController.setStrategy(manualFocusMode);
 });
-focusRefocus.addEventListener("click", () => focusController.refocus("Reacquire requested"));
+focusRefocus.addEventListener("click", () => {
+  optimizeWaiting = false;
+  optimizeMeasureToken++;
+  opticsKeep.hidden = true;
+  opticsOptimizeStatus.textContent = "Reacquire requested · Hardware AF + AE active";
+  focusController.refocus("Reacquire requested");
+});
 focusDistance.addEventListener("input", () => {
   preferredFocusDistance = Number(focusDistance.value);
   focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
