@@ -1049,6 +1049,7 @@ function syncExposureControls(): void {
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
   opticsAutoActions.hidden = !automaticOptics || cameraExposureControl.hidden;
+  progressEl.hidden = !automaticOptics;
   focusMode.value = manualFocusMode;
   const manualFocus = manualFocusMode === "manual";
   focusDistance.hidden = !manualFocus;
