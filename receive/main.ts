@@ -77,6 +77,9 @@ const isoAxisToggle = document.getElementById("iso-axis-toggle")!;
 const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
 const exposureAxisReset = document.getElementById("exposure-axis-reset") as HTMLButtonElement;
 const isoAxisReset = document.getElementById("iso-axis-reset") as HTMLButtonElement;
+const focusAxisName = document.getElementById("focus-axis-name")!;
+const exposureAxisName = document.getElementById("exposure-axis-name")!;
+const isoAxisName = document.getElementById("iso-axis-name")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
 const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
@@ -1018,28 +1021,29 @@ function syncExposureControls(): void {
   exposureAxisAuto.checked = automaticExposureAxis;
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
-  for (const [automatic, toggle, slider, output, reset] of [
-    [automaticFocusAxis, focusAxisToggle, focusDistance, focusDistanceValue, focusAxisReset],
-    [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset],
-    [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset],
+  for (const [automatic, toggle, slider, output, reset, name] of [
+    [automaticFocusAxis, focusAxisToggle, focusDistance, focusDistanceValue, focusAxisReset, focusAxisName],
+    [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName],
+    [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName],
   ] as const) {
     toggle.hidden = !automatic;
     slider.hidden = automatic;
     output.hidden = automatic;
     reset.hidden = automatic;
+    name.hidden = !automatic;
   }
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
   if (automaticOptics) return;
-  if (automaticExposureAxis) {
-    await applyCameraConstraint(track, {
-      exposureMode: "continuous",
-      ...(!automaticIsoAxis && preferredIso !== undefined ? { iso: preferredIso } : {}),
-    });
+  if (automaticExposureAxis && automaticIsoAxis) {
+    await applyCameraConstraint(track, { exposureMode: "continuous" });
     return;
   }
-  const requested = preferredExposureTime;
+  const activeSettings = track.getSettings() as MediaTrackSettings & CameraPatch;
+  // ISO is only honored by Android camera HALs in manual exposure mode. When
+  // ISO alone is overridden, freeze the current AE-selected shutter time.
+  const requested = automaticExposureAxis ? activeSettings.exposureTime : preferredExposureTime;
   if (requested === undefined) return;
   if (automaticIsoAxis) delete desiredCamera.iso;
   const requestedIso = automaticIsoAxis ? undefined : preferredIso;
@@ -1105,7 +1109,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     cameraIso.max = String(iso.max);
     cameraIso.step = String(iso.step ?? 1);
     cameraIso.value = String(preferredIso);
-    cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
+    cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
   }
   const widthMin = caps.width.min ?? 0;
   const widthMax = caps.width.max ?? Infinity;
@@ -1488,7 +1492,7 @@ function queueIsoChange(immediate = false): void {
   preferredIso = Number(cameraIso.value);
   automaticIsoAxis = false;
   isoAxisAuto.checked = false;
-  cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
+  cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
   syncExposureControls();
   saveCameraSettings();
   focusController.developerOverride("developer changed ISO");

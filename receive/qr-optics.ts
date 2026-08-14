@@ -145,7 +145,8 @@ export class StaticQrOpticsAnalyzer {
       this.edge(image, 6, p, 6, p + 1, true, black, white);
     }
     const transition = this.edgeCount ? this.median(this.edges, this.edgeCount) : 1;
-    const noise = Math.sqrt(this.noiseSquared / Math.max(1, this.noiseCount));
+    const anchorNoise = Math.sqrt(this.noiseSquared / Math.max(1, this.noiseCount));
+    const noise = Math.max(anchorNoise, this.contentNoise(image, modules, black, white));
     let clipped = 0;
     for (let i = 0; i < this.blackCount; i++) if (this.black[i]! <= 3) clipped++;
     for (let i = 0; i < this.whiteCount; i++) if (this.white[i]! >= 252) clipped++;
@@ -173,6 +174,20 @@ export class StaticQrOpticsAnalyzer {
       blackLevel: black, whiteLevel: white, separation, noise, clipping, banding,
       tiles: 1, sampledModules: this.blackCount + this.whiteCount,
     };
+  }
+
+  private contentNoise(image: ImageData, modules: number, black: number, white: number): number {
+    const stride = Math.max(1, Math.ceil(modules / 16));
+    let squared = 0;
+    let count = 0;
+    for (let y = 0; y < modules; y += stride) for (let x = 0; x < modules; x += stride) {
+      const value = this.luma(image, x + 0.5, y + 0.5);
+      if (value < 0) continue;
+      const residual = Math.min(Math.abs(value - black), Math.abs(value - white));
+      squared += residual * residual;
+      count++;
+    }
+    return Math.sqrt(squared / Math.max(1, count));
   }
 
   private finder(image: ImageData, ox: number, oy: number): void {
