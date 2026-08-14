@@ -55,6 +55,7 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+        deleteStaleDownloads();
 
         FrameLayout root = new FrameLayout(this);
         webView = new WebView(this);
@@ -318,6 +319,13 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void deleteStaleDownloads() {
+        File[] files = getCacheDir().listFiles((dir, name) ->
+                name.startsWith("airgapper-") && name.endsWith(".download"));
+        if (files == null) return;
+        for (File file : files) file.delete();
+    }
+
     private synchronized void discardPendingDownload() {
         try {
             if (pendingDownloadStream != null) pendingDownloadStream.close();
@@ -367,6 +375,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         discardPendingDownload();
+        if (downloadToSave != null) downloadToSave.delete();
+        downloadToSave = null;
+        webView.clearCache(true);
         webView.destroy();
         super.onDestroy();
     }

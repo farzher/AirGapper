@@ -291,6 +291,26 @@ let done = false;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 const plainQrDecoder = new TextDecoder("utf-8", { fatal: true });
 const plainQrPolicy = new PlainQrPolicy();
+const RECEIVED_MEDIA_CACHE = "received-media";
+const receivedObjectUrls = new Set<string>();
+let receivedDataGeneration = 0;
+
+function receivedObjectUrl(blob: Blob): string {
+  const url = URL.createObjectURL(blob);
+  receivedObjectUrls.add(url);
+  return url;
+}
+
+function purgeReceivedData(): void {
+  receivedDataGeneration++;
+  for (const url of receivedObjectUrls) URL.revokeObjectURL(url);
+  receivedObjectUrls.clear();
+  if ("caches" in window) void caches.delete(RECEIVED_MEDIA_CACHE).catch(() => undefined);
+}
+
+// Remove anything a previous page session could not clean up (for example if
+// the browser killed it while received media was still open).
+purgeReceivedData();
 
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
@@ -1300,6 +1320,7 @@ function stopReceiver(): void {
   timeline.length = 0;
   plainQrPolicy.reset();
   result.replaceChildren();
+  purgeReceivedData();
   preview.style.display = "none";
   preview.classList.remove("camera-loading");
   cameraActual.textContent = "";
@@ -1375,6 +1396,7 @@ function resumeReceiver(): void {
 window.addEventListener("airgapper:leave-mode", () => {
   if (document.getElementById("receiveView")?.classList.contains("active")) stopReceiver();
 });
+window.addEventListener("pagehide", stopReceiver);
 window.addEventListener("airgapper:pause-mode", () => {
   if (document.getElementById("receiveView")?.classList.contains("active")) pauseReceiver();
 });
@@ -2407,7 +2429,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   cancelScanCapture();
   if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
-  captureGen++;
+  const finishGen = ++captureGen;
   // Snapshot diagnostics before teardown, but do not report success until the
   // recovered output passes SHA-256. Goodput is unique original-file bytes
   // divided by time through verification, never projected frame capacity.
@@ -2541,6 +2563,10 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
     const file = await unpackFile(container);
     if (!(await verifyFile(file))) throw new Error("The recovered file failed SHA-256 verification.");
+    if (finishGen !== captureGen) {
+      file.bytes.fill(0);
+      return;
+    }
     seconds = (receiverNow() - startTs) / 1000;
     document.body.classList.add("receive-complete");
     // Restore the root scroller so mobile browsers can use their normal
@@ -2569,7 +2595,13 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     result.replaceChildren();
     if (file.type === "application/vnd.airgapper.files+zip") {
       const entries = readStoredZip(file.bytes);
-      for (const entry of entries) await appendReceivedFile(entry, result);
+      for (const entry of entries) {
+        if (finishGen !== captureGen) {
+          file.bytes.fill(0);
+          return;
+        }
+        await appendReceivedFile(entry, result);
+      }
       const archive = document.createElement("section");
       archive.className = "received-file received-archive";
       const archiveType = document.createElement("span");
@@ -2588,6 +2620,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type, true);
     }
   } catch (error) {
+    if (finishGen !== captureGen) return;
     sendDiagnostics(false, (receiverNow() - startTs) / 1000, 0);
     // Everything is already torn down by this point, so the only way back to a
     // live receiver is a reload. Offer it: a failed checksum used to leave the
@@ -2605,6 +2638,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       "Nothing usable came out of that stream. Restart the sender, then scan it again — " +
       "a partial transfer costs nothing but the time.";
     result.replaceChildren(heading, detail, restartButton("Try again"));
+  } finally {
+    decoder = null;
+    container.fill(0);
   }
 }
 
@@ -2625,7 +2661,7 @@ function inferredType(name: string): string {
 function downloadLink(name: string, type: string, bytes: Uint8Array, label = `Save ${name}`): HTMLAnchorElement {
   const link = document.createElement("a");
   link.className = "download";
-  link.href = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  link.href = receivedObjectUrl(new Blob([bytes as BlobPart], { type }));
   link.download = name;
   link.textContent = label;
   link.addEventListener("click", (event) => {
@@ -2641,10 +2677,11 @@ async function appendReceivedFile(
   declaredType?: string,
   autoplayVideo = false,
 ): Promise<void> {
+  const dataGeneration = receivedDataGeneration;
   const type = declaredType || inferredType(entry.name);
   const container = document.createElement("section");
   container.className = "received-file";
-  const url = URL.createObjectURL(new Blob([entry.bytes as BlobPart], { type }));
+  const url = receivedObjectUrl(new Blob([entry.bytes as BlobPart], { type }));
   let receivedVideo: HTMLVideoElement | undefined;
   if (type.startsWith("image/")) {
     const image = document.createElement("img");
@@ -2667,6 +2704,10 @@ async function appendReceivedFile(
       }
     }
     const src = await servableMediaUrl(entry.bytes, type, url);
+    if (dataGeneration !== receivedDataGeneration) {
+      purgeReceivedData();
+      return;
+    }
     if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true });
     player.src = src;
     if (player instanceof HTMLVideoElement) enableMediaInspection(player);
@@ -2810,7 +2851,7 @@ async function servableMediaUrl(bytes: Uint8Array, type: string, blobUrl: string
     // root — where the worker's route matches under any deploy subpath. Each
     // received file gets its own path so several media players can coexist.
     const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href;
-    const cache = await caches.open("received-media");
+    const cache = await caches.open(RECEIVED_MEDIA_CACHE);
     await cache.put(
       target,
       new Response(new Blob([bytes as BlobPart]), {

@@ -284,10 +284,18 @@ function updateFilePicker(): void {
 /** Tear the stream down and disarm the picker. The input is cleared so the
  *  same file can be picked again (change would not fire otherwise) and so a
  *  mode switch does not silently resurrect the stopped stream. */
+function discardSelectedFile(): void {
+  selectedFile?.payload.fill(0);
+  selectedFile = null;
+  resizeDisplay = null;
+  canvas.width = canvas.height = 16;
+}
+
 function stopTransfer(): void {
   generation++;
   releaseScreenWakeLock();
-  selectedFile = null;
+  discardSelectedFile();
+  snippetText.value = "";
   setStageFullscreen(false);
   stage.hidden = true;
   stageError.hidden = true;
@@ -353,7 +361,7 @@ window.addEventListener("keydown", (event) => {
 function applyMode(): void {
   generation++;
   releaseScreenWakeLock();
-  selectedFile = null;
+  discardSelectedFile();
   setStageFullscreen(false);
   stage.hidden = true;
   stageError.hidden = true;
@@ -381,12 +389,15 @@ async function startSelection(
   prepare: () => Promise<{ name: string; size: number; packed: PackedOpticalFile; files: { name: string; size: number }[] }>,
 ): Promise<void> {
   const selectionGeneration = ++generation;
-  selectedFile = null;
+  discardSelectedFile();
   stage.hidden = true;
   setStatus(status);
   try {
     const { name, size, packed, files } = await prepare();
-    if (selectionGeneration !== generation) return;
+    if (selectionGeneration !== generation) {
+      packed.container.fill(0);
+      return;
+    }
     selectedFile = {
       name,
       size,
@@ -406,6 +417,7 @@ async function selectFiles(fileList: FileList | readonly File[]): Promise<void> 
   const files = Array.from(fileList);
   if (!files.length) return;
   selectMode("file");
+  snippetText.value = "";
   const total = files.reduce((sum, file) => sum + file.size, 0);
   await startSelection(`Preparing ${files.length === 1 ? files[0]!.name : `${files.length} files`}…`, async () => {
     const empty = files.find((file) => file.size === 0);
@@ -915,6 +927,7 @@ window.addEventListener("airgapper:leave-mode", () => {
   if (!document.getElementById("sendView")?.classList.contains("active")) return;
   stopTransfer();
 });
+window.addEventListener("pagehide", stopTransfer);
 window.addEventListener("airgapper:pause-mode", () => {
   if (!document.getElementById("sendView")?.classList.contains("active")) return;
   // Hidden tabs stop receiving animation frames, so the stream naturally
