@@ -61,7 +61,7 @@ export const CAMERA_TUNING = {
   fullRecoveryCooldownMs: 12000,
   automaticRecoveryCooldownMs: 4500,
   optimizeMovementConfirmMs: 650,
-  optimizeBudgetMs: 14000,
+  optimizeBudgetMs: 8000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
   acquisitionBracketDelayMs: 900,
@@ -459,8 +459,8 @@ export class FocusController {
   cancelOptimize(reason = "optimization stopped"): void {
     if (!this.isOptimizing()) return;
     this.cancel(reason);
-    this.optimizeState = "complete";
-    this.optimizeReason = `${reason}; best settings retained`;
+    this.optimizeState = "paused";
+    this.optimizeReason = `${reason}; original settings restored`;
     void this.restoreOptimizationBest().then(() => this.transition("LOCKED", this.optimizeReason));
   }
 
@@ -661,8 +661,10 @@ export class FocusController {
       );
       const exposures = Array.from({ length: 4 }, (_, index) => level(exposureRange, index));
       const isos = Array.from({ length: 4 }, (_, index) => level(isoRange, index));
-      const order: [number, number][] = [[0, 0], [3, 3], [1, 2], [2, 1], [0, 3], [3, 0], [1, 1], [2, 2],
-        [0, 1], [3, 2], [1, 3], [2, 0], [0, 2], [3, 1], [1, 0], [2, 3]];
+      const order: [number, number][] = [
+        [0, 0], [0, 3], [1, 0], [1, 2], [2, 3],
+        [2, 0], [1, 3], [2, 1], [2, 2], [3, 1],
+      ];
       const coarse = [incumbent, ...order.map(([x, y]) => make(exposures[x]!, isos[y]!))]
         .filter((candidate, index, all) => all.indexOf(candidate) === index);
       this.exposureProbes += coarse.length - 1;
@@ -670,7 +672,7 @@ export class FocusController {
       if (!this.current(generation) || !this.optimizeCandidates.length) return;
       const baselineRate = incumbent.windows.length ? rate(performanceOf(incumbent)) : 0;
 
-      let survivors = [...candidates.values()].filter((candidate) => candidate.windows.length).sort(compare).slice(0, 6);
+      let survivors = [...candidates.values()].filter((candidate) => candidate.windows.length).sort(compare).slice(0, 5);
       for (const candidate of candidates.values()) if (candidate.windows.length && !survivors.includes(candidate)) candidate.state = "eliminated";
       this.optimizeSurvivors = `${survivors.length}/${this.optimizeCandidates.length}`;
       this.optimizeDecision = "coarse halving";
@@ -691,7 +693,7 @@ export class FocusController {
         if (performance.now() >= deadline - 700) break;
         this.optimizeExposureStepEV = eSpacing * scale;
         this.optimizeShutterStepEV = iSpacing * scale;
-        const offsets: [number, number][] = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
+        const offsets: [number, number][] = [[-1, 0], [0, -1], [0, 1], [1, 0]];
         const refinements = offsets.map(([x, y]) => make(
           winner.exposure * 2 ** (x * eSpacing * scale), winner.iso * 2 ** (y * iSpacing * scale),
         )).filter((candidate, index, all) => candidate !== winner && all.indexOf(candidate) === index && !candidate.windows.length);

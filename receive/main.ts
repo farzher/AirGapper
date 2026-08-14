@@ -100,6 +100,7 @@ const cameraIsoControl = document.getElementById("camera-iso-control")!;
 const cameraIso = document.getElementById("camera-iso") as HTMLInputElement;
 const cameraIsoValue = document.getElementById("camera-iso-value") as HTMLOutputElement;
 const focusDiagnostics = document.getElementById("focus-diagnostics")!;
+const copyDiagnostics = document.getElementById("copy-diagnostics") as HTMLButtonElement;
 const focusTuningInputs = [...document.querySelectorAll<HTMLInputElement>("[data-camera-tuning]")];
 const corpusFile = document.getElementById("corpus-file") as HTMLInputElement;
 const benchmarkDialog = document.getElementById("benchmark-dialog") as HTMLDialogElement;
@@ -676,8 +677,9 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   if (!epoch || epoch.id !== epochId) throw new Error("Optimizer candidate epoch is not active");
   const startedAt = receiverNow();
   const multiQr = optimizerFixedTargets.length > 1;
-  const targetFrames = multiQr ? 3 : 6;
-  const maxBurstMs = multiQr ? 520 : 900;
+  const coarse = label.startsWith("coarse");
+  const targetFrames = coarse ? (multiQr ? 2 : 3) : multiQr ? 3 : 5;
+  const maxBurstMs = coarse ? 480 : multiQr ? 520 : 800;
   const evidence: CandidateEvidence = {
     epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
     sourceFrames: new Set(), qrAttempts: 0, validDecodes: 0, usefulSymbols: 0,
@@ -785,28 +787,36 @@ opticsKeep.addEventListener("click", () => {
   } else if (winningFocusMode === "single-shot") {
     manualFocusMode = "single-shot";
   }
-  if (diagnostic.committedExposureMode === "manual" && diagnostic.committedExposureTime !== undefined) {
-    automaticExposureAxis = false;
-    preferredExposureTime = diagnostic.committedExposureTime;
-    cameraExposure.value = String(diagnostic.committedExposureTime);
-    showExposureTime(diagnostic.committedExposureTime);
-    automaticIsoAxis = diagnostic.committedIso === undefined;
-    preferredIso = diagnostic.committedIso;
-    if (diagnostic.committedIso !== undefined) {
-      cameraIso.value = String(diagnostic.committedIso);
-      cameraIsoValue.value = String(Number(diagnostic.committedIso.toPrecision(4)));
-    }
-  } else {
-    automaticExposureAxis = true;
-    automaticIsoAxis = true;
-  }
+  const winner = diagnostic.optimizeCandidates.find((candidate) => candidate.state === "winner") ??
+    diagnostic.optimizeCandidates[0];
+  if (!winner) return;
+  automaticExposureAxis = false;
+  automaticIsoAxis = false;
+  preferredExposureTime = winner.exposure;
+  preferredIso = winner.iso;
+  cameraExposure.value = String(winner.exposure);
+  showExposureTime(winner.exposure);
+  cameraIso.value = String(winner.iso);
+  cameraIsoValue.value = String(Number(winner.iso.toPrecision(4)));
   setOptimizeEnabled(false);
   automaticOptics = false;
   cameraExposureAuto.checked = false;
   syncExposureControls();
   saveCameraSettings();
   focusController.setStrategy(manualFocusMode);
-  void applyExposureSetting(track);
+  void applyExposureSetting(track).then(() => {
+    opticsOptimizeStatus.textContent = `Kept · ${formatExposureMs(winner.exposure)} · ISO ${winner.iso}`;
+  });
+});
+copyDiagnostics.addEventListener("click", async () => {
+  const text = focusDiagnostics.textContent ?? "";
+  try {
+    if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
+    copyDiagnostics.textContent = "Copied";
+  } catch {
+    copyDiagnostics.textContent = "Copy failed";
+  }
+  setTimeout(() => { copyDiagnostics.textContent = "Copy diagnostics"; }, 1500);
 });
 let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
