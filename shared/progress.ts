@@ -73,17 +73,14 @@ export function estimateTransferProgress(
   return { fraction, expectedFrames, remainingFrames, etaSeconds, phase };
 }
 
-/** Completed-transfer goodput, capped at the payload's KB count. Transfers
- * finishing inside one second otherwise show a numerically absurd rate larger
- * than the entire tiny file (for example, 220 KB/s for a 700-byte file). */
+/** Completed-transfer goodput from the exact measured transfer time. */
 export function completedGoodputKbs(bytes: number, seconds: number): number {
-  const payloadKb = Math.max(0, bytes) / 1024;
-  const measured = payloadKb / Math.max(0.01, seconds);
-  return Math.min(payloadKb, measured);
+  return Math.max(0, bytes) / 1024 / Math.max(0.001, seconds);
 }
 
 export function formatDuration(seconds: number): string {
-  const rounded = Math.max(1, Math.ceil(seconds));
+  if (seconds < 1) return `${Math.max(1, Math.round(seconds * 1000))}ms`;
+  const rounded = Math.ceil(seconds);
   if (rounded < 60) return `${rounded}s`;
   const minutes = Math.floor(rounded / 60);
   const remainder = rounded % 60;
