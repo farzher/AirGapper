@@ -855,11 +855,14 @@ async function startStream(revealStage = false) {
     cellCursor = (cellCursor + 1) % gridCodes;
   };
 
-  if (staticStream) {
+  // Fill the complete grid in this task. On a fresh stream or settings restart,
+  // leaving this to the stagger loop would expose empty cells for most of the
+  // first sweep. Only subsequent updates should be staggered.
+  for (let i = 0; i < gridCodes; i++) {
     const img = queue.shift();
     if (img) paintCell(img);
-    return;
   }
+  if (staticStream) return;
 
   // Staggered flips: every cell refreshes at txFps, but cell j flips at phase
   // j/N of the frame interval instead of all N flipping together. A camera
@@ -872,7 +875,7 @@ async function startStream(revealStage = false) {
   // the old behavior, never below it. A grid of one IS the old behavior.)
   const interval = 1000 / txFps;
   const subInterval = interval / gridCodes;
-  let nextAt = performance.now();
+  let nextAt = performance.now() + interval;
   let lastTickAt = performance.now();
   let completedSweeps = 0;
   const tick = (now: number) => {
