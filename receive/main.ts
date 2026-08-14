@@ -173,14 +173,12 @@ function populateCameraOptions(): void {
 function restoreCameraSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
-      resolution?: string; workers?: string; automaticExposure?: boolean; exposureTime?: number;
+      resolution?: string; automaticExposure?: boolean; exposureTime?: number;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
-    const savedWorkers = Number(saved.workers);
-    if (saved.workers === "auto" || (Number.isInteger(savedWorkers) && savedWorkers >= 1 && savedWorkers <= hardwareThreadCount)) decodeWorkers.value = saved.workers!;
     if (typeof saved.automaticExposure === "boolean") automaticExposure = saved.automaticExposure;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
@@ -189,7 +187,6 @@ function saveCameraSettings(): void {
   try {
     localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
       resolution: cameraResolution.value,
-      workers: decodeWorkers.value,
       automaticExposure,
       exposureTime: preferredExposureTime,
     }));
@@ -216,10 +213,9 @@ populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
 
-// Keep benchmark tools out of the normal settings UI. Opening, closing, then
-// reopening Settings within half a second reveals them. A slower close/reopen
-// hides them again.
-const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
+// Keep developer controls out of the normal settings UI. Show, hide, then show
+// Settings within one second to reveal them. A slower close/reopen hides them.
+const DEV_SETTINGS_TOGGLE_WINDOW_MS = 1000;
 const settingsToggleTimes: number[] = [];
 let previousSettingsToggleAt = 0;
 receiverSettings.addEventListener("toggle", () => {
