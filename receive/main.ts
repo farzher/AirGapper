@@ -2392,7 +2392,7 @@ function finishPlainQr(text: string): void {
 }
 
 /** One-second information goodput for live aiming feedback. The completed
- * transfer still reports verified original bytes divided by total time. */
+ * transfer reports the transmitted payload bytes divided by total time. */
 function liveGoodputKbs(now: number): number {
   while (usefulFrameTimes.length && usefulFrameTimes[0]! <= now - STATS_WINDOW_MS) {
     usefulFrameTimes.shift();
@@ -2553,7 +2553,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     // pull-to-refresh gesture on the completed screen.
     document.body.classList.remove("receive-mode");
     transferSizeLabel.textContent = "";
-    etaLabel.textContent = `${formatBytes(file.bytes.length)} · ${formatDuration(seconds)}`;
+    etaLabel.textContent = `${formatBytes(file.transmittedSize)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
     sendDiagnostics(true, seconds, file.bytes.length);
 
@@ -2564,7 +2564,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`;
     speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
     progressLabel.textContent = "✓ Complete";
-    etaLabel.textContent = `${formatBytes(file.bytes.length)} in ${formatDuration(seconds)}`;
+    etaLabel.textContent = `${formatBytes(file.transmittedSize)} in ${formatDuration(seconds)}`;
     if (isSnippet(file)) {
       setStatus("");
       showSnippet(snippetText(file));
