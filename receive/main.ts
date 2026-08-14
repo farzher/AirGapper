@@ -47,6 +47,7 @@ import {
   type CameraPatch,
   type FocusGeometry,
   type FocusStrategy,
+  type ReceivePerformance,
 } from "./focus-controller";
 import { StaticQrOpticsAnalyzer, type QrOpticalTarget } from "./qr-optics";
 import {
@@ -68,16 +69,13 @@ const cameraActual = document.getElementById("camera-actual")!;
 const cameraExposureControl = document.getElementById("camera-exposure-control")!;
 const cameraExposureAuto = document.getElementById("camera-exposure-auto") as HTMLInputElement;
 const cameraOpticsManual = document.getElementById("camera-optics-manual")!;
-const focusAxisAuto = document.getElementById("focus-axis-auto") as HTMLInputElement;
+const opticsAutoActions = document.getElementById("optics-auto-actions")!;
 const exposureAxisAuto = document.getElementById("exposure-axis-auto") as HTMLInputElement;
 const isoAxisAuto = document.getElementById("iso-axis-auto") as HTMLInputElement;
-const focusAxisToggle = document.getElementById("focus-axis-toggle")!;
 const exposureAxisToggle = document.getElementById("exposure-axis-toggle")!;
 const isoAxisToggle = document.getElementById("iso-axis-toggle")!;
-const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
 const exposureAxisReset = document.getElementById("exposure-axis-reset") as HTMLButtonElement;
 const isoAxisReset = document.getElementById("iso-axis-reset") as HTMLButtonElement;
-const focusAxisName = document.getElementById("focus-axis-name")!;
 const exposureAxisName = document.getElementById("exposure-axis-name")!;
 const isoAxisName = document.getElementById("iso-axis-name")!;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
@@ -88,8 +86,9 @@ const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElemen
 const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
 const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
 const focusDev = document.getElementById("focus-dev")!;
-const focusStrategy = document.getElementById("focus-strategy") as HTMLSelectElement;
+const focusMode = document.getElementById("focus-mode") as HTMLSelectElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
+const opticsOptimize = document.getElementById("optics-optimize") as HTMLButtonElement;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
 const focusDistance = document.getElementById("focus-distance") as HTMLInputElement;
 const focusDistanceValue = document.getElementById("focus-distance-value") as HTMLOutputElement;
@@ -158,7 +157,7 @@ function selectedWorkerCount(): number {
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v7";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v8";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
@@ -167,11 +166,10 @@ let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
 let automaticOptics = true;
-let automaticFocusAxis = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
 let preferredExposureTime: number | undefined;
-let preferredFocusStrategy: FocusStrategy = "auto";
+let manualFocusMode: Exclude<FocusStrategy, "auto"> = "continuous";
 let preferredFocusDistance: number | undefined;
 let preferredIso: number | undefined;
 let exposureApplyGeneration = 0;
@@ -284,21 +282,20 @@ function populateCameraOptions(): void {
 function restoreCameraSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
-      resolution?: string; automaticOptics?: boolean; automaticFocusAxis?: boolean;
+      resolution?: string; automaticOptics?: boolean;
       automaticExposureAxis?: boolean; automaticIsoAxis?: boolean; exposureTime?: number; workers?: string;
-      focusStrategy?: FocusStrategy; focusDistance?: number; iso?: number;
+      manualFocusMode?: Exclude<FocusStrategy, "auto">; focusDistance?: number; iso?: number;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
     if (typeof saved.automaticOptics === "boolean") automaticOptics = saved.automaticOptics;
-    if (typeof saved.automaticFocusAxis === "boolean") automaticFocusAxis = saved.automaticFocusAxis;
     if (typeof saved.automaticExposureAxis === "boolean") automaticExposureAxis = saved.automaticExposureAxis;
     if (typeof saved.automaticIsoAxis === "boolean") automaticIsoAxis = saved.automaticIsoAxis;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
-    if (["auto", "continuous", "single-shot", "manual"].includes(saved.focusStrategy ?? "")) preferredFocusStrategy = saved.focusStrategy!;
+    if (["continuous", "single-shot", "manual"].includes(saved.manualFocusMode ?? "")) manualFocusMode = saved.manualFocusMode!;
     if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
     if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
@@ -308,12 +305,11 @@ function saveCameraSettings(): void {
     localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
       resolution: cameraResolution.value,
       automaticOptics,
-      automaticFocusAxis,
       automaticExposureAxis,
       automaticIsoAxis,
       exposureTime: preferredExposureTime,
       workers: decodeWorkers.value,
-      focusStrategy: preferredFocusStrategy,
+      manualFocusMode,
       focusDistance: preferredFocusDistance,
       iso: preferredIso,
     }));
@@ -342,18 +338,18 @@ showRequestedCameraSettings();
 const focusController = new FocusController(
   applyCameraConstraint,
   renderFocusDiagnostics,
-  preferredFocusStrategy,
+  automaticOptics ? "auto" : manualFocusMode,
   preferredFocusDistance,
 );
 const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track: MediaStreamTrack): void {
   focusController.attach(track);
   if (!automaticOptics) {
-    focusController.setStrategy(automaticFocusAxis ? "continuous" : "manual");
+    focusController.setStrategy(manualFocusMode);
     void applyExposureSetting(track);
   }
 }
-focusStrategy.value = preferredFocusStrategy;
+focusMode.value = manualFocusMode;
 
 // Keep developer controls out of the normal settings UI. Show, hide, then show
 // Settings within half a second to reveal them. A slower close/reopen hides them.
@@ -486,6 +482,7 @@ const usefulFrameTimes: number[] = [];
 // answer "how much, in total, did this run do".
 let totalCaptures = 0;
 let totalDecodes = 0;
+let totalUsefulSymbols = 0;
 let fullScans = 0;
 let cheapFullScans = 0;
 let thoroughFullScans = 0;
@@ -494,6 +491,32 @@ let globalReacquisitions = 0;
 let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
 let cropsSubmitted = 0;
+
+async function measureReceivePerformance(durationMs: number): Promise<ReceivePerformance> {
+  const started = receiverNow();
+  const captures = totalCaptures;
+  const attempts = completedJobs;
+  const decodes = totalDecodes;
+  const useful = totalUsefulSymbols;
+  await new Promise((resolve) => setTimeout(resolve, durationMs));
+  const seconds = Math.max(0.001, (receiverNow() - started) / 1000);
+  return {
+    usefulSymbolsPerSecond: (totalUsefulSymbols - useful) / seconds,
+    decodeSuccessRate: (completedJobs - attempts) > 0 ? (totalDecodes - decodes) / (completedJobs - attempts) : 0,
+    captureFps: (totalCaptures - captures) / seconds,
+  };
+}
+
+opticsOptimize.addEventListener("click", () => {
+  const state = focusController.diagnostics().optimizeState;
+  if (state === "baseline" || state === "focus" || state === "exposure") {
+    focusController.cancelOptimize("Optimize cancelled");
+    opticsOptimize.textContent = "Optimize";
+    return;
+  }
+  opticsOptimize.textContent = "Cancel";
+  void focusController.optimize(measureReceivePerformance).finally(() => { opticsOptimize.textContent = "Optimize"; });
+});
 let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
 // the fork's real hit rate; zero attempts means the quad/dim plumbing broke
@@ -1022,12 +1045,15 @@ function showExposureTime(value: number): void {
 }
 function syncExposureControls(): void {
   cameraExposureAuto.checked = automaticOptics;
-  focusAxisAuto.checked = automaticFocusAxis;
   exposureAxisAuto.checked = automaticExposureAxis;
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
+  opticsAutoActions.hidden = !automaticOptics || cameraExposureControl.hidden;
+  focusMode.value = manualFocusMode;
+  const manualFocus = manualFocusMode === "manual";
+  focusDistance.hidden = !manualFocus;
+  focusDistanceValue.hidden = !manualFocus;
   for (const [automatic, toggle, slider, output, reset, name] of [
-    [automaticFocusAxis, focusAxisToggle, focusDistance, focusDistanceValue, focusAxisReset, focusAxisName],
     [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName],
     [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName],
   ] as const) {
@@ -1321,12 +1347,10 @@ function renderFocusDiagnostics(): void {
   const diagnostic = focusController?.diagnostics();
   if (!diagnostic) return;
   focusDev.hidden = diagnostic.state === "UNAVAILABLE";
-  focusStrategy.value = preferredFocusStrategy;
-  for (const option of focusStrategy.options) {
-    option.disabled = option.value !== "auto" && !diagnostic.availableModes.includes(option.value);
-  }
+  focusMode.value = manualFocusMode;
+  for (const option of focusMode.options) option.disabled = !diagnostic.availableModes.includes(option.value);
   const range = diagnostic.distanceRange;
-  focusDistanceControl.hidden = !range || !diagnostic.availableModes.includes("manual");
+  focusDistanceControl.hidden = automaticOptics || (!range && diagnostic.availableModes.length === 0);
   if (range) {
     focusDistance.min = String(range.min);
     focusDistance.max = String(range.max);
@@ -1339,6 +1363,9 @@ function renderFocusDiagnostics(): void {
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
   const optical = diagnostic.optical;
+  const optimizing = diagnostic.optimizeState === "baseline" || diagnostic.optimizeState === "focus" || diagnostic.optimizeState === "exposure";
+  opticsOptimize.textContent = optimizing ? "Cancel" : "Optimize";
+  focusRefocus.disabled = optimizing;
   const mutation = lastCameraMutation;
   const cameraLine = (value?: CameraPatch) => value
     ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${value.exposureTime ?? "—"}ms · ISO ${value.iso ?? "—"}`
@@ -1348,9 +1375,12 @@ function renderFocusDiagnostics(): void {
     `Focus    committed ${diagnostic.committedFocusDistance ?? "—"} · actual ${diagnostic.actualDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
     `Exposure committed ${diagnostic.committedExposureTime ?? "—"}ms · actual ${diagnostic.actualExposure ?? "—"}ms · candidate ${diagnostic.candidateExposureTime ?? "—"}`,
     `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
-    optical ? `Health   focus ${optical.focusScore.toFixed(2)} · exposure ${optical.exposureScore.toFixed(2)} · levels ${optical.blackLevel.toFixed(0)}/${optical.whiteLevel.toFixed(0)} · noise ${optical.noise.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Health   waiting for static QR",
+    optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  ${diagnostic.decodedNow}/${diagnostic.totalTiles} now · ${diagnostic.decodedRecently}/${diagnostic.totalTiles} recent`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount} · reacquire ${diagnostic.reacquireCount}`,
+    `Optimize ${diagnostic.optimizeState}${diagnostic.optimizeCandidatePerformance ? ` · candidate ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.decodeSuccessRate * 100).toFixed(0)}% decode · ${diagnostic.optimizeCandidatePerformance.captureFps.toFixed(1)} fps` : ""}`,
+    diagnostic.optimizeBestPerformance ? `Best     ${diagnostic.optimizeBestPerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${diagnostic.committedExposureTime ?? "—"}ms · ISO ${diagnostic.committedIso ?? "—"}` : "",
+    `Analyzer ${(opticalAnalyzeCount / Math.max(0.001, (performance.now() - opticalTimingStartedAt) / 1000)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${mutation?.kind ?? "—"}`,
     mutation ? `  before    ${cameraLine(mutation.before)}\n  requested ${cameraLine(mutation.requested)}\n  after     ${cameraLine(mutation.after)}` : "",
@@ -1358,22 +1388,17 @@ function renderFocusDiagnostics(): void {
   ].filter(Boolean).join("\n");
 }
 
-focusStrategy.addEventListener("change", () => {
-  preferredFocusStrategy = focusStrategy.value as FocusStrategy;
+focusMode.addEventListener("change", () => {
+  manualFocusMode = focusMode.value as Exclude<FocusStrategy, "auto">;
+  syncExposureControls();
   saveCameraSettings();
-  focusController.setStrategy(preferredFocusStrategy);
+  if (!automaticOptics) focusController.setStrategy(manualFocusMode);
 });
-focusRefocus.addEventListener("click", () => focusController.refocus());
+focusRefocus.addEventListener("click", () => focusController.refocus("Reacquire requested"));
 focusDistance.addEventListener("input", () => {
-  const switchToManual = preferredFocusStrategy !== "manual";
   preferredFocusDistance = Number(focusDistance.value);
-  preferredFocusStrategy = "manual";
-  automaticFocusAxis = false;
-  focusStrategy.value = "manual";
-  focusAxisAuto.checked = false;
   focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   saveCameraSettings();
-  if (switchToManual) focusController.setStrategy("manual");
   focusController.setManualDistance(preferredFocusDistance);
 });
 for (const input of focusTuningInputs) input.addEventListener("change", () => {
@@ -1432,16 +1457,9 @@ cameraExposureAuto.addEventListener("change", () => {
   syncExposureControls();
   saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
-  if (!automaticOptics) focusController.setStrategy(automaticFocusAxis ? "continuous" : "manual");
+  if (!automaticOptics) focusController.setStrategy(manualFocusMode);
   else focusController.setStrategy("auto");
   if (track) void applyExposureSetting(track);
-});
-focusAxisAuto.addEventListener("change", () => {
-  automaticFocusAxis = focusAxisAuto.checked;
-  preferredFocusStrategy = automaticFocusAxis ? "continuous" : "manual";
-  syncExposureControls();
-  saveCameraSettings();
-  focusController.setStrategy(preferredFocusStrategy);
 });
 exposureAxisAuto.addEventListener("change", () => {
   automaticExposureAxis = exposureAxisAuto.checked;
@@ -1456,13 +1474,6 @@ isoAxisAuto.addEventListener("change", () => {
   saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
   if (track) void applyExposureSetting(track);
-});
-focusAxisReset.addEventListener("click", () => {
-  automaticFocusAxis = true;
-  preferredFocusStrategy = "continuous";
-  syncExposureControls();
-  saveCameraSettings();
-  focusController.setStrategy("continuous");
 });
 exposureAxisReset.addEventListener("click", () => {
   automaticExposureAxis = true;
@@ -1621,6 +1632,7 @@ function stopReceiver(): void {
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
+  totalUsefulSymbols = 0;
   fullScans = 0;
   cheapFullScans = 0;
   thoroughFullScans = 0;
@@ -1633,6 +1645,11 @@ function stopReceiver(): void {
   trackedAttempts = 0;
   cameraStartedTs = 0;
   lastOpticalSampleAt = -Infinity;
+  lastOpticalSourceSequence = -1;
+  opticalAnalyzeCount = 0;
+  opticalAnalyzeTotalMs = 0;
+  opticalAnalyzeMaxMs = 0;
+  opticalTimingStartedAt = performance.now();
   zeroRegionMs = 0;
   degradedMs = 0;
   timeline.length = 0;
@@ -2251,14 +2268,21 @@ function submitReceiverJob(
 
 const opticalTargets: QrOpticalTarget[] = [];
 let lastOpticalSampleAt = -Infinity;
+let lastOpticalSourceSequence = -1;
+let opticalAnalyzeCount = 0;
+let opticalAnalyzeTotalMs = 0;
+let opticalAnalyzeMaxMs = 0;
+let opticalTimingStartedAt = performance.now();
 function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, oy = 0): void {
-  if (replayRunning) return;
+  if (replayRunning || source.sequence === lastOpticalSourceSequence) return;
   const now = receiverNow();
-  if (now - lastOpticalSampleAt < focusController.opticalIntervalMs) return;
-  lastOpticalSampleAt = now;
+  const interval = focusController.opticalIntervalMs;
+  if (!Number.isFinite(interval) || now - lastOpticalSampleAt < interval) return;
   opticalTargets.length = 0;
+  let eligibleTargetExists = false;
   for (const region of regions) {
     if (!region.quad || !region.dim || region.visibleFraction < 0.85) continue;
+    eligibleTargetExists = true;
     const q = region.quad;
     const inside = (point: { x: number; y: number }) =>
       point.x >= ox + 2 && point.y >= oy + 2 && point.x < ox + image.width - 2 && point.y < oy + image.height - 2;
@@ -2267,10 +2291,21 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
     }
   }
   if (!opticalTargets.length) {
-    focusController.noteTargetAbsent(now);
+    // A crop not containing the known static target says nothing about target
+    // loss. Another job from this source frame may cheaply provide it.
+    if (!eligibleTargetExists) focusController.noteTargetAbsent(now);
     return;
   }
+  // Claim the source sequence immediately before the sole analyzer call. A
+  // later full/shared/individual crop from this camera frame cannot repeat it.
+  lastOpticalSourceSequence = source.sequence;
+  lastOpticalSampleAt = now;
+  const analyzeStarted = performance.now();
   const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);
+  const analyzeMs = performance.now() - analyzeStarted;
+  opticalAnalyzeCount++;
+  opticalAnalyzeTotalMs += analyzeMs;
+  opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs);
   if (!metrics || (metrics.confidence < 0.55 && !focusController.expectsProbeFrame)) {
     focusController.noteTargetAbsent(now);
     return;
@@ -2279,7 +2314,8 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
   if (!geometry) return;
   const decodedNow = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < 140).length;
   const decodedRecently = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < CAMERA_TUNING.recentTileWindowMs).length;
-  focusController.observe(source.sequence, geometry, metrics, decodedNow, decodedRecently, Math.max(1, expectedRegions), now);
+  const captureFps = captureTimes.reduce((count, at) => count + Number(at > now - STATS_WINDOW_MS), 0);
+  focusController.observe(source.sequence, geometry, metrics, decodedNow, decodedRecently, Math.max(1, expectedRegions), now, captureFps);
 }
 
 function captureFrame(source: ReceiverFrame) {
@@ -2695,6 +2731,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     lastDistinctArrivalAt = receivedAt;
   }
   if (decoder.usefulSymbols > usefulBefore) {
+    totalUsefulSymbols += decoder.usefulSymbols - usefulBefore;
     usefulFrameTimes.push(receivedAt);
   }
   updateProgressEstimate();

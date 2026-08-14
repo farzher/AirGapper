@@ -9,7 +9,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'" />
   <link rel="canonical" href="https://farzher.github.io/AirGapper/" />
   <link rel="apple-touch-icon" href="./assets/icon-192-C1ByXx_Q.png" />
-  <script type="module" crossorigin src="./assets/app-D4AAVEyC.js"></script>
+  <script type="module" crossorigin src="./assets/app-AAOJ34TQ.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/app-CtUTLl2T.css">
 <link rel="manifest" href="./manifest.webmanifest"></head>
 <body>
@@ -20,7 +20,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.6</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.7</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -94,8 +94,9 @@
               <div class="row">
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
+            <div id="optics-auto-actions" hidden><button class="secondary-button" id="focus-refocus" type="button">Reacquire</button><button class="secondary-button" id="optics-optimize" type="button">Optimize</button></div>
             <div id="camera-optics-manual" class="optics-manual" hidden>
-              <div id="focus-distance-control" class="axis-control" hidden><span class="axis-heading"><span id="focus-axis-name">Focus</span><button id="focus-axis-reset" type="button" hidden>Focus</button><output id="focus-distance-value" hidden></output></span><label id="focus-axis-toggle" class="setting-toggle" aria-label="Automatic focus"><input id="focus-axis-auto" type="checkbox" checked /></label><input id="focus-distance" type="range" min="0" max="0" step="1" value="0" aria-label="Focus distance" hidden /></div>
+              <div id="focus-distance-control" class="axis-control"><span class="axis-heading"><span>Focus</span><select id="focus-mode"><option value="continuous">Continuous</option><option value="single-shot">Single</option><option value="manual">Manual</option></select><output id="focus-distance-value" hidden></output></span><input id="focus-distance" type="range" min="0" max="0" step="1" value="0" aria-label="Focus distance" hidden /></div>
               <div id="camera-exposure-manual" class="axis-control"><span class="axis-heading"><span id="exposure-axis-name">Exposure</span><button id="exposure-axis-reset" type="button" hidden>Exposure</button><output id="camera-exposure-value" hidden></output></span><label id="exposure-axis-toggle" class="setting-toggle" aria-label="Automatic exposure"><input id="exposure-axis-auto" type="checkbox" checked /></label><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" hidden /></div>
               <div id="camera-iso-control" class="axis-control" hidden><span class="axis-heading"><span id="iso-axis-name">ISO</span><button id="iso-axis-reset" type="button" hidden>ISO</button><output id="camera-iso-value" hidden></output></span><label id="iso-axis-toggle" class="setting-toggle" aria-label="Automatic ISO"><input id="iso-axis-auto" type="checkbox" checked /></label><input id="camera-iso" type="range" min="0" max="0" step="1" value="0" aria-label="ISO" hidden /></div>
             </div>
@@ -103,8 +104,6 @@
               <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
               <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
               <div class="focus-dev" id="focus-dev" hidden>
-                <label><span>Focus strategy</span><select id="focus-strategy"><option value="auto">Auto</option><option value="continuous">Continuous</option><option value="single-shot">Single-shot</option><option value="manual">Manual</option></select></label>
-                <button class="secondary-button" id="focus-refocus" type="button">Recalibrate</button>
                 <details class="focus-tuning"><summary>Tuning</summary><div><label><span>Stable ms</span><input type="number" min="100" step="50" data-camera-tuning="geometryStabilityMs" /></label><label><span>Scale change</span><input type="number" min="0.05" max="1" step="0.01" data-camera-tuning="scaleChangeRatio" /></label><label><span>Movement</span><input type="number" min="0.03" max="1" step="0.01" data-camera-tuning="displacementRatio" /></label></div></details>
                 <pre id="focus-diagnostics"></pre>
               </div>

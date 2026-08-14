@@ -16,6 +16,7 @@ export interface QrOpticalMetrics {
   noise: number;
   clipping: number;
   banding: number;
+  temporalContamination: number;
   tiles: number;
   sampledModules: number;
 }
@@ -40,6 +41,7 @@ export class StaticQrOpticsAnalyzer {
   private readonly tileNoise = new Float32Array(MAX_TILES);
   private readonly tileClipping = new Float32Array(MAX_TILES);
   private readonly tileBanding = new Float32Array(MAX_TILES);
+  private readonly tileTemporal = new Float32Array(MAX_TILES);
   private readonly transform = new Float64Array(8);
   private blackCount = 0;
   private whiteCount = 0;
@@ -72,6 +74,7 @@ export class StaticQrOpticsAnalyzer {
       this.tileNoise[tileCount] = metric.noise;
       this.tileClipping[tileCount] = metric.clipping;
       this.tileBanding[tileCount] = metric.banding;
+      this.tileTemporal[tileCount] = metric.temporalContamination;
       tileCount++;
     }
     if (!tileCount) return undefined;
@@ -98,6 +101,7 @@ export class StaticQrOpticsAnalyzer {
       noise: this.median(this.tileNoise, tileCount),
       clipping: this.median(this.tileClipping, tileCount),
       banding,
+      temporalContamination: this.median(this.tileTemporal, tileCount),
       tiles: tileCount,
       sampledModules: this.blackCount + this.whiteCount,
     };
@@ -145,8 +149,11 @@ export class StaticQrOpticsAnalyzer {
       this.edge(image, 6, p, 6, p + 1, true, black, white);
     }
     const transition = this.edgeCount ? this.median(this.edges, this.edgeCount) : 1;
-    const anchorNoise = Math.sqrt(this.noiseSquared / Math.max(1, this.noiseCount));
-    const noise = Math.max(anchorNoise, this.contentNoise(image, modules, black, white));
+    // Only known function modules contribute to camera quality. Payload
+    // modules change between sender frames and can be gray under rolling
+    // shutter/display scanout; report that separately rather than blaming AE.
+    const noise = Math.sqrt(this.noiseSquared / Math.max(1, this.noiseCount));
+    const temporalContamination = this.contentNoise(image, modules, black, white);
     let clipped = 0;
     for (let i = 0; i < this.blackCount; i++) if (this.black[i]! <= 3) clipped++;
     for (let i = 0; i < this.whiteCount; i++) if (this.white[i]! >= 252) clipped++;
@@ -165,13 +172,15 @@ export class StaticQrOpticsAnalyzer {
     const contrastGate = clamp01((separation - 18) / 32);
     const focusScore = clamp01((0.76 - transition) / 0.62) * contrastGate;
     const signal = clamp01((separation - 35) / 95);
-    const brightnessPenalty = clamp01(Math.max(0, white - 242) / 35 + Math.max(0, black - 48) / 75);
+    // This compatibility summary is deliberately binary-signal based. Camera
+    // decisions use the fields above directly; photographic brightness and
+    // changing payload grayness are not optimization targets.
     const exposureScore = signal * clamp01((confidence - 0.55) / 0.4) *
       clamp01(1 - noise / Math.max(18, separation * 0.32)) *
-      (1 - clipping * 0.35) * (1 - banding * 0.3) * (1 - brightnessPenalty * 0.45);
+      (1 - clipping * 0.25) * (1 - banding * 0.3);
     return {
       confidence, focusScore, exposureScore, transitionWidthModules: transition,
-      blackLevel: black, whiteLevel: white, separation, noise, clipping, banding,
+      blackLevel: black, whiteLevel: white, separation, noise, clipping, banding, temporalContamination,
       tiles: 1, sampledModules: this.blackCount + this.whiteCount,
     };
   }
@@ -299,7 +308,9 @@ export class StaticQrOpticsAnalyzer {
     const version = (modules - 17) / 4;
     if (version <= 1) return [];
     const count = Math.floor(version / 7) + 2;
-    const step = version === 32 ? 26 : Math.ceil((version * 4 + count * 2 + 1) / (count * 2 - 2)) * 2;
+    // ISO/IEC 18004 placement algorithm. The division is intentionally
+    // integer-floor before doubling; ceil produces V7 [6,20,38].
+    const step = version === 32 ? 26 : Math.floor((version * 4 + count * 2 + 1) / (count * 2 - 2)) * 2;
     const result = new Array<number>(count);
     result[0] = 6;
     for (let i = 1; i < count; i++) result[i] = modules - 7 - (count - 1 - i) * step;

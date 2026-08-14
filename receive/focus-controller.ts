@@ -4,7 +4,8 @@ export type FocusStrategy = "auto" | "continuous" | "single-shot" | "manual";
 export type CalibrationMode = "auto" | "off" | "force";
 export type FocusState =
   | "UNAVAILABLE" | "SEEKING" | "STABILIZING" | "BASELINE"
-  | "FOCUS_REFINE" | "EXPOSURE_REFINE" | "LOCKED" | "TARGET_LOST_GRACE" | "OVERRIDE";
+  | "FOCUS_REFINE" | "EXPOSURE_REFINE" | "LOCKED" | "TARGET_LOST_GRACE"
+  | "FOCUS_RECOVERY" | "EXPOSURE_RECOVERY" | "OPTIMIZE_FOCUS" | "OPTIMIZE_EXPOSURE" | "OVERRIDE";
 
 type NumericRange = { min: number; max: number; step?: number };
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -40,14 +41,20 @@ export const CAMERA_TUNING = {
   focusExcellent: 0.78,
   meaningfulFocusImprovement: 0.035,
   maxFocusProbes: 5,
-  maxFocusCalibrationMs: 1300,
+  maxFocusCalibrationMs: 1800,
   maxFocusDistanceRatio: 0.12,
+  physicalSettleMs: 150,
+  probeSamples: 3,
+  probeDiscardFrames: 1,
   exposureExcellent: 0.7,
   exposureSafetyMargin: 0.06,
-  maxExposureProbes: 14,
-  maxExposureCalibrationMs: 4200,
-  freshFramesAfterMutation: 2,
-  lockedOpticalIntervalMs: 180,
+  maxExposureProbes: 2,
+  maxExposureCalibrationMs: 1500,
+  freshFramesAfterMutation: 3,
+  seekingOpticalIntervalMs: 110,
+  lockedOpticalIntervalMs: 320,
+  targetLostGraceMs: 1600,
+  recoverySamples: 3,
   recentTileWindowMs: 1800,
 };
 
@@ -68,6 +75,7 @@ interface OpticalObservation {
   decodedNow: number;
   decodedRecently: number;
   totalTiles: number;
+  captureFps: number;
 }
 
 interface CameraSnapshot {
@@ -119,10 +127,18 @@ export interface FocusDiagnostics {
   fullResetCount: number;
   focusRefinementCount: number;
   exposureRefinementCount: number;
+  optimizeState: "idle" | "baseline" | "focus" | "exposure" | "cancelled" | "complete";
+  optimizeCandidatePerformance?: ReceivePerformance;
+  optimizeBestPerformance?: ReceivePerformance;
   transitions: string[];
   lastReason: string;
 }
 
+export interface ReceivePerformance {
+  usefulSymbolsPerSecond: number;
+  decodeSuccessRate: number;
+  captureFps: number;
+}
 type ApplyCamera = (track: MediaStreamTrack, patch: CameraPatch) => Promise<boolean>;
 
 export class FocusController {
@@ -160,9 +176,20 @@ export class FocusController {
   private fullResetCount = 0;
   private focusRefinementCount = 0;
   private exposureRefinementCount = 0;
+  private lockedFocusFailures = 0;
+  private lockedExposureFailures = 0;
+  private recoveryAxis?: "focus" | "exposure";
+  private optimizeState: FocusDiagnostics["optimizeState"] = "idle";
+  private optimizeCandidatePerformance?: ReceivePerformance;
+  private optimizeBestPerformance?: ReceivePerformance;
   private readonly transitions: string[] = [];
   private poiAimed = false;
-  private waiter?: { generation: number; afterId: number; remaining: number; resolve: (value?: OpticalObservation) => void };
+  private afRetryCount = 0;
+  private lastFocusSettled = false;
+  private waiter?: {
+    generation: number; afterId: number; notBefore: number; discard: number;
+    samples: OpticalObservation[]; distances: number[]; resolve: (value?: OpticalObservation) => void;
+  };
 
   constructor(
     private readonly apply: ApplyCamera,
@@ -178,8 +205,17 @@ export class FocusController {
 
   get capabilities(): CameraCapabilities { return this.caps; }
   get selectedStrategy(): FocusStrategy { return this.strategy; }
-  get expectsProbeFrame(): boolean { return this.state === "BASELINE" || this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE"; }
-  get opticalIntervalMs(): number { return this.state === "LOCKED" ? CAMERA_TUNING.lockedOpticalIntervalMs : 0; }
+  get expectsProbeFrame(): boolean {
+    return this.state === "BASELINE" || this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE" ||
+      this.state === "FOCUS_RECOVERY" || this.state === "EXPOSURE_RECOVERY" ||
+      this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE";
+  }
+  get opticalIntervalMs(): number {
+    if (this.strategy !== "auto" || this.calibrationMode === "off" || this.state === "OVERRIDE") return Infinity;
+    if (this.expectsProbeFrame) return 0;
+    return this.state === "LOCKED" || this.state === "TARGET_LOST_GRACE"
+      ? CAMERA_TUNING.lockedOpticalIntervalMs : CAMERA_TUNING.seekingOpticalIntervalMs;
+  }
 
   attach(track: MediaStreamTrack): void {
     this.cancel("camera track changed");
@@ -191,13 +227,18 @@ export class FocusController {
     this.stableSince = 0;
     this.targetMissingSince = 0;
     this.poiAimed = false;
+    this.afRetryCount = 0;
     this.initialLockMs = undefined;
+    this.optimizeState = "idle";
+    this.optimizeCandidatePerformance = undefined;
+    this.optimizeBestPerformance = undefined;
     this.knownGood = undefined;
     this.committedFocusDistance = undefined;
     this.committedExposureTime = undefined;
     this.committedIso = undefined;
     this.transition(this.strategy === "auto" ? "SEEKING" : "OVERRIDE", "camera track changed");
-    void this.enterHardwareAuto("camera opened", this.generation, true);
+    if (this.strategy === "auto") void this.enterHardwareAuto("camera opened", this.generation, true);
+    else void this.applyDeveloperFocus();
   }
 
   detach(): void {
@@ -208,11 +249,16 @@ export class FocusController {
   }
 
   setStrategy(strategy: FocusStrategy): void {
+    const optimizing = this.optimizeState === "baseline" || this.optimizeState === "focus" || this.optimizeState === "exposure";
     this.cancel("developer focus strategy changed");
     this.strategy = strategy;
+    if (optimizing) this.optimizeState = "cancelled";
     this.transition(strategy === "auto" ? "SEEKING" : "OVERRIDE", "focus ownership changed");
-    if (strategy === "auto") void this.enterHardwareAuto("automatic focus selected");
-    else void this.applyDeveloperFocus();
+    const applySelected = () => strategy === "auto"
+      ? this.enterHardwareAuto("automatic focus selected")
+      : this.applyDeveloperFocus();
+    if (optimizing) void this.rollbackCommitted().then(applySelected);
+    else void applySelected();
   }
 
   setCalibrationMode(mode: CalibrationMode): void {
@@ -240,6 +286,104 @@ export class FocusController {
     }
   }
 
+  cancelOptimize(reason = "optimization cancelled"): void {
+    if (this.optimizeState !== "baseline" && this.optimizeState !== "focus" && this.optimizeState !== "exposure") return;
+    this.cancel(reason);
+    this.optimizeState = "cancelled";
+    void this.rollbackCommitted().then(() => this.transition("LOCKED", `${reason}; best settings restored`));
+  }
+
+  async optimize(measure: (durationMs: number) => Promise<ReceivePerformance>): Promise<void> {
+    if (this.strategy !== "auto" || this.state !== "LOCKED" || !this.latest || !this.track) return;
+    const generation = ++this.generation;
+    const baselineObservation = this.latest;
+    const settings = this.settings();
+    this.committedFocusDistance = settings.focusDistance;
+    this.committedExposureTime = settings.exposureTime;
+    this.committedIso = settings.iso;
+    const windowMs = baselineObservation.totalTiles > 1 ? 500 : 850;
+    this.optimizeState = "baseline";
+    this.transition("OPTIMIZE_FOCUS", "measuring receive-throughput baseline");
+    let bestPerformance = await measure(windowMs);
+    this.optimizeBestPerformance = bestPerformance;
+    this.optimizeCandidatePerformance = bestPerformance;
+    if (!this.current(generation)) return;
+    let bestObservation = this.latest ?? baselineObservation;
+    const better = (candidate: ReceivePerformance, best: ReceivePerformance) =>
+      candidate.captureFps >= best.captureFps * 0.88 &&
+      (candidate.usefulSymbolsPerSecond > best.usefulSymbolsPerSecond * 1.03 ||
+        (candidate.usefulSymbolsPerSecond >= best.usefulSymbolsPerSecond * 0.98 && candidate.decodeSuccessRate > best.decodeSuccessRate + 0.04));
+    const safe = (observation: OpticalObservation) => this.exposureAcceptable(observation.metrics, 0.45) && observation.metrics.focusScore >= 0.35;
+
+    const focusRange = this.caps.focusDistance;
+    if (this.manualFocus() && focusRange && settings.focusDistance !== undefined) {
+      this.optimizeState = "focus";
+      const delta = Math.max((focusRange.step ?? 0) * 2, (focusRange.max - focusRange.min) / 40);
+      for (const requested of [settings.focusDistance - delta, settings.focusDistance + delta]) {
+        if (!this.current(generation)) return;
+        const candidate = this.quantize(requested, focusRange);
+        if (candidate === this.committedFocusDistance) continue;
+        this.candidateFocusDistance = candidate;
+        if (!(await this.applyProbe(generation, { focusMode: "manual", focusDistance: candidate }))) break;
+        const optical = await this.fresh(generation, this.latest?.id ?? baselineObservation.id);
+        if (!optical) { this.cancelOptimize("static target unavailable"); return; }
+        if (safe(optical)) {
+          const performance = await measure(windowMs);
+          this.optimizeCandidatePerformance = performance;
+          if (!this.current(generation)) return;
+          if (better(performance, bestPerformance)) {
+            bestPerformance = performance;
+            this.optimizeBestPerformance = performance;
+            bestObservation = optical;
+            this.committedFocusDistance = this.settings().focusDistance ?? candidate;
+          }
+        }
+        await this.rollbackCommitted("focus");
+      }
+    }
+    if (!this.current(generation)) return;
+    await this.rollbackCommitted("focus");
+
+    const exposureRange = this.caps.exposureTime;
+    if (this.manualExposure() && exposureRange && this.committedExposureTime !== undefined) {
+      this.optimizeState = "exposure";
+      this.transition("OPTIMIZE_EXPOSURE", "focus fixed; searching shorter exposure by receive throughput");
+      for (const factor of [Math.SQRT2, 2]) {
+        const candidate = this.quantize(this.committedExposureTime / factor, exposureRange);
+        if (candidate >= this.committedExposureTime) continue;
+        this.candidateExposureTime = candidate;
+        let iso = this.committedIso;
+        if (!(await this.applyProbe(generation, { exposureMode: "manual", exposureTime: candidate, ...(iso !== undefined ? { iso } : {}) }))) break;
+        let optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
+        if (!optical) { this.cancelOptimize("static target unavailable"); return; }
+        if (!safe(optical) && this.caps.iso && iso !== undefined) {
+          iso = this.quantize(Math.min(this.caps.iso.max, iso * 1.5), this.caps.iso);
+          await this.applyProbe(generation, { exposureMode: "manual", exposureTime: candidate, iso });
+          optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
+          if (!optical) { this.cancelOptimize("static target unavailable"); return; }
+        }
+        if (safe(optical)) {
+          const performance = await measure(windowMs);
+          this.optimizeCandidatePerformance = performance;
+          if (!this.current(generation)) return;
+          if (better(performance, bestPerformance)) {
+            bestPerformance = performance;
+            this.optimizeBestPerformance = performance;
+            bestObservation = optical;
+            this.committedExposureTime = this.settings().exposureTime ?? candidate;
+            this.committedIso = this.settings().iso ?? iso;
+          }
+        }
+        await this.rollbackCommitted("exposure");
+      }
+    }
+    if (!this.current(generation)) return;
+    await this.rollbackCommitted();
+    this.optimizeState = "complete";
+    this.lock(bestObservation);
+    this.lastReason = "one-shot throughput optimization complete; best settings committed";
+  }
+
   refocus(reason = "developer forced calibration"): void {
     this.cancel(reason);
     if (this.strategy !== "auto") {
@@ -247,6 +391,7 @@ export class FocusController {
       return;
     }
     this.reacquireCount++;
+    this.optimizeState = "idle";
     this.transition("SEEKING", reason);
     void this.enterHardwareAuto(reason, this.generation, true).then(() => {
       if (this.latest) this.beginCalibration();
@@ -261,15 +406,21 @@ export class FocusController {
     decodedRecently = 0,
     totalTiles = 1,
     now = performance.now(),
+    captureFps = 0,
   ): void {
-    const observation = { id, at: now, geometry, metrics, decodedNow, decodedRecently, totalTiles };
+    const observation = { id, at: now, geometry, metrics, decodedNow, decodedRecently, totalTiles, captureFps };
     this.latest = observation;
     this.targetMissingSince = 0;
     this.resolveWaiter(observation);
-    if ((this.state === "BASELINE" || this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE") &&
+    if ((this.state === "BASELINE" || this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE" ||
+        this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE") &&
         this.geometryChanged(geometry, this.stableGeometry)) {
-      this.cancel("target moved during calibration");
-      this.transition("STABILIZING", "target moved; probe cancelled and committed optics retained");
+      const optimizing = this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE";
+      this.cancel(optimizing ? "target moved during optimization" : "target moved during calibration");
+      if (optimizing) this.optimizeState = "cancelled";
+      this.transition(optimizing ? "LOCKED" : "STABILIZING", optimizing
+        ? "target moved; optimization cancelled and best optics restored"
+        : "target moved; probe cancelled and committed optics retained");
       this.stableGeometry = geometry;
       this.stableSince = now;
       void this.rollbackCommitted();
@@ -297,13 +448,32 @@ export class FocusController {
       return;
     }
 
-    if (this.state === "LOCKED" || this.state === "TARGET_LOST_GRACE") {
-      // A lock is session-long. QR tracking, visibility, and geometry naturally
-      // fluctuate during a transfer and are not permission to move the lens or
-      // restore AE. Recalibration is explicit or follows a new camera track.
-      this.transition("LOCKED", decodedNow > 0
-        ? "payload flowing; committed optics held"
-        : "payload/geometry fluctuation; committed optics held");
+    if (this.state === "TARGET_LOST_GRACE") {
+      this.transition("LOCKED", "static target returned during loss grace; committed optics restored");
+      this.targetMissingSince = 0;
+      return;
+    }
+    if (this.state === "LOCKED") {
+      const reference = this.knownGood;
+      const moved = this.geometryChanged(geometry, reference?.geometry);
+      const focusBad = Boolean(reference && moved && metrics.confidence >= 0.82 &&
+        metrics.focusScore < Math.max(0.35, reference.optical.focusScore - 0.14));
+      const exposureBad = Boolean(reference && !focusBad && metrics.focusScore >= 0.55 &&
+        !this.exposureAcceptable(metrics, Math.max(0.42, reference.optical.exposureScore - 0.2)));
+      this.lockedFocusFailures = focusBad ? this.lockedFocusFailures + 1 : 0;
+      this.lockedExposureFailures = exposureBad ? this.lockedExposureFailures + 1 : 0;
+      if (this.lockedFocusFailures >= CAMERA_TUNING.recoverySamples) {
+        this.lockedFocusFailures = 0;
+        void this.beginFocusRecovery(observation);
+      } else if (this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
+        this.lockedExposureFailures = 0;
+        void this.beginExposureRecovery(observation);
+      } else {
+        // Payload success is intentionally absent from this decision. Healthy
+        // static structures mean phase/rolling-shutter failures are temporal.
+        this.lastReason = decodedNow > 0 ? "payload flowing; committed optics held" : "static optics healthy; payload failure ignored";
+      }
+      this.changed();
       return;
     }
 
@@ -324,13 +494,21 @@ export class FocusController {
   noteTargetAbsent(now = performance.now()): void {
     if (this.strategy !== "auto" || this.state === "UNAVAILABLE" || this.state === "OVERRIDE") return;
     if (!this.targetMissingSince) this.targetMissingSince = now;
-    if (this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE" || this.state === "BASELINE") {
+    if (this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE") {
+      this.cancelOptimize("target disappeared during optimization");
+    } else if (this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE" || this.state === "BASELINE") {
       this.cancel("static QR target disappeared during calibration");
       this.transition("STABILIZING", "target absent during probe; committed optics restored");
       this.stableGeometry = undefined;
       void this.rollbackCommitted();
     } else if (this.state === "LOCKED") {
-      this.lastReason = "target absent; committed camera lock retained";
+      this.transition("TARGET_LOST_GRACE", "static target missing; waiting through grace");
+    } else if (this.state === "TARGET_LOST_GRACE" && now - this.targetMissingSince >= CAMERA_TUNING.targetLostGraceMs) {
+      this.cancel("static target absent beyond grace");
+      this.stableGeometry = undefined;
+      this.stableSince = 0;
+      this.transition("SEEKING", "static target absent beyond grace; hardware AF + AE reacquired");
+      void this.enterHardwareAuto("sustained target loss", this.generation, true);
     }
     this.changed();
   }
@@ -384,6 +562,9 @@ export class FocusController {
       fullResetCount: this.fullResetCount,
       focusRefinementCount: this.focusRefinementCount,
       exposureRefinementCount: this.exposureRefinementCount,
+      optimizeState: this.optimizeState,
+      optimizeCandidatePerformance: this.optimizeCandidatePerformance,
+      optimizeBestPerformance: this.optimizeBestPerformance,
       transitions: [...this.transitions],
       lastReason: this.lastReason,
     };
@@ -399,17 +580,33 @@ export class FocusController {
     const track = this.track;
     const initial = this.latest;
     if (!track || !initial || !this.current(generation)) return;
-    this.transition("BASELINE", "capturing hardware AF/AE baseline");
+    this.transition("BASELINE", "waiting for hardware AF to physically settle");
     this.focusProbes = 0;
     this.exposureProbes = 0;
+    let settled = await this.fresh(generation, initial.id, CAMERA_TUNING.physicalSettleMs);
+    if (!settled || !this.current(generation)) return;
+    const focusRange = this.caps.focusDistance;
+    let visiblyBad = !this.lastFocusSettled || settled.metrics.focusScore < 0.35 || settled.metrics.confidence < 0.72;
+    if (visiblyBad && this.afRetryCount < 1 && this.focusModes().includes("single-shot")) {
+      this.afRetryCount++;
+      this.poiAimed = true;
+      await this.applyProbe(generation, { focusMode: "single-shot", pointsOfInterest: [{ x: settled.geometry.x, y: settled.geometry.y }] });
+      settled = await this.fresh(generation, settled.id, CAMERA_TUNING.physicalSettleMs) ?? settled;
+      visiblyBad = !this.lastFocusSettled || settled.metrics.focusScore < 0.35 || settled.metrics.confidence < 0.72;
+    }
     const baseline = this.settings();
     this.baselineFocus = baseline.focusDistance;
     this.baselineExposure = baseline.exposureTime;
     this.baselineIso = baseline.iso;
     this.changed();
 
-    let observation = this.latest ?? initial;
-    if (this.manualFocus() && Number.isFinite(this.baselineFocus)) {
+    let observation = settled;
+    if (visiblyBad && settled.metrics.focusScore < 0.35 && this.focusModes().includes("continuous")) {
+      this.lastReason = "hardware AF remained poor; continuous focus retained instead of freezing a bad lock";
+      this.lock(observation);
+      return;
+    }
+    if (this.manualFocus() && Number.isFinite(this.baselineFocus) && focusRange) {
       const frozenExposure = this.baselineExposure;
       const frozenIso = this.baselineIso;
       const frozen = await this.applyProbe(generation, {
@@ -440,7 +637,10 @@ export class FocusController {
     const focused = this.settings();
     this.committedFocusDistance = focused.focusDistance;
     this.candidateFocusDistance = undefined;
-    if (this.manualExposure() && Number.isFinite(this.settings().exposureTime)) {
+    if (this.recoveryAxis === "focus") {
+      this.recoveryAxis = undefined;
+      this.lastReason = "focus-only recovery completed; exposure and ISO preserved";
+    } else if (this.manualExposure() && Number.isFinite(this.settings().exposureTime)) {
       observation = await this.refineExposure(generation, observation);
     } else if (this.manualFocus()) {
       this.lastReason = "manual exposure unavailable; focus locked, hardware AE retained";
@@ -525,7 +725,7 @@ export class FocusController {
     while (this.current(generation) && this.exposureProbes < CAMERA_TUNING.maxExposureProbes &&
         performance.now() - started < CAMERA_TUNING.maxExposureCalibrationMs) {
       const exposureStep = Math.max(range.step ?? 0, 1e-6);
-      const nextExposure = this.quantize(Math.max(range.min, currentExposure / 2), range);
+      const nextExposure = this.quantize(Math.max(range.min, currentExposure / Math.SQRT2), range);
       if (nextExposure >= currentExposure - exposureStep / 2) break;
       let trialIso = currentIso;
       let observed: OpticalObservation | undefined;
@@ -541,11 +741,12 @@ export class FocusController {
           ...(trialIso !== undefined ? { iso: trialIso } : {}),
         }))) break;
         observed = await this.fresh(generation, this.latest?.id ?? baseline.id);
-        acceptable = Boolean(observed && this.exposureAcceptable(observed.metrics, qualityFloor));
+        acceptable = Boolean(observed && this.exposureAcceptable(observed.metrics, qualityFloor) &&
+          (!baseline.captureFps || !observed.captureFps || observed.captureFps >= baseline.captureFps * 0.88));
         this.changed();
         if (acceptable || !isoRange || trialIso === undefined || trialIso >= isoRange.max ||
             this.exposureProbes >= CAMERA_TUNING.maxExposureProbes) break;
-        trialIso = this.quantize(Math.min(isoRange.max, trialIso * 2), isoRange);
+        trialIso = this.quantize(Math.min(isoRange.max, trialIso * 1.5), isoRange);
       } while (this.current(generation) && performance.now() - started < CAMERA_TUNING.maxExposureCalibrationMs);
       if (!observed || !acceptable) break;
       // Accepted candidates are authoritative because Android getSettings()
@@ -571,16 +772,16 @@ export class FocusController {
     this.committedIso = bestIso;
     this.candidateExposureTime = undefined;
     this.candidateIso = undefined;
-    this.lastReason = best.metrics.whiteLevel <= 242 && best.metrics.blackLevel <= 48
-      ? "balanced highlight and shadow levels committed"
-      : "best robust brightness committed at camera limit";
+    this.lastReason = bestExposure < (this.baselineExposure ?? Infinity)
+      ? "shorter exposure kept: static binary signal and actual capture FPS remained safe"
+      : "AE exposure retained; shorter candidate weakened signal or capture FPS";
     return await this.fresh(generation, this.latest?.id ?? baseline.id) ?? best;
   }
 
   private exposureAcceptable(metrics: QrOpticalMetrics, floor: number): boolean {
     return metrics.confidence >= 0.86 && metrics.exposureScore >= floor &&
-      metrics.separation >= 55 && metrics.noise <= Math.max(22, metrics.separation * 0.28) &&
-      metrics.banding < 0.32;
+      metrics.separation >= 48 && metrics.noise <= Math.max(20, metrics.separation * 0.25) &&
+      metrics.clipping < 0.55 && metrics.banding < 0.32;
   }
 
   private lock(observation: OpticalObservation): void {
@@ -604,6 +805,54 @@ export class FocusController {
     this.stableSince = observation.at;
     if (this.initialLockMs === undefined) this.initialLockMs = performance.now() - this.attachedAt;
     this.changed();
+  }
+
+  private async beginFocusRecovery(observation: OpticalObservation): Promise<void> {
+    if (this.state !== "LOCKED") return;
+    const generation = ++this.generation;
+    this.recoveryAxis = "focus";
+    this.transition("FOCUS_RECOVERY", "persistent static-edge loss plus geometry change; exposure preserved");
+    const mode = this.focusModes().includes("continuous") ? "continuous" : this.focusModes().includes("single-shot") ? "single-shot" : undefined;
+    if (!mode || !(await this.applyProbe(generation, { focusMode: mode, pointsOfInterest: [{ x: observation.geometry.x, y: observation.geometry.y }] }))) {
+      this.recoveryAxis = undefined;
+      this.lock(observation);
+      return;
+    }
+    await this.fresh(generation, observation.id, CAMERA_TUNING.physicalSettleMs);
+    if (!this.current(generation)) return;
+    this.stableGeometry = observation.geometry;
+    this.stableSince = performance.now();
+    this.transition("STABILIZING", "hardware AF settling for focus-only recovery");
+  }
+
+  private async beginExposureRecovery(observation: OpticalObservation): Promise<void> {
+    if (this.state !== "LOCKED" || !this.exposureModes().includes("continuous")) return;
+    const generation = ++this.generation;
+    this.transition("EXPOSURE_RECOVERY", "persistent static binary-signal loss; focus preserved");
+    if (!(await this.applyProbe(generation, { exposureMode: "continuous" }))) {
+      this.lock(observation);
+      return;
+    }
+    const recovered = await this.fresh(generation, observation.id, CAMERA_TUNING.physicalSettleMs);
+    if (!recovered || !this.current(generation)) {
+      await this.rollbackCommitted("exposure");
+      return;
+    }
+    let final = recovered;
+    const actual = this.settings();
+    this.baselineExposure = actual.exposureTime;
+    this.baselineIso = actual.iso;
+    if (this.manualExposure() && Number.isFinite(actual.exposureTime)) {
+      await this.applyProbe(generation, {
+        exposureMode: "manual", exposureTime: actual.exposureTime!,
+        ...(this.caps.iso && actual.iso !== undefined ? { iso: actual.iso } : {}),
+      });
+      final = await this.refineExposure(generation, recovered);
+    }
+    if (this.current(generation)) {
+      this.lastReason = "exposure-only conservative recovery completed; focus preserved";
+      this.lock(final);
+    }
   }
 
   private async enterHardwareAuto(reason: string, generation = this.generation, fullReset = false): Promise<void> {
@@ -685,32 +934,66 @@ export class FocusController {
     return accepted && this.current(generation);
   }
 
-  private fresh(generation: number, afterId: number): Promise<OpticalObservation | undefined> {
+  private fresh(generation: number, afterId: number, settleMs = CAMERA_TUNING.physicalSettleMs): Promise<OpticalObservation | undefined> {
     if (!this.current(generation)) return Promise.resolve(undefined);
     return new Promise((resolve) => {
       this.waiter?.resolve(undefined);
       this.waiter = {
-        generation,
-        afterId,
-        remaining: CAMERA_TUNING.freshFramesAfterMutation,
-        resolve,
+        generation, afterId, notBefore: performance.now() + settleMs,
+        discard: CAMERA_TUNING.probeDiscardFrames, samples: [], distances: [], resolve,
       };
       setTimeout(() => {
         if (this.waiter?.resolve === resolve) {
           this.waiter = undefined;
           resolve(undefined);
         }
-      }, 520);
+      }, 1100);
     });
   }
 
   private resolveWaiter(observation: OpticalObservation): void {
     const waiter = this.waiter;
-    if (!waiter || waiter.generation !== this.generation || observation.id <= waiter.afterId) return;
+    if (!waiter || waiter.generation !== this.generation || observation.id <= waiter.afterId || observation.at < waiter.notBefore) return;
     waiter.afterId = observation.id;
-    if (--waiter.remaining > 0) return;
+    if (waiter.discard-- > 0) return;
+    waiter.samples.push(observation);
+    const distance = this.settings().focusDistance;
+    if (distance !== undefined) waiter.distances.push(distance);
+    if (waiter.samples.length < CAMERA_TUNING.probeSamples) return;
     this.waiter = undefined;
-    waiter.resolve(observation);
+    const distanceStep = this.caps.focusDistance?.step ?? 0.01;
+    const distanceStable = waiter.distances.length < 2 || Math.max(...waiter.distances) - Math.min(...waiter.distances) <= distanceStep * 1.5;
+    const focusValues = waiter.samples.map((sample) => sample.metrics.focusScore);
+    const qualityStable = Math.max(...focusValues) - Math.min(...focusValues) <= 0.08;
+    this.lastFocusSettled = distanceStable && qualityStable;
+    waiter.resolve(this.aggregate(waiter.samples));
+  }
+
+  private aggregate(samples: OpticalObservation[]): OpticalObservation {
+    const middle = <T>(values: T[], value: (item: T) => number): number => {
+      const ordered = values.map(value).sort((a, b) => a - b);
+      return ordered[ordered.length >> 1]!;
+    };
+    const latest = samples[samples.length - 1]!;
+    const metric = (key: keyof QrOpticalMetrics) => middle(samples, (sample) => Number(sample.metrics[key]));
+    return {
+      ...latest,
+      captureFps: middle(samples, (sample) => sample.captureFps),
+      geometry: {
+        x: middle(samples, (sample) => sample.geometry.x), y: middle(samples, (sample) => sample.geometry.y),
+        scale: middle(samples, (sample) => sample.geometry.scale),
+        perspectiveX: middle(samples, (sample) => sample.geometry.perspectiveX),
+        perspectiveY: middle(samples, (sample) => sample.geometry.perspectiveY),
+        quality: middle(samples, (sample) => sample.geometry.quality),
+      },
+      metrics: {
+        confidence: metric("confidence"), focusScore: metric("focusScore"), exposureScore: metric("exposureScore"),
+        transitionWidthModules: metric("transitionWidthModules"), blackLevel: metric("blackLevel"),
+        whiteLevel: metric("whiteLevel"), separation: metric("separation"), noise: metric("noise"),
+        clipping: metric("clipping"), banding: metric("banding"), temporalContamination: metric("temporalContamination"),
+        tiles: Math.round(metric("tiles")), sampledModules: Math.round(metric("sampledModules")),
+      },
+    };
   }
 
   private cancel(reason: string): void {
