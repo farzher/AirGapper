@@ -1377,8 +1377,12 @@ function renderFocusDiagnostics(): void {
     ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${value.exposureTime ?? "—"}ms · ISO ${value.iso ?? "—"}`
     : "—";
   focusDiagnostics.textContent = [
-    `STATE  ${diagnostic.state}${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
-    `Focus    committed ${diagnostic.committedFocusDistance ?? "—"} · actual ${diagnostic.actualDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
+    diagnostic.invariantWarning ? `!!! ${diagnostic.invariantWarning} — SELF-HEALING TO HARDWARE AF !!!` : "",
+    `State    ${diagnostic.state} · ${(diagnostic.stateMs / 1000).toFixed(1)}s${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
+    `Owner    ${diagnostic.focusOwner}`,
+    `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
+    `Freeze   attempted ${diagnostic.manualFreezeAttempted ? "yes" : "no"} · verified ${diagnostic.manualFreezeVerified ? "yes" : "no"} · unsafe ${diagnostic.manualFreezeUnsafe ? "yes" : "no"}`,
+    `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
     `Exposure committed ${diagnostic.committedExposureTime ?? "—"}ms · actual ${diagnostic.actualExposure ?? "—"}ms · candidate ${diagnostic.candidateExposureTime ?? "—"}`,
     `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
