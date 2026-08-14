@@ -326,9 +326,8 @@ const pool = new DecodeWorkerPool(
   (id, completion) => noteDecodeCompleted(id, completion),
 );
 const captureTimes: number[] = [];
-// Distinct sender symbols acquired, not successful attempts. A 10 fps
-// single-code sender can therefore never misleadingly read as 30 QR/s merely
-// because the camera decoded the same displayed symbol three times.
+// Every successfully decoded QR, including duplicate or redundant sender
+// symbols. This is scanner throughput; useful transfer speed is shown as KB/s.
 const qrReadTimes: number[] = [];
 const poolBusyTimes: number[] = [];
 // Decoder jobs that actually finished searching a submitted frame or crop,
@@ -2231,8 +2230,9 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   totalDecodes++;
   if (info?.tracked) trackedDecodes++;
   const decodedAt = receiverNow();
-  const parsed = parseFrame(bytes);
   if (done) return;
+  qrReadTimes.push(decodedAt);
+  const parsed = parseFrame(bytes);
   if (!parsed) {
     noteScanOutcome(info?.scanId, "rejected");
     // Finder-pattern sightings and arbitrary binary decodes never become
@@ -2318,7 +2318,6 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted",
   );
   if (decoder.framesNew > framesNewBefore) {
-    qrReadTimes.push(receivedAt);
     if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
     lastDistinctArrivalAt = receivedAt;
   }
