@@ -619,8 +619,10 @@ async function measureReceivePerformance(label: string): Promise<PerformanceSamp
 }
 let optimizeEnabled = false;
 let optimizeRunning = false;
+let optimizeConverged = false;
 function setOptimizeEnabled(enabled: boolean): void {
   optimizeEnabled = enabled;
+  if (enabled) optimizeConverged = false;
   opticsOptimize.setAttribute("aria-pressed", String(enabled));
   opticsOptimize.textContent = enabled ? "Stop" : "Optimize";
   if (!enabled) {
@@ -633,7 +635,7 @@ function setOptimizeEnabled(enabled: boolean): void {
   }
 }
 function beginOptimizeWhenReady(): void {
-  if (!optimizeEnabled || optimizeRunning) return;
+  if (!optimizeEnabled || optimizeRunning || optimizeConverged) return;
   if (!focusController.optimizeEligible()) {
     opticsOptimizeStatus.textContent = "Camera unavailable";
     return;
@@ -641,22 +643,17 @@ function beginOptimizeWhenReady(): void {
   optimizeRunning = true;
   optimizeMeasureToken++;
   opticsKeep.hidden = true;
-  const priorOptimization = focusController.diagnostics();
-  opticsOptimizeStatus.textContent = priorOptimization.optimizeReason?.includes("monitoring") ? "Monitoring…" : "Refining…";
-  let nextDelay = 250;
+  opticsOptimizeStatus.textContent = "Refining…";
   void focusController.startOptimizer(measureReceivePerformance).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
-      const monitoring = finished.optimizeReason?.includes("monitoring");
-      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · ${monitoring ? "Optimal" : "Refining"}`;
+      optimizeConverged = true;
+      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · Optimal`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
-      if (monitoring) nextDelay = 6000;
+      opticsKeep.hidden = false;
     } else opticsOptimizeStatus.textContent = "Waiting…";
-  }).finally(() => {
-    optimizeRunning = false;
-    if (optimizeEnabled) setTimeout(beginOptimizeWhenReady, nextDelay);
-  });
+  }).finally(() => { optimizeRunning = false; });
 }
 opticsOptimize.addEventListener("click", () => {
   if (!automaticOptics) {
