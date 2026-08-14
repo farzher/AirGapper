@@ -505,29 +505,72 @@ let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
 let cropsSubmitted = 0;
 
+type OptimizerTraceEvent = {
+  time: number;
+  event: "APPLY" | "ACTUAL_SETTINGS" | "TRANSITION_FRAME" | "CANDIDATE_OPEN" | "CAPTURE" |
+    "JOB_SUBMIT" | "JOB_COMPLETE" | "VALID_DECODE" | "CANDIDATE_CLOSE" | "CANDIDATE_SCORE";
+  candidateId?: string;
+  candidateEpoch?: number;
+  sourceSequence?: number;
+  scanId?: number;
+  requestedExposure?: number;
+  requestedIso?: number;
+  actualExposure?: number;
+  actualIso?: number;
+  validDecode?: boolean;
+  usefulSymbol?: boolean;
+};
 type CandidateEvidence = {
-  boundary: number;
-  endBoundary: number;
+  epoch: number;
   startedAt: number;
   closedAt: number;
-  captures: number;
-  capturedFrames: number;
+  submittedJobs: number;
   completedJobs: number;
-  targetCompletions: number;
+  sourceFrames: Set<number>;
   qrAttempts: number;
   validDecodes: number;
   usefulSymbols: number;
   temporalSamples: number[];
   performance?: ReceivePerformance;
 };
-const candidateEvidenceWindows: CandidateEvidence[] = [];
+type OptimizerEpoch = {
+  id: number;
+  candidateId: string;
+  requestedExposure: number;
+  requestedIso: number;
+  actualExposure: number;
+  actualIso: number;
+  activationTime: number;
+  firstValidSourceSequence: number;
+  lastValidSourceSequence?: number;
+  collecting: boolean;
+};
+type ScanCandidateAttribution = {
+  scanId: number;
+  sourceFrameSequence: number;
+  epoch: OptimizerEpoch;
+  evidence: CandidateEvidence;
+  fixedAttempts: number;
+  validDecodes: number;
+  usefulSymbols: number;
+};
+const candidateEvidenceWindows = new Map<number, CandidateEvidence>();
+const scanCandidateEpoch = new Map<number, ScanCandidateAttribution>();
+const optimizerTrace: OptimizerTraceEvent[] = [];
+const OPTIMIZER_TRACE_LIMIT = 700;
+let optimizerUnattributedResults = 0;
+let optimizerEpochSequence = 0;
+let optimizerPipelineActive = false;
+let optimizerTransition: { candidateId: string; requestedExposure: number; requestedIso: number } | undefined;
+let activeOptimizerEpoch: OptimizerEpoch | undefined;
+let latestSourceFrameSequence = -1;
 let optimizeMeasureToken = 0;
+let optimizerFixedTargets: { id: number; slot?: number; misses: number; quad: SymbolQuad; dim: number; crc32: boolean }[] = [];
 
-function evidenceForScan(scanId: number | undefined): CandidateEvidence | undefined {
-  if (scanId === undefined) return undefined;
-  return candidateEvidenceWindows.find((evidence) => scanId >= evidence.boundary && scanId < evidence.endBoundary);
+function traceOptimizer(event: OptimizerTraceEvent): void {
+  optimizerTrace.push(event);
+  if (optimizerTrace.length > OPTIMIZER_TRACE_LIMIT) optimizerTrace.splice(0, optimizerTrace.length - OPTIMIZER_TRACE_LIMIT);
 }
-
 function refreshCandidateEvidence(evidence: CandidateEvidence): ReceivePerformance | undefined {
   if (!evidence.closedAt) return evidence.performance;
   const seconds = Math.max(0.001, (evidence.closedAt - evidence.startedAt) / 1000);
@@ -535,83 +578,138 @@ function refreshCandidateEvidence(evidence: CandidateEvidence): ReceivePerforman
     validDecodesPerSecond: evidence.validDecodes / seconds,
     usefulSymbolsPerSecond: evidence.usefulSymbols / seconds,
     perQrAttemptSuccessRate: evidence.qrAttempts ? evidence.validDecodes / evidence.qrAttempts : 0,
-    captureFps: evidence.capturedFrames / seconds,
+    captureFps: evidence.sourceFrames.size / seconds,
+    submittedJobs: evidence.submittedJobs,
     completedJobs: evidence.completedJobs,
+    completionCoverage: evidence.submittedJobs ? evidence.completedJobs / evidence.submittedJobs : 0,
+    sourceFrames: evidence.sourceFrames.size,
     qrAttempts: evidence.qrAttempts,
     validDecodes: evidence.validDecodes,
     measurementMs: seconds * 1000,
-    temporalContamination: evidence.temporalSamples.reduce((sum, value) => sum + value, 0) / evidence.temporalSamples.length,
+    temporalContamination: evidence.temporalSamples.reduce((sum, value) => sum + value, 0) /
+      Math.max(1, evidence.temporalSamples.length),
   };
   if (evidence.performance) Object.assign(evidence.performance, next);
   else evidence.performance = next;
   return evidence.performance;
 }
-
-function releaseCandidateEvidence(evidence: CandidateEvidence): void {
-  if (!evidence.closedAt || evidence.completedJobs < evidence.targetCompletions) return;
-  const index = candidateEvidenceWindows.indexOf(evidence);
-  if (index >= 0) candidateEvidenceWindows.splice(index, 1);
+function optimizerAttributionComplete(scanId: number): void {
+  const attribution = scanCandidateEpoch.get(scanId);
+  if (!attribution) return;
+  scanCandidateEpoch.delete(scanId);
 }
-
-async function waitForExposureSettled(token: number, label: string): Promise<void> {
-  const firstFrame = totalCaptures;
-  const startedAt = receiverNow();
-  while (token === optimizeMeasureToken && totalCaptures - firstFrame < 2 && receiverNow() - startedAt < 400) {
-    opticsOptimizeStatus.textContent = `${label} · Settling`;
-    await new Promise((resolve) => setTimeout(resolve, 16));
-  }
+function snapshotOptimizerGeometry(): boolean {
+  optimizerFixedTargets = regions
+    .filter((region) => region.decoded && region.quad && region.dim && region.visibleFraction >= 0.85)
+    .slice(0, 15)
+    .map((region) => ({
+      id: region.id,
+      slot: region.gridSlot,
+      misses: 0,
+      quad: {
+        topLeft: { ...region.quad!.topLeft }, topRight: { ...region.quad!.topRight },
+        bottomRight: { ...region.quad!.bottomRight }, bottomLeft: { ...region.quad!.bottomLeft },
+      },
+      dim: region.dim!,
+      crc32: Boolean(region.crc32),
+    }));
+  return optimizerFixedTargets.length > 0;
 }
+const optimizerEpochHooks = {
+  transition(request: { candidateId: string; requestedExposure: number; requestedIso: number }): void {
+    if (activeOptimizerEpoch) activeOptimizerEpoch.collecting = false;
+    activeOptimizerEpoch = undefined;
+    optimizerPipelineActive = true;
+    optimizerTransition = request;
+    traceOptimizer({ time: receiverNow(), event: "APPLY", ...request });
+  },
+  async open(request: {
+    candidateId: string; requestedExposure: number; requestedIso: number; actualExposure: number; actualIso: number;
+  }): Promise<number | undefined> {
+    traceOptimizer({ time: receiverNow(), event: "ACTUAL_SETTINGS", ...request });
+    const after = latestSourceFrameSequence;
+    const token = optimizeMeasureToken;
+    const settleStartedAt = receiverNow();
+    while (token === optimizeMeasureToken && latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames + 1 &&
+        receiverNow() - settleStartedAt < 650) {
+      await new Promise((resolve) => setTimeout(resolve, 8));
+    }
+    if (token !== optimizeMeasureToken || latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames + 1) return undefined;
+    const epoch: OptimizerEpoch = {
+      id: ++optimizerEpochSequence,
+      candidateId: request.candidateId,
+      requestedExposure: request.requestedExposure,
+      requestedIso: request.requestedIso,
+      actualExposure: request.actualExposure,
+      actualIso: request.actualIso,
+      activationTime: receiverNow(),
+      firstValidSourceSequence: latestSourceFrameSequence + 1,
+      collecting: false,
+    };
+    optimizerTransition = undefined;
+    activeOptimizerEpoch = epoch;
+    traceOptimizer({ time: receiverNow(), event: "CANDIDATE_OPEN", candidateEpoch: epoch.id, ...request });
+    return epoch.id;
+  },
+  close(epochId: number): void {
+    if (activeOptimizerEpoch?.id !== epochId) return;
+    activeOptimizerEpoch.collecting = false;
+    activeOptimizerEpoch.lastValidSourceSequence = latestSourceFrameSequence;
+    traceOptimizer({
+      time: receiverNow(), event: "CANDIDATE_CLOSE", candidateId: activeOptimizerEpoch.candidateId,
+      candidateEpoch: epochId, sourceSequence: latestSourceFrameSequence,
+      requestedExposure: activeOptimizerEpoch.requestedExposure, requestedIso: activeOptimizerEpoch.requestedIso,
+      actualExposure: activeOptimizerEpoch.actualExposure, actualIso: activeOptimizerEpoch.actualIso,
+    });
+    activeOptimizerEpoch = undefined;
+  },
+  finish(): void {
+    activeOptimizerEpoch = undefined;
+    optimizerTransition = undefined;
+    optimizerPipelineActive = false;
+  },
+};
 
-async function measureReceivePerformance(label: string): Promise<PerformanceSample> {
+async function measureReceivePerformance(label: string, epochId: number): Promise<PerformanceSample> {
   const token = optimizeMeasureToken;
-  await waitForExposureSettled(token, label);
+  const epoch = activeOptimizerEpoch;
+  if (!epoch || epoch.id !== epochId) throw new Error("Optimizer candidate epoch is not active");
   const startedAt = receiverNow();
-  const multiQr = focusController.diagnostics().totalTiles > 1;
-  const targetFrames = multiQr ? 5 : 9;
-  const maxBurstMs = multiQr ? 900 : 1400;
+  const multiQr = optimizerFixedTargets.length > 1;
+  const targetFrames = multiQr ? 3 : 6;
+  const maxBurstMs = multiQr ? 520 : 900;
   const evidence: CandidateEvidence = {
-    boundary: frameId,
-    endBoundary: Infinity,
-    startedAt,
-    closedAt: 0,
-    captures: totalCaptures,
-    capturedFrames: 0,
-    completedJobs: 0,
-    targetCompletions: 0,
-    qrAttempts: 0,
-    validDecodes: 0,
-    usefulSymbols: 0,
+    epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
+    sourceFrames: new Set(), qrAttempts: 0, validDecodes: 0, usefulSymbols: 0,
     temporalSamples: [focusController.diagnostics().optical?.temporalContamination ?? 0],
   };
-  candidateEvidenceWindows.push(evidence);
-
-  // Camera dwell is source-frame based. Decoder workers may finish these
-  // fenced scan IDs after several later camera configurations have run.
-  while (token === optimizeMeasureToken) {
-    const captures = totalCaptures - evidence.captures;
-    opticsOptimizeStatus.textContent = `${label} · ${captures}/${targetFrames}`;
-    if (captures >= targetFrames || receiverNow() - startedAt >= maxBurstMs) break;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+  candidateEvidenceWindows.set(epochId, evidence);
+  epoch.collecting = true;
+  while (token === optimizeMeasureToken && activeOptimizerEpoch?.id === epochId) {
+    opticsOptimizeStatus.textContent = `${label} · ${evidence.sourceFrames.size}/${targetFrames}`;
+    if (evidence.sourceFrames.size >= targetFrames || receiverNow() - startedAt >= maxBurstMs) break;
+    await new Promise((resolve) => setTimeout(resolve, 12));
   }
-  evidence.endBoundary = frameId;
+  epoch.collecting = false;
   evidence.closedAt = receiverNow();
-  evidence.capturedFrames = totalCaptures - evidence.captures;
   evidence.temporalSamples.push(focusController.diagnostics().optical?.temporalContamination ?? 0);
-  const pending = [...scanCapturedAt.keys()].filter((id) => id >= evidence.boundary && id < evidence.endBoundary).length;
-  evidence.targetCompletions = evidence.completedJobs + pending;
   refreshCandidateEvidence(evidence);
-  releaseCandidateEvidence(evidence);
 
   const result = (async (): Promise<ReceivePerformance> => {
     const waitStartedAt = receiverNow();
-    while (token === optimizeMeasureToken && evidence.completedJobs < evidence.targetCompletions &&
+    while (token === optimizeMeasureToken && evidence.completedJobs < evidence.submittedJobs &&
         receiverNow() - waitStartedAt < 2600) {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const performanceSample = refreshCandidateEvidence(evidence)!;
-    releaseCandidateEvidence(evidence);
+    traceOptimizer({
+      time: receiverNow(), event: "CANDIDATE_SCORE", candidateId: epoch.candidateId, candidateEpoch: epochId,
+      requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+      actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+      validDecode: performanceSample.validDecodes > 0,
+    });
     if (token === optimizeMeasureToken) {
-      opticsOptimizeStatus.textContent = `${label} · ${performanceSample.validDecodesPerSecond.toFixed(1)} QR/s`;
+      opticsOptimizeStatus.textContent = `${label} · ${(performanceSample.perQrAttemptSuccessRate * 100).toFixed(0)}%`;
     }
     return performanceSample;
   })();
@@ -640,11 +738,18 @@ function beginOptimizeWhenReady(): void {
     opticsOptimizeStatus.textContent = "Camera unavailable";
     return;
   }
+  if (!snapshotOptimizerGeometry()) {
+    opticsOptimizeStatus.textContent = "Hold a decoded target steady";
+    return;
+  }
   optimizeRunning = true;
   optimizeMeasureToken++;
+  optimizerTrace.length = 0;
+  optimizerUnattributedResults = 0;
+  candidateEvidenceWindows.clear();
   opticsKeep.hidden = true;
-  opticsOptimizeStatus.textContent = "Refining…";
-  void focusController.startOptimizer(measureReceivePerformance).then(() => {
+  opticsOptimizeStatus.textContent = "Exploring…";
+  void focusController.startOptimizer(measureReceivePerformance, optimizerEpochHooks).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
@@ -878,12 +983,23 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   scanCompletionTimes.push(receiverNow());
   completedJobs++;
   focusController.noteDecoderCompletion(id);
-  const evidence = evidenceForScan(id);
-  if (evidence) {
-    evidence.completedJobs++;
-    evidence.qrAttempts += Math.max(1, completion.symbolCount, completion.targetedAttempts + completion.readFullAttempts + Number(completion.fallbackAttempted));
-    refreshCandidateEvidence(evidence);
-    releaseCandidateEvidence(evidence);
+  const attribution = scanCandidateEpoch.get(id);
+  if (attribution) {
+    const complete = attribution.scanId === id && attribution.sourceFrameSequence >= 0 &&
+      Number.isFinite(attribution.epoch.actualExposure) && Number.isFinite(attribution.epoch.actualIso);
+    if (complete) {
+      attribution.evidence.completedJobs++;
+      refreshCandidateEvidence(attribution.evidence);
+      traceOptimizer({
+        time: receiverNow(), event: "JOB_COMPLETE", candidateId: attribution.epoch.candidateId,
+        candidateEpoch: attribution.epoch.id, sourceSequence: attribution.sourceFrameSequence, scanId: id,
+        requestedExposure: attribution.epoch.requestedExposure, requestedIso: attribution.epoch.requestedIso,
+        actualExposure: attribution.epoch.actualExposure, actualIso: attribution.epoch.actualIso,
+        validDecode: attribution.validDecodes > 0, usefulSymbol: attribution.usefulSymbols > 0,
+      });
+    } else {
+      optimizerUnattributedResults++;
+    }
   }
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -915,6 +1031,7 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   scanOutcomes.delete(id);
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
+  optimizerAttributionComplete(id);
   if (!attempts) return;
   if (completion.trackedAttempted) trackedAttempts += attempts.length;
   // Attribute misses per slot. In a multi-track reply, one successful QR must
@@ -1564,7 +1681,7 @@ function renderFocusDiagnostics(): void {
   const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
   if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = "Camera unavailable";
-  else if (optimizing && !candidateEvidenceWindows.length) {
+  else if (optimizing && !candidateEvidenceWindows.size) {
     opticsOptimizeStatus.textContent = diagnostic.optimizeRound
       ? `${diagnostic.optimizeRound[0]!.toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${diagnostic.optimizeSurvivors ?? diagnostic.optimizeVisit ?? "Exposure"}`
       : "Exposure…";
@@ -1572,6 +1689,26 @@ function renderFocusDiagnostics(): void {
   opticsKeep.hidden = diagnostic.optimizeState !== "complete";
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
+  const candidateTable = diagnostic.optimizeCandidates.map((candidate, index) =>
+    `${index === 0 ? "*" : " "} E ${candidate.exposure} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.validDecodes}/${candidate.qrAttempts} ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)}/s · cov ${(candidate.completionCoverage * 100).toFixed(0)}% · temp ${candidate.temporalContamination.toFixed(2)} · ${candidate.state}`,
+  ).join("\n");
+  const manualCandidate = !automaticOptics && diagnostic.actualExposure && diagnostic.actualIso && diagnostic.optimizeCandidates.length
+    ? diagnostic.optimizeCandidates.reduce((closest, candidate) => {
+      const distance = Math.hypot(
+        Math.log2(candidate.exposure / diagnostic.actualExposure!),
+        Math.log2(candidate.iso / diagnostic.actualIso!),
+      );
+      return distance < closest.distance ? { candidate, distance } : closest;
+    }, { candidate: diagnostic.optimizeCandidates[0]!, distance: Infinity })
+    : undefined;
+  const manualQrRate = qrReadTimes.reduce((count, time) => count + Number(time > receiverNow() - STATS_WINDOW_MS), 0);
+  const manualVerdict = manualCandidate
+    ? manualCandidate.distance > 0.35
+      ? "MANUAL CONFIG NOT SEARCHED"
+      : manualQrRate > (diagnostic.optimizeCandidates[0]?.normalizedQrRate ?? Infinity) * 1.1
+        ? "MANUAL CONFIG SEARCHED BUT MIS-SCORED"
+        : "manual config searched"
+    : "";
   const cameraLine = (value?: CameraPatch) => value
     ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${formatExposureMs(value.exposureTime)} · ISO ${value.iso ?? "—"} · EV ${value.exposureCompensation ?? "—"}`
     : "—";
@@ -1594,6 +1731,13 @@ function renderFocusDiagnostics(): void {
     diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/attempt` : "",
     diagnostic.optimizeBestPerformance ? `Incumbent ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
     diagnostic.optimizeReason ? `Search   ${diagnostic.optimizeReason}` : "",
+    diagnostic.optimizeExposureVisited ? `Visited  E ${diagnostic.optimizeExposureVisited.min}–${diagnostic.optimizeExposureVisited.max} (${(diagnostic.optimizeExposureVisited.coverage * 100).toFixed(0)}%) · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max} (${((diagnostic.optimizeIsoVisited?.coverage ?? 0) * 100).toFixed(0)}%) · ${diagnostic.optimizeUniqueConfigurations} actual` : "",
+    `Attribution unattributed ${optimizerUnattributedResults} · mapped ${scanCandidateEpoch.size} · trace ${optimizerTrace.length}`,
+    candidateTable ? `Candidates\n${candidateTable}` : "",
+    optimizerTrace.length ? `Optimizer trace\n${optimizerTrace.slice(-20).map((event) =>
+      `${event.time.toFixed(0)} ${event.event} ${event.candidateId ?? "—"} ep${event.candidateEpoch ?? "—"} src${event.sourceSequence ?? "—"} scan${event.scanId ?? "—"} E${event.actualExposure ?? event.requestedExposure ?? "—"} ISO${event.actualIso ?? event.requestedIso ?? "—"} valid:${event.validDecode === undefined ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === undefined ? "—" : event.usefulSymbol ? "yes" : "no"}`,
+    ).join("\n")}` : "",
+    manualCandidate ? `Current manual E ${diagnostic.actualExposure} · ISO ${diagnostic.actualIso} · ${manualQrRate.toFixed(1)} QR/s\nClosest Optimize E ${manualCandidate.candidate.exposure} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)}/s\n${manualVerdict}` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(0.001, (performance.now() - opticalTimingStartedAt) / 1000)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${mutation?.kind ?? "—"}`,
@@ -2151,6 +2295,14 @@ function scheduleFrame(gen: number) {
     const width = video.videoWidth;
     const height = video.videoHeight;
     const sequence = benchmarkRecordingSequence++;
+    latestSourceFrameSequence = sequence;
+    if (optimizerPipelineActive && !activeOptimizerEpoch) {
+      traceOptimizer({
+        time: receiverNow(), event: "TRANSITION_FRAME", candidateId: optimizerTransition?.candidateId,
+        sourceSequence: sequence, requestedExposure: optimizerTransition?.requestedExposure,
+        requestedIso: optimizerTransition?.requestedIso,
+      });
+    }
     const recorder = benchmarkRecorder;
     const frame: ReceiverFrame = {
       sequence, width, height, callbackTimeMs: callbackTime,
@@ -2446,12 +2598,31 @@ function submitReceiverJob(
   transfer: Transferable[],
   kind: BenchmarkJobKind,
   trace: BenchmarkFrameTrace | undefined,
+  sourceSequence: number,
   trackedRegions: Region[] = [],
+  fixedAttempts = 0,
 ): boolean {
   const accepted = pool.submit(message, transfer);
   if (accepted) {
     submittedJobs++;
     scanCapturedAt.set(message.id, receiverNow());
+    const epoch = activeOptimizerEpoch;
+    const evidence = epoch?.collecting ? candidateEvidenceWindows.get(epoch.id) : undefined;
+    if (epoch && evidence) {
+      const attribution: ScanCandidateAttribution = {
+        scanId: message.id, sourceFrameSequence: sourceSequence, epoch: { ...epoch }, evidence, fixedAttempts,
+        validDecodes: 0, usefulSymbols: 0,
+      };
+      scanCandidateEpoch.set(message.id, attribution);
+      evidence.submittedJobs++;
+      evidence.sourceFrames.add(sourceSequence);
+      evidence.qrAttempts += fixedAttempts;
+      traceOptimizer({
+        time: receiverNow(), event: "JOB_SUBMIT", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+        sourceSequence, scanId: message.id, requestedExposure: epoch.requestedExposure,
+        requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+      });
+    }
     if (kind === "FULL FRAME") {
       fullScanIds.add(message.id);
       fullScanJobs.set(message.id, { thorough: false, native: true, reacquire: gridLattice.state === "REACQUIRE" });
@@ -2530,6 +2701,34 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
   focusController.observe(source.sequence, geometry, metrics, Math.max(1, expectedRegions), now, captureFps);
 }
 
+function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace | undefined): void {
+  const epoch = activeOptimizerEpoch;
+  if (!epoch?.collecting || !optimizerFixedTargets.length) return;
+  const points = optimizerFixedTargets.flatMap((target) => [
+    target.quad.topLeft, target.quad.topRight, target.quad.bottomRight, target.quad.bottomLeft,
+  ]);
+  const pad = 12;
+  const x = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - pad));
+  const y = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - pad));
+  const right = Math.min(source.width, Math.ceil(Math.max(...points.map((point) => point.x)) + pad));
+  const bottom = Math.min(source.height, Math.ceil(Math.max(...points.map((point) => point.y)) + pad));
+  const w = right - x;
+  const h = bottom - y;
+  if (w < 32 || h < 32) return;
+  const image = readBoundedVideoCrop(source, x, y, w, h);
+  inspectStaticQrOptics(source, image, x, y);
+  const id = frameId++;
+  traceOptimizer({
+    time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+    sourceSequence: source.sequence, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+    actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+  });
+  submitReceiverJob(
+    { id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false, tracks: optimizerFixedTargets },
+    [image.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, [], optimizerFixedTargets.length,
+  );
+}
+
 function captureFrame(source: ReceiverFrame) {
   const vw = source.width;
   const vh = source.height;
@@ -2549,6 +2748,11 @@ function captureFrame(source: ReceiverFrame) {
     capturesDropped++;
     poolBusyTimes.push(now);
     if (trace) { trace.decision = "worker busy"; trace.stateAfter = gridLattice.state; }
+    activeBenchmarkFrame = undefined;
+    return;
+  }
+  if (optimizerPipelineActive) {
+    captureOptimizerProbe(source, trace);
     activeBenchmarkFrame = undefined;
     return;
   }
@@ -2572,7 +2776,7 @@ function captureFrame(source: ReceiverFrame) {
     const id = frameId++;
     if (submitReceiverJob(
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true, thorough: true },
-      [img.data.buffer], "FULL FRAME", trace,
+      [img.data.buffer], "FULL FRAME", trace, source.sequence,
     )) {
       fullScans++;
       thoroughFullScans++;
@@ -2672,7 +2876,7 @@ function captureFrame(source: ReceiverFrame) {
     const id = frameId++;
     if (submitReceiverJob(
       { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
-      [img.data.buffer], "FULL FRAME", trace,
+      [img.data.buffer], "FULL FRAME", trace, source.sequence,
     )) {
       if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
     } else if (pendingScanCapture?.id === undefined) {
@@ -2727,7 +2931,7 @@ function captureFrame(source: ReceiverFrame) {
       const id = frameId++;
       if (submitReceiverJob(
         { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
-        [img.data.buffer], "SHARED TRACKED BATCH CROP", trace, batchRegions,
+        [img.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, batchRegions,
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
@@ -2785,7 +2989,7 @@ function captureFrame(source: ReceiverFrame) {
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     if (!submitReceiverJob(
       { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
-      [img.data.buffer], "INDIVIDUAL TRACKED CROP", trace, [r],
+      [img.data.buffer], "INDIVIDUAL TRACKED CROP", trace, source.sequence, [r],
     )) {
       cropAttempts.delete(id);
       if (pendingScanCapture?.id === undefined) cancelScanCapture();
@@ -2844,6 +3048,7 @@ function resetActiveTransfer(): void {
 }
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
+  const optimizerAttribution = info?.scanId === undefined ? undefined : scanCandidateEpoch.get(info.scanId);
   if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) {
     noteScanOutcome(info.scanId, "stale");
     return;
@@ -2861,7 +3066,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      if (box) noteRegion(box, decodedAt, true, info);
+      if (box && !optimizerAttribution) noteRegion(box, decodedAt, true, info);
       const settled = plainQrPolicy.addPlain(text, info?.scanId ?? -1);
       if (settled) finishPlainQr(settled);
     } catch {
@@ -2871,10 +3076,21 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   }
   const { header, block } = parsed;
   focusController.noteValidDecode(info?.scanId);
-  const evidence = evidenceForScan(info?.scanId);
-  if (evidence) {
-    evidence.validDecodes++;
-    refreshCandidateEvidence(evidence);
+  if (optimizerAttribution) {
+    const epoch = optimizerAttribution.epoch;
+    const complete = info?.scanId !== undefined && optimizerAttribution.sourceFrameSequence >= epoch.firstValidSourceSequence &&
+      Number.isFinite(epoch.actualExposure) && Number.isFinite(epoch.actualIso);
+    if (complete) {
+      optimizerAttribution.evidence.validDecodes++;
+      optimizerAttribution.validDecodes++;
+      refreshCandidateEvidence(optimizerAttribution.evidence);
+      traceOptimizer({
+        time: receiverNow(), event: "VALID_DECODE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+        sourceSequence: optimizerAttribution.sourceFrameSequence, scanId: info.scanId,
+        requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+        actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: false,
+      });
+    } else optimizerUnattributedResults++;
   }
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
@@ -2896,7 +3112,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
 
   plainQrPolicy.noteFramed();
   let decodedRegion: Region | undefined;
-  if (box && info?.quad && info.modules) {
+  if (!optimizerAttribution && box && info?.quad && info.modules) {
     const priorBenchmarkFrame = activeBenchmarkFrame;
     if (productionTrace) activeBenchmarkFrame = productionTrace;
     const snapshot = gridLattice.accept({
@@ -2953,10 +3169,17 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     totalUsefulSymbols += added;
     usefulFrameTimes.push(receivedAt);
     focusController.noteUsefulDecode(info?.scanId);
-    const usefulEvidence = evidenceForScan(info?.scanId);
-    if (usefulEvidence) {
-      usefulEvidence.usefulSymbols += added;
-      refreshCandidateEvidence(usefulEvidence);
+    if (optimizerAttribution) {
+      optimizerAttribution.evidence.usefulSymbols += added;
+      optimizerAttribution.usefulSymbols += added;
+      refreshCandidateEvidence(optimizerAttribution.evidence);
+      const epoch = optimizerAttribution.epoch;
+      traceOptimizer({
+        time: receiverNow(), event: "VALID_DECODE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+        sourceSequence: optimizerAttribution.sourceFrameSequence, scanId: info?.scanId,
+        requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+        actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: true,
+      });
     }
   }
   updateProgressEstimate();
@@ -3137,6 +3360,12 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       },
       camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: camera.facingMode ?? null } : null,
       cameraAutomation: cameraAutomationDiagnostics,
+      optimizer: {
+        unattributedResults: optimizerUnattributedResults,
+        pendingMappedScans: scanCandidateEpoch.size,
+        fixedTargets: optimizerFixedTargets.length,
+        trace: [...optimizerTrace],
+      },
       cameraCapabilities: track ? probeCameraCapabilities(track) : null,
       device: { cores: navigator.hardwareConcurrency ?? null, ua: navigator.userAgent },
       timelineKey: "seconds, framesNew, solvedBlocks, decodedRegions, trackedRegions, captureFps, decodeFps, fullScansCumulative",
