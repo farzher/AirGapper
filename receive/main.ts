@@ -2585,7 +2585,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       archive.append(archiveType, archiveRow);
       result.append(archive);
     } else {
-      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type);
+      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type, true);
     }
   } catch (error) {
     sendDiagnostics(false, (receiverNow() - startTs) / 1000, 0);
@@ -2639,11 +2639,13 @@ async function appendReceivedFile(
   entry: ZipEntry,
   parent: HTMLElement,
   declaredType?: string,
+  autoplayVideo = false,
 ): Promise<void> {
   const type = declaredType || inferredType(entry.name);
   const container = document.createElement("section");
   container.className = "received-file";
   const url = URL.createObjectURL(new Blob([entry.bytes as BlobPart], { type }));
+  let receivedVideo: HTMLVideoElement | undefined;
   if (type.startsWith("image/")) {
     const image = document.createElement("img");
     image.className = "received";
@@ -2657,7 +2659,13 @@ async function appendReceivedFile(
     player.controls = true;
     player.preload = "metadata";
     player.setAttribute("aria-label", `Received file: ${entry.name}`);
-    if (player instanceof HTMLVideoElement) player.playsInline = true;
+    if (player instanceof HTMLVideoElement) {
+      player.playsInline = true;
+      if (autoplayVideo) {
+        player.autoplay = true;
+        receivedVideo = player;
+      }
+    }
     const src = await servableMediaUrl(entry.bytes, type, url);
     if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true });
     player.src = src;
@@ -2673,6 +2681,14 @@ async function appendReceivedFile(
   downloadRow.append(link, fileSize);
   container.append(downloadRow);
   parent.append(container);
+  if (receivedVideo) {
+    void receivedVideo.play().catch(async () => {
+      // Browsers commonly require muted playback when transfer completion is
+      // too far removed from the original user gesture.
+      receivedVideo.muted = true;
+      await receivedVideo.play().catch(() => undefined);
+    });
+  }
 }
 
 function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void {
