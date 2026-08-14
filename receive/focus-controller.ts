@@ -258,6 +258,7 @@ export class FocusController {
   private poorFocusSince = 0;
   private fullRecoveryAt = -Infinity;
   private optimizeMovementSince = 0;
+  private optimizeSweep = 0;
   private readonly transitions: string[] = [];
   private poiAimed = false;
   private invariantRepairPending = false;
@@ -309,6 +310,7 @@ export class FocusController {
     this.targetMissingSince = 0;
     this.poiAimed = false;
     this.optimizeMovementSince = 0;
+    this.optimizeSweep = 0;
     this.stabilizingAfRetries = 0;
     this.initialLockMs = undefined;
     this.optimizeState = "idle";
@@ -413,15 +415,17 @@ export class FocusController {
     }
   }
 
-  cancelOptimize(reason = "optimization cancelled"): void {
+  cancelOptimize(reason = "optimization stopped"): void {
     if (!this.isOptimizing()) return;
     this.cancel(reason);
-    this.optimizeState = "cancelled";
-    void this.restoreOptimizationBest().then(() => this.transition("LOCKED", `${reason}; best settings restored`));
+    this.optimizeState = "complete";
+    this.optimizeReason = `${reason}; best settings retained`;
+    void this.restoreOptimizationBest().then(() => this.transition("LOCKED", this.optimizeReason));
   }
 
   optimizeEligible(): boolean {
-    return this.strategy === "auto" && !this.isOptimizing() && Boolean(
+    const retryHasTarget = this.optimizeState !== "paused" || Boolean(this.latest && !this.targetMissingSince);
+    return this.strategy === "auto" && !this.isOptimizing() && retryHasTarget && Boolean(
       this.track && this.track.readyState === "live" && this.manualExposure() && this.caps.iso,
     );
   }
@@ -433,10 +437,8 @@ export class FocusController {
     const deadline = startedAt + CAMERA_TUNING.optimizeBudgetMs;
     this.optimizeState = "baseline";
     this.optimizeRound = "coarse";
-    this.optimizeSummary = undefined;
     this.optimizeComparison = undefined;
     this.optimizeCandidatePerformance = undefined;
-    this.optimizeBestPerformance = undefined;
     this.optimizePairedSamples = 0;
     this.optimizeSurvivors = undefined;
     this.optimizeDecision = "starting";
@@ -636,12 +638,27 @@ export class FocusController {
       return true;
     };
 
+    const coarseDirections = [
+      { label: "brighter", signalEV: 1, shutterEV: 0 },
+      { label: "darker", signalEV: -1, shutterEV: 0 },
+      { label: "much brighter", signalEV: 2, shutterEV: 0 },
+      { label: "much darker", signalEV: -2, shutterEV: 0 },
+      { label: "faster", signalEV: 0, shutterEV: -1 },
+      { label: "slower", signalEV: 0, shutterEV: 1 },
+      { label: "bright + fast", signalEV: 1, shutterEV: -1 },
+      { label: "dark + fast", signalEV: -1, shutterEV: -1 },
+      { label: "bright + slow", signalEV: 1, shutterEV: 1 },
+      { label: "dark + slow", signalEV: -1, shutterEV: 1 },
+    ];
+    const sweepOffset = this.optimizeSweep++ % coarseDirections.length;
+    const orderedDirections = coarseDirections.map((_, index) => coarseDirections[(index + sweepOffset) % coarseDirections.length]!);
     const coarseRequested = [
       incumbent,
-      makeCandidate("B brighter", 1, 0),
-      makeCandidate("C darker", -1, 0),
-      makeCandidate("D faster", 0, -1),
-      makeCandidate("E slower", 0, 1),
+      ...orderedDirections.map((direction, index) => makeCandidate(
+        `${String.fromCharCode(66 + index)} ${direction.label}`,
+        direction.signalEV,
+        direction.shutterEV,
+      )),
     ];
     this.exposureProbes += coarseRequested.length - 1;
     const coarse = await captureRound(coarseRequested, "coarse");
@@ -921,6 +938,7 @@ export class FocusController {
         }
       }
       const reference = this.bestKnownGood;
+      const optimizedHold = this.optimizeState === "complete";
       const moved = this.geometryChanged(geometry, reference?.geometry);
       const silence = this.decodeSilence(now);
       const silenceThreshold = this.silenceThreshold();
@@ -942,14 +960,14 @@ export class FocusController {
       if (this.lockedFocusFailures >= requiredFocusSamples) {
         this.lockedFocusFailures = 0;
         void this.beginFocusRecovery(observation);
-      } else if (this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
+      } else if (!optimizedHold && this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
         this.lockedExposureFailures = 0;
         void this.beginExposureRecovery(observation);
-      } else if (decoderActive && noProgress && silence >= Math.max(1400, silenceThreshold * 1.3) &&
+      } else if (!optimizedHold && decoderActive && noProgress && silence >= Math.max(1400, silenceThreshold * 1.3) &&
           (metrics.focusScore < CAMERA_TUNING.focusExcellent || metrics.exposureScore < CAMERA_TUNING.exposureExcellent) &&
           now - this.fullRecoveryAt >= CAMERA_TUNING.automaticRecoveryCooldownMs) {
         void this.beginAmbiguousRecovery(observation);
-      } else if (decoderActive && silence >= Math.max(6000, Math.min(CAMERA_TUNING.prolongedSilenceMs, silenceThreshold * 5)) &&
+      } else if (!optimizedHold && decoderActive && silence >= Math.max(6000, Math.min(CAMERA_TUNING.prolongedSilenceMs, silenceThreshold * 5)) &&
           !(metrics.focusScore >= CAMERA_TUNING.focusExcellent && metrics.exposureScore >= CAMERA_TUNING.exposureExcellent && metrics.temporalContamination > 0.35) &&
           now - this.fullRecoveryAt >= CAMERA_TUNING.fullRecoveryCooldownMs) {
         this.fullRecoveryAt = now;

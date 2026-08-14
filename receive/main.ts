@@ -645,15 +645,14 @@ function beginOptimizeWhenReady(): void {
   void focusController.startOptimizer(measureReceivePerformance).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
-    optimizeEnabled = false;
-    opticsOptimize.setAttribute("aria-pressed", "false");
-    opticsOptimize.textContent = "Optimize";
     if (finished.optimizeState === "complete") {
-      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s`;
+      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · Refining`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
-      opticsKeep.hidden = false;
-    } else opticsOptimizeStatus.textContent = "Paused";
-  }).finally(() => { optimizeRunning = false; });
+    } else opticsOptimizeStatus.textContent = "Waiting…";
+  }).finally(() => {
+    optimizeRunning = false;
+    if (optimizeEnabled) setTimeout(beginOptimizeWhenReady, 250);
+  });
 }
 opticsOptimize.addEventListener("click", () => {
   if (!automaticOptics) {
