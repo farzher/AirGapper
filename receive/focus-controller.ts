@@ -507,11 +507,20 @@ export class FocusController {
     }
 
     const origin = this.settings();
-    const exposureRange = this.caps.exposureTime;
+    const hardwareExposureRange = this.caps.exposureTime;
     const isoRange = this.caps.iso;
-    if (!this.manualExposure() || !exposureRange || !isoRange || origin.exposureTime === undefined || origin.iso === undefined) {
+    if (!this.manualExposure() || !hardwareExposureRange || !isoRange || origin.exposureTime === undefined || origin.iso === undefined) {
       this.optimizeState = "paused";
       this.optimizeReason = "manual exposure and ISO controls unavailable";
+      return;
+    }
+    const exposureRange: NumericRange = {
+      ...hardwareExposureRange,
+      max: Math.min(hardwareExposureRange.max, 100),
+    };
+    if (exposureRange.max <= exposureRange.min) {
+      this.optimizeState = "paused";
+      this.optimizeReason = "camera has no safe exposure range";
       return;
     }
     this.commitSettings(origin);
@@ -544,9 +553,16 @@ export class FocusController {
     };
     const candidates = new Map<string, Candidate>();
     let nextId = 1;
-    const make = (exposure: number, iso: number): Candidate => {
-      exposure = this.quantize(exposure, exposureRange);
+    const make = (exposure: number, iso: number, safe = true): Candidate => {
+      exposure = this.quantize(exposure, safe ? exposureRange : hardwareExposureRange);
       iso = this.quantize(iso, isoRange);
+      if (safe) {
+        const exposurePosition = Math.log2(exposure / exposureRange.min) / Math.log2(exposureRange.max / exposureRange.min);
+        const isoPosition = Math.log2(iso / isoRange.min) / Math.log2(isoRange.max / isoRange.min);
+        if (exposurePosition > 0.66 && isoPosition > 0.34) {
+          iso = this.quantize(2 ** (Math.log2(isoRange.min) + Math.log2(isoRange.max / isoRange.min) / 3), isoRange);
+        }
+      }
       const key = `${exposure}|${iso}`;
       const existing = candidates.get(key);
       if (existing) return existing;
@@ -557,7 +573,7 @@ export class FocusController {
       candidates.set(key, candidate);
       return candidate;
     };
-    const incumbent = make(origin.exposureTime, origin.iso);
+    const incumbent = make(origin.exposureTime, origin.iso, false);
     const performanceOf = (candidate: Candidate) => aggregate(candidate.windows);
     const rate = (performance: ReceivePerformance) => performance.perQrAttemptSuccessRate *
       (performance.sourceFrames ? performance.qrAttempts / performance.sourceFrames : 0) * performance.captureFps;
@@ -662,10 +678,16 @@ export class FocusController {
       const exposures = Array.from({ length: 4 }, (_, index) => level(exposureRange, index));
       const isos = Array.from({ length: 4 }, (_, index) => level(isoRange, index));
       const order: [number, number][] = [
-        [0, 0], [0, 3], [1, 0], [1, 2], [2, 3],
-        [2, 0], [1, 3], [2, 1], [2, 2], [3, 1],
+        [0, 0], [0, 3], [1, 0], [1, 2], [1, 3],
+        [2, 0], [2, 1], [2, 2], [3, 0], [3, 1],
       ];
-      const coarse = [incumbent, ...order.map(([x, y]) => make(exposures[x]!, isos[y]!))]
+      const incumbentExposurePosition = Math.log2(incumbent.exposure / exposureRange.min) /
+        Math.log2(exposureRange.max / exposureRange.min);
+      const incumbentIsoPosition = Math.log2(incumbent.iso / isoRange.min) /
+        Math.log2(isoRange.max / isoRange.min);
+      const safeIncumbent = incumbent.exposure <= exposureRange.max &&
+        !(incumbentExposurePosition > 0.66 && incumbentIsoPosition > 0.34) ? [incumbent] : [];
+      const coarse = [...safeIncumbent, ...order.map(([x, y]) => make(exposures[x]!, isos[y]!))]
         .filter((candidate, index, all) => all.indexOf(candidate) === index);
       this.exposureProbes += coarse.length - 1;
       await captureRound(coarse, "coarse", true);
@@ -715,6 +737,16 @@ export class FocusController {
       const verification = await measure("Winner", final.epoch);
       epochs.close(final.epoch);
       winner.windows.push(await verification.result);
+      const repeatableVisits = winner.windows.filter((window) =>
+        window.completionCoverage >= 0.8 && window.validDecodes > 0).length;
+      if (repeatableVisits < 2 || performanceOf(winner).perQrAttemptSuccessRate <= 0) {
+        winner.state = "rejected: not repeatable";
+        refresh();
+        await this.restoreOptimizationBest("exposure");
+        this.optimizeState = "paused";
+        this.optimizeReason = "no repeatable QR winner; original settings restored";
+        return;
+      }
       winner.state = "winner";
       this.commitSettings(this.settings());
       refresh();
@@ -733,7 +765,7 @@ export class FocusController {
       this.optimizeBestPerformance = finalPerformance;
       const gain = baselineRate ? (finalRate / baselineRate - 1) * 100 : 0;
       this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${finalRate.toFixed(1)} normalized QR/s`;
-      this.optimizeReason = `${this.optimizeCandidates.length} actual configurations · full-range coarse complete`;
+      this.optimizeReason = `${this.optimizeCandidates.length} safe configurations · exposure capped at ${exposureRange.max}`;
       this.lock(finalObservation, "full-range exposure tournament converged; hardware focus retained");
     } finally {
       epochs.finish();
