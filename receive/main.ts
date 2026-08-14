@@ -641,17 +641,21 @@ function beginOptimizeWhenReady(): void {
   optimizeRunning = true;
   optimizeMeasureToken++;
   opticsKeep.hidden = true;
-  opticsOptimizeStatus.textContent = "Starting…";
+  const priorOptimization = focusController.diagnostics();
+  opticsOptimizeStatus.textContent = priorOptimization.optimizeReason?.includes("monitoring") ? "Monitoring…" : "Refining…";
+  let nextDelay = 250;
   void focusController.startOptimizer(measureReceivePerformance).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
-      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · Refining`;
+      const monitoring = finished.optimizeReason?.includes("monitoring");
+      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · ${monitoring ? "Optimal" : "Refining"}`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
+      if (monitoring) nextDelay = 6000;
     } else opticsOptimizeStatus.textContent = "Waiting…";
   }).finally(() => {
     optimizeRunning = false;
-    if (optimizeEnabled) setTimeout(beginOptimizeWhenReady, 250);
+    if (optimizeEnabled) setTimeout(beginOptimizeWhenReady, nextDelay);
   });
 }
 opticsOptimize.addEventListener("click", () => {
