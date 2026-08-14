@@ -91,6 +91,7 @@ const focusAxisName = document.getElementById("focus-axis-name")!;
 const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const opticsOptimize = document.getElementById("optics-optimize") as HTMLButtonElement;
+const opticsOptimizeStatus = document.getElementById("optics-optimize-status")!;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
 const focusDistance = document.getElementById("focus-distance") as HTMLInputElement;
 const focusDistanceValue = document.getElementById("focus-distance-value") as HTMLOutputElement;
@@ -337,11 +338,14 @@ function showRequestedCameraSettings(): void {
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
+let frameId = 0;
 const focusController = new FocusController(
   applyCameraConstraint,
   renderFocusDiagnostics,
   automaticOptics ? "auto" : manualFocusMode,
   preferredFocusDistance,
+  "auto",
+  () => frameId,
 );
 const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track: MediaStreamTrack): void {
@@ -494,30 +498,93 @@ let peakRegions = 0;
 let capturesDropped = 0; // pool full — frame never even submitted
 let cropsSubmitted = 0;
 
-async function measureReceivePerformance(durationMs: number): Promise<ReceivePerformance> {
-  const started = receiverNow();
-  const captures = totalCaptures;
-  const attempts = completedJobs;
-  const decodes = totalDecodes;
-  const useful = totalUsefulSymbols;
-  await new Promise((resolve) => setTimeout(resolve, durationMs));
-  const seconds = Math.max(0.001, (receiverNow() - started) / 1000);
+type CandidateEvidence = {
+  boundary: number;
+  startedAt: number;
+  captures: number;
+  completedJobs: number;
+  qrAttempts: number;
+  validDecodes: number;
+  usefulSymbols: number;
+};
+let candidateEvidence: CandidateEvidence | undefined;
+
+function recentCompletionIntervalMs(now: number): number {
+  const recent = scanCompletionTimes.filter((at) => at > now - 6000);
+  const gaps = recent.slice(1).map((at, index) => at - recent[index]!).filter((gap) => gap > 0).sort((a, b) => a - b);
+  return gaps.length ? gaps[gaps.length >> 1]! : 350;
+}
+
+async function measureReceivePerformance(label: string): Promise<ReceivePerformance> {
+  const startedAt = receiverNow();
+  const evidence: CandidateEvidence = {
+    boundary: frameId,
+    startedAt,
+    captures: totalCaptures,
+    completedJobs: 0,
+    qrAttempts: 0,
+    validDecodes: 0,
+    usefulSymbols: 0,
+  };
+  candidateEvidence = evidence;
+  const targetAttempts = 8;
+  const minCompletions = 4;
+  const minMs = 700;
+  const maxMs = Math.max(2200, Math.min(4200, recentCompletionIntervalMs(startedAt) * targetAttempts * 1.35));
+  try {
+    for (;;) {
+      const elapsed = receiverNow() - startedAt;
+      opticsOptimizeStatus.textContent = `Optimize: ${label} · collecting ${Math.min(targetAttempts, evidence.qrAttempts)}/${targetAttempts} attempts`;
+      const enoughEvidence = evidence.completedJobs >= minCompletions && evidence.qrAttempts >= targetAttempts;
+      if (elapsed >= minMs && enoughEvidence && (evidence.validDecodes > 0 || evidence.qrAttempts >= targetAttempts)) break;
+      if (elapsed >= maxMs) break;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+  } finally {
+    if (candidateEvidence === evidence) candidateEvidence = undefined;
+  }
+  const seconds = Math.max(0.001, (receiverNow() - startedAt) / 1000);
+  const validDecodesPerSecond = evidence.validDecodes / seconds;
+  const priorBest = focusController.diagnostics().optimizeBestPerformance;
+  opticsOptimizeStatus.textContent = `Optimize: ${label} · ${validDecodesPerSecond.toFixed(1)} valid QR/s${priorBest ? ` · best ${priorBest.validDecodesPerSecond.toFixed(1)}` : ""}`;
   return {
-    usefulSymbolsPerSecond: (totalUsefulSymbols - useful) / seconds,
-    decodeSuccessRate: (completedJobs - attempts) > 0 ? (totalDecodes - decodes) / (completedJobs - attempts) : 0,
-    captureFps: (totalCaptures - captures) / seconds,
+    validDecodesPerSecond,
+    usefulSymbolsPerSecond: evidence.usefulSymbols / seconds,
+    perQrAttemptSuccessRate: evidence.qrAttempts ? evidence.validDecodes / evidence.qrAttempts : 0,
+    captureFps: (totalCaptures - evidence.captures) / seconds,
+    completedJobs: evidence.completedJobs,
+    qrAttempts: evidence.qrAttempts,
+    validDecodes: evidence.validDecodes,
   };
 }
 
 opticsOptimize.addEventListener("click", () => {
-  const state = focusController.diagnostics().optimizeState;
-  if (state === "baseline" || state === "focus" || state === "exposure") {
+  const diagnostic = focusController.diagnostics();
+  const state = diagnostic.optimizeState;
+  if (state === "baseline" || state === "focus" || state === "exposure" || state === "iso") {
     focusController.cancelOptimize("Optimize cancelled");
-    opticsOptimize.textContent = "Optimize";
+    opticsOptimizeStatus.textContent = "Optimize cancelled · best restored";
+    return;
+  }
+  if (!automaticOptics) {
+    opticsOptimizeStatus.textContent = "Optimize: enable Auto";
+    return;
+  }
+  if (diagnostic.state !== "LOCKED") {
+    opticsOptimizeStatus.textContent = "Optimize: waiting for lock";
+    return;
+  }
+  if (!diagnostic.geometryStable) {
+    opticsOptimizeStatus.textContent = "Optimize: waiting for stable target";
     return;
   }
   opticsOptimize.textContent = "Cancel";
-  void focusController.optimize(measureReceivePerformance).finally(() => { opticsOptimize.textContent = "Optimize"; });
+  opticsOptimizeStatus.textContent = "Optimize: starting";
+  void focusController.optimize(measureReceivePerformance).then(() => {
+    const finished = focusController.diagnostics();
+    if (finished.optimizeState === "cancelled") return;
+    opticsOptimizeStatus.textContent = finished.optimizeSummary ? `Optimize complete · ${finished.optimizeSummary}` : "Optimize complete";
+  }).finally(() => { opticsOptimize.textContent = "Optimize"; });
 });
 let trackedDecodes = 0; // decodes via the fork's detection-skipping fast path
 let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
@@ -696,6 +763,12 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   scanCapturedAt.delete(id);
   scanCompletionTimes.push(receiverNow());
   completedJobs++;
+  focusController.noteDecoderCompletion(id);
+  const evidence = candidateEvidence;
+  if (evidence && id >= evidence.boundary) {
+    evidence.completedJobs++;
+    evidence.qrAttempts += Math.max(1, completion.symbolCount, completion.targetedAttempts + completion.readFullAttempts + Number(completion.fallbackAttempted));
+  }
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (fullJob) {
@@ -1042,15 +1115,18 @@ function showNegotiatedWebMode(track: MediaStreamTrack, prefix = ""): void {
 function sameModeSize(a: BrowserMode, b: BrowserMode): boolean {
   return (a.width === b.width && a.height === b.height) || (a.width === b.height && a.height === b.width);
 }
+function formatExposureMs(value?: number): string {
+  return value === undefined ? "—" : `${Number((value * 0.1).toPrecision(3))} ms`;
+}
 function showExposureTime(value: number): void {
-  cameraExposureValue.value = `${Number(value.toPrecision(3))} ms`;
+  cameraExposureValue.value = formatExposureMs(value);
 }
 function syncExposureControls(): void {
   cameraExposureAuto.checked = automaticOptics;
   exposureAxisAuto.checked = automaticExposureAxis;
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
-  opticsAutoActions.hidden = !automaticOptics || cameraExposureControl.hidden;
+  opticsAutoActions.hidden = !automaticOptics;
   focusMode.value = manualFocusMode;
   const manualFocus = manualFocusMode === "manual";
   focusDistanceControl.classList.toggle("manual-focus", manualFocus);
@@ -1369,12 +1445,19 @@ function renderFocusDiagnostics(): void {
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
   const optical = diagnostic.optical;
-  const optimizing = diagnostic.optimizeState === "baseline" || diagnostic.optimizeState === "focus" || diagnostic.optimizeState === "exposure";
+  const optimizing = diagnostic.optimizeState === "baseline" || diagnostic.optimizeState === "focus" || diagnostic.optimizeState === "exposure" || diagnostic.optimizeState === "iso";
   opticsOptimize.textContent = optimizing ? "Cancel" : "Optimize";
+  const optimizeEligible = automaticOptics && diagnostic.state === "LOCKED" && diagnostic.geometryStable;
+  opticsOptimize.disabled = !optimizing && !optimizeEligible;
+  if (!optimizing && diagnostic.optimizeState !== "complete" && diagnostic.optimizeState !== "cancelled") {
+    opticsOptimizeStatus.textContent = diagnostic.state !== "LOCKED"
+      ? "Optimize: waiting for lock"
+      : !diagnostic.geometryStable ? "Optimize: waiting for stable target" : "Optimize: ready";
+  }
   focusRefocus.disabled = optimizing;
   const mutation = lastCameraMutation;
   const cameraLine = (value?: CameraPatch) => value
-    ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${value.exposureTime ?? "—"}ms · ISO ${value.iso ?? "—"}`
+    ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${formatExposureMs(value.exposureTime)} · ISO ${value.iso ?? "—"}`
     : "—";
   focusDiagnostics.textContent = [
     diagnostic.invariantWarning ? `!!! ${diagnostic.invariantWarning} — SELF-HEALING TO HARDWARE AF !!!` : "",
@@ -1383,13 +1466,13 @@ function renderFocusDiagnostics(): void {
     `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
     `Freeze   attempted ${diagnostic.manualFreezeAttempted ? "yes" : "no"} · verified ${diagnostic.manualFreezeVerified ? "yes" : "no"} · unsafe ${diagnostic.manualFreezeUnsafe ? "yes" : "no"}`,
     `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
-    `Exposure committed ${diagnostic.committedExposureTime ?? "—"}ms · actual ${diagnostic.actualExposure ?? "—"}ms · candidate ${diagnostic.candidateExposureTime ?? "—"}`,
+    `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · candidate ${formatExposureMs(diagnostic.candidateExposureTime)}`,
     `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
-    `Payload  ${diagnostic.decodedNow}/${diagnostic.totalTiles} now · ${diagnostic.decodedRecently}/${diagnostic.totalTiles} recent`,
+    `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1000).toFixed(1)}s`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount} · reacquire ${diagnostic.reacquireCount}`,
-    `Optimize ${diagnostic.optimizeState}${diagnostic.optimizeCandidatePerformance ? ` · candidate ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.decodeSuccessRate * 100).toFixed(0)}% decode · ${diagnostic.optimizeCandidatePerformance.captureFps.toFixed(1)} fps` : ""}`,
-    diagnostic.optimizeBestPerformance ? `Best     ${diagnostic.optimizeBestPerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${diagnostic.committedExposureTime ?? "—"}ms · ISO ${diagnostic.committedIso ?? "—"}` : "",
+    `Optimize ${diagnostic.optimizeState}${diagnostic.optimizeCandidatePerformance ? ` · candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/attempt` : ""}`,
+    diagnostic.optimizeBestPerformance ? `Best     ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(0.001, (performance.now() - opticalTimingStartedAt) / 1000)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${mutation?.kind ?? "—"}`,
@@ -1980,7 +2063,6 @@ function scheduleFrame(gen: number) {
 
 const grab = document.createElement("canvas");
 const replaySourceCanvas = document.createElement("canvas");
-let frameId = 0;
 // A transfer handover invalidates every older in-flight capture. Submission
 // ids are monotonic, so stale asynchronous replies cannot reclaim the lock.
 let minimumAcceptedScanId = 0;
@@ -2322,10 +2404,8 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
   }
   const geometry = focusGeometry();
   if (!geometry) return;
-  const decodedNow = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < 140).length;
-  const decodedRecently = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < CAMERA_TUNING.recentTileWindowMs).length;
   const captureFps = captureTimes.reduce((count, at) => count + Number(at > now - STATS_WINDOW_MS), 0);
-  focusController.observe(source.sequence, geometry, metrics, decodedNow, decodedRecently, Math.max(1, expectedRegions), now, captureFps);
+  focusController.observe(source.sequence, geometry, metrics, Math.max(1, expectedRegions), now, captureFps);
 }
 
 function captureFrame(source: ReceiverFrame) {
@@ -2668,6 +2748,9 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     return;
   }
   const { header, block } = parsed;
+  focusController.noteValidDecode(info?.scanId);
+  const evidence = candidateEvidence;
+  if (evidence && info?.scanId !== undefined && info.scanId >= evidence.boundary) evidence.validDecodes++;
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
     slot: header.slotIndex, esi: header.seq, bytes: header.blockLen, quad: info?.quad,
@@ -2741,8 +2824,11 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     lastDistinctArrivalAt = receivedAt;
   }
   if (decoder.usefulSymbols > usefulBefore) {
-    totalUsefulSymbols += decoder.usefulSymbols - usefulBefore;
+    const added = decoder.usefulSymbols - usefulBefore;
+    totalUsefulSymbols += added;
     usefulFrameTimes.push(receivedAt);
+    focusController.noteUsefulDecode(info?.scanId);
+    if (candidateEvidence && info?.scanId !== undefined && info.scanId >= candidateEvidence.boundary) candidateEvidence.usefulSymbols += added;
   }
   updateProgressEstimate();
 
