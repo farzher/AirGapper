@@ -2431,8 +2431,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   releaseScreenWakeLock();
   const finishGen = ++captureGen;
   // Snapshot diagnostics before teardown, but do not report success until the
-  // recovered output passes SHA-256. Goodput is unique original-file bytes
-  // divided by time through verification, never projected frame capacity.
+  // recovered output passes SHA-256.
   let diagnosticsBase: Record<string, unknown> | null = null;
   if (import.meta.env.DEV && import.meta.env.VITE_DIAGNOSTICS === "1") {
     const track = stream?.getVideoTracks()[0];
@@ -2578,9 +2577,9 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     sendDiagnostics(true, seconds, file.bytes.length);
 
     // The container carries its own media type, so the receiver never has to be
-    // told in advance whether a file or a text snippet is coming. The displayed
-    // rate is complete, unique original-file goodput through SHA verification.
-    const rate = completedGoodputKbs(file.bytes.length, seconds);
+    // told in advance whether a file or a text snippet is coming. Report the
+    // bytes that actually crossed the optical link, compressed when gzip won.
+    const rate = completedGoodputKbs(file.transmittedSize, seconds);
     metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`;
     speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
     progressLabel.textContent = "✓ Complete";
