@@ -212,6 +212,7 @@ export class FocusController {
   private optimizeCandidatePerformance?: ReceivePerformance;
   private optimizeBestPerformance?: ReceivePerformance;
   private optimizeSummary?: string;
+  private optimizeRunCount = 0;
   private decodeBoundary = 0;
   private cameraGenerationStartedAt = performance.now();
   private lastValidDecodeAt?: number;
@@ -279,6 +280,7 @@ export class FocusController {
     this.optimizeCandidatePerformance = undefined;
     this.optimizeBestPerformance = undefined;
     this.optimizeSummary = undefined;
+    this.optimizeRunCount = 0;
     this.bestKnownGood = undefined;
     this.lastWorkingState = undefined;
     this.beginDecodeGeneration();
@@ -361,7 +363,7 @@ export class FocusController {
   optimizeEligible(now = performance.now()): boolean {
     const stable = Boolean(this.stableSince && now - this.stableSince >= CAMERA_TUNING.geometryStabilityMs);
     const recentlyDecoded = Boolean(this.lastValidDecodeAt && now - this.lastValidDecodeAt <= this.silenceThreshold());
-    const inactive = !this.isOptimizing() && !["SEEKING", "STABILIZING", "TARGET_LOST_GRACE", "EXPOSURE_RECOVERY"].includes(this.state);
+    const inactive = !this.isOptimizing() && !["SEEKING", "TARGET_LOST_GRACE", "EXPOSURE_RECOVERY"].includes(this.state);
     return this.strategy === "auto" && Boolean(this.track && this.latest && !this.targetMissingSince) &&
       stable && recentlyDecoded && inactive;
   }
@@ -371,13 +373,15 @@ export class FocusController {
     const generation = ++this.generation;
     this.beginDecodeGeneration();
     this.optimizeMovementSince = 0;
+    const refinementLevel = this.optimizeRunCount++ % 4;
+    const refinementLabel = ["coarse", "medium", "fine", "micro"][refinementLevel]!;
     const baselineObservation = this.latest!;
     const baselineSettings = this.settings();
     this.commitSettings(baselineSettings);
     this.optimizeSummary = undefined;
     this.optimizeState = "baseline";
     this.transition("OPTIMIZE_FOCUS", "baseline: waiting for post-setting decoder evidence");
-    const baselinePerformance = await measure("Baseline");
+    const baselinePerformance = await measure(`Baseline · ${refinementLabel}`);
     let bestPerformance = baselinePerformance;
     this.optimizeBestPerformance = bestPerformance;
     this.optimizeCandidatePerformance = bestPerformance;
@@ -419,6 +423,11 @@ export class FocusController {
       };
     };
     let bestWindows = [baselinePerformance];
+    const phasePause = async (): Promise<boolean> => {
+      const adaptive = Math.min(700, Math.max(120, (this.medianInterval(this.validDecodeTimes) ?? 180) * 1.5));
+      await new Promise((resolve) => setTimeout(resolve, 80 + Math.random() * adaptive));
+      return this.current(generation);
+    };
     const phaseResistant = async (
       first: ReceivePerformance, label: string, patch: CameraPatch, afterId: number,
     ): Promise<{ performance: ReceivePerformance; observation: OpticalObservation } | undefined> => {
@@ -426,6 +435,7 @@ export class FocusController {
       const obvious = (ratio >= 1.4 && first.validDecodes >= 4) ||
         (ratio <= 0.5 && first.qrAttempts >= 8) || (first.validDecodes === 0 && first.qrAttempts >= 8);
       if (obvious) return this.latest ? { performance: first, observation: this.latest } : undefined;
+      if (!(await phasePause())) return undefined;
       await this.restoreOptimizationBest();
       const refreshedBest = await this.fresh(generation, this.latest?.id ?? afterId);
       if (!refreshedBest || !this.current(generation)) return undefined;
@@ -433,7 +443,7 @@ export class FocusController {
       bestWindows.push(bestAgain);
       bestPerformance = medianPerformance(bestWindows);
       this.optimizeBestPerformance = bestPerformance;
-      if (!(await this.applyProbe(generation, patch))) return undefined;
+      if (!(await phasePause()) || !(await this.applyProbe(generation, patch))) return undefined;
       const repeated = await this.fresh(generation, this.latest?.id ?? refreshedBest.id);
       if (!repeated || !safe(repeated)) return undefined;
       const second = await measure(`${label} · retest`);
@@ -453,7 +463,7 @@ export class FocusController {
     if (this.manualFocus() && focusRange && baselineSettings.focusDistance !== undefined) {
       this.optimizeState = "focus";
       const origin = baselineSettings.focusDistance;
-      const delta = Math.max((focusRange.step ?? 0) * 2, (focusRange.max - focusRange.min) / 40);
+      const delta = Math.max((focusRange.step ?? 0) * 2, (focusRange.max - focusRange.min) / (40 * 2 ** refinementLevel));
       let improvingDirection = 0;
       let focusIndex = 0;
       for (const requested of [origin - delta, origin + delta]) {
@@ -466,7 +476,7 @@ export class FocusController {
         const optical = await this.fresh(generation, this.latest?.id ?? baselineObservation.id);
         if (!optical) { this.cancelOptimize("static target unavailable"); return; }
         if (safe(optical)) {
-          const label = `Focus ${focusIndex}/3`;
+          const label = `Focus ${focusIndex}/3 · ${refinementLabel}`;
           const measured = await measure(label);
           const compared = await phaseResistant(measured, label, { focusMode: "manual", focusDistance: candidate }, optical.id);
           if (!this.current(generation)) return;
@@ -485,7 +495,7 @@ export class FocusController {
           if (await this.applyProbe(generation, { focusMode: "manual", focusDistance: candidate })) {
             const optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
             if (optical && safe(optical)) {
-              const label = "Focus 3/3";
+              const label = `Focus 3/3 · ${refinementLabel}`;
               const measured = await measure(label);
               const compared = await phaseResistant(measured, label, { focusMode: "manual", focusDistance: candidate }, optical.id);
               if (compared) {
@@ -506,9 +516,10 @@ export class FocusController {
       this.optimizeState = "exposure";
       this.transition("OPTIMIZE_EXPOSURE", "focus fixed; probing brighter and darker exposure");
       const origin = this.committedExposureTime;
+      const exposureFactor = 2 ** (1 / (2 * 2 ** refinementLevel));
       let improvingDirection = 0;
       let exposureIndex = 0;
-      for (const factor of [1 / Math.SQRT2, Math.SQRT2]) {
+      for (const factor of [1 / exposureFactor, exposureFactor]) {
         const candidate = this.quantize(origin * factor, exposureRange);
         if (!this.current(generation) || candidate === origin) continue;
         exposureIndex++;
@@ -519,7 +530,7 @@ export class FocusController {
         const optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
         if (!optical) { this.cancelOptimize("static target unavailable"); return; }
         if (safe(optical)) {
-          const label = `Exposure ${exposureIndex}/3`;
+          const label = `Exposure ${exposureIndex}/3 · ${refinementLabel}`;
           const patch = { exposureMode: "manual", exposureTime: candidate, ...(iso !== undefined ? { iso } : {}) };
           const measured = await measure(label);
           const compared = await phaseResistant(measured, label, patch, optical.id);
@@ -532,7 +543,7 @@ export class FocusController {
         await this.restoreOptimizationBest("exposure");
       }
       if (improvingDirection && this.current(generation)) {
-        const candidate = this.quantize(origin * (improvingDirection > 0 ? 2 : 0.5), exposureRange);
+        const candidate = this.quantize(origin * (improvingDirection > 0 ? exposureFactor ** 2 : 1 / exposureFactor ** 2), exposureRange);
         if (candidate !== this.committedExposureTime) {
           const iso = this.committedIso;
           this.exposureProbes++;
@@ -540,7 +551,7 @@ export class FocusController {
           if (await this.applyProbe(generation, { exposureMode: "manual", exposureTime: candidate, ...(iso !== undefined ? { iso } : {}) })) {
             const optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
             if (optical && safe(optical)) {
-              const label = "Exposure 3/3";
+              const label = `Exposure 3/3 · ${refinementLabel}`;
               const patch = { exposureMode: "manual", exposureTime: candidate, ...(iso !== undefined ? { iso } : {}) };
               const measured = await measure(label);
               const compared = await phaseResistant(measured, label, patch, optical.id);
@@ -559,8 +570,9 @@ export class FocusController {
     if (isoRange && this.committedIso !== undefined && this.committedExposureTime !== undefined && this.current(generation)) {
       this.optimizeState = "iso";
       const origin = this.committedIso;
+      const isoFactor = 2 ** (1 / (2 * 2 ** refinementLevel));
       let isoIndex = 0;
-      for (const factor of [1 / Math.SQRT2, Math.SQRT2]) {
+      for (const factor of [1 / isoFactor, isoFactor]) {
         const candidate = this.quantize(origin * factor, isoRange);
         if (candidate === origin) continue;
         isoIndex++;
@@ -568,7 +580,7 @@ export class FocusController {
         if (!(await this.applyProbe(generation, { exposureMode: "manual", exposureTime: this.committedExposureTime, iso: candidate }))) break;
         const optical = await this.fresh(generation, this.latest?.id ?? bestObservation.id);
         if (optical && safe(optical)) {
-          const label = `ISO ${isoIndex}/2`;
+          const label = `ISO ${isoIndex}/2 · ${refinementLabel}`;
           const patch = { exposureMode: "manual", exposureTime: this.committedExposureTime, iso: candidate };
           const measured = await measure(label);
           const compared = await phaseResistant(measured, label, patch, optical.id);
@@ -699,6 +711,7 @@ export class FocusController {
           this.stableSince = now;
           this.poiAimed = false;
           this.optimizeMovementSince = 0;
+          this.optimizeRunCount = 0;
           this.transition("STABILIZING", "target moved during optimization; exposure best retained and hardware AF restored");
           void this.enterAutoFocusAcquisition("optimization cancelled by movement", this.generation, false, true, geometry);
           return;

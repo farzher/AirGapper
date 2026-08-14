@@ -591,10 +591,10 @@ function beginOptimizeWhenReady(): void {
       opticsOptimizeStatus.textContent = `Watching · ${finished.optimizeSummary ?? "best verified"}`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
-      nextOptimizeAt = performance.now() + 15_000;
+      nextOptimizeAt = performance.now() + 750 + Math.random() * 750;
     } else {
       opticsOptimizeStatus.textContent = "Optimize on · stabilizing · best kept";
-      nextOptimizeAt = performance.now() + 1200;
+      nextOptimizeAt = performance.now() + 250 + Math.random() * 500;
     }
   }).finally(() => { optimizeRunning = false; });
 }
