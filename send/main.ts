@@ -608,12 +608,10 @@ async function startStream(revealStage = false) {
   const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= frameBytes
     ? snippetValue
     : null;
-  const configuredGrid = layoutGrid(configuredLayout);
-  let transport = selectTransportPlan(payload.length, frameBytes, configuredGrid.codes);
+  const transport = selectTransportPlan(payload.length, frameBytes);
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode: LayoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
-  if (staticStream) transport = selectTransportPlan(payload.length, frameBytes, gridCodes);
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
   const encoder = new TransportEncoder(payload, blockLen, payloadId);
@@ -787,7 +785,7 @@ async function startStream(revealStage = false) {
               modules,
               encodedBytes: transport.frameBytes,
               ceilingBytes: frameBytes,
-              headerPercent: Number((transport.headerFraction * 100).toFixed(2)),
+              overheadPercent: Number((transport.overheadFraction * 100).toFixed(2)),
             },
             fountain: {
               mode: encoder.mode,
