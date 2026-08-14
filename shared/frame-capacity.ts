@@ -25,8 +25,8 @@ export function blockLength(frameBytes: number): number {
  * almost all padding.
  *
  * Equal-sized fountain blocks cannot produce every requested count exactly.
- * This balances the payload across the requested blocks; if that would produce
- * one block too few, it steps down to the next size with at least that count.
+ * This balances the payload across the requested or capacity-required blocks;
+ * if that would produce one block too few, it steps down to the next size.
  */
 export function denseBlockLength(
   payloadBytes: number,
@@ -35,8 +35,8 @@ export function denseBlockLength(
 ): number {
   const payload = Math.max(1, Math.floor(payloadBytes));
   const maximum = Math.max(1, Math.floor(maximumBlockLength));
-  const target = Math.max(1, Math.min(Math.floor(desiredBlocks), payload));
-  if (target === 1) return Math.min(payload, maximum);
+  const visibleBlocks = Math.max(1, Math.min(Math.floor(desiredBlocks), payload));
+  const target = Math.max(visibleBlocks, Math.ceil(payload / maximum));
   let balanced = Math.ceil(payload / target);
   if (Math.ceil(payload / balanced) < target) balanced--;
   return Math.min(maximum, Math.max(1, balanced));
