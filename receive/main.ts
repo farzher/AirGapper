@@ -44,7 +44,6 @@ import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/plat
 import {
   FocusController,
   CAMERA_TUNING,
-  type CalibrationMode,
   type CameraPatch,
   type FocusGeometry,
   type FocusStrategy,
@@ -72,6 +71,12 @@ const cameraOpticsManual = document.getElementById("camera-optics-manual")!;
 const focusAxisAuto = document.getElementById("focus-axis-auto") as HTMLInputElement;
 const exposureAxisAuto = document.getElementById("exposure-axis-auto") as HTMLInputElement;
 const isoAxisAuto = document.getElementById("iso-axis-auto") as HTMLInputElement;
+const focusAxisToggle = document.getElementById("focus-axis-toggle")!;
+const exposureAxisToggle = document.getElementById("exposure-axis-toggle")!;
+const isoAxisToggle = document.getElementById("iso-axis-toggle")!;
+const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
+const exposureAxisReset = document.getElementById("exposure-axis-reset") as HTMLButtonElement;
+const isoAxisReset = document.getElementById("iso-axis-reset") as HTMLButtonElement;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
 const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
@@ -80,7 +85,6 @@ const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElemen
 const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
 const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
 const focusDev = document.getElementById("focus-dev")!;
-const cameraCalibration = document.getElementById("camera-calibration") as HTMLSelectElement;
 const focusStrategy = document.getElementById("focus-strategy") as HTMLSelectElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
@@ -162,7 +166,6 @@ let preferredExposureTime: number | undefined;
 let preferredFocusStrategy: FocusStrategy = "auto";
 let preferredFocusDistance: number | undefined;
 let preferredIso: number | undefined;
-let preferredCalibrationMode: CalibrationMode = "auto";
 let exposureApplyGeneration = 0;
 let cameraMutationQueue = Promise.resolve();
 let desiredCamera: CameraPatch = {};
@@ -275,7 +278,7 @@ function restoreCameraSettings(): void {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
       resolution?: string; automaticOptics?: boolean; automaticFocusAxis?: boolean;
       automaticExposureAxis?: boolean; automaticIsoAxis?: boolean; exposureTime?: number; workers?: string;
-      focusStrategy?: FocusStrategy; focusDistance?: number; iso?: number; calibrationMode?: CalibrationMode;
+      focusStrategy?: FocusStrategy; focusDistance?: number; iso?: number;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
@@ -290,7 +293,6 @@ function restoreCameraSettings(): void {
     if (["auto", "continuous", "single-shot", "manual"].includes(saved.focusStrategy ?? "")) preferredFocusStrategy = saved.focusStrategy!;
     if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
     if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
-    if (["auto", "off", "force"].includes(saved.calibrationMode ?? "")) preferredCalibrationMode = saved.calibrationMode!;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
@@ -306,7 +308,6 @@ function saveCameraSettings(): void {
       focusStrategy: preferredFocusStrategy,
       focusDistance: preferredFocusDistance,
       iso: preferredIso,
-      calibrationMode: preferredCalibrationMode,
     }));
   } catch { /* Storage is optional. */ }
 }
@@ -335,7 +336,6 @@ const focusController = new FocusController(
   renderFocusDiagnostics,
   preferredFocusStrategy,
   preferredFocusDistance,
-  preferredCalibrationMode,
 );
 const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track: MediaStreamTrack): void {
@@ -346,7 +346,6 @@ function attachCameraController(track: MediaStreamTrack): void {
   }
 }
 focusStrategy.value = preferredFocusStrategy;
-cameraCalibration.value = preferredCalibrationMode;
 
 // Keep developer controls out of the normal settings UI. Show, hide, then show
 // Settings within one second to reveal them. A slower close/reopen hides them.
@@ -1019,9 +1018,16 @@ function syncExposureControls(): void {
   exposureAxisAuto.checked = automaticExposureAxis;
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
-  cameraExposure.disabled = automaticExposureAxis;
-  focusDistance.disabled = automaticFocusAxis;
-  cameraIso.disabled = automaticIsoAxis;
+  for (const [automatic, toggle, slider, output, reset] of [
+    [automaticFocusAxis, focusAxisToggle, focusDistance, focusDistanceValue, focusAxisReset],
+    [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset],
+    [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset],
+  ] as const) {
+    toggle.hidden = !automatic;
+    slider.hidden = automatic;
+    output.hidden = automatic;
+    reset.hidden = automatic;
+  }
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
@@ -1045,11 +1051,13 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 80));
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
-  type ExposureSettings = MediaTrackSettings & { exposureMode?: string; exposureTime?: number };
+  type ExposureSettings = MediaTrackSettings & { exposureMode?: string; exposureTime?: number; iso?: number };
   const active = track.getSettings() as ExposureSettings;
   const step = Number(cameraExposure.step) || 0.1;
+  const isoStep = Number(cameraIso.step) || 1;
   if ((active.exposureMode && active.exposureMode !== "manual") ||
-      (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
+      (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2) ||
+      (requestedIso !== undefined && active.iso !== undefined && Math.abs(active.iso - requestedIso) > isoStep / 2)) {
     await applyCameraConstraint(track, {
       exposureMode: "manual", exposureTime: requested,
       ...(requestedIso !== undefined ? { iso: requestedIso } : {}),
@@ -1305,7 +1313,6 @@ function renderFocusDiagnostics(): void {
   if (!diagnostic) return;
   focusDev.hidden = diagnostic.state === "UNAVAILABLE";
   focusStrategy.value = preferredFocusStrategy;
-  cameraCalibration.value = preferredCalibrationMode;
   for (const option of focusStrategy.options) {
     option.disabled = option.value !== "auto" && !diagnostic.availableModes.includes(option.value);
   }
@@ -1342,11 +1349,6 @@ function renderFocusDiagnostics(): void {
   ].filter(Boolean).join("\n");
 }
 
-cameraCalibration.addEventListener("change", () => {
-  preferredCalibrationMode = cameraCalibration.value as CalibrationMode;
-  saveCameraSettings();
-  focusController.setCalibrationMode(preferredCalibrationMode);
-});
 focusStrategy.addEventListener("change", () => {
   preferredFocusStrategy = focusStrategy.value as FocusStrategy;
   saveCameraSettings();
@@ -1446,6 +1448,27 @@ isoAxisAuto.addEventListener("change", () => {
   const track = stream?.getVideoTracks()[0];
   if (track) void applyExposureSetting(track);
 });
+focusAxisReset.addEventListener("click", () => {
+  automaticFocusAxis = true;
+  preferredFocusStrategy = "continuous";
+  syncExposureControls();
+  saveCameraSettings();
+  focusController.setStrategy("continuous");
+});
+exposureAxisReset.addEventListener("click", () => {
+  automaticExposureAxis = true;
+  syncExposureControls();
+  saveCameraSettings();
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyExposureSetting(track);
+});
+isoAxisReset.addEventListener("click", () => {
+  automaticIsoAxis = true;
+  syncExposureControls();
+  saveCameraSettings();
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyExposureSetting(track);
+});
 function queueExposureChange(immediate = false): void {
   preferredExposureTime = Number(cameraExposure.value);
   focusController.developerOverride("developer changed exposure time");
@@ -1461,20 +1484,24 @@ function queueExposureChange(immediate = false): void {
 }
 cameraExposure.addEventListener("input", () => queueExposureChange());
 cameraExposure.addEventListener("change", () => queueExposureChange(true));
-cameraIso.addEventListener("input", () => {
-  preferredIso = Number(cameraIso.value);
-  cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
-});
-cameraIso.addEventListener("change", () => {
+function queueIsoChange(immediate = false): void {
   preferredIso = Number(cameraIso.value);
   automaticIsoAxis = false;
   isoAxisAuto.checked = false;
+  cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
   syncExposureControls();
   saveCameraSettings();
   focusController.developerOverride("developer changed ISO");
-  const track = stream?.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
+  clearTimeout(exposureApplyTimer);
+  const apply = () => {
+    const track = stream?.getVideoTracks()[0];
+    if (track && !automaticOptics) void applyExposureSetting(track);
+  };
+  if (immediate) apply();
+  else exposureApplyTimer = setTimeout(apply, 80);
+}
+cameraIso.addEventListener("input", () => queueIsoChange());
+cameraIso.addEventListener("change", () => queueIsoChange(true));
 decodeWorkers.addEventListener("change", () => {
   saveCameraSettings();
   if (!stream || done) return;
@@ -2216,7 +2243,7 @@ function submitReceiverJob(
 const opticalTargets: QrOpticalTarget[] = [];
 let lastOpticalSampleAt = -Infinity;
 function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, oy = 0): void {
-  if (replayRunning || legacyAndroidApp) return;
+  if (replayRunning) return;
   const now = receiverNow();
   if (now - lastOpticalSampleAt < focusController.opticalIntervalMs) return;
   lastOpticalSampleAt = now;

@@ -38,9 +38,6 @@ export const CAMERA_TUNING = {
   scaleChangeRatio: 0.16,
   displacementRatio: 0.1,
   perspectiveChange: 0.14,
-  movingDisplacementRatio: 0.018,
-  movingScaleRatio: 0.035,
-  movingPerspective: 0.04,
   lockCooldownMs: 4000,
   focusSaturation: 0.9,
   focusExcellent: 0.78,
@@ -271,13 +268,12 @@ export class FocusController {
     totalTiles = 1,
     now = performance.now(),
   ): void {
-    const priorGeometry = this.latest?.geometry;
     const observation = { id, at: now, geometry, metrics, decodedNow, decodedRecently, totalTiles };
     this.latest = observation;
     this.targetMissingSince = 0;
     this.resolveWaiter(observation);
     if ((this.state === "BASELINE" || this.state === "FOCUS_REFINE" || this.state === "EXPOSURE_REFINE") &&
-        (this.geometryChanged(geometry, this.stableGeometry) || this.geometryMoving(geometry, priorGeometry))) {
+        this.geometryChanged(geometry, this.stableGeometry)) {
       this.cancel("target moved during calibration");
       this.transition("STABILIZING", "target moved; probe cancelled and committed optics retained");
       this.stableGeometry = geometry;
@@ -324,11 +320,13 @@ export class FocusController {
     }
 
     if (this.state !== "SEEKING" && this.state !== "STABILIZING") return;
-    if (!this.stableGeometry || this.geometryChanged(geometry, this.stableGeometry) || this.geometryMoving(geometry, priorGeometry)) {
+    if (!this.stableGeometry || this.geometryChanged(geometry, this.stableGeometry)) {
       this.stableGeometry = geometry;
       this.stableSince = now;
       this.transition("STABILIZING", "waiting for stable QR geometry");
     } else {
+      // Detector jitter is expected, especially while exposure is changing.
+      // Blend it without restarting the stability clock.
       this.stableGeometry = this.blendGeometry(this.stableGeometry, geometry);
       if (now - this.stableSince >= CAMERA_TUNING.geometryStabilityMs) this.beginCalibration();
     }
@@ -551,14 +549,13 @@ export class FocusController {
 
     while (this.current(generation) && this.exposureProbes < CAMERA_TUNING.maxExposureProbes &&
         performance.now() - started < CAMERA_TUNING.maxExposureCalibrationMs) {
-      const tooBright = best.metrics.whiteLevel > 242 || best.metrics.blackLevel > 48 || best.metrics.clipping > 0.015;
       let nextIso = currentIso;
       let nextExposure = currentExposure;
       const exposureStep = Math.max(range.step ?? 0, 1e-6);
-      if (currentExposure > range.min + exposureStep / 2) {
-        nextExposure = this.quantize(Math.max(range.min, currentExposure / 2), range);
-      } else if (tooBright && isoRange && currentIso !== undefined && currentIso > isoRange.min) {
+      if (isoRange && currentIso !== undefined && currentIso > isoRange.min) {
         nextIso = this.quantize(Math.max(isoRange.min, currentIso / 2), isoRange);
+      } else if (currentExposure > range.min + exposureStep / 2) {
+        nextExposure = this.quantize(Math.max(range.min, currentExposure / 2), range);
       }
       if (nextExposure === currentExposure && nextIso === currentIso) break;
       this.exposureProbes++;
@@ -576,12 +573,15 @@ export class FocusController {
       const acceptable = this.exposureAcceptable(observed.metrics, qualityFloor);
       this.changed();
       if (!acceptable || score < bestScore - 0.025) break;
-      currentExposure = this.settings().exposureTime ?? nextExposure;
-      currentIso = this.settings().iso ?? nextIso;
+      // Android frequently reports the previous camera settings for several
+      // frames after accepting a constraint. The accepted candidate is the
+      // transaction source of truth; getSettings remains diagnostic only.
+      currentExposure = nextExposure;
+      currentIso = nextIso;
       best = observed;
       bestScore = score;
-      bestExposure = currentExposure;
-      bestIso = currentIso;
+      bestExposure = nextExposure;
+      bestIso = nextIso;
     }
     this.requestedExposure = bestExposure;
     this.requestedIso = bestIso;
@@ -594,9 +594,8 @@ export class FocusController {
       await this.rollbackCommitted("exposure");
       return this.latest ?? baseline;
     }
-    const committed = this.settings();
-    this.committedExposureTime = committed.exposureTime ?? bestExposure;
-    this.committedIso = committed.iso ?? bestIso;
+    this.committedExposureTime = bestExposure;
+    this.committedIso = bestIso;
     this.candidateExposureTime = undefined;
     this.candidateIso = undefined;
     this.lastReason = best.metrics.whiteLevel <= 242 && best.metrics.blackLevel <= 48
@@ -723,7 +722,15 @@ export class FocusController {
     if (!track) return;
     if (this.strategy === "manual" && this.manualFocus() && this.manualDistance !== undefined) {
       this.requestedMode = "manual";
-      await this.apply(track, { focusMode: "manual", focusDistance: this.manualDistance });
+      const requested = this.manualDistance;
+      await this.apply(track, { focusMode: "manual", focusDistance: requested });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const actual = this.settings();
+      const step = this.caps.focusDistance?.step ?? 0.01;
+      if ((actual.focusMode && actual.focusMode !== "manual") ||
+          (actual.focusDistance !== undefined && Math.abs(actual.focusDistance - requested) > step / 2)) {
+        await this.apply(track, { focusMode: "manual", focusDistance: requested });
+      }
     } else if (this.focusModes().includes(this.strategy)) {
       this.requestedMode = this.strategy;
       await this.apply(track, { focusMode: this.strategy });
@@ -735,6 +742,7 @@ export class FocusController {
     const track = this.track;
     if (!track || !this.current(generation)) return false;
     if (patch.focusMode) this.requestedMode = patch.focusMode;
+    this.geometryChanges = 0;
     const accepted = await this.apply(track, patch);
     return accepted && this.current(generation);
   }
@@ -800,14 +808,6 @@ export class FocusController {
     );
     return displacement > CAMERA_TUNING.displacementRatio || scale > CAMERA_TUNING.scaleChangeRatio ||
       perspective > CAMERA_TUNING.perspectiveChange;
-  }
-
-  private geometryMoving(current: FocusGeometry, prior?: FocusGeometry): boolean {
-    if (!prior) return false;
-    return Math.hypot(current.x - prior.x, current.y - prior.y) > CAMERA_TUNING.movingDisplacementRatio ||
-      Math.abs(Math.log(Math.max(0.0001, current.scale) / Math.max(0.0001, prior.scale))) > CAMERA_TUNING.movingScaleRatio ||
-      Math.abs(current.perspectiveX - prior.perspectiveX) > CAMERA_TUNING.movingPerspective ||
-      Math.abs(current.perspectiveY - prior.perspectiveY) > CAMERA_TUNING.movingPerspective;
   }
 
   private blendGeometry(a: FocusGeometry, b: FocusGeometry): FocusGeometry {
