@@ -87,8 +87,12 @@
           <summary>Settings <span class="settings-actual" id="camera-actual"></span></summary>
           <div class="row">
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
-            <label id="camera-exposure-control" class="exposure-auto" hidden><span>Exposure</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
-            <label id="camera-exposure-manual" class="exposure-manual" hidden><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" /><output id="camera-exposure-value"></output></label>
+            <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
+            <div id="camera-optics-manual" class="optics-manual" hidden>
+              <label id="focus-distance-control" hidden><span>Focus <span class="axis-auto"><input id="focus-axis-auto" type="checkbox" checked /> Auto</span></span><input id="focus-distance" type="range" min="0" max="0" step="1" value="0" /><output id="focus-distance-value"></output></label>
+              <label id="camera-exposure-manual"><span>Exposure <span class="axis-auto"><input id="exposure-axis-auto" type="checkbox" checked /> Auto</span></span><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" /><output id="camera-exposure-value"></output></label>
+              <label id="camera-iso-control" hidden><span>ISO <span class="axis-auto"><input id="iso-axis-auto" type="checkbox" checked /> Auto</span></span><input id="camera-iso" type="range" min="0" max="0" step="1" value="0" /><output id="camera-iso-value"></output></label>
+            </div>
             <div class="receiver-dev-actions" hidden>
               <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
               <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
@@ -96,9 +100,7 @@
                 <label><span>Camera calibration</span><select id="camera-calibration"><option value="auto">Auto</option><option value="off">Off</option><option value="force">Force</option></select></label>
                 <label><span>Focus strategy</span><select id="focus-strategy"><option value="auto">Auto</option><option value="continuous">Continuous</option><option value="single-shot">Single-shot</option><option value="manual">Manual</option></select></label>
                 <button class="secondary-button" id="focus-refocus" type="button">Recalibrate</button>
-                <label id="focus-distance-control" hidden><span>Focus distance</span><input id="focus-distance" type="range" min="0" max="0" step="1" value="0" /><output id="focus-distance-value"></output></label>
-                <label id="camera-iso-control" hidden><span>ISO</span><input id="camera-iso" type="range" min="0" max="0" step="1" value="0" /><output id="camera-iso-value"></output></label>
-                <details class="focus-tuning"><summary>Tuning</summary><div><label><span>Stable ms</span><input type="number" min="100" step="50" data-camera-tuning="geometryStabilityMs" /></label><label><span>Loss grace ms</span><input type="number" min="100" step="20" data-camera-tuning="targetLossGraceMs" /></label><label><span>Scale change</span><input type="number" min="0.05" max="1" step="0.01" data-camera-tuning="scaleChangeRatio" /></label><label><span>Movement</span><input type="number" min="0.03" max="1" step="0.01" data-camera-tuning="displacementRatio" /></label><label><span>Optical samples</span><input type="number" min="2" step="1" data-camera-tuning="opticalDegradationSamples" /></label></div></details>
+                <details class="focus-tuning"><summary>Tuning</summary><div><label><span>Stable ms</span><input type="number" min="100" step="50" data-camera-tuning="geometryStabilityMs" /></label><label><span>Loss grace ms</span><input type="number" min="100" step="20" data-camera-tuning="targetLossGraceMs" /></label><label><span>Scale change</span><input type="number" min="0.05" max="1" step="0.01" data-camera-tuning="scaleChangeRatio" /></label><label><span>Movement</span><input type="number" min="0.03" max="1" step="0.01" data-camera-tuning="displacementRatio" /></label><label><span>Lock cooldown ms</span><input type="number" min="1000" step="500" data-camera-tuning="lockCooldownMs" /></label></div></details>
                 <pre id="focus-diagnostics"></pre>
               </div>
             </div>

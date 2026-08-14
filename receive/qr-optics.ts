@@ -158,9 +158,16 @@ export class StaticQrOpticsAnalyzer {
     const banding = finderSignals.some((value) => !Number.isFinite(value)) ? 1 : clamp01(
       (Math.max(...finderSignals) - Math.min(...finderSignals)) / Math.max(20, separation) / 1.5,
     );
-    const focusScore = clamp01((0.76 - transition) / 0.62) * clamp01((confidence - 0.55) / 0.4);
+    // Edge transition is normalized between this QR's own measured black and
+    // white levels, so intentionally shortening exposure must not masquerade
+    // as lost focus. Confidence only gates unusably low-contrast samples.
+    const contrastGate = clamp01((separation - 18) / 32);
+    const focusScore = clamp01((0.76 - transition) / 0.62) * contrastGate;
     const signal = clamp01((separation - 35) / 95);
-    const exposureScore = signal * clamp01((confidence - 0.55) / 0.4) * clamp01(1 - noise / Math.max(18, separation * 0.32)) * (1 - clipping * 0.08) * (1 - banding * 0.3);
+    const brightnessPenalty = clamp01(Math.max(0, white - 242) / 35 + Math.max(0, black - 48) / 75);
+    const exposureScore = signal * clamp01((confidence - 0.55) / 0.4) *
+      clamp01(1 - noise / Math.max(18, separation * 0.32)) *
+      (1 - clipping * 0.35) * (1 - banding * 0.3) * (1 - brightnessPenalty * 0.45);
     return {
       confidence, focusScore, exposureScore, transitionWidthModules: transition,
       blackLevel: black, whiteLevel: white, separation, noise, clipping, banding,

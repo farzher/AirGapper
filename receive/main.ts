@@ -68,7 +68,10 @@ const decodeWorkersControl = document.getElementById("decode-workers-control")!;
 const cameraActual = document.getElementById("camera-actual")!;
 const cameraExposureControl = document.getElementById("camera-exposure-control")!;
 const cameraExposureAuto = document.getElementById("camera-exposure-auto") as HTMLInputElement;
-const cameraExposureManual = document.getElementById("camera-exposure-manual")!;
+const cameraOpticsManual = document.getElementById("camera-optics-manual")!;
+const focusAxisAuto = document.getElementById("focus-axis-auto") as HTMLInputElement;
+const exposureAxisAuto = document.getElementById("exposure-axis-auto") as HTMLInputElement;
+const isoAxisAuto = document.getElementById("iso-axis-auto") as HTMLInputElement;
 const cameraExposure = document.getElementById("camera-exposure") as HTMLInputElement;
 const cameraExposureValue = document.getElementById("camera-exposure-value") as HTMLOutputElement;
 const captureScanBtn = document.getElementById("capture-scan") as HTMLButtonElement;
@@ -143,7 +146,7 @@ function selectedWorkerCount(): number {
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v6";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v7";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
@@ -151,7 +154,10 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
-let automaticExposure = true;
+let automaticOptics = true;
+let automaticFocusAxis = true;
+let automaticExposureAxis = true;
+let automaticIsoAxis = true;
 let preferredExposureTime: number | undefined;
 let preferredFocusStrategy: FocusStrategy = "auto";
 let preferredFocusDistance: number | undefined;
@@ -160,6 +166,7 @@ let preferredCalibrationMode: CalibrationMode = "auto";
 let exposureApplyGeneration = 0;
 let cameraMutationQueue = Promise.resolve();
 let desiredCamera: CameraPatch = {};
+let lastCameraMutation: { kind: string; before: CameraPatch; requested: CameraPatch; after: CameraPatch } | undefined;
 
 function mutateCamera(track: MediaStreamTrack, mutation: () => Promise<void>): Promise<void> {
   const operation = cameraMutationQueue.catch(() => undefined).then(async () => {
@@ -182,15 +189,21 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
   let accepted = false;
   const enteringManualFocus = patch.focusMode === "manual" && desiredCamera.focusMode !== "manual";
   const enteringManualExposure = patch.exposureMode === "manual" && desiredCamera.exposureMode !== "manual";
+  if (patch.exposureMode === "continuous") {
+    delete desiredCamera.exposureTime;
+    if (patch.iso === undefined) delete desiredCamera.iso;
+  }
   Object.assign(desiredCamera, patch);
   return mutateCamera(track, async () => {
+    const before = track.getSettings() as MediaTrackSettings & CameraPatch;
     // Build at execution time, not enqueue time. If a newer generation or a
     // developer override superseded this queued operation, it therefore
     // applies the newest desired state instead of stale probe values.
     const effectiveCamera = (includeFocusDistance = true, includeExposureValues = true): CameraPatch => {
       const effective: CameraPatch = { ...desiredCamera };
       if (effective.focusMode !== "manual" || !includeFocusDistance) delete effective.focusDistance;
-      if (effective.exposureMode !== "manual" || !includeExposureValues) {
+      if (effective.exposureMode !== "manual") delete effective.exposureTime;
+      if (!includeExposureValues) {
         delete effective.exposureTime;
         delete effective.iso;
       }
@@ -209,7 +222,15 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
     accepted = await applyAdvancedConstraint(track, effectiveCamera());
     // Reading settings here is intentional: many Android providers quantize or
     // silently reject one member of an otherwise accepted advanced set.
-    track.getSettings();
+    const after = track.getSettings() as MediaTrackSettings & CameraPatch;
+    const kind = patch.focusMode !== undefined || patch.focusDistance !== undefined
+      ? (patch.exposureMode !== undefined || patch.exposureTime !== undefined || patch.iso !== undefined ? "focus + exposure" : "focus")
+      : patch.iso !== undefined && patch.exposureTime === undefined ? "ISO" : "exposure";
+    const optics = (value: MediaTrackSettings & CameraPatch): CameraPatch => ({
+      focusMode: value.focusMode, focusDistance: value.focusDistance,
+      exposureMode: value.exposureMode, exposureTime: value.exposureTime, iso: value.iso,
+    });
+    lastCameraMutation = { kind, before: optics(before), requested: effectiveCamera(), after: optics(after) };
   }).then(() => accepted);
 }
 let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -252,14 +273,18 @@ function populateCameraOptions(): void {
 function restoreCameraSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
-      resolution?: string; automaticExposure?: boolean; exposureTime?: number; workers?: string;
+      resolution?: string; automaticOptics?: boolean; automaticFocusAxis?: boolean;
+      automaticExposureAxis?: boolean; automaticIsoAxis?: boolean; exposureTime?: number; workers?: string;
       focusStrategy?: FocusStrategy; focusDistance?: number; iso?: number; calibrationMode?: CalibrationMode;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
-    if (typeof saved.automaticExposure === "boolean") automaticExposure = saved.automaticExposure;
+    if (typeof saved.automaticOptics === "boolean") automaticOptics = saved.automaticOptics;
+    if (typeof saved.automaticFocusAxis === "boolean") automaticFocusAxis = saved.automaticFocusAxis;
+    if (typeof saved.automaticExposureAxis === "boolean") automaticExposureAxis = saved.automaticExposureAxis;
+    if (typeof saved.automaticIsoAxis === "boolean") automaticIsoAxis = saved.automaticIsoAxis;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
     if (["auto", "continuous", "single-shot", "manual"].includes(saved.focusStrategy ?? "")) preferredFocusStrategy = saved.focusStrategy!;
@@ -272,7 +297,10 @@ function saveCameraSettings(): void {
   try {
     localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
       resolution: cameraResolution.value,
-      automaticExposure,
+      automaticOptics,
+      automaticFocusAxis,
+      automaticExposureAxis,
+      automaticIsoAxis,
       exposureTime: preferredExposureTime,
       workers: decodeWorkers.value,
       focusStrategy: preferredFocusStrategy,
@@ -312,7 +340,10 @@ const focusController = new FocusController(
 const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track: MediaStreamTrack): void {
   focusController.attach(track);
-  if (!automaticExposure) focusController.developerOverride("saved manual exposure retained");
+  if (!automaticOptics) {
+    focusController.setStrategy(automaticFocusAxis ? "continuous" : "manual");
+    void applyExposureSetting(track);
+  }
 }
 focusStrategy.value = preferredFocusStrategy;
 cameraCalibration.value = preferredCalibrationMode;
@@ -983,22 +1014,34 @@ function showExposureTime(value: number): void {
   cameraExposureValue.value = `${Number(value.toPrecision(3))} ms`;
 }
 function syncExposureControls(): void {
-  cameraExposureAuto.checked = automaticExposure;
-  cameraExposureManual.hidden = automaticExposure || cameraExposureControl.hidden;
+  cameraExposureAuto.checked = automaticOptics;
+  focusAxisAuto.checked = automaticFocusAxis;
+  exposureAxisAuto.checked = automaticExposureAxis;
+  isoAxisAuto.checked = automaticIsoAxis;
+  cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
+  cameraExposure.disabled = automaticExposureAxis;
+  focusDistance.disabled = automaticFocusAxis;
+  cameraIso.disabled = automaticIsoAxis;
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
-  if (automaticExposure) {
-    await applyCameraConstraint(track, { exposureMode: "continuous" });
+  if (automaticOptics) return;
+  if (automaticExposureAxis) {
+    await applyCameraConstraint(track, {
+      exposureMode: "continuous",
+      ...(!automaticIsoAxis && preferredIso !== undefined ? { iso: preferredIso } : {}),
+    });
     return;
   }
   const requested = preferredExposureTime;
   if (requested === undefined) return;
+  if (automaticIsoAxis) delete desiredCamera.iso;
+  const requestedIso = automaticIsoAxis ? undefined : preferredIso;
 
   // Several Android camera providers silently ignore a time bundled with the
   // mode switch. Put the camera in manual first, then send the value by itself.
   await applyCameraConstraint(track, { exposureMode: "manual" });
-  await applyCameraConstraint(track, { exposureTime: requested, ...(preferredIso !== undefined ? { iso: preferredIso } : {}) });
+  await applyCameraConstraint(track, { exposureTime: requested, ...(requestedIso !== undefined ? { iso: requestedIso } : {}) });
   await new Promise((resolve) => setTimeout(resolve, 80));
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
@@ -1009,7 +1052,7 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
       (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
     await applyCameraConstraint(track, {
       exposureMode: "manual", exposureTime: requested,
-      ...(preferredIso !== undefined ? { iso: preferredIso } : {}),
+      ...(requestedIso !== undefined ? { iso: requestedIso } : {}),
     });
     if (generation !== exposureApplyGeneration) return;
   }
@@ -1044,7 +1087,7 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     syncExposureControls();
     void applyExposureSetting(track);
   } else {
-    cameraExposureManual.hidden = true;
+    cameraOpticsManual.hidden = true;
   }
   const iso = caps.iso;
   cameraIsoControl.hidden = !iso;
@@ -1280,21 +1323,23 @@ function renderFocusDiagnostics(): void {
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
   const optical = diagnostic.optical;
-  const levels = optical
-    ? `black/white ${optical.blackLevel.toFixed(0)}/${optical.whiteLevel.toFixed(0)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · clip ${(optical.clipping * 100).toFixed(1)}% · band ${(optical.banding * 100).toFixed(1)}%`
-    : "black/white — · separation — · noise —";
-  const known = diagnostic.knownGoodSettings;
+  const mutation = lastCameraMutation;
+  const cameraLine = (value?: CameraPatch) => value
+    ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${value.exposureTime ?? "—"}ms · ISO ${value.iso ?? "—"}`
+    : "—";
   focusDiagnostics.textContent = [
-    `state ${diagnostic.state} · calibration ${diagnostic.calibrationMode} · target ${diagnostic.targetDetected ? "yes" : "no"} · geometry ${diagnostic.geometryStable ? "stable" : "moving/waiting"}`,
-    `focus ${diagnostic.actualMode ?? "—"} ${diagnostic.actualDistance ?? "—"} · AF baseline ${diagnostic.baselineFocus ?? "—"} · probes ${diagnostic.focusProbes}`,
-    `exposure actual ${diagnostic.actualExposure ?? "—"} ms · requested ${diagnostic.requestedExposure ?? "—"} · AE baseline ${diagnostic.baselineExposure ?? "—"}`,
-    `ISO actual ${diagnostic.actualIso ?? "—"} · requested ${diagnostic.requestedIso ?? "—"} · baseline ${diagnostic.baselineIso ?? "—"} · probes ${diagnostic.exposureProbes}`,
-    optical ? `static focus ${optical.focusScore.toFixed(2)} · transition ${optical.transitionWidthModules.toFixed(2)} modules · exposure ${optical.exposureScore.toFixed(2)} · confidence ${optical.confidence.toFixed(2)} · tiles ${optical.tiles}` : "static optics —",
-    levels,
-    `payload now ${diagnostic.decodedNow}/${diagnostic.totalTiles} · recent ${diagnostic.decodedRecently}/${diagnostic.totalTiles}${diagnostic.likelyTemporalFailure ? " · likely temporal/phase/rolling-shutter degradation" : ""}`,
-    `known-good ${known ? `focus ${known.focusDistance ?? "—"} · ${known.exposureTime ?? "—"} ms · ISO ${known.iso ?? "—"}` : "no"} · initial lock ${diagnostic.initialLockMs === undefined ? "—" : `${diagnostic.initialLockMs.toFixed(0)} ms`} · reacquire ${diagnostic.reacquireCount}`,
-    `decision ${diagnostic.lastReason}`,
-  ].join("\n");
+    `STATE  ${diagnostic.state}${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
+    `Focus    committed ${diagnostic.committedFocusDistance ?? "—"} · actual ${diagnostic.actualDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
+    `Exposure committed ${diagnostic.committedExposureTime ?? "—"}ms · actual ${diagnostic.actualExposure ?? "—"}ms · candidate ${diagnostic.candidateExposureTime ?? "—"}`,
+    `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
+    optical ? `Health   focus ${optical.focusScore.toFixed(2)} · exposure ${optical.exposureScore.toFixed(2)} · levels ${optical.blackLevel.toFixed(0)}/${optical.whiteLevel.toFixed(0)} · noise ${optical.noise.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Health   waiting for static QR",
+    `Payload  ${diagnostic.decodedNow}/${diagnostic.totalTiles} now · ${diagnostic.decodedRecently}/${diagnostic.totalTiles} recent`,
+    `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount} · reacquire ${diagnostic.reacquireCount}`,
+    `Reason   ${diagnostic.lastReason}`,
+    `Mutation ${mutation?.kind ?? "—"}`,
+    mutation ? `  before    ${cameraLine(mutation.before)}\n  requested ${cameraLine(mutation.requested)}\n  after     ${cameraLine(mutation.after)}` : "",
+    diagnostic.transitions.length ? `Transitions\n${diagnostic.transitions.join("\n")}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 cameraCalibration.addEventListener("change", () => {
@@ -1312,7 +1357,9 @@ focusDistance.addEventListener("input", () => {
   const switchToManual = preferredFocusStrategy !== "manual";
   preferredFocusDistance = Number(focusDistance.value);
   preferredFocusStrategy = "manual";
+  automaticFocusAxis = false;
   focusStrategy.value = "manual";
+  focusAxisAuto.checked = false;
   focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   saveCameraSettings();
   if (switchToManual) focusController.setStrategy("manual");
@@ -1369,13 +1416,34 @@ const changeCameraSettings = async () => {
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
 cameraExposureAuto.addEventListener("change", () => {
-  automaticExposure = cameraExposureAuto.checked;
+  automaticOptics = cameraExposureAuto.checked;
   clearTimeout(exposureApplyTimer);
   syncExposureControls();
   saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
-  if (!automaticExposure) focusController.developerOverride("developer selected manual exposure");
-  else if (preferredFocusStrategy === "auto") focusController.refocus("developer restored automatic exposure");
+  if (!automaticOptics) focusController.setStrategy(automaticFocusAxis ? "continuous" : "manual");
+  else focusController.setStrategy("auto");
+  if (track) void applyExposureSetting(track);
+});
+focusAxisAuto.addEventListener("change", () => {
+  automaticFocusAxis = focusAxisAuto.checked;
+  preferredFocusStrategy = automaticFocusAxis ? "continuous" : "manual";
+  syncExposureControls();
+  saveCameraSettings();
+  focusController.setStrategy(preferredFocusStrategy);
+});
+exposureAxisAuto.addEventListener("change", () => {
+  automaticExposureAxis = exposureAxisAuto.checked;
+  syncExposureControls();
+  saveCameraSettings();
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyExposureSetting(track);
+});
+isoAxisAuto.addEventListener("change", () => {
+  automaticIsoAxis = isoAxisAuto.checked;
+  syncExposureControls();
+  saveCameraSettings();
+  const track = stream?.getVideoTracks()[0];
   if (track) void applyExposureSetting(track);
 });
 function queueExposureChange(immediate = false): void {
@@ -1386,7 +1454,7 @@ function queueExposureChange(immediate = false): void {
   clearTimeout(exposureApplyTimer);
   const apply = () => {
     const track = stream?.getVideoTracks()[0];
-    if (track && !automaticExposure) void applyExposureSetting(track);
+    if (track && !automaticOptics) void applyExposureSetting(track);
   };
   if (immediate) apply();
   else exposureApplyTimer = setTimeout(apply, 80);
@@ -1399,8 +1467,8 @@ cameraIso.addEventListener("input", () => {
 });
 cameraIso.addEventListener("change", () => {
   preferredIso = Number(cameraIso.value);
-  automaticExposure = false;
-  cameraExposureAuto.checked = false;
+  automaticIsoAxis = false;
+  isoAxisAuto.checked = false;
   syncExposureControls();
   saveCameraSettings();
   focusController.developerOverride("developer changed ISO");
@@ -2455,7 +2523,8 @@ function captureFrame(source: ReceiverFrame) {
 }
 
 function resetActiveTransfer(): void {
-  if (automaticExposure) focusController.refocus("new transfer acquisition");
+  // Transfer/protocol boundaries do not imply an optical change. Keep the
+  // committed camera lock across them.
   releaseTransportDecoder();
   streamKey = "";
   reportStreamId = 0;
