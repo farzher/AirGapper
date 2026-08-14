@@ -356,8 +356,8 @@ function attachCameraController(track: MediaStreamTrack): void {
 focusStrategy.value = preferredFocusStrategy;
 
 // Keep developer controls out of the normal settings UI. Show, hide, then show
-// Settings within one second to reveal them. A slower close/reopen hides them.
-const DEV_SETTINGS_TOGGLE_WINDOW_MS = 1000;
+// Settings within half a second to reveal them. A slower close/reopen hides them.
+const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
 const settingsToggleTimes: number[] = [];
 let previousSettingsToggleAt = 0;
 receiverSettings.addEventListener("toggle", () => {
