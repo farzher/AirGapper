@@ -6,18 +6,12 @@
 // cheap systematic sparse fountain. Scheduling is shared with the sender so
 // physical slots get distinct rows and each slot remains a complete stream.
 
+import { codingMode, type CodingMode } from "./coding-mode";
 import { splitmix32 } from "./protocol";
 
-export const MDS_MAX_K = 32;
 const MDS_SYMBOLS = 256;
 const REPAIR_DEGREE_MIN = 4;
 const REPAIR_DEGREE_MAX = 24;
-
-export type CodingMode = "direct" | "mds" | "fountain";
-
-export function codingMode(k: number): CodingMode {
-  return k <= 1 ? "direct" : k <= MDS_MAX_K ? "mds" : "fountain";
-}
 
 function gcd(a: number, b: number): number {
   while (b !== 0) [a, b] = [b, a % b];
@@ -59,8 +53,8 @@ export function scheduledEsi(
   return k + (repairOrdinal % repairSpace);
 }
 
-function frameSeed(sessionId: number, esi: number): number {
-  let h = (Math.imul(sessionId + 1, 0x9e3779b1) ^ (esi + 0x85ebca6b)) | 0;
+function frameSeed(streamSeed: number, esi: number): number {
+  let h = (Math.imul(streamSeed + 1, 0x9e3779b1) ^ (esi + 0x85ebca6b)) | 0;
   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
   return (h ^ (h >>> 16)) | 0;
 }
@@ -71,14 +65,14 @@ function frameSeed(sessionId: number, esi: number): number {
  * group are identical. Epoch-specific permutations retain the old 4..24
  * mid-degree behavior without the tiny-K full-set collapse.
  */
-function repairIndices(k: number, sessionId: number, esi: number): number[] {
+function repairIndices(k: number, streamSeed: number, esi: number): number[] {
   const repair = esi - k;
   const epoch = Math.floor(repair / k);
   const start = repair % k;
-  const rnd = splitmix32(frameSeed(sessionId, epoch));
+  const rnd = splitmix32(frameSeed(streamSeed, epoch));
   const maximumDegree = Math.min(REPAIR_DEGREE_MAX, k - 1);
   const minimumDegree = Math.min(REPAIR_DEGREE_MIN, maximumDegree);
-  const degree = minimumDegree + (splitmix32(frameSeed(sessionId, esi))() % (maximumDegree - minimumDegree + 1));
+  const degree = minimumDegree + (splitmix32(frameSeed(streamSeed, esi))() % (maximumDegree - minimumDegree + 1));
   const offset = rnd() % k;
   let stride = 1 + (rnd() % (k - 1));
   while (gcd(stride, k) !== 1) stride = stride === k - 1 ? 1 : stride + 1;
@@ -87,8 +81,8 @@ function repairIndices(k: number, sessionId: number, esi: number): number[] {
   return out;
 }
 
-export function fountainComposition(k: number, sessionId: number, esi: number): number[] {
-  return esi < k ? [esi] : repairIndices(k, sessionId, esi);
+export function fountainComposition(k: number, streamSeed: number, esi: number): number[] {
+  return esi < k ? [esi] : repairIndices(k, streamSeed, esi);
 }
 
 const GF_EXP = new Uint8Array(512);
@@ -150,7 +144,7 @@ export class TransportEncoder {
   constructor(
     payload: Uint8Array,
     readonly blockLen: number,
-    readonly sessionId: number,
+    readonly streamSeed: number,
   ) {
     this.k = Math.max(1, Math.ceil(payload.length / blockLen));
     this.mode = codingMode(this.k);
@@ -177,7 +171,7 @@ export class TransportEncoder {
     }
 
     const out = new Uint32Array(this.words);
-    for (const block of fountainComposition(this.k, this.sessionId, esi)) {
+    for (const block of fountainComposition(this.k, this.streamSeed, esi)) {
       const offset = block * this.words;
       for (let word = 0; word < this.words; word++) {
         out[word] = (out[word]! ^ this.xorBlocks[offset + word]!) >>> 0;
@@ -214,7 +208,7 @@ export class TransportDecoder {
   constructor(
     readonly k: number,
     readonly blockLen: number,
-    readonly sessionId: number,
+    readonly streamSeed: number,
     readonly totalLen: number,
   ) {
     this.mode = codingMode(k);
@@ -285,7 +279,7 @@ export class TransportDecoder {
   }
 
   private addFountain(esi: number, block: Uint8Array): void {
-    const composition = fountainComposition(this.k, this.sessionId, esi);
+    const composition = fountainComposition(this.k, this.streamSeed, esi);
     const signature = [...composition].sort((a, b) => a - b).join(",");
     if (this.seenCompositions.has(signature)) {
       this.framesRedundant++;

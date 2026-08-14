@@ -2,7 +2,8 @@
 // never a fill target: data is balanced over enough blocks to stay below a
 // layout-scaled optical density target.
 
-import { FRAME_CRC_LEN, HEADER_LEN } from "./protocol";
+import { codingMode, MDS_MAX_K, type CodingMode } from "./coding-mode";
+import { frameOverhead } from "./protocol";
 
 export const MAX_SOURCE_BLOCKS = 0xffff;
 
@@ -15,6 +16,7 @@ const QR_BYTE_CAPACITY_L: readonly number[] = [
 ];
 
 export interface TransportPlan {
+  mode: CodingMode;
   blockLen: number;
   k: number;
   frameBytes: number;
@@ -25,8 +27,8 @@ export interface TransportPlan {
   headerFraction: number;
 }
 
-export function blockLength(frameBytes: number): number {
-  return frameBytes - HEADER_LEN - FRAME_CRC_LEN;
+export function blockLength(frameBytes: number, mode: CodingMode): number {
+  return frameBytes - frameOverhead(mode);
 }
 
 export function qrVersionForBytes(frameBytes: number): number {
@@ -35,18 +37,26 @@ export function qrVersionForBytes(frameBytes: number): number {
   return index + 1;
 }
 
+function balancedPlan(
+  payload: number,
+  maximumFrameBytes: number,
+  slots: number,
+  mode: "mds" | "fountain",
+): { blockLen: number; k: number } {
+  const maximumBlock = Math.max(1, blockLength(maximumFrameBytes, mode));
+  const opticalTarget = Math.max(1, Math.floor(maximumBlock / Math.sqrt(slots)));
+  const countLimitedMinimum = Math.ceil(payload / MAX_SOURCE_BLOCKS);
+  const target = Math.min(maximumBlock, Math.max(opticalTarget, countLimitedMinimum));
+  const desiredK = Math.min(MAX_SOURCE_BLOCKS, Math.max(2, Math.ceil(payload / target)));
+  const blockLen = Math.min(maximumBlock, Math.ceil(payload / desiredK));
+  return { blockLen, k: Math.ceil(payload / blockLen) };
+}
+
 /**
- * Pick blockLen and K together.
- *
- * A grid divides the available screen area among its symbols. Filling every
- * cell to the single-code ceiling would increase module density by sqrt(N).
- * Scaling payload by 1/sqrt(N) takes the geometric midpoint: aggregate useful
- * bytes per display state grow by sqrt(N), while optical density worsens by
- * only the fourth root of N. The selected Size remains a hard upper bound.
- *
- * Once the optical target is known, balancing over ceil(payload/target)
- * blocks removes the capacity-boundary padding cliff. Padding is then below K
- * bytes instead of as much as one maximum-sized QR.
+ * Pick mode, blockLen, and K together. Direct, MDS, and fountain packets have
+ * different packed overhead, so each candidate spends only the bytes its mode
+ * needs. Grid payload scales by 1/sqrt(N), balancing aggregate throughput and
+ * optical module density.
  */
 export function selectTransportPlan(
   payloadBytes: number,
@@ -54,25 +64,34 @@ export function selectTransportPlan(
   gridCodes: number,
 ): TransportPlan {
   const payload = Math.max(1, Math.floor(payloadBytes));
-  const maximumBlock = Math.max(1, blockLength(maximumFrameBytes));
   const slots = Math.max(1, Math.floor(gridCodes));
-
+  let mode: CodingMode;
   let blockLen: number;
-  if (payload <= maximumBlock) {
+  let k: number;
+
+  const directCapacity = blockLength(maximumFrameBytes, "direct");
+  if (payload <= directCapacity) {
+    mode = "direct";
     blockLen = payload;
+    k = 1;
   } else {
-    const opticalTarget = Math.max(1, Math.floor(maximumBlock / Math.sqrt(slots)));
-    const countLimitedMinimum = Math.ceil(payload / MAX_SOURCE_BLOCKS);
-    const target = Math.min(maximumBlock, Math.max(opticalTarget, countLimitedMinimum));
-    const desiredK = Math.min(MAX_SOURCE_BLOCKS, Math.max(2, Math.ceil(payload / target)));
-    blockLen = Math.min(maximumBlock, Math.ceil(payload / desiredK));
+    const mds = balancedPlan(payload, maximumFrameBytes, slots, "mds");
+    if (mds.k <= MDS_MAX_K) {
+      mode = "mds";
+      ({ blockLen, k } = mds);
+    } else {
+      mode = "fountain";
+      ({ blockLen, k } = balancedPlan(payload, maximumFrameBytes, slots, mode));
+    }
   }
 
-  const k = Math.ceil(payload / blockLen);
-  const frameBytes = blockLen + HEADER_LEN + FRAME_CRC_LEN;
+  // The candidate calculation and the shared wire rule must always agree.
+  if (codingMode(k) !== mode) throw new Error("Could not select a consistent coding mode.");
+  const frameBytes = blockLen + frameOverhead(mode);
   const qrVersion = qrVersionForBytes(frameBytes);
   const paddingBytes = k * blockLen - payload;
   return {
+    mode,
     blockLen,
     k,
     frameBytes,
@@ -80,12 +99,13 @@ export function selectTransportPlan(
     qrModules: 17 + 4 * qrVersion,
     paddingBytes,
     paddingFraction: paddingBytes / (k * blockLen),
-    headerFraction: (HEADER_LEN + FRAME_CRC_LEN) / frameBytes,
+    headerFraction: frameOverhead(mode) / frameBytes,
   };
 }
 
+/** Source count at the largest block available to a long fountain stream. */
 export function sourceBlockCount(payloadBytes: number, frameBytes: number): number {
-  return Math.ceil(payloadBytes / blockLength(frameBytes));
+  return Math.ceil(payloadBytes / blockLength(frameBytes, "fountain"));
 }
 
 export function fitsInOneStream(payloadBytes: number, frameBytes: number): boolean {
@@ -93,7 +113,7 @@ export function fitsInOneStream(payloadBytes: number, frameBytes: number): boole
 }
 
 export function minimumFrameBytes(payloadBytes: number): number {
-  return Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) + HEADER_LEN + FRAME_CRC_LEN;
+  return Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) + frameOverhead("fountain");
 }
 
 export function smallestSufficientFrameSize(

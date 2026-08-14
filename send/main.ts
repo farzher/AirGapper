@@ -16,7 +16,6 @@ import QRCode from "qrcode";
 import { rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
-  blockLength,
   fitsInOneStream,
   selectTransportPlan,
   smallestSufficientFrameSize,
@@ -589,8 +588,6 @@ async function startStream(revealStage = false) {
   const frameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0]!;
   const ecc = "L" as const;
   const configuredLayout = selectedLayout();
-  const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
-  const maximumBlockLen = blockLength(frameBytes);
   // Keep selectedFile on this path — raising bytes/frame back up is the fix,
   // and dropping the pick would hide that.
   if (!fitsInOneStream(payload.length, frameBytes)) {
@@ -611,19 +608,22 @@ async function startStream(revealStage = false) {
   const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= frameBytes
     ? snippetValue
     : null;
-  const staticStream = plainSnippet !== null || payload.length <= maximumBlockLen;
+  const configuredGrid = layoutGrid(configuredLayout);
+  let transport = selectTransportPlan(payload.length, frameBytes, configuredGrid.codes);
+  const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode: LayoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
-  const transport = selectTransportPlan(payload.length, frameBytes, gridCodes);
+  if (staticStream) transport = selectTransportPlan(payload.length, frameBytes, gridCodes);
   const blockLen = transport.blockLen;
-  const encoder = new TransportEncoder(payload, blockLen, sessionId);
+  const payloadId = fnv1a(payload);
+  const encoder = new TransportEncoder(payload, blockLen, payloadId);
   const header: Omit<FrameHeader, "seq" | "slotIndex"> = {
-    sessionId,
+    mode: encoder.mode,
     layoutId: gridLayoutId(gridCols, gridRows),
     k: encoder.k,
     blockLen,
     totalLen: payload.length,
-    payloadFnv: fnv1a(payload),
+    payloadId,
   };
 
   let version: number | undefined; // locked after the first frame
@@ -750,7 +750,7 @@ async function startStream(revealStage = false) {
       // npm run diagnostics: announce this stream's settings so the server
       // log can pair them with the receiver's end-of-run report — the
       // receiver only ever learns k and blockLen from the wire, never the
-      // knobs that produced them. Correlate the two by sessionId. The DEV
+      // knobs that produced them. Correlate the two by streamId. The DEV
       // guard is load-bearing: import.meta.env.DEV is statically false in
       // every build, so no static site or standalone file ships this.
       if (import.meta.env.DEV && import.meta.env.VITE_DIAGNOSTICS === "1") {
@@ -760,7 +760,7 @@ async function startStream(revealStage = false) {
           body: JSON.stringify({
             role: "sender",
             when: new Date().toISOString(),
-            sessionId,
+            streamId: payloadId,
             payload: {
               name,
               fileBytes: fileSize,
@@ -893,7 +893,7 @@ async function startStream(revealStage = false) {
             role: "sender",
             event: "stall",
             when: new Date().toISOString(),
-            sessionId,
+            streamId: payloadId,
             stallSeconds: Number((sinceLastTick / 1000).toFixed(1)),
           }),
         }).catch(() => undefined);

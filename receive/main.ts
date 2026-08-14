@@ -279,7 +279,7 @@ const STATS_TICK_MS = 250;
 let stream: MediaStream | null = null;
 let decoder: TransportDecoder | null = null;
 let streamKey = "";
-let reportSessionId = 0; // pairs this run with the sender's diagnostics post
+let reportStreamId = 0; // pairs this run with the sender's diagnostics post
 let startTs = 0;
 let captureGen = 0;
 let cameraStartGen = 0;
@@ -1237,7 +1237,7 @@ function stopReceiver(): void {
   pool.resize(0);
   decoder = null;
   streamKey = "";
-  reportSessionId = 0;
+  reportStreamId = 0;
   startTs = 0;
   done = false;
   regions.length = 0;
@@ -2191,7 +2191,7 @@ function captureFrame(source: ReceiverFrame) {
 function resetActiveTransfer(): void {
   decoder = null;
   streamKey = "";
-  reportSessionId = 0;
+  reportStreamId = 0;
   startTs = 0;
   regions.length = 0;
   gridLattice.reset();
@@ -2298,10 +2298,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   // streamIdentity() covers every invariant header field. parseFrame has
   // already checked magic, lengths, field ranges and CRC before this point.
   if (!decoder) {
-    decoder = new TransportDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
+    decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
     usefulFrameTimes.length = 0;
     streamKey = identity;
-    reportSessionId = header.sessionId;
+    reportStreamId = header.payloadId;
     startTs = receiverNow();
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
@@ -2331,12 +2331,12 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     if (!benchmarkCompletionChecked) {
       benchmarkCompletionChecked = true;
       const payload = decoder.assemble()!;
-      if (fnv1a(payload) === header.payloadFnv) benchmarkVerifiedBytes = header.totalLen;
+      if (fnv1a(payload) === header.payloadId) benchmarkVerifiedBytes = header.totalLen;
     }
   } else if (decoder.isComplete) {
     const payload = decoder.assemble()!;
     const seconds = (receiverNow() - startTs) / 1000;
-    const ok = fnv1a(payload) === header.payloadFnv;
+    const ok = fnv1a(payload) === header.payloadId;
     void finish(payload, ok, seconds);
   }
 }
@@ -2417,7 +2417,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
     diagnosticsBase = {
       role: "receiver",
       when: new Date().toISOString(),
-      sessionId: reportSessionId,
+      streamId: reportStreamId,
       acquisitionSeconds: cameraStartedTs ? Number(((startTs - cameraStartedTs) / 1000).toFixed(2)) : null,
       payloadSha256: [...container.slice(9, 41)].map((b) => b.toString(16).padStart(2, "0")).join(""),
       fountain: {

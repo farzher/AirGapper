@@ -1,23 +1,25 @@
+import { codingMode, type CodingMode } from "./coding-mode";
 import { gridLayoutById } from "./grid-layout";
 
-// Frame protocol: every QR frame is fully self-describing, so there is NO
-// handshake — the receiver locks onto a stream mid-flight, and a new session
-// id on any frame simply starts a fresh transfer.
-//
-// Layout (little-endian), 17 bytes, followed by `blockLen` payload bytes:
-//   0  u8   magic 0xD2
-//   1  u16  sessionId   random per sender start
-//   3  u32  ESI + grid metadata (see fountain.ts)
-//   7  u16  blockLen    payload bytes per frame
-//   9  u32  totalLen    protected file-container length in bytes
-//  13  u32  payloadFnv  FNV-1a of the whole container — verified on completion
-//
-// The source block count is ceil(totalLen / blockLen), so carrying it in every
-// frame was redundant. A single magic byte plus the frame CRC identifies the
-// format without spending a byte on a version number.
+// Regime-specific frame protocol. The format byte identifies both AirGapper
+// and the coding mode; exact-width fields follow, then one coded block and the
+// trailing CRC32 consumed by both JavaScript and the native tracked decoder.
 
-export const HEADER_LEN = 17;
+const DIRECT_MAGIC = 0xd3;
+const MDS_MAGIC = 0xd4;
+const FOUNTAIN_MAGIC = 0xd5;
+const DIRECT_HEADER_LEN = 7;
+const MDS_HEADER_LEN = 11;
+const FOUNTAIN_HEADER_LEN = 14;
 export const FRAME_CRC_LEN = 4;
+
+export function frameHeaderLength(mode: CodingMode): number {
+  return mode === "direct" ? DIRECT_HEADER_LEN : mode === "mds" ? MDS_HEADER_LEN : FOUNTAIN_HEADER_LEN;
+}
+
+export function frameOverhead(mode: CodingMode): number {
+  return frameHeaderLength(mode) + FRAME_CRC_LEN;
+}
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 /**
  * One place for the number, so the picker label, the rejection message and
@@ -33,7 +35,6 @@ export const MAX_FILE_LABEL = `${MAX_FILE_BYTES / 1024 / 1024} MB`;
 // not need to be stored. The outer framed stream already authenticates this
 // container, so it also needs no magic or version bytes of its own.
 const FILE_HEADER_LEN = 41;
-const MAGIC = 0xd2;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -274,7 +275,7 @@ export async function verifyFile(file: OpticalFile): Promise<boolean> {
 }
 
 export interface FrameHeader {
-  sessionId: number;
+  mode: CodingMode;
   /** Encoding symbol ID; identical IDs always describe the same equation. */
   seq: number;
   layoutId: number;
@@ -282,74 +283,136 @@ export interface FrameHeader {
   k: number;
   blockLen: number;
   totalLen: number;
-  payloadFnv: number;
+  payloadId: number;
 }
 
-const GRID_META_MARKER = 0x80000000;
-const GRID_ESI_MASK = 0x00ffffff;
+const BLOCK_LEN_BITS = 12;
+const DIRECT_TOTAL_BITS = 12;
+const MDS_TOTAL_BITS = 17;
+const FOUNTAIN_TOTAL_BITS = 27;
 
-function encodeGridSequence(esi: number, layoutId: number, slotIndex: number): number {
-  return (GRID_META_MARKER | (layoutId & 7) << 28 | (slotIndex & 15) << 24 | (esi & GRID_ESI_MASK)) >>> 0;
+function magicForMode(mode: CodingMode): number {
+  return mode === "direct" ? DIRECT_MAGIC : mode === "mds" ? MDS_MAGIC : FOUNTAIN_MAGIC;
+}
+
+function modeForMagic(magic: number): CodingMode | null {
+  return magic === DIRECT_MAGIC ? "direct" : magic === MDS_MAGIC ? "mds" : magic === FOUNTAIN_MAGIC ? "fountain" : null;
+}
+
+function writeBits(out: Uint8Array, bitOffset: number, value: number, width: number): number {
+  for (let bit = 0; bit < width; bit++) {
+    if ((value >>> bit) & 1) out[(bitOffset + bit) >>> 3] = out[(bitOffset + bit) >>> 3]! | 1 << ((bitOffset + bit) & 7);
+  }
+  return bitOffset + width;
+}
+
+function readBits(bytes: Uint8Array, bitOffset: number, width: number): { value: number; next: number } {
+  let value = 0;
+  for (let bit = 0; bit < width; bit++) {
+    value += ((bytes[(bitOffset + bit) >>> 3]! >>> ((bitOffset + bit) & 7)) & 1) * 2 ** bit;
+  }
+  return { value, next: bitOffset + width };
+}
+
+function fitsBits(value: number, width: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value < 2 ** width;
 }
 
 export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
-  const out = new Uint8Array(HEADER_LEN + block.length + FRAME_CRC_LEN);
-  const dv = new DataView(out.buffer);
-  dv.setUint8(0, MAGIC);
-  dv.setUint16(1, h.sessionId, true);
-  dv.setUint32(3, encodeGridSequence(h.seq, h.layoutId, h.slotIndex), true);
-  dv.setUint16(7, h.blockLen, true);
-  dv.setUint32(9, h.totalLen, true);
-  dv.setUint32(13, h.payloadFnv, true);
-  out.set(block, HEADER_LEN);
-  dv.setUint32(HEADER_LEN + block.length, crc32(out.subarray(0, HEADER_LEN + block.length)), true);
+  const headerLen = frameHeaderLength(h.mode);
+  if (
+    codingMode(h.k) !== h.mode || block.length !== h.blockLen ||
+    !fitsBits(h.payloadId, 32) || !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) ||
+    !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS) ||
+    (h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen)) ||
+    (h.mode === "mds" && !fitsBits(h.seq, 8)) ||
+    (h.mode === "fountain" && !fitsBits(h.seq, 24)) ||
+    (h.mode !== "direct" && (!fitsBits(h.layoutId, 3) || !fitsBits(h.slotIndex, 4)))
+  ) throw new Error("Frame metadata exceeds its packed field.");
+
+  const out = new Uint8Array(headerLen + block.length + FRAME_CRC_LEN);
+  out[0] = magicForMode(h.mode);
+  let bit = 8;
+  if (h.mode === "direct") {
+    bit = writeBits(out, bit, h.totalLen - 1, DIRECT_TOTAL_BITS);
+  } else {
+    bit = writeBits(out, bit, h.seq, h.mode === "mds" ? 8 : 24);
+    bit = writeBits(out, bit, h.layoutId, 3);
+    bit = writeBits(out, bit, h.slotIndex, 4);
+    bit = writeBits(out, bit, h.blockLen - 1, BLOCK_LEN_BITS);
+    bit = writeBits(out, bit, h.totalLen - 1, h.mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS);
+  }
+  writeBits(out, bit, h.payloadId >>> 0, 32);
+  out.set(block, headerLen);
+  new DataView(out.buffer).setUint32(
+    headerLen + block.length,
+    crc32(out.subarray(0, headerLen + block.length)),
+    true,
+  );
   return out;
 }
 
 export function parseFrame(
   bytes: Uint8Array,
 ): { header: FrameHeader; block: Uint8Array } | null {
-  if (bytes.length <= HEADER_LEN) return null;
-  if (bytes[0] !== MAGIC) return null;
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const blockLen = dv.getUint16(7, true);
-  const totalLen = dv.getUint32(9, true);
-  const wireSeq = dv.getUint32(3, true);
-  if (!(wireSeq & GRID_META_MARKER)) return null;
-  const header: FrameHeader = {
-    sessionId: dv.getUint16(1, true),
-    seq: wireSeq & GRID_ESI_MASK,
-    layoutId: (wireSeq >>> 28) & 7,
-    slotIndex: (wireSeq >>> 24) & 15,
-    k: Math.ceil(totalLen / blockLen),
-    blockLen,
-    totalLen,
-    payloadFnv: dv.getUint32(13, true),
-  };
-  if (header.k === 0 || header.k > 0xffff || header.blockLen === 0 || header.totalLen === 0) return null;
-  const layout = gridLayoutById(header.layoutId);
-  if (!layout || header.slotIndex >= layout.cols * layout.rows) return null;
-  const packetLength = HEADER_LEN + header.blockLen;
+  const mode = modeForMagic(bytes[0] ?? -1);
+  if (!mode) return null;
+  const headerLen = frameHeaderLength(mode);
+  if (bytes.length < headerLen + FRAME_CRC_LEN + 1) return null;
+
+  let bit = 8;
+  let seq = 0;
+  let layoutId = 0;
+  let slotIndex = 0;
+  let blockLen: number;
+  let totalLen: number;
+  if (mode === "direct") {
+    const total = readBits(bytes, bit, DIRECT_TOTAL_BITS);
+    bit = total.next;
+    totalLen = total.value + 1;
+    blockLen = totalLen;
+  } else {
+    const sequence = readBits(bytes, bit, mode === "mds" ? 8 : 24);
+    seq = sequence.value;
+    const layout = readBits(bytes, sequence.next, 3);
+    layoutId = layout.value;
+    const slot = readBits(bytes, layout.next, 4);
+    slotIndex = slot.value;
+    const block = readBits(bytes, slot.next, BLOCK_LEN_BITS);
+    blockLen = block.value + 1;
+    const total = readBits(bytes, block.next, mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS);
+    totalLen = total.value + 1;
+    bit = total.next;
+  }
+  const identity = readBits(bytes, bit, 32);
+  bit = identity.next;
+  while (bit < headerLen * 8) {
+    const reserved = readBits(bytes, bit, 1);
+    if (reserved.value !== 0) return null;
+    bit = reserved.next;
+  }
+
+  const k = Math.ceil(totalLen / blockLen);
+  if (k === 0 || k > 0xffff || codingMode(k) !== mode) return null;
+  if (mode !== "direct") {
+    const layout = gridLayoutById(layoutId);
+    if (!layout || slotIndex >= layout.cols * layout.rows) return null;
+  }
+  const packetLength = headerLen + blockLen;
   if (bytes.length !== packetLength + FRAME_CRC_LEN) return null;
-  if (dv.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
-  return { header, block: bytes.subarray(HEADER_LEN, packetLength) };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
+  const header: FrameHeader = {
+    mode, seq, layoutId, slotIndex, k, blockLen, totalLen,
+    payloadId: identity.value >>> 0,
+  };
+  return { header, block: bytes.subarray(headerLen, packetLength) };
 }
 
-/**
- * Everything about a frame that has to hold constant for a decoder to keep
- * accepting frames into it. `seq` is deliberately absent — it is the one field
- * that varies within a stream.
- *
- * The receiver resets on ANY disagreement, not just a new session id: session
- * ids are 16 bits drawn at random on every sender restart, so a collision
- * across a restart is rare but real, and a mismatched frame fed into the old
- * decoder corrupts it silently — surfacing only as a checksum failure after the
- * whole transfer has run. Including `payloadFnv` also means a sender restarted
- * on the SAME file resumes into the same decoder, which is correct: identical
- * k, sessionId and seq produce an identical frame.
- */
+/** Stable stream identity. Restarting the same payload with the same transport
+ * plan produces identical equations and safely continues receiver progress. */
 export function streamIdentity(h: FrameHeader): string {
-  return `${h.sessionId}:${h.k}:${h.blockLen}:${h.totalLen}:${h.payloadFnv}:${h.layoutId}`;
+  return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}:${h.layoutId}`;
 }
 
 export function crc32(bytes: Uint8Array): number {
