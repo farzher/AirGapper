@@ -22,12 +22,16 @@ export const isAndroid: boolean = !!nav && /Android/.test(nav.userAgent);
 type ExtendedCapabilities = MediaTrackCapabilities & {
   torch?: boolean;
   focusMode?: string[];
+  focusDistance?: { min: number; max: number; step?: number };
+  pointsOfInterest?: unknown;
   exposureMode?: string[];
   exposureTime?: { min: number; max: number; step?: number };
 };
 type ExtendedConstraintSet = MediaTrackConstraintSet & {
   torch?: boolean;
   focusMode?: string;
+  focusDistance?: number;
+  pointsOfInterest?: { x: number; y: number }[];
   exposureMode?: string;
   exposureTime?: number;
 };
@@ -37,6 +41,9 @@ export interface CameraCapabilities {
    *  flashlight adds glare, never light the camera was missing. */
   torch: boolean;
   continuousFocus: boolean;
+  focusModes: string[];
+  focusDistance?: { min: number; max: number; step?: number };
+  pointsOfInterest: boolean;
   /** Highest frame rate the current camera mode reports, when it reports one. */
   maxFrameRate?: number;
   /** Widest capture the camera reports, when it reports one. */
@@ -50,6 +57,9 @@ export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabili
   return {
     torch: caps.torch === true,
     continuousFocus: Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous"),
+    focusModes: Array.isArray(caps.focusMode) ? caps.focusMode : [],
+    focusDistance: caps.focusDistance,
+    pointsOfInterest: Boolean(caps.pointsOfInterest),
     maxFrameRate: caps.frameRate?.max,
     maxWidth: caps.width?.max,
     exposureTime: caps.exposureMode?.includes("manual") ? caps.exposureTime : undefined,

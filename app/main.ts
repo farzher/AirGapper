@@ -3,6 +3,83 @@ import "../receive/main";
 import { closeOnBackdropClick } from "../shared/dialog";
 import { isAndroid, isIOS } from "../shared/platform";
 
+interface InstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
+
+const installMenuButton = document.getElementById("install-menu-button") as HTMLButtonElement;
+const installMenu = document.getElementById("install-menu")!;
+const pwaInstall = document.getElementById("pwa-install") as HTMLButtonElement;
+const installHelp = document.getElementById("install-help")!;
+let deferredInstall: InstallPromptEvent | undefined;
+let installed = matchMedia("(display-mode: standalone)").matches ||
+  Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+
+function closeInstallMenu(restoreFocus = false): void {
+  installMenu.hidden = true;
+  installMenuButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) installMenuButton.focus();
+}
+function installFallback(): string {
+  if (isIOS) return "Use Share → Add to Home Screen.";
+  if (isAndroid) return "Use your browser menu → Install app.";
+  return "Use your browser menu to install AirGapper.";
+}
+function syncInstallUi(): void {
+  installMenuButton.textContent = installed ? "Installed" : "Install App";
+  installMenuButton.disabled = false;
+  pwaInstall.textContent = installed ? "Installed" : "Install App";
+  pwaInstall.disabled = installed;
+  installHelp.hidden = installed || Boolean(deferredInstall);
+  installHelp.textContent = installed ? "" : installFallback();
+}
+function openInstallMenu(): void {
+  installMenu.hidden = false;
+  installMenuButton.setAttribute("aria-expanded", "true");
+  pwaInstall.focus();
+}
+installMenuButton.addEventListener("click", () => installMenu.hidden ? openInstallMenu() : closeInstallMenu());
+pwaInstall.addEventListener("click", async () => {
+  if (!deferredInstall) {
+    installHelp.hidden = false;
+    installHelp.textContent = installFallback();
+    return;
+  }
+  const prompt = deferredInstall;
+  deferredInstall = undefined;
+  await prompt.prompt();
+  const choice = await prompt.userChoice;
+  if (choice.outcome === "accepted") closeInstallMenu();
+  syncInstallUi();
+});
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstall = event as InstallPromptEvent;
+  syncInstallUi();
+});
+window.addEventListener("appinstalled", () => {
+  installed = true;
+  deferredInstall = undefined;
+  closeInstallMenu();
+  syncInstallUi();
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!installMenu.hidden && event.target instanceof Node && !installMenu.parentElement!.contains(event.target)) closeInstallMenu();
+});
+installMenu.addEventListener("keydown", (event) => {
+  const items = [...installMenu.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])')];
+  const index = items.indexOf(document.activeElement as HTMLElement);
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeInstallMenu(true);
+  } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+  }
+});
+syncInstallUi();
+
 const views = {
   home: document.getElementById("homeView")!,
   send: document.getElementById("sendView")!,

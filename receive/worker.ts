@@ -13,7 +13,7 @@
 //    batched sampler hits. Missing cells then get a bounded isolated generic
 //    retry, recovering valid QRs hidden by neighboring finder patterns.
 
-import wasmUrl from "./wasm-url";
+import wasmUrl from "../vendor/decimen-codec/decimen_codec.wasm?url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
 import { parseFrame } from "../shared/protocol";
 import { gridLayoutById } from "../shared/grid-layout";

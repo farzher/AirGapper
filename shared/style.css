@@ -68,8 +68,19 @@ body.receive-mode .preview { width: 100%; height: 100%; max-height: none; aspect
 .header-qr-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .header-qr { display: block; width: 48px; height: 48px; image-rendering: pixelated; }
 .brand-button { border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
-.apk-download { flex: none; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 8px 11px; font-size: 12px; font-weight: 650; text-decoration: none; }
-.apk-download:hover { border-color: #ccc; }
+.install-shell { position: relative; flex: none; }
+.install-menu-button { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 8px 11px; font-size: 12px; font-weight: 650; cursor: pointer; }
+.install-menu-button:hover { border-color: #ccc; }
+.install-menu-button:disabled { color: var(--muted); cursor: default; }
+.install-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; width: 150px; padding: 5px; background: var(--card); border: 1px solid var(--line); border-radius: 11px; box-shadow: 0 12px 32px #0002; }
+.install-menu button,
+.install-menu a { display: block; width: 100%; padding: 8px 9px; border: 0; border-radius: 7px; color: var(--ink); background: transparent; text-align: left; text-decoration: none; font-size: 12px; cursor: pointer; }
+.install-menu button:hover,
+.install-menu button:focus-visible,
+.install-menu a:hover,
+.install-menu a:focus-visible { background: var(--bg); outline: 0; }
+.install-menu button:disabled { color: var(--muted); cursor: default; }
+.install-menu p { margin: 4px 7px 5px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .brand { display: block; color: var(--ink); font-weight: 750; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
 .app-version { margin-left: 3px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0; }
 .tag { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -238,9 +249,18 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-settings select { min-width: 0; width: 100%; }
 .receiver-settings .settings-actual { min-width: 0; margin-left: 5px; color: var(--muted); font-weight: 400; opacity: .8; }
 .receiver-settings .scan-capture-button { padding: 5px 9px; min-height: 34px; }
-.receiver-dev-actions { grid-column: 4; grid-row: 1; display: flex; gap: 6px; align-items: end; }
+.receiver-dev-actions { grid-column: 1 / -1; grid-row: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: end; }
 .receiver-dev-actions[hidden] { display: none; }
 .receiver-dev-actions button { padding: 5px 9px; min-height: 34px; }
+.focus-dev { flex: 1 0 100%; display: grid; grid-template-columns: minmax(130px, 1fr) auto minmax(180px, 2fr); align-items: end; gap: 8px; padding-top: 4px; }
+.focus-dev pre { grid-column: 1 / -1; margin: 0; padding: 8px; overflow: auto; color: var(--muted); background: var(--bg); border-radius: 8px; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.focus-tuning { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.focus-tuning summary { cursor: pointer; }
+.focus-tuning > div { display: grid; grid-template-columns: repeat(5, minmax(80px, 1fr)); gap: 6px; padding-top: 6px; }
+.focus-tuning input { width: 100%; }
+#focus-distance-control { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 8px; }
+#focus-distance-control span { grid-column: 1 / -1; }
+#focus-distance-value { min-width: 54px; color: var(--ink); font-size: 11px; text-align: right; }
 .receiver-settings .exposure-manual { grid-column: 1 / -1; grid-row: 2; flex-direction: row; align-items: center; gap: 10px; }
 .receiver-settings .exposure-manual input { flex: 1; min-width: 0; }
 .receiver-settings .exposure-manual output { flex: 0 0 62px; color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; text-transform: none; letter-spacing: 0; }
@@ -276,8 +296,10 @@ input[type="range"] { accent-color: #222; }
 .benchmark-controls button { min-height: 34px; }
 #benchmark-summary { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 @media (max-width: 700px) {
-  .receiver-dev-actions { grid-column: 1 / -1; grid-row: auto; flex-wrap: wrap; }
-  .receiver-dev-actions button { flex: 1; }
+  .receiver-dev-actions { grid-row: auto; }
+  .receiver-dev-actions > button { flex: 1; }
+  .focus-dev { grid-template-columns: 1fr auto; }
+  #focus-distance-control { grid-column: 1 / -1; }
 }
 
 /* Receiver ----------------------------------------------------------------- */

@@ -23,7 +23,14 @@
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
-    <a class="apk-download" href="./AirGapper.apk" download>Download .apk</a>
+    <div class="install-shell">
+      <button class="install-menu-button" id="install-menu-button" type="button" aria-haspopup="menu" aria-expanded="false">Install App</button>
+      <div class="install-menu" id="install-menu" role="menu" hidden>
+        <button id="pwa-install" type="button" role="menuitem">Install App</button>
+        <a href="./AirGapper.apk" download role="menuitem">Download .apk</a>
+        <p id="install-help" role="status" hidden></p>
+      </div>
+    </div>
   </header>
 
   <main class="app-main">
@@ -82,7 +89,17 @@
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Exposure</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <label id="camera-exposure-manual" class="exposure-manual" hidden><input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" /><output id="camera-exposure-value"></output></label>
-            <div class="receiver-dev-actions" hidden><label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label><button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden /></div>
+            <div class="receiver-dev-actions" hidden>
+              <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
+              <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
+              <div class="focus-dev" id="focus-dev" hidden>
+                <label><span>Focus strategy</span><select id="focus-strategy"><option value="auto">Auto</option><option value="continuous">Continuous</option><option value="single-shot">Single-shot</option><option value="manual">Manual</option></select></label>
+                <button class="secondary-button" id="focus-refocus" type="button">Refocus now</button>
+                <label id="focus-distance-control" hidden><span>Focus distance</span><input id="focus-distance" type="range" min="0" max="0" step="1" value="0" /><output id="focus-distance-value"></output></label>
+                <details class="focus-tuning"><summary>Tuning</summary><div><label><span>Good frames</span><input type="number" min="2" step="1" data-focus-tuning="goodFramesToLock" /></label><label><span>Loss ms</span><input type="number" min="500" step="100" data-focus-tuning="sustainedLossMs" /></label><label><span>Scale change</span><input type="number" min="0.05" max="1" step="0.01" data-focus-tuning="scaleChangeRatio" /></label><label><span>Movement</span><input type="number" min="0.03" max="1" step="0.01" data-focus-tuning="displacementRatio" /></label><label><span>Cooldown ms</span><input type="number" min="0" step="500" data-focus-tuning="minRefocusCooldownMs" /></label></div></details>
+                <pre id="focus-diagnostics"></pre>
+              </div>
+            </div>
           </div>
         </details>
         <section class="transfer-panel" id="metrics" aria-live="polite">

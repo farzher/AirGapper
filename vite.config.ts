@@ -1,11 +1,10 @@
 import { defineConfig } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
-import { viteSingleFile } from "vite-plugin-singlefile";
 import { VitePWA } from "vite-plugin-pwa";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { htmlTokens } from "./build/html-tokens";
-import { inlineCodecWasm } from "./build/inline-codec-wasm";
+import { buildSizeReport } from "./build/build-size-report";
 import { diagnosticsEndpoint } from "./build/diagnostics-endpoint";
 import { appArtifact } from "./build/app-artifact";
 
@@ -42,7 +41,7 @@ export default defineConfig(({ mode }) => ({
         inlineWorkboxRuntime: true,
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         dontCacheBustURLsMatching: /-[\w-]{8}\./,
-        globPatterns: ["**/*.html"],
+        globPatterns: ["**/*.{html,js,css,wasm,png}"],
         runtimeCaching: [{
           urlPattern: /\/received-media\//,
           handler: "CacheOnly" as const,
@@ -50,31 +49,17 @@ export default defineConfig(({ mode }) => ({
         }],
       },
     }),
-    inlineCodecWasm(),
-    inlineCodecWasm(
-      "virtual:android-codec-wasm-data-url",
-      "../vendor/decimen-codec-android/decimen_codec.wasm",
-    ),
-    viteSingleFile(),
     appArtifact(__dirname),
     diagnosticsEndpoint(pkg.version),
+    buildSizeReport(),
   ],
-  worker: {
-    format: "iife",
-    plugins: () => [
-      inlineCodecWasm(),
-      inlineCodecWasm(
-        "virtual:android-codec-wasm-data-url",
-        "../vendor/decimen-codec-android/decimen_codec.wasm",
-      ),
-    ],
-  },
+  worker: { format: "iife" },
   build: {
     // The hosted app keeps the fast native syntax used by the known-good web
     // build. Only the APK needs downlevel output for its older WebView.
     target: mode === "apk" ? "chrome67" : "es2022",
     outDir: "dist",
-    assetsInlineLimit: Number.MAX_SAFE_INTEGER,
+    assetsInlineLimit: 0,
     rollupOptions: { input: resolve(__dirname, "app.html") },
   },
   server: { host: true },

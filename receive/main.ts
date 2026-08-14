@@ -41,6 +41,7 @@ import {
 import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
+import { FocusController, FOCUS_TUNING, type FocusGeometry, type FocusStrategy } from "./focus-controller";
 import {
   copyTextOnAndroid,
   isAndroidApp,
@@ -67,6 +68,14 @@ const recordCorpusBtn = document.getElementById("record-corpus") as HTMLButtonEl
 const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElement;
 const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
 const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
+const focusDev = document.getElementById("focus-dev")!;
+const focusStrategy = document.getElementById("focus-strategy") as HTMLSelectElement;
+const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
+const focusDistanceControl = document.getElementById("focus-distance-control")!;
+const focusDistance = document.getElementById("focus-distance") as HTMLInputElement;
+const focusDistanceValue = document.getElementById("focus-distance-value") as HTMLOutputElement;
+const focusDiagnostics = document.getElementById("focus-diagnostics")!;
+const focusTuningInputs = [...document.querySelectorAll<HTMLInputElement>("[data-focus-tuning]")];
 const corpusFile = document.getElementById("corpus-file") as HTMLInputElement;
 const benchmarkDialog = document.getElementById("benchmark-dialog") as HTMLDialogElement;
 const closeBenchmarkBtn = document.getElementById("close-benchmark") as HTMLButtonElement;
@@ -122,7 +131,7 @@ function selectedWorkerCount(): number {
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v4";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v5";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
@@ -132,7 +141,26 @@ let requestedHeight = 720;
 let requestedFps = 60;
 let automaticExposure = true;
 let preferredExposureTime: number | undefined;
+let preferredFocusStrategy: FocusStrategy = "auto";
+let preferredFocusDistance: number | undefined;
 let exposureApplyGeneration = 0;
+let cameraMutationQueue = Promise.resolve();
+
+function mutateCamera(track: MediaStreamTrack, mutation: () => Promise<void>): Promise<void> {
+  const operation = cameraMutationQueue.catch(() => undefined).then(async () => {
+    if (track.readyState === "live" && stream?.getVideoTracks()[0] === track) await mutation();
+  });
+  cameraMutationQueue = operation.catch(() => undefined);
+  return operation;
+}
+function applyCameraConstraint(track: MediaStreamTrack, constraint: Parameters<typeof applyAdvancedConstraint>[1]): Promise<boolean> {
+  let accepted = false;
+  const effective = { ...constraint };
+  // A focus POI can also steer 3A on Android. Keep the useful optical target
+  // for automatic exposure, but never let it perturb an explicit exposure.
+  if (!automaticExposure) delete effective.pointsOfInterest;
+  return mutateCamera(track, async () => { accepted = await applyAdvancedConstraint(track, effective); }).then(() => accepted);
+}
 let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
 function formatCameraSize(width: number, height: number): string {
@@ -173,7 +201,8 @@ function populateCameraOptions(): void {
 function restoreCameraSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
-      resolution?: string; automaticExposure?: boolean; exposureTime?: number;
+      resolution?: string; automaticExposure?: boolean; exposureTime?: number; workers?: string;
+      focusStrategy?: FocusStrategy; focusDistance?: number;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
@@ -181,6 +210,9 @@ function restoreCameraSettings(): void {
     }
     if (typeof saved.automaticExposure === "boolean") automaticExposure = saved.automaticExposure;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
+    if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
+    if (["auto", "continuous", "single-shot", "manual"].includes(saved.focusStrategy ?? "")) preferredFocusStrategy = saved.focusStrategy!;
+    if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
@@ -189,6 +221,9 @@ function saveCameraSettings(): void {
       resolution: cameraResolution.value,
       automaticExposure,
       exposureTime: preferredExposureTime,
+      workers: decodeWorkers.value,
+      focusStrategy: preferredFocusStrategy,
+      focusDistance: preferredFocusDistance,
     }));
   } catch { /* Storage is optional. */ }
 }
@@ -212,6 +247,8 @@ function showRequestedCameraSettings(): void {
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
+const focusController = new FocusController(applyCameraConstraint, renderFocusDiagnostics, preferredFocusStrategy, preferredFocusDistance);
+focusStrategy.value = preferredFocusStrategy;
 
 // Keep developer controls out of the normal settings UI. Show, hide, then show
 // Settings within one second to reveal them. A slower close/reopen hides them.
@@ -542,6 +579,8 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     notePipelineEvent("decode-exception", decodeExceptions);
   } else if (completion.symbolCount > 0) {
     lastDecodeError = "";
+  } else {
+    focusController.noteBad();
   }
   if (completion.full) {
     fullSightings += completion.sightingCount;
@@ -883,7 +922,7 @@ function syncExposureControls(): void {
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
   if (automaticExposure) {
-    await applyAdvancedConstraint(track, { exposureMode: "continuous" });
+    await applyCameraConstraint(track, { exposureMode: "continuous" });
     return;
   }
   const requested = preferredExposureTime;
@@ -891,8 +930,8 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
 
   // Several Android camera providers silently ignore a time bundled with the
   // mode switch. Put the camera in manual first, then send the value by itself.
-  await applyAdvancedConstraint(track, { exposureMode: "manual" });
-  await applyAdvancedConstraint(track, { exposureTime: requested });
+  await applyCameraConstraint(track, { exposureMode: "manual" });
+  await applyCameraConstraint(track, { exposureTime: requested });
   await new Promise((resolve) => setTimeout(resolve, 80));
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
@@ -901,7 +940,7 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const step = Number(cameraExposure.step) || 0.1;
   if ((active.exposureMode && active.exposureMode !== "manual") ||
       (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
-    await applyAdvancedConstraint(track, { exposureMode: "manual", exposureTime: requested });
+    await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: requested });
     if (generation !== exposureApplyGeneration) return;
   }
   // Android camera providers can report a stale exposureTime after accepting
@@ -1111,6 +1150,79 @@ function drawOverlay(now: number) {
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
 }
+function focusGeometry(): FocusGeometry | undefined {
+  const snapshot = lastGridSnapshot;
+  if (!snapshot || !receiverFrameWidth || !receiverFrameHeight || !snapshot.slots.length) return undefined;
+  const points = snapshot.slots.flatMap((slot) => [slot.quad.topLeft, slot.quad.topRight, slot.quad.bottomRight, slot.quad.bottomLeft]);
+  const left = Math.min(...points.map((point) => point.x));
+  const right = Math.max(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const tracked = regions.filter((region) => region.gridSlot !== undefined);
+  const quality = tracked.length ? tracked.reduce((sum, region) => sum + region.decodeConfidence, 0) / tracked.length : snapshot.confidence;
+  return {
+    x: Math.max(0, Math.min(1, (left + right) / 2 / receiverFrameWidth)),
+    y: Math.max(0, Math.min(1, (top + bottom) / 2 / receiverFrameHeight)),
+    scale: Math.sqrt(Math.max(1, (right - left) * (bottom - top)) / (receiverFrameWidth * receiverFrameHeight)),
+    quality,
+  };
+}
+
+function renderFocusDiagnostics(): void {
+  const diagnostic = focusController?.diagnostics();
+  if (!diagnostic) return;
+  const supported = diagnostic.availableModes.length > 0;
+  focusDev.hidden = !supported;
+  focusStrategy.value = preferredFocusStrategy;
+  for (const option of focusStrategy.options) {
+    option.disabled = option.value !== "auto" && !diagnostic.availableModes.includes(option.value);
+  }
+  const range = diagnostic.distanceRange;
+  focusDistanceControl.hidden = !range || !diagnostic.availableModes.includes("manual");
+  if (range) {
+    focusDistance.min = String(range.min);
+    focusDistance.max = String(range.max);
+    focusDistance.step = String(range.step || (range.max - range.min) / 100 || 0.01);
+    if (document.activeElement !== focusDistance) focusDistance.value = String(preferredFocusDistance ?? diagnostic.actualDistance ?? range.min);
+    focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
+  }
+  for (const input of focusTuningInputs) {
+    if (document.activeElement !== input) input.value = String(FOCUS_TUNING[input.dataset.focusTuning as keyof typeof FOCUS_TUNING]);
+  }
+  const now = performance.now();
+  const since = diagnostic.lastRefocusAt === undefined ? "—" : `${((now - diagnostic.lastRefocusAt) / 1000).toFixed(1)}s`;
+  const improvement = diagnostic.receptionBefore === undefined ? "—" :
+    `${diagnostic.receptionBefore.toFixed(0)} → ${diagnostic.receptionAfter?.toFixed(0) ?? "…"} B/s`;
+  focusDiagnostics.textContent = [
+    `state ${diagnostic.state} · modes ${diagnostic.availableModes.join(", ") || "none"}`,
+    `requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
+    `range ${range ? `${range.min}…${range.max} step ${range.step ?? "—"}` : "—"} · POI ${diagnostic.poiSupported ? "yes" : "no"}`,
+    `initial lock ${diagnostic.initialLockMs === undefined ? "—" : `${diagnostic.initialLockMs.toFixed(0)}ms`} · refocus ${diagnostic.refocusCount} · since ${since}`,
+    `reason ${diagnostic.lastRefocusReason} · good/bad ${diagnostic.goodStreak}/${diagnostic.badStreak} · quality ${diagnostic.quality.toFixed(2)}`,
+    `useful reception ${improvement}`,
+    `tuning good=${FOCUS_TUNING.goodFramesToLock} stable=${FOCUS_TUNING.stableEvidenceMs}ms loss=${FOCUS_TUNING.sustainedLossMs}ms bad=${FOCUS_TUNING.badCompletionsToReacquire} geometry=${FOCUS_TUNING.geometrySamplesToReacquire} scale=${FOCUS_TUNING.scaleChangeRatio} move=${FOCUS_TUNING.displacementRatio} cooldown=${FOCUS_TUNING.minRefocusCooldownMs}ms`,
+  ].join("\n");
+}
+
+focusStrategy.addEventListener("change", () => {
+  preferredFocusStrategy = focusStrategy.value as FocusStrategy;
+  saveCameraSettings();
+  focusController.setStrategy(preferredFocusStrategy);
+});
+focusRefocus.addEventListener("click", () => focusController.refocus());
+focusDistance.addEventListener("input", () => {
+  preferredFocusDistance = Number(focusDistance.value);
+  focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
+  saveCameraSettings();
+  focusController.setManualDistance(preferredFocusDistance);
+});
+for (const input of focusTuningInputs) input.addEventListener("change", () => {
+  const key = input.dataset.focusTuning as keyof typeof FOCUS_TUNING;
+  const value = Number(input.value);
+  if (Number.isFinite(value)) FOCUS_TUNING[key] = value;
+  renderFocusDiagnostics();
+});
+
 startBtn.onclick = () => void start();
 const changeCameraSettings = async () => {
   showRequestedCameraSettings();
@@ -1118,19 +1230,20 @@ const changeCameraSettings = async () => {
   const track = stream?.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
-    await track.applyConstraints({
+    await mutateCamera(track, () => track.applyConstraints({
       width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 },
-    }).catch(() => undefined);
+    })).catch(() => undefined);
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
+    focusController.attach(track);
     return;
   }
   const attempted = browserModes.find((mode) => mode.key === cameraResolution.value);
   if (!attempted) return;
   try {
-    await track.applyConstraints({
+    await mutateCamera(track, () => track.applyConstraints({
       width: { exact: attempted.width }, height: { exact: attempted.height }, frameRate: { exact: attempted.fps },
-    });
+    }));
     const active = track.getSettings();
     const exactSize = (active.width === attempted.width && active.height === attempted.height) ||
       (active.width === attempted.height && active.height === attempted.width);
@@ -1141,6 +1254,7 @@ const changeCameraSettings = async () => {
     if (option) option.textContent = attempted.label;
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
+    focusController.attach(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
     cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)?.remove();
@@ -1148,6 +1262,7 @@ const changeCameraSettings = async () => {
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
     saveCameraSettings();
+    focusController.attach(track);
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
@@ -1222,6 +1337,7 @@ function offerRetry(message: string) {
 /** Stop every hot-path resource before this in-page view is hidden. */
 function stopReceiver(): void {
   cameraStartGen++;
+  focusController.detach();
   captureGen++;
   receiverPaused = false;
   pauseStartedAt = 0;
@@ -1343,6 +1459,7 @@ function stopReceiver(): void {
 }
 function pauseReceiver(): void {
   if (receiverPaused || done) return;
+  focusController.detach();
   receiverPaused = true;
   pauseStartedAt = receiverNow();
   cameraStartGen++;
@@ -1494,30 +1611,18 @@ async function start() {
   if (activeTrack) {
     populateBrowserCapabilities(activeTrack);
     showNegotiatedWebMode(activeTrack);
+    if (!legacyAndroidApp) focusController.attach(activeTrack);
   }
   syncPreviewAspect();
   setStatus("");
 
   pool.resize(selectedWorkerCount());
-  void applyCameraExtras();
 
   cameraStartedTs = receiverNow();
   captureGen++;
   scheduleFrame(captureGen);
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
-}
-
-/** Use what this camera can actually do, probed rather than UA-sniffed.
- *  Continuous autofocus is applied silently — except in the APK, where old
- *  camera providers can break the live stream on any applyConstraints call. */
-async function applyCameraExtras() {
-  const track = stream?.getVideoTracks()[0];
-  if (!track || isAndroidApp()) return;
-  const caps = probeCameraCapabilities(track);
-  if (caps.continuousFocus) {
-    await applyAdvancedConstraint(track, { focusMode: "continuous" });
-  }
 }
 
 interface VideoFrameMetadata {
@@ -2329,6 +2434,13 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (decoder.usefulSymbols > usefulBefore) {
     usefulFrameTimes.push(receivedAt);
   }
+  const geometry = focusGeometry();
+  if (geometry) focusController.noteGood(
+    info?.scanId ?? totalCaptures,
+    geometry,
+    Math.max(0, decoder.usefulSymbols - usefulBefore) * header.blockLen,
+    receivedAt,
+  );
   updateProgressEstimate();
 
   if (decoder.isComplete && replayRunning) {
@@ -3301,6 +3413,7 @@ async function runReceiverBenchmark(): Promise<void> {
 function updateStats() {
   if (done) return;
   const now = receiverNow();
+  if (!receiverDevActions.hidden) renderFocusDiagnostics();
   const prune = (a: number[]) => {
     while (a.length > 0 && a[0]! < now - STATS_WINDOW_MS) a.shift();
   };

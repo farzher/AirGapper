@@ -4,7 +4,7 @@
 // scalar ZXing scan out. It deliberately does not share the modern tracking,
 // batching, reduced-frame, or SIMD paths.
 
-import wasmUrl from "./wasm-url-android";
+import wasmUrl from "../vendor/decimen-codec-android/decimen_codec.wasm?url";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec-android/decimen_codec.js";
 
 const ready: Promise<DecimenModule> = DecimenCodec({

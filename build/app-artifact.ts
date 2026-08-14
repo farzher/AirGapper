@@ -1,5 +1,5 @@
 import type { Plugin } from "vite";
-import { copyFileSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 /** Name the single HTML output index.html and keep the checked-in root artifact
@@ -15,15 +15,11 @@ export function appArtifact(root: string): Plugin {
       delete bundle[htmlName];
     },
     closeBundle() {
-      for (const file of [
-        "index.html",
-        "manifest.webmanifest",
-        "sw.js",
-        "icon-192.png",
-        "icon-512.png",
-        "icon-512-maskable.png",
-      ]) {
-        copyFileSync(resolve(root, "dist", file), resolve(root, file));
+      const output = resolve(root, "dist");
+      const generatedAssets = resolve(root, "assets");
+      if (existsSync(generatedAssets)) rmSync(generatedAssets, { recursive: true, force: true });
+      for (const file of readdirSync(output)) {
+        cpSync(resolve(output, file), resolve(root, file), { recursive: true, force: true });
       }
     },
   };

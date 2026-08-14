@@ -1,9 +1,8 @@
-// The decoder worker is always embedded. A blob worker works from file:// and
-// avoids maintaining a second hosted implementation; the PWA caches the same
-// self-contained application artifact.
+// Workers are emitted once and precached with their WASM dependencies. This
+// avoids duplicating large decoder binaries inside the application HTML.
 import { isLegacyAndroidApp } from "../shared/android";
-import InlineDecodeWorker from "./worker.ts?worker&inline";
-import LegacyAndroidDecodeWorker from "./worker-legacy-android.ts?worker&inline";
+import DecodeWorker from "./worker.ts?worker";
+import LegacyAndroidDecodeWorker from "./worker-legacy-android.ts?worker";
 
 function supportsWasmSimd(): boolean {
   try {
@@ -19,5 +18,5 @@ function supportsWasmSimd(): boolean {
 export const usesSimpleDecodeWorker = isLegacyAndroidApp() || !supportsWasmSimd();
 
 export function createDecodeWorker(): Worker {
-  return usesSimpleDecodeWorker ? new LegacyAndroidDecodeWorker() : new InlineDecodeWorker();
+  return usesSimpleDecodeWorker ? new LegacyAndroidDecodeWorker() : new DecodeWorker();
 }
