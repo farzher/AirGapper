@@ -108,7 +108,7 @@ function renderReceiverLink(): void {
     const dpr = window.devicePixelRatio || 1;
     const scale = moduleCssScale === undefined
       ? Math.max(1, Math.round((targetCssSize * dpr) / raster.size))
-      : Math.max(1, Math.round(moduleCssScale * dpr));
+      : moduleCssScale;
     const source = document.createElement("canvas");
     source.width = source.height = raster.size;
     source.getContext("2d")!.putImageData(
