@@ -40,8 +40,8 @@ export default defineConfig(({ mode }) => ({
         clientsClaim: true,
         inlineWorkboxRuntime: true,
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
-        dontCacheBustURLsMatching: /-[\w-]{8}\./,
-        globPatterns: ["**/*.{html,js,css,wasm,png}"],
+        dontCacheBustURLsMatching: /\/assets\/[^/]+-[A-Za-z0-9_-]{8}\.[^/]+$/,
+        globPatterns: ["**/*.{html,js,css,wasm}"],
         runtimeCaching: [{
           urlPattern: /\/received-media\//,
           handler: "CacheOnly" as const,
