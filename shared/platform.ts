@@ -26,6 +26,7 @@ type ExtendedCapabilities = MediaTrackCapabilities & {
   pointsOfInterest?: unknown;
   exposureMode?: string[];
   exposureTime?: { min: number; max: number; step?: number };
+  iso?: { min: number; max: number; step?: number };
 };
 type ExtendedConstraintSet = MediaTrackConstraintSet & {
   torch?: boolean;
@@ -34,6 +35,7 @@ type ExtendedConstraintSet = MediaTrackConstraintSet & {
   pointsOfInterest?: { x: number; y: number }[];
   exposureMode?: string;
   exposureTime?: number;
+  iso?: number;
 };
 
 export interface CameraCapabilities {
@@ -49,6 +51,7 @@ export interface CameraCapabilities {
   /** Widest capture the camera reports, when it reports one. */
   maxWidth?: number;
   exposureTime?: { min: number; max: number; step?: number };
+  iso?: { min: number; max: number; step?: number };
 }
 
 export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabilities {
@@ -63,6 +66,7 @@ export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabili
     maxFrameRate: caps.frameRate?.max,
     maxWidth: caps.width?.max,
     exposureTime: caps.exposureMode?.includes("manual") ? caps.exposureTime : undefined,
+    iso: caps.iso,
   };
 }
 

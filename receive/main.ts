@@ -41,7 +41,15 @@ import {
 import { statusLine } from "../shared/status-line";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock";
 import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform";
-import { FocusController, FOCUS_TUNING, type FocusGeometry, type FocusStrategy } from "./focus-controller";
+import {
+  FocusController,
+  CAMERA_TUNING,
+  type CalibrationMode,
+  type CameraPatch,
+  type FocusGeometry,
+  type FocusStrategy,
+} from "./focus-controller";
+import { StaticQrOpticsAnalyzer, type QrOpticalTarget } from "./qr-optics";
 import {
   copyTextOnAndroid,
   isAndroidApp,
@@ -69,13 +77,17 @@ const loadCorpusBtn = document.getElementById("load-corpus") as HTMLButtonElemen
 const receiverSettings = document.querySelector<HTMLDetailsElement>(".receiver-settings")!;
 const receiverDevActions = document.querySelector<HTMLElement>(".receiver-dev-actions")!;
 const focusDev = document.getElementById("focus-dev")!;
+const cameraCalibration = document.getElementById("camera-calibration") as HTMLSelectElement;
 const focusStrategy = document.getElementById("focus-strategy") as HTMLSelectElement;
 const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const focusDistanceControl = document.getElementById("focus-distance-control")!;
 const focusDistance = document.getElementById("focus-distance") as HTMLInputElement;
 const focusDistanceValue = document.getElementById("focus-distance-value") as HTMLOutputElement;
+const cameraIsoControl = document.getElementById("camera-iso-control")!;
+const cameraIso = document.getElementById("camera-iso") as HTMLInputElement;
+const cameraIsoValue = document.getElementById("camera-iso-value") as HTMLOutputElement;
 const focusDiagnostics = document.getElementById("focus-diagnostics")!;
-const focusTuningInputs = [...document.querySelectorAll<HTMLInputElement>("[data-focus-tuning]")];
+const focusTuningInputs = [...document.querySelectorAll<HTMLInputElement>("[data-camera-tuning]")];
 const corpusFile = document.getElementById("corpus-file") as HTMLInputElement;
 const benchmarkDialog = document.getElementById("benchmark-dialog") as HTMLDialogElement;
 const closeBenchmarkBtn = document.getElementById("close-benchmark") as HTMLButtonElement;
@@ -131,7 +143,7 @@ function selectedWorkerCount(): number {
 // frame is 9× the pixels of 1280×960, and the synchronous canvas readback can
 // collapse an older phone to ~2 fps. 1280 keeps V40 modules comfortably large
 // while leaving enough CPU budget for capture and decode.
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v5";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v6";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480], [960, 720], [1280, 720], [1280, 960], [1920, 1080], [2560, 1440], [3840, 2160],
@@ -143,8 +155,11 @@ let automaticExposure = true;
 let preferredExposureTime: number | undefined;
 let preferredFocusStrategy: FocusStrategy = "auto";
 let preferredFocusDistance: number | undefined;
+let preferredIso: number | undefined;
+let preferredCalibrationMode: CalibrationMode = "auto";
 let exposureApplyGeneration = 0;
 let cameraMutationQueue = Promise.resolve();
+let desiredCamera: CameraPatch = {};
 
 function mutateCamera(track: MediaStreamTrack, mutation: () => Promise<void>): Promise<void> {
   const operation = cameraMutationQueue.catch(() => undefined).then(async () => {
@@ -153,13 +168,49 @@ function mutateCamera(track: MediaStreamTrack, mutation: () => Promise<void>): P
   cameraMutationQueue = operation.catch(() => undefined);
   return operation;
 }
-function applyCameraConstraint(track: MediaStreamTrack, constraint: Parameters<typeof applyAdvancedConstraint>[1]): Promise<boolean> {
+function seedDesiredCamera(track: MediaStreamTrack): void {
+  const settings = track.getSettings() as MediaTrackSettings & CameraPatch;
+  desiredCamera = {
+    focusMode: settings.focusMode,
+    focusDistance: settings.focusDistance,
+    exposureMode: settings.exposureMode,
+    exposureTime: settings.exposureTime,
+    iso: settings.iso,
+  };
+}
+function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Promise<boolean> {
   let accepted = false;
-  const effective = { ...constraint };
-  // A focus POI can also steer 3A on Android. Keep the useful optical target
-  // for automatic exposure, but never let it perturb an explicit exposure.
-  if (!automaticExposure) delete effective.pointsOfInterest;
-  return mutateCamera(track, async () => { accepted = await applyAdvancedConstraint(track, effective); }).then(() => accepted);
+  const enteringManualFocus = patch.focusMode === "manual" && desiredCamera.focusMode !== "manual";
+  const enteringManualExposure = patch.exposureMode === "manual" && desiredCamera.exposureMode !== "manual";
+  Object.assign(desiredCamera, patch);
+  return mutateCamera(track, async () => {
+    // Build at execution time, not enqueue time. If a newer generation or a
+    // developer override superseded this queued operation, it therefore
+    // applies the newest desired state instead of stale probe values.
+    const effectiveCamera = (includeFocusDistance = true, includeExposureValues = true): CameraPatch => {
+      const effective: CameraPatch = { ...desiredCamera };
+      if (effective.focusMode !== "manual" || !includeFocusDistance) delete effective.focusDistance;
+      if (effective.exposureMode !== "manual" || !includeExposureValues) {
+        delete effective.exposureTime;
+        delete effective.iso;
+      }
+      if (effective.exposureMode === "manual") delete effective.pointsOfInterest;
+      return effective;
+    };
+    // Android camera providers often require each mode transition before its
+    // numeric value. These mode-only sets still carry the unrelated desired
+    // camera state, so neither focus nor exposure can reset the other.
+    if (enteringManualFocus && desiredCamera.focusMode === "manual") {
+      await applyAdvancedConstraint(track, effectiveCamera(false, !enteringManualExposure));
+    }
+    if (enteringManualExposure && desiredCamera.exposureMode === "manual") {
+      await applyAdvancedConstraint(track, effectiveCamera(true, false));
+    }
+    accepted = await applyAdvancedConstraint(track, effectiveCamera());
+    // Reading settings here is intentional: many Android providers quantize or
+    // silently reject one member of an otherwise accepted advanced set.
+    track.getSettings();
+  }).then(() => accepted);
 }
 let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
 interface BrowserMode { key: string; width: number; height: number; fps: number; label: string }
@@ -202,7 +253,7 @@ function restoreCameraSettings(): void {
   try {
     const saved = JSON.parse(localStorage.getItem(CAMERA_SETTINGS_KEY) ?? "null") as {
       resolution?: string; automaticExposure?: boolean; exposureTime?: number; workers?: string;
-      focusStrategy?: FocusStrategy; focusDistance?: number;
+      focusStrategy?: FocusStrategy; focusDistance?: number; iso?: number; calibrationMode?: CalibrationMode;
     } | null;
     if (!saved) return;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
@@ -213,6 +264,8 @@ function restoreCameraSettings(): void {
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
     if (["auto", "continuous", "single-shot", "manual"].includes(saved.focusStrategy ?? "")) preferredFocusStrategy = saved.focusStrategy!;
     if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
+    if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
+    if (["auto", "off", "force"].includes(saved.calibrationMode ?? "")) preferredCalibrationMode = saved.calibrationMode!;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
 }
 function saveCameraSettings(): void {
@@ -224,6 +277,8 @@ function saveCameraSettings(): void {
       workers: decodeWorkers.value,
       focusStrategy: preferredFocusStrategy,
       focusDistance: preferredFocusDistance,
+      iso: preferredIso,
+      calibrationMode: preferredCalibrationMode,
     }));
   } catch { /* Storage is optional. */ }
 }
@@ -247,8 +302,20 @@ function showRequestedCameraSettings(): void {
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
-const focusController = new FocusController(applyCameraConstraint, renderFocusDiagnostics, preferredFocusStrategy, preferredFocusDistance);
+const focusController = new FocusController(
+  applyCameraConstraint,
+  renderFocusDiagnostics,
+  preferredFocusStrategy,
+  preferredFocusDistance,
+  preferredCalibrationMode,
+);
+const opticsAnalyzer = new StaticQrOpticsAnalyzer();
+function attachCameraController(track: MediaStreamTrack): void {
+  focusController.attach(track);
+  if (!automaticExposure) focusController.developerOverride("saved manual exposure retained");
+}
 focusStrategy.value = preferredFocusStrategy;
+cameraCalibration.value = preferredCalibrationMode;
 
 // Keep developer controls out of the normal settings UI. Show, hide, then show
 // Settings within one second to reveal them. A slower close/reopen hides them.
@@ -579,9 +646,9 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
     notePipelineEvent("decode-exception", decodeExceptions);
   } else if (completion.symbolCount > 0) {
     lastDecodeError = "";
-  } else {
-    focusController.noteBad();
   }
+  // A decoder miss is channel evidence only. Static QR optics and geometry,
+  // sampled independently on fresh camera frames, own camera reacquisition.
   if (completion.full) {
     fullSightings += completion.sightingCount;
     if (completion.symbolCount === 0 && completion.sightingCount === 0) fullDetectorMisses++;
@@ -931,7 +998,7 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   // Several Android camera providers silently ignore a time bundled with the
   // mode switch. Put the camera in manual first, then send the value by itself.
   await applyCameraConstraint(track, { exposureMode: "manual" });
-  await applyCameraConstraint(track, { exposureTime: requested });
+  await applyCameraConstraint(track, { exposureTime: requested, ...(preferredIso !== undefined ? { iso: preferredIso } : {}) });
   await new Promise((resolve) => setTimeout(resolve, 80));
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
@@ -940,7 +1007,10 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const step = Number(cameraExposure.step) || 0.1;
   if ((active.exposureMode && active.exposureMode !== "manual") ||
       (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
-    await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: requested });
+    await applyCameraConstraint(track, {
+      exposureMode: "manual", exposureTime: requested,
+      ...(preferredIso !== undefined ? { iso: preferredIso } : {}),
+    });
     if (generation !== exposureApplyGeneration) return;
   }
   // Android camera providers can report a stale exposureTime after accepting
@@ -950,9 +1020,11 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   showExposureTime(requested);
 }
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
+  seedDesiredCamera(track);
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
     exposureMode?: string[];
     exposureTime?: { min: number; max: number; step?: number };
+    iso?: { min: number; max: number; step?: number };
   }) | undefined;
   cameraResolutionLabel.textContent = "Mode";
   if (!caps?.width || !caps.height) return;
@@ -973,6 +1045,16 @@ function populateBrowserCapabilities(track: MediaStreamTrack): void {
     void applyExposureSetting(track);
   } else {
     cameraExposureManual.hidden = true;
+  }
+  const iso = caps.iso;
+  cameraIsoControl.hidden = !iso;
+  if (iso) {
+    preferredIso = Math.max(iso.min, Math.min(iso.max, preferredIso ?? (Number((track.getSettings() as MediaTrackSettings & { iso?: number }).iso) || iso.min)));
+    cameraIso.min = String(iso.min);
+    cameraIso.max = String(iso.max);
+    cameraIso.step = String(iso.step ?? 1);
+    cameraIso.value = String(preferredIso);
+    cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
   }
   const widthMin = caps.width.min ?? 0;
   const widthMax = caps.width.max ?? Infinity;
@@ -1160,10 +1242,17 @@ function focusGeometry(): FocusGeometry | undefined {
   const bottom = Math.max(...points.map((point) => point.y));
   const tracked = regions.filter((region) => region.gridSlot !== undefined);
   const quality = tracked.length ? tracked.reduce((sum, region) => sum + region.decodeConfidence, 0) / tracked.length : snapshot.confidence;
+  const representative = snapshot.slots[Math.floor(snapshot.slots.length / 2)]!.quad;
+  const topEdge = Math.hypot(representative.topRight.x - representative.topLeft.x, representative.topRight.y - representative.topLeft.y);
+  const bottomEdge = Math.hypot(representative.bottomRight.x - representative.bottomLeft.x, representative.bottomRight.y - representative.bottomLeft.y);
+  const leftEdge = Math.hypot(representative.bottomLeft.x - representative.topLeft.x, representative.bottomLeft.y - representative.topLeft.y);
+  const rightEdge = Math.hypot(representative.bottomRight.x - representative.topRight.x, representative.bottomRight.y - representative.topRight.y);
   return {
     x: Math.max(0, Math.min(1, (left + right) / 2 / receiverFrameWidth)),
     y: Math.max(0, Math.min(1, (top + bottom) / 2 / receiverFrameHeight)),
     scale: Math.sqrt(Math.max(1, (right - left) * (bottom - top)) / (receiverFrameWidth * receiverFrameHeight)),
+    perspectiveX: Math.log(Math.max(0.0001, topEdge) / Math.max(0.0001, bottomEdge)),
+    perspectiveY: Math.log(Math.max(0.0001, leftEdge) / Math.max(0.0001, rightEdge)),
     quality,
   };
 }
@@ -1171,9 +1260,9 @@ function focusGeometry(): FocusGeometry | undefined {
 function renderFocusDiagnostics(): void {
   const diagnostic = focusController?.diagnostics();
   if (!diagnostic) return;
-  const supported = diagnostic.availableModes.length > 0;
-  focusDev.hidden = !supported;
+  focusDev.hidden = diagnostic.state === "UNAVAILABLE";
   focusStrategy.value = preferredFocusStrategy;
+  cameraCalibration.value = preferredCalibrationMode;
   for (const option of focusStrategy.options) {
     option.disabled = option.value !== "auto" && !diagnostic.availableModes.includes(option.value);
   }
@@ -1187,23 +1276,32 @@ function renderFocusDiagnostics(): void {
     focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   }
   for (const input of focusTuningInputs) {
-    if (document.activeElement !== input) input.value = String(FOCUS_TUNING[input.dataset.focusTuning as keyof typeof FOCUS_TUNING]);
+    const key = input.dataset.cameraTuning as keyof typeof CAMERA_TUNING;
+    if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
-  const now = performance.now();
-  const since = diagnostic.lastRefocusAt === undefined ? "—" : `${((now - diagnostic.lastRefocusAt) / 1000).toFixed(1)}s`;
-  const improvement = diagnostic.receptionBefore === undefined ? "—" :
-    `${diagnostic.receptionBefore.toFixed(0)} → ${diagnostic.receptionAfter?.toFixed(0) ?? "…"} B/s`;
+  const optical = diagnostic.optical;
+  const levels = optical
+    ? `black/white ${optical.blackLevel.toFixed(0)}/${optical.whiteLevel.toFixed(0)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · clip ${(optical.clipping * 100).toFixed(1)}% · band ${(optical.banding * 100).toFixed(1)}%`
+    : "black/white — · separation — · noise —";
+  const known = diagnostic.knownGoodSettings;
   focusDiagnostics.textContent = [
-    `state ${diagnostic.state} · modes ${diagnostic.availableModes.join(", ") || "none"}`,
-    `requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
-    `range ${range ? `${range.min}…${range.max} step ${range.step ?? "—"}` : "—"} · POI ${diagnostic.poiSupported ? "yes" : "no"}`,
-    `initial lock ${diagnostic.initialLockMs === undefined ? "—" : `${diagnostic.initialLockMs.toFixed(0)}ms`} · refocus ${diagnostic.refocusCount} · since ${since}`,
-    `reason ${diagnostic.lastRefocusReason} · good/bad ${diagnostic.goodStreak}/${diagnostic.badStreak} · quality ${diagnostic.quality.toFixed(2)}`,
-    `useful reception ${improvement}`,
-    `tuning good=${FOCUS_TUNING.goodFramesToLock} stable=${FOCUS_TUNING.stableEvidenceMs}ms loss=${FOCUS_TUNING.sustainedLossMs}ms bad=${FOCUS_TUNING.badCompletionsToReacquire} geometry=${FOCUS_TUNING.geometrySamplesToReacquire} scale=${FOCUS_TUNING.scaleChangeRatio} move=${FOCUS_TUNING.displacementRatio} cooldown=${FOCUS_TUNING.minRefocusCooldownMs}ms`,
+    `state ${diagnostic.state} · calibration ${diagnostic.calibrationMode} · target ${diagnostic.targetDetected ? "yes" : "no"} · geometry ${diagnostic.geometryStable ? "stable" : "moving/waiting"}`,
+    `focus ${diagnostic.actualMode ?? "—"} ${diagnostic.actualDistance ?? "—"} · AF baseline ${diagnostic.baselineFocus ?? "—"} · probes ${diagnostic.focusProbes}`,
+    `exposure actual ${diagnostic.actualExposure ?? "—"} ms · requested ${diagnostic.requestedExposure ?? "—"} · AE baseline ${diagnostic.baselineExposure ?? "—"}`,
+    `ISO actual ${diagnostic.actualIso ?? "—"} · requested ${diagnostic.requestedIso ?? "—"} · baseline ${diagnostic.baselineIso ?? "—"} · probes ${diagnostic.exposureProbes}`,
+    optical ? `static focus ${optical.focusScore.toFixed(2)} · transition ${optical.transitionWidthModules.toFixed(2)} modules · exposure ${optical.exposureScore.toFixed(2)} · confidence ${optical.confidence.toFixed(2)} · tiles ${optical.tiles}` : "static optics —",
+    levels,
+    `payload now ${diagnostic.decodedNow}/${diagnostic.totalTiles} · recent ${diagnostic.decodedRecently}/${diagnostic.totalTiles}${diagnostic.likelyTemporalFailure ? " · likely temporal/phase/rolling-shutter degradation" : ""}`,
+    `known-good ${known ? `focus ${known.focusDistance ?? "—"} · ${known.exposureTime ?? "—"} ms · ISO ${known.iso ?? "—"}` : "no"} · initial lock ${diagnostic.initialLockMs === undefined ? "—" : `${diagnostic.initialLockMs.toFixed(0)} ms`} · reacquire ${diagnostic.reacquireCount}`,
+    `decision ${diagnostic.lastReason}`,
   ].join("\n");
 }
 
+cameraCalibration.addEventListener("change", () => {
+  preferredCalibrationMode = cameraCalibration.value as CalibrationMode;
+  saveCameraSettings();
+  focusController.setCalibrationMode(preferredCalibrationMode);
+});
 focusStrategy.addEventListener("change", () => {
   preferredFocusStrategy = focusStrategy.value as FocusStrategy;
   saveCameraSettings();
@@ -1211,15 +1309,19 @@ focusStrategy.addEventListener("change", () => {
 });
 focusRefocus.addEventListener("click", () => focusController.refocus());
 focusDistance.addEventListener("input", () => {
+  const switchToManual = preferredFocusStrategy !== "manual";
   preferredFocusDistance = Number(focusDistance.value);
+  preferredFocusStrategy = "manual";
+  focusStrategy.value = "manual";
   focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   saveCameraSettings();
+  if (switchToManual) focusController.setStrategy("manual");
   focusController.setManualDistance(preferredFocusDistance);
 });
 for (const input of focusTuningInputs) input.addEventListener("change", () => {
-  const key = input.dataset.focusTuning as keyof typeof FOCUS_TUNING;
+  const key = input.dataset.cameraTuning as keyof typeof CAMERA_TUNING;
   const value = Number(input.value);
-  if (Number.isFinite(value)) FOCUS_TUNING[key] = value;
+  if (Number.isFinite(value)) CAMERA_TUNING[key] = value;
   renderFocusDiagnostics();
 });
 
@@ -1235,7 +1337,7 @@ const changeCameraSettings = async () => {
     })).catch(() => undefined);
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
-    focusController.attach(track);
+    attachCameraController(track);
     return;
   }
   const attempted = browserModes.find((mode) => mode.key === cameraResolution.value);
@@ -1254,7 +1356,7 @@ const changeCameraSettings = async () => {
     if (option) option.textContent = attempted.label;
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track);
-    focusController.attach(track);
+    attachCameraController(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
     cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)?.remove();
@@ -1262,7 +1364,7 @@ const changeCameraSettings = async () => {
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
     saveCameraSettings();
-    focusController.attach(track);
+    attachCameraController(track);
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
@@ -1272,10 +1374,13 @@ cameraExposureAuto.addEventListener("change", () => {
   syncExposureControls();
   saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
+  if (!automaticExposure) focusController.developerOverride("developer selected manual exposure");
+  else if (preferredFocusStrategy === "auto") focusController.refocus("developer restored automatic exposure");
   if (track) void applyExposureSetting(track);
 });
 function queueExposureChange(immediate = false): void {
   preferredExposureTime = Number(cameraExposure.value);
+  focusController.developerOverride("developer changed exposure time");
   showExposureTime(preferredExposureTime);
   saveCameraSettings();
   clearTimeout(exposureApplyTimer);
@@ -1288,6 +1393,20 @@ function queueExposureChange(immediate = false): void {
 }
 cameraExposure.addEventListener("input", () => queueExposureChange());
 cameraExposure.addEventListener("change", () => queueExposureChange(true));
+cameraIso.addEventListener("input", () => {
+  preferredIso = Number(cameraIso.value);
+  cameraIsoValue.value = `ISO ${Number(preferredIso.toPrecision(4))}`;
+});
+cameraIso.addEventListener("change", () => {
+  preferredIso = Number(cameraIso.value);
+  automaticExposure = false;
+  cameraExposureAuto.checked = false;
+  syncExposureControls();
+  saveCameraSettings();
+  focusController.developerOverride("developer changed ISO");
+  const track = stream?.getVideoTracks()[0];
+  if (track) void applyExposureSetting(track);
+});
 decodeWorkers.addEventListener("change", () => {
   saveCameraSettings();
   if (!stream || done) return;
@@ -1409,6 +1528,7 @@ function stopReceiver(): void {
   trackedDecodes = 0;
   trackedAttempts = 0;
   cameraStartedTs = 0;
+  lastOpticalSampleAt = -Infinity;
   zeroRegionMs = 0;
   degradedMs = 0;
   timeline.length = 0;
@@ -1611,7 +1731,7 @@ async function start() {
   if (activeTrack) {
     populateBrowserCapabilities(activeTrack);
     showNegotiatedWebMode(activeTrack);
-    if (!legacyAndroidApp) focusController.attach(activeTrack);
+    if (!legacyAndroidApp) attachCameraController(activeTrack);
   }
   syncPreviewAspect();
   setStatus("");
@@ -2025,6 +2145,39 @@ function submitReceiverJob(
 // thing requiring main-thread pixel access. Duplicates now cost one cheap
 // tracked decode each, which the pool absorbs without noticing.
 
+const opticalTargets: QrOpticalTarget[] = [];
+let lastOpticalSampleAt = -Infinity;
+function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, oy = 0): void {
+  if (replayRunning || legacyAndroidApp) return;
+  const now = receiverNow();
+  if (now - lastOpticalSampleAt < focusController.opticalIntervalMs) return;
+  lastOpticalSampleAt = now;
+  opticalTargets.length = 0;
+  for (const region of regions) {
+    if (!region.quad || !region.dim || region.visibleFraction < 0.85) continue;
+    const q = region.quad;
+    const inside = (point: { x: number; y: number }) =>
+      point.x >= ox + 2 && point.y >= oy + 2 && point.x < ox + image.width - 2 && point.y < oy + image.height - 2;
+    if (inside(q.topLeft) && inside(q.topRight) && inside(q.bottomRight) && inside(q.bottomLeft)) {
+      opticalTargets.push({ quad: q, modules: region.dim });
+    }
+  }
+  if (!opticalTargets.length) {
+    focusController.noteTargetAbsent(now);
+    return;
+  }
+  const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);
+  if (!metrics || (metrics.confidence < 0.55 && !focusController.expectsProbeFrame)) {
+    focusController.noteTargetAbsent(now);
+    return;
+  }
+  const geometry = focusGeometry();
+  if (!geometry) return;
+  const decodedNow = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < 140).length;
+  const decodedRecently = regions.filter((region) => now - (region.decodedSeen ?? -Infinity) < CAMERA_TUNING.recentTileWindowMs).length;
+  focusController.observe(source.sequence, geometry, metrics, decodedNow, decodedRecently, Math.max(1, expectedRegions), now);
+}
+
 function captureFrame(source: ReceiverFrame) {
   const vw = source.width;
   const vh = source.height;
@@ -2062,6 +2215,7 @@ function captureFrame(source: ReceiverFrame) {
     const img = source.image
       ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh)
       : (ctx.drawImage(video, 0, 0, vw, vh), ctx.getImageData(0, 0, vw, vh));
+    inspectStaticQrOptics(source, img);
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
     if (submitReceiverJob(
@@ -2161,6 +2315,7 @@ function captureFrame(source: ReceiverFrame) {
     const img = source.image
       ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh)
       : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
+    inspectStaticQrOptics(source, img);
     captureSubmittedScan(img, 0, 0, true);
     const id = frameId++;
     if (submitReceiverJob(
@@ -2215,6 +2370,7 @@ function captureFrame(source: ReceiverFrame) {
     const h = bottom - y;
     if (w >= 32 && h >= 32) {
       const img = readBoundedVideoCrop(source, x, y, w, h);
+      inspectStaticQrOptics(source, img, x, y);
       captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
       const id = frameId++;
       if (submitReceiverJob(
@@ -2271,6 +2427,7 @@ function captureFrame(source: ReceiverFrame) {
     const h = Math.ceil(bottom + pad) - y;
     if (w < 32 || h < 32) continue;
     const img = readBoundedVideoCrop(source, x, y, w, h);
+    inspectStaticQrOptics(source, img, x, y);
     captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
@@ -2298,6 +2455,7 @@ function captureFrame(source: ReceiverFrame) {
 }
 
 function resetActiveTransfer(): void {
+  if (automaticExposure) focusController.refocus("new transfer acquisition");
   releaseTransportDecoder();
   streamKey = "";
   reportStreamId = 0;
@@ -2434,13 +2592,6 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (decoder.usefulSymbols > usefulBefore) {
     usefulFrameTimes.push(receivedAt);
   }
-  const geometry = focusGeometry();
-  if (geometry) focusController.noteGood(
-    info?.scanId ?? totalCaptures,
-    geometry,
-    Math.max(0, decoder.usefulSymbols - usefulBefore) * header.blockLen,
-    receivedAt,
-  );
   updateProgressEstimate();
 
   if (decoder.isComplete && replayRunning) {
@@ -2490,6 +2641,7 @@ function updateProgressEstimate() {
  * AirGapper container or SHA-256; files never take this path. */
 function finishPlainQr(text: string): void {
   done = true;
+  focusController.detach();
   cancelScanCapture();
   if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
@@ -2519,6 +2671,8 @@ function liveGoodputKbs(now: number): number {
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   done = true;
+  const cameraAutomationDiagnostics = focusController.diagnostics();
+  focusController.detach();
   cancelScanCapture();
   if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
@@ -2615,6 +2769,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         workerSetting: decodeWorkers.value,
       },
       camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: camera.facingMode ?? null } : null,
+      cameraAutomation: cameraAutomationDiagnostics,
       cameraCapabilities: track ? probeCameraCapabilities(track) : null,
       device: { cores: navigator.hardwareConcurrency ?? null, ua: navigator.userAgent },
       timelineKey: "seconds, framesNew, solvedBlocks, decodedRegions, trackedRegions, captureFps, decodeFps, fullScansCumulative",
