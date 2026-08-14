@@ -1,4 +1,4 @@
-// Receiver: camera → WASM QR decode in workers → fountain decoder → file.
+// Receiver: camera → WASM QR decode in workers → transport decoder → file.
 //
 // Field lessons baked in:
 // - iOS treats `frameRate: {ideal: 60}` as a suggestion and delivers 30.
@@ -11,7 +11,8 @@
 //   iOS Safari exposes neither. shared/platform.ts owns
 //   the probing, so everything here is capability-gated rather than UA-gated.
 
-import { TransportDecoder } from "../shared/fountain";
+import { TransportDecoder } from "../shared/transport";
+import { prepareRaptorQ } from "../shared/raptorq";
 import { formatBytes } from "../shared/format";
 import {
   completedGoodputKbs,
@@ -278,6 +279,10 @@ const STATS_TICK_MS = 250;
 
 let stream: MediaStream | null = null;
 let decoder: TransportDecoder | null = null;
+function releaseTransportDecoder(): void {
+  decoder?.free();
+  decoder = null;
+}
 let streamKey = "";
 let reportStreamId = 0; // pairs this run with the sender's diagnostics post
 let startTs = 0;
@@ -333,7 +338,7 @@ const poolBusyTimes: number[] = [];
 // Decoder jobs that actually finished searching a submitted frame or crop,
 // regardless of whether they found a QR code.
 const scanCompletionTimes: number[] = [];
-// Timestamps of frames that contributed new fountain information. Unlike the
+// Timestamps of frames that contributed new transport information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
 const usefulFrameTimes: number[] = [];
@@ -1234,7 +1239,7 @@ function stopReceiver(): void {
   clearInterval(statsTimer);
   statsTimer = undefined;
   pool.resize(0);
-  decoder = null;
+  releaseTransportDecoder();
   streamKey = "";
   reportStreamId = 0;
   startTs = 0;
@@ -1389,6 +1394,13 @@ const localCameraMessage =
 
 async function start() {
   const startAttempt = cameraStartGen;
+  try {
+    await prepareRaptorQ();
+  } catch (error) {
+    offerRetry(`Transport: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) return;
   // Materialize the complete receiver layout before camera permission or
   // startup can delay it. Camera readiness should only replace the viewfinder,
   // never determine the size or visibility of the controls below it.
@@ -2188,7 +2200,7 @@ function captureFrame(source: ReceiverFrame) {
 }
 
 function resetActiveTransfer(): void {
-  decoder = null;
+  releaseTransportDecoder();
   streamKey = "";
   reportStreamId = 0;
   startTs = 0;
@@ -2344,8 +2356,7 @@ function updateProgressEstimate() {
   if (!decoder) return;
   const elapsed = Math.max(0, (receiverNow() - startTs) / 1000);
   // Progress runs on coding innovation, not successful QR decodes. MDS uses
-  // exact matrix rank; fountain mode removes duplicate IDs, repeated supports,
-  // and equations that reduce entirely to solved blocks.
+  // exact matrix rank; RaptorQ discounts duplicate and failed-rank symbols.
   const usefulFrames = decoder.usefulSymbols;
   const estimate = estimateTransferProgress(
     decoder.k,
@@ -2419,7 +2430,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       streamId: reportStreamId,
       acquisitionSeconds: cameraStartedTs ? Number(((startTs - cameraStartedTs) / 1000).toFixed(2)) : null,
       payloadSha256: [...container.slice(9, 41)].map((b) => b.toString(16).padStart(2, "0")).join(""),
-      fountain: {
+      transport: {
         mode: decoder?.mode,
         k: decoder?.k,
         blockLen: decoder?.blockLen,
@@ -2428,7 +2439,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
         framesRedundant: decoder?.framesRedundant,
         innovativeSymbols: decoder?.usefulSymbols,
         sourceRank: decoder?.mode === "mds" ? decoder.solvedCount : null,
-        solvedBlocks: decoder?.mode === "fountain" ? decoder.solvedCount : null,
+        solvedBlocks: decoder?.mode === "raptorq" ? decoder.solvedCount : null,
         overhead: decoder ? Number((decoder.framesNew / decoder.k).toFixed(2)) : null,
         usefulOverhead: decoder ? Number((decoder.usefulSymbols / decoder.k).toFixed(2)) : null,
         innovationRate: decoder?.framesNew
@@ -2618,7 +2629,7 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       "a partial transfer costs nothing but the time.";
     result.replaceChildren(heading, detail, restartButton("Try again"));
   } finally {
-    decoder = null;
+    releaseTransportDecoder();
     container.fill(0);
   }
 }

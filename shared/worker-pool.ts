@@ -55,7 +55,7 @@ export interface SymbolInfo {
 interface DecodeMessage {
   id: number;
   /** Every QR found in the frame. The grid sender shows several codes at
-   *  once; each one is an independent fountain frame. Empty means a miss. */
+   *  once; each one is an independent transport frame. Empty means a miss. */
   symbols: { bytes: Uint8Array; box?: SymbolBox; quad?: SymbolQuad; modules?: number; tracked?: boolean; crc32?: boolean }[];
   /** Codes DETECTED but not decoded — no bytes, but the position is real.
    *  The receiver uses these to aim crops at codes the full frame lost. */

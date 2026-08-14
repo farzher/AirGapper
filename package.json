@@ -1,8 +1,8 @@
 {
   "name": "airgapper",
   "private": true,
-  "version": "0.2.0",
-  "description": "Offline file and text transfer using fountain-coded animated QR codes.",
+  "version": "0.3.0",
+  "description": "Offline file and text transfer using RaptorQ animated QR codes.",
   "type": "module",
   "scripts": {
     "dev": "vite --open /app.html",

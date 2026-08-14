@@ -90,7 +90,7 @@ let suspended = false;
   if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
   suspended = true;
   // Backgrounding pauses hot resources without treating it as navigation.
-  // The selected sender payload and partial fountain decoder stay in memory.
+  // The selected sender payload and partial transport decoder stay in memory.
   window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 

@@ -2,7 +2,7 @@
 // compiled to WASM. (Safari has
 // never shipped BarcodeDetector — WebKit bug 281848 — so WASM is the only
 // portable way.) One frame in flight per worker; the main thread drops frames
-// when all workers are busy. Frames are disposable — the fountain doesn't care.
+// when all workers are busy. Frames are disposable — the transport does not care.
 //
 // Two decode paths (see ../../decimen-codec/wrapper/decimen_codec.cpp):
 //  - readFull: stock acquisition. QR-only, invert/rotate sweeps compiled off,

@@ -8,7 +8,7 @@ import { packFile, type OpticalFile, type PackedOpticalFile } from "./protocol";
 
 export const SNIPPET_MEDIA_TYPE = "application/vnd.decimen.snippet";
 export const SNIPPET_FILE_NAME = "snippet.txt";
-// Text uses the same container and fountain pipeline as a file, so the only
+// Text uses the same container and transport pipeline as a file, so the only
 // hard ceiling is MAX_FILE_BYTES. This lower cap is a UX one: a <textarea>
 // holding tens of megabytes bogs down on paste and re-render.
 export const MAX_SNIPPET_BYTES = 4 * 1024 * 1024;

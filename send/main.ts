@@ -1,4 +1,4 @@
-// Sender: turn a file into an endless fountain-coded QR stream.
+// Sender: turn a file into an endless erasure-coded QR stream.
 //
 // Tuning notes from the experiments this PoC is distilled from:
 // - Frame payload sets the QR version; denser wins on goodput as long as the
@@ -9,7 +9,7 @@
 //   this skips the spec's 8-way mask evaluation and speeds generation ~4×.
 // - Displays need each frame shown for ≥2 refresh cycles or captures catch
 //   the transition; 24 fps on a 60 Hz screen is comfortable.
-// - Error correction stays at L by default: the fountain layer already
+// - Error correction stays at L by default: the transport layer already
 //   handles erasures, and a frame is either decoded whole or discarded.
 
 import QRCode from "qrcode";
@@ -21,7 +21,8 @@ import {
   smallestSufficientFrameSize,
   sourceBlockCount,
 } from "../shared/frame-capacity";
-import { scheduledEsi, TransportEncoder } from "../shared/fountain";
+import { scheduledEsi, TransportEncoder } from "../shared/transport";
+import { prepareRaptorQ } from "../shared/raptorq";
 import { MAX_SNIPPET_BYTES, MAX_SNIPPET_LABEL, packSnippet } from "../shared/snippet";
 import {
   MAX_FILE_BYTES,
@@ -209,6 +210,7 @@ let selectedFile: {
 } | null = null;
 let generation = 0; // bumped on every restart; stale loops see it and die
 let resizeDisplay: (() => void) | null = null;
+let activeTransportEncoder: TransportEncoder | null = null;
 
 const specsLine = statusLine(specs);
 const setStatus = specsLine.setStatus;
@@ -283,6 +285,8 @@ function updateFilePicker(): void {
  *  same file can be picked again (change would not fire otherwise) and so a
  *  mode switch does not silently resurrect the stopped stream. */
 function discardSelectedFile(): void {
+  activeTransportEncoder?.free();
+  activeTransportEncoder = null;
   selectedFile?.payload.fill(0);
   selectedFile = null;
   resizeDisplay = null;
@@ -569,6 +573,8 @@ function scrollStageIntoView() {
 
 async function startStream(revealStage = false) {
   const gen = ++generation;
+  activeTransportEncoder?.free();
+  activeTransportEncoder = null;
   resizeDisplay = null;
   canvas.style.display = "";
   stageError.hidden = true;
@@ -603,7 +609,7 @@ async function startStream(revealStage = false) {
 
   // Short snippets use their plain UTF-8 text as the QR payload, so any normal
   // QR reader can read them. Files retain the verified AirGapper container,
-  // even when they fit in one static code. Longer text keeps fountain framing.
+  // even when they fit in one static code. Longer text keeps transport framing.
   const snippetValue = currentMode() === "snippet" ? snippetText.value : null;
   const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= frameBytes
     ? snippetValue
@@ -614,7 +620,12 @@ async function startStream(revealStage = false) {
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
-  const encoder = new TransportEncoder(payload, blockLen, payloadId);
+  if (transport.mode === "raptorq") {
+    await prepareRaptorQ();
+    if (gen !== generation) return;
+  }
+  const encoder = new TransportEncoder(payload, blockLen, payloadId, transport.mode);
+  activeTransportEncoder = encoder;
   const header: Omit<FrameHeader, "seq" | "slotIndex"> = {
     mode: encoder.mode,
     layoutId: gridLayoutId(gridCols, gridRows),
@@ -787,7 +798,7 @@ async function startStream(revealStage = false) {
               ceilingBytes: frameBytes,
               overheadPercent: Number((transport.overheadFraction * 100).toFixed(2)),
             },
-            fountain: {
+            transport: {
               mode: encoder.mode,
               k: encoder.k,
               blockLen,

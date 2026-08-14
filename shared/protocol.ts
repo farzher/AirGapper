@@ -1,4 +1,4 @@
-import { codingMode, type CodingMode } from "./coding-mode";
+import { codingMode, RAPTOR_MAX_K, RAPTOR_PACKET_ID_BYTES, type CodingMode } from "./coding-mode";
 import { gridLayoutById } from "./grid-layout";
 
 // Regime-specific frame protocol. The format byte identifies both AirGapper
@@ -7,14 +7,14 @@ import { gridLayoutById } from "./grid-layout";
 
 const DIRECT_MAGIC = 0xd3;
 const MDS_MAGIC = 0xd4;
-const FOUNTAIN_MAGIC = 0xd5;
+const RAPTORQ_MAGIC = 0xd5;
 const DIRECT_HEADER_LEN = 7;
 const MDS_HEADER_LEN = 11;
-const FOUNTAIN_HEADER_LEN = 14;
+const RAPTORQ_HEADER_LEN = 14;
 export const FRAME_CRC_LEN = 4;
 
 export function frameHeaderLength(mode: CodingMode): number {
-  return mode === "direct" ? DIRECT_HEADER_LEN : mode === "mds" ? MDS_HEADER_LEN : FOUNTAIN_HEADER_LEN;
+  return mode === "direct" ? DIRECT_HEADER_LEN : mode === "mds" ? MDS_HEADER_LEN : RAPTORQ_HEADER_LEN;
 }
 
 export function frameOverhead(mode: CodingMode): number {
@@ -289,14 +289,14 @@ export interface FrameHeader {
 const BLOCK_LEN_BITS = 12;
 const DIRECT_TOTAL_BITS = 12;
 const MDS_TOTAL_BITS = 17;
-const FOUNTAIN_TOTAL_BITS = 27;
+const RAPTORQ_TOTAL_BITS = 27;
 
 function magicForMode(mode: CodingMode): number {
-  return mode === "direct" ? DIRECT_MAGIC : mode === "mds" ? MDS_MAGIC : FOUNTAIN_MAGIC;
+  return mode === "direct" ? DIRECT_MAGIC : mode === "mds" ? MDS_MAGIC : RAPTORQ_MAGIC;
 }
 
 function modeForMagic(magic: number): CodingMode | null {
-  return magic === DIRECT_MAGIC ? "direct" : magic === MDS_MAGIC ? "mds" : magic === FOUNTAIN_MAGIC ? "fountain" : null;
+  return magic === DIRECT_MAGIC ? "direct" : magic === MDS_MAGIC ? "mds" : magic === RAPTORQ_MAGIC ? "raptorq" : null;
 }
 
 function writeBits(out: Uint8Array, bitOffset: number, value: number, width: number): number {
@@ -321,12 +321,14 @@ function fitsBits(value: number, width: number): boolean {
 export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
   const headerLen = frameHeaderLength(h.mode);
   if (
-    codingMode(h.k) !== h.mode || block.length !== h.blockLen ||
+    codingMode(h.k) !== h.mode || (h.mode === "raptorq" && h.k > RAPTOR_MAX_K) || block.length !== h.blockLen ||
+    h.blockLen <= (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0) ||
+    Math.ceil(h.totalLen / (h.blockLen - (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0))) !== h.k ||
     !fitsBits(h.payloadId, 32) || !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) ||
-    !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS) ||
+    !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) ||
     (h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen)) ||
     (h.mode === "mds" && !fitsBits(h.seq, 8)) ||
-    (h.mode === "fountain" && !fitsBits(h.seq, 24)) ||
+    (h.mode === "raptorq" && !fitsBits(h.seq, 24)) ||
     (h.mode !== "direct" && (!fitsBits(h.layoutId, 3) || !fitsBits(h.slotIndex, 4)))
   ) throw new Error("Frame metadata exceeds its packed field.");
 
@@ -340,7 +342,7 @@ export function packFrame(h: FrameHeader, block: Uint8Array): Uint8Array {
     bit = writeBits(out, bit, h.layoutId, 3);
     bit = writeBits(out, bit, h.slotIndex, 4);
     bit = writeBits(out, bit, h.blockLen - 1, BLOCK_LEN_BITS);
-    bit = writeBits(out, bit, h.totalLen - 1, h.mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS);
+    bit = writeBits(out, bit, h.totalLen - 1, h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS);
   }
   writeBits(out, bit, h.payloadId >>> 0, 32);
   out.set(block, headerLen);
@@ -380,7 +382,7 @@ export function parseFrame(
     slotIndex = slot.value;
     const block = readBits(bytes, slot.next, BLOCK_LEN_BITS);
     blockLen = block.value + 1;
-    const total = readBits(bytes, block.next, mode === "mds" ? MDS_TOTAL_BITS : FOUNTAIN_TOTAL_BITS);
+    const total = readBits(bytes, block.next, mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS);
     totalLen = total.value + 1;
     bit = total.next;
   }
@@ -392,8 +394,10 @@ export function parseFrame(
     bit = reserved.next;
   }
 
-  const k = Math.ceil(totalLen / blockLen);
-  if (k === 0 || k > 0xffff || codingMode(k) !== mode) return null;
+  const sourceBlockLen = mode === "raptorq" ? blockLen - RAPTOR_PACKET_ID_BYTES : blockLen;
+  if (sourceBlockLen < 1) return null;
+  const k = Math.ceil(totalLen / sourceBlockLen);
+  if (k === 0 || k > RAPTOR_MAX_K || codingMode(k) !== mode) return null;
   if (mode !== "direct") {
     const layout = gridLayoutById(layoutId);
     if (!layout || slotIndex >= layout.cols * layout.rows) return null;

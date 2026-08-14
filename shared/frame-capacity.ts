@@ -2,10 +2,10 @@
 // never a fill target: use the fewest source blocks that fit, then balance the
 // payload evenly across them.
 
-import { codingMode, MDS_MAX_K, type CodingMode } from "./coding-mode";
+import { codingMode, MDS_MAX_K, RAPTOR_MAX_K, RAPTOR_PACKET_ID_BYTES, type CodingMode } from "./coding-mode";
 import { frameOverhead } from "./protocol";
 
-export const MAX_SOURCE_BLOCKS = 0xffff;
+export const MAX_SOURCE_BLOCKS = RAPTOR_MAX_K;
 
 /** QR byte-mode capacities at ECC L, versions 1..40. */
 const QR_BYTE_CAPACITY_L: readonly number[] = [
@@ -40,14 +40,27 @@ export function qrVersionForBytes(frameBytes: number): number {
 function balancedPlan(
   payload: number,
   maximumFrameBytes: number,
-  mode: "mds" | "fountain",
+  mode: "mds" | "raptorq",
   minimumK: number,
 ): { blockLen: number; k: number } {
-  const maximumBlock = blockLength(maximumFrameBytes, mode);
-  if (maximumBlock < 1) throw new Error("Size is too small for transport metadata.");
-  const k = Math.max(minimumK, Math.ceil(payload / maximumBlock));
-  const blockLen = Math.ceil(payload / k);
-  return { blockLen, k: Math.ceil(payload / blockLen) };
+  const packetIdBytes = mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
+  const availableSourceBlock = blockLength(maximumFrameBytes, mode) - packetIdBytes;
+  const maximumSourceBlock = mode === "raptorq"
+    ? Math.floor(availableSourceBlock / 8) * 8
+    : availableSourceBlock;
+  if (maximumSourceBlock < 1) throw new Error("Size is too small for transport metadata.");
+  const k = Math.max(minimumK, Math.ceil(payload / maximumSourceBlock));
+  const minimumSourceBlock = Math.ceil(payload / k);
+  let sourceBlockLen = mode === "raptorq"
+    ? Math.ceil(minimumSourceBlock / 8) * 8
+    : minimumSourceBlock;
+  if (mode === "raptorq" && Math.ceil(payload / sourceBlockLen) < minimumK) {
+    sourceBlockLen = Math.floor(minimumSourceBlock / 8) * 8;
+  }
+  return {
+    blockLen: sourceBlockLen + packetIdBytes,
+    k: Math.ceil(payload / sourceBlockLen),
+  };
 }
 
 function sourcePlan(payloadBytes: number, maximumFrameBytes: number): {
@@ -61,7 +74,7 @@ function sourcePlan(payloadBytes: number, maximumFrameBytes: number): {
 
   const mds = balancedPlan(payload, maximumFrameBytes, "mds", 2);
   if (mds.k <= MDS_MAX_K) return { mode: "mds", ...mds };
-  return { mode: "fountain", ...balancedPlan(payload, maximumFrameBytes, "fountain", MDS_MAX_K + 1) };
+  return { mode: "raptorq", ...balancedPlan(payload, maximumFrameBytes, "raptorq", MDS_MAX_K + 1) };
 }
 
 /**
@@ -83,7 +96,8 @@ export function selectTransportPlan(
   if (codingMode(k) !== mode) throw new Error("Could not select a consistent coding mode.");
   const frameBytes = blockLen + frameOverhead(mode);
   const qrVersion = qrVersionForBytes(frameBytes);
-  const paddingBytes = k * blockLen - payload;
+  const sourceBlockLen = blockLen - (mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0);
+  const paddingBytes = k * sourceBlockLen - payload;
   return {
     mode,
     blockLen,
@@ -92,8 +106,8 @@ export function selectTransportPlan(
     qrVersion,
     qrModules: 17 + 4 * qrVersion,
     paddingBytes,
-    paddingFraction: paddingBytes / (k * blockLen),
-    overheadFraction: frameOverhead(mode) / frameBytes,
+    paddingFraction: paddingBytes / (k * sourceBlockLen),
+    overheadFraction: (frameOverhead(mode) + (mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0)) / frameBytes,
   };
 }
 
@@ -107,7 +121,8 @@ export function fitsInOneStream(payloadBytes: number, frameBytes: number): boole
 }
 
 export function minimumFrameBytes(payloadBytes: number): number {
-  return Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) + frameOverhead("fountain");
+  const sourceBytes = Math.ceil(Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) / 8) * 8;
+  return sourceBytes + RAPTOR_PACKET_ID_BYTES + frameOverhead("raptorq");
 }
 
 export function smallestSufficientFrameSize(
