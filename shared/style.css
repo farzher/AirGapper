@@ -245,9 +245,13 @@ details.settings .row { display: flex; flex-wrap: wrap; gap: 10px 18px; padding-
 details.settings label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .receiver-settings {
   flex: none;
-  max-height: min(320px, 40dvh);
+  max-height: 240px;
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+@media (max-height: 700px) {
+  .receiver-settings { max-height: 180px; }
 }
 details.receiver-settings .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(70px, .8fr) auto auto; gap: 10px; }
 .receiver-settings label,
