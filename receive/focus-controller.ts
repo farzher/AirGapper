@@ -1,12 +1,12 @@
 import type { QrOpticalMetrics } from "./qr-optics";
 
-export type FocusStrategy = "auto" | "continuous" | "single-shot" | "manual";
+export type FocusStrategy = "auto" | "camera-auto" | "single-shot" | "manual";
 export type CalibrationMode = "auto" | "off" | "force";
 export type FocusState =
   | "UNAVAILABLE" | "SEEKING" | "STABILIZING" | "AUTO_AF_SETTLE" | "AUTO_FREEZE_VERIFY"
   | "LOCKED" | "TARGET_LOST_GRACE" | "EXPOSURE_RECOVERY"
-  | "OPTIMIZE_FOCUS" | "OPTIMIZE_EXPOSURE" | "OPTIMIZE_VERIFY" | "OVERRIDE";
-export type FocusOwner = "HARDWARE" | "MANUAL" | "OPTIMIZE" | "DEVELOPER" | "NONE";
+  | "OPTIMIZE_EXPOSURE" | "OPTIMIZE_VERIFY" | "OVERRIDE";
+export type FocusOwner = "HARDWARE" | "MANUAL" | "DEVELOPER" | "NONE";
 
 type NumericRange = { min: number; max: number; step?: number };
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -42,9 +42,10 @@ export const CAMERA_TUNING = {
   displacementRatio: 0.1,
   perspectiveChange: 0.14,
   focusExcellent: 0.78,
-  physicalSettleMs: 150,
-  probeSamples: 3,
-  probeDiscardFrames: 1,
+  focusSettleMs: 150,
+  focusProbeSamples: 3,
+  focusDiscardFrames: 1,
+  exposureDiscardFrames: 2,
   exposureExcellent: 0.7,
   seekingOpticalIntervalMs: 110,
   lockedOpticalIntervalMs: 320,
@@ -61,10 +62,9 @@ export const CAMERA_TUNING = {
   automaticRecoveryCooldownMs: 4500,
   optimizeMovementConfirmMs: 650,
   optimizeTargetGraceMs: 1200,
-  optimizeBudgetMs: 12000,
+  optimizeBudgetMs: 9000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
-  optimizeMaxPairs: 3,
   acquisitionBracketDelayMs: 900,
 };
 
@@ -157,7 +157,6 @@ export interface FocusDiagnostics {
   committedExposureMode?: string;
   committedExposureTime?: number;
   committedIso?: number;
-  candidateFocusDistance?: number;
   candidateExposureTime?: number;
   candidateIso?: number;
   lockedMs?: number;
@@ -169,13 +168,16 @@ export interface FocusDiagnostics {
   manualFreezeAttempted: boolean;
   manualFreezeVerified: boolean;
   manualFreezeUnsafe: boolean;
-  optimizeState: "idle" | "baseline" | "focus" | "exposure" | "verification" | "paused" | "cancelled" | "complete";
+  optimizeState: "idle" | "baseline" | "exposure" | "verification" | "paused" | "cancelled" | "complete";
+  optimizeRound?: "coarse" | "expand" | "refine";
+  optimizeVisit?: string;
+  optimizeSurvivors?: string;
+  optimizeDecision?: string;
   optimizeCandidatePerformance?: ReceivePerformance;
   optimizeBestPerformance?: ReceivePerformance;
   optimizeSummary?: string;
-  optimizeFocusStep?: number;
   optimizeExposureStepEV?: number;
-  optimizeGainStepEV?: number;
+  optimizeShutterStepEV?: number;
   optimizeComparison?: "WIN" | "LOSS" | "UNCERTAIN";
   optimizePairedSamples?: number;
   optimizeReason?: string;
@@ -218,7 +220,6 @@ export class FocusController {
   private committedExposureTime?: number;
   private committedIso?: number;
   private committedExposureCompensation?: number;
-  private candidateFocusDistance?: number;
   private candidateExposureTime?: number;
   private candidateIso?: number;
   private lockedAt = 0;
@@ -232,16 +233,18 @@ export class FocusController {
   private manualFreezeVerified = false;
   private manualFreezeUnsafe = false;
   private optimizeState: FocusDiagnostics["optimizeState"] = "idle";
+  private optimizeRound?: FocusDiagnostics["optimizeRound"];
+  private optimizeVisit?: string;
+  private optimizeSurvivors?: string;
+  private optimizeDecision?: string;
   private optimizeCandidatePerformance?: ReceivePerformance;
   private optimizeBestPerformance?: ReceivePerformance;
   private optimizeSummary?: string;
-  private optimizeFocusStep?: number;
-  private optimizeExposureStepEV = 0.5;
-  private optimizeGainStepEV = 0.5;
+  private optimizeExposureStepEV = 1;
+  private optimizeShutterStepEV = 1;
   private optimizeComparison?: "WIN" | "LOSS" | "UNCERTAIN";
   private optimizePairedSamples = 0;
   private optimizeReason = "idle";
-  private readonly optimizeCandidates = new Map<string, { result: "accepted" | "rejected" | "uncertain"; at: number; performance?: ReceivePerformance; staticQuality?: QrOpticalMetrics }>();
   private acquisitionBracketRunning = false;
   private acquisitionBracketTried = false;
   private decodeBoundary = 0;
@@ -265,6 +268,7 @@ export class FocusController {
     notBefore: number;
     discard: number;
     samples: OpticalObservation[];
+    requiredSamples: number;
     resolve: (value?: OpticalObservation) => void;
   };
 
@@ -285,7 +289,7 @@ export class FocusController {
   get selectedStrategy(): FocusStrategy { return this.strategy; }
   get expectsProbeFrame(): boolean {
     return this.state === "AUTO_AF_SETTLE" || this.state === "AUTO_FREEZE_VERIFY" || this.state === "EXPOSURE_RECOVERY" ||
-      this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
+      this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
   }
   get opticalIntervalMs(): number {
     if (this.strategy !== "auto" || this.calibrationMode === "off" || this.state === "OVERRIDE") return Infinity;
@@ -308,16 +312,18 @@ export class FocusController {
     this.stabilizingAfRetries = 0;
     this.initialLockMs = undefined;
     this.optimizeState = "idle";
+    this.optimizeRound = undefined;
+    this.optimizeVisit = undefined;
+    this.optimizeSurvivors = undefined;
+    this.optimizeDecision = undefined;
     this.optimizeCandidatePerformance = undefined;
     this.optimizeBestPerformance = undefined;
     this.optimizeSummary = undefined;
-    this.optimizeFocusStep = undefined;
-    this.optimizeExposureStepEV = 0.5;
-    this.optimizeGainStepEV = 0.5;
+    this.optimizeExposureStepEV = 1;
+    this.optimizeShutterStepEV = 1;
     this.optimizeComparison = undefined;
     this.optimizePairedSamples = 0;
     this.optimizeReason = "camera changed";
-    this.optimizeCandidates.clear();
     this.acquisitionBracketRunning = false;
     this.acquisitionBracketTried = false;
     this.bestKnownGood = undefined;
@@ -402,37 +408,63 @@ export class FocusController {
 
   optimizeEligible(now = performance.now()): boolean {
     const stable = Boolean(this.stableSince && now - this.stableSince >= CAMERA_TUNING.geometryStabilityMs);
-    const recentlyDecoded = Boolean(this.lastValidDecodeAt && now - this.lastValidDecodeAt <= this.silenceThreshold());
-    const inactive = !this.isOptimizing() && !["SEEKING", "TARGET_LOST_GRACE", "EXPOSURE_RECOVERY"].includes(this.state);
-    return this.strategy === "auto" && Boolean(this.track && this.latest && !this.targetMissingSince) &&
-      stable && recentlyDecoded && inactive;
+    return this.strategy === "auto" && this.state === "LOCKED" && !this.isOptimizing() &&
+      Boolean(this.track && this.latest && !this.targetMissingSince) && stable;
   }
 
   async optimize(measure: (label: string) => Promise<PerformanceSample>): Promise<void> {
     if (!this.optimizeEligible()) return;
     const generation = ++this.generation;
-    const optimizeStartedAt = performance.now();
-    let deadline = optimizeStartedAt + CAMERA_TUNING.optimizeBudgetMs;
-    const explicitlyRestarted = this.optimizeState === "complete";
-    this.beginDecodeGeneration();
+    const startedAt = performance.now();
+    const deadline = startedAt + CAMERA_TUNING.optimizeBudgetMs;
     this.optimizeState = "baseline";
+    this.optimizeRound = "coarse";
     this.optimizeSummary = undefined;
     this.optimizeComparison = undefined;
-    this.optimizeReason = "measuring incumbent";
-    const initialSettings = this.settings();
+    this.optimizeCandidatePerformance = undefined;
+    this.optimizeBestPerformance = undefined;
+    this.optimizePairedSamples = 0;
+    this.optimizeSurvivors = undefined;
+    this.optimizeDecision = "starting";
+    this.optimizeReason = "checking hardware focus";
+
     const initialObservation = this.latest!;
-    this.commitSettings(initialSettings);
-    const focusRange = this.caps.focusDistance;
-    if (explicitlyRestarted) {
-      this.optimizeCandidates.clear();
-      if (focusRange) this.optimizeFocusStep = Math.max(this.optimizeFocusStep ?? 0, (focusRange.max - focusRange.min) / 128);
-      this.optimizeExposureStepEV = Math.max(this.optimizeExposureStepEV, 0.25);
-      this.optimizeGainStepEV = Math.max(this.optimizeGainStepEV, 0.25);
-    } else if (this.optimizeFocusStep === undefined) {
-      this.optimizeFocusStep = focusRange ? Math.max((focusRange.step ?? 0) * 2, (focusRange.max - focusRange.min) / 16) : 0;
-      this.optimizeExposureStepEV = 0.5;
-      this.optimizeGainStepEV = 0.5;
+    const focusHealthy = this.decodeIsFresh() && initialObservation.metrics.focusScore >= 0.55;
+    if (!focusHealthy) {
+      const mode = this.hardwareFocusMode();
+      const patch: CameraPatch = {};
+      if (mode) patch.focusMode = mode;
+      if (this.caps.pointsOfInterest) {
+        patch.pointsOfInterest = [{ x: initialObservation.geometry.x, y: initialObservation.geometry.y }];
+      }
+      this.transition("OPTIMIZE_EXPOSURE", "hardware AF refresh before exposure tournament");
+      const accepted = Object.keys(patch).length > 0 && await this.applyProbe(generation, patch, false);
+      const focused = accepted
+        ? await this.waitForFocusSettled(generation, initialObservation.id)
+        : initialObservation;
+      if (!focused || focused.metrics.focusScore < 0.28 || !this.current(generation)) {
+        this.optimizeState = "paused";
+        this.optimizeReason = "hardware autofocus has not produced a usable image";
+        return;
+      }
     }
+
+    if (!this.current(generation)) return;
+    const originSettings = this.settings();
+    const exposureRange = this.caps.exposureTime;
+    const isoRange = this.caps.iso;
+    if (!this.manualExposure() || !exposureRange || !isoRange ||
+        originSettings.exposureTime === undefined || originSettings.iso === undefined) {
+      this.optimizeState = "paused";
+      this.optimizeReason = "manual exposure and ISO controls unavailable";
+      return;
+    }
+
+    this.commitSettings(originSettings);
+    this.optimizeState = "exposure";
+    this.transition("OPTIMIZE_EXPOSURE", focusHealthy
+      ? "hardware focus retained; coarse exposure tournament"
+      : "hardware AF usable; coarse exposure tournament");
 
     const median = (values: number[]): number => {
       const sorted = [...values].sort((a, b) => a - b);
@@ -450,219 +482,281 @@ export class FocusController {
       measurementMs: windows.reduce((sum, window) => sum + window.measurementMs, 0),
       temporalContamination: median(windows.map((window) => window.temporalContamination ?? 0)),
     });
-    const safe = (observation: OpticalObservation): boolean => observation.metrics.confidence >= 0.62 &&
-      observation.metrics.focusScore >= 0.2 && observation.metrics.separation >= 24 &&
-      observation.metrics.exposureScore >= 0.18 && observation.metrics.clipping < 0.82 && observation.metrics.banding < 0.58;
-    const patchFor = (settings: CameraSettings): CameraPatch => ({
-      focusMode: settings.focusMode,
-      focusDistance: settings.focusMode === "manual" ? settings.focusDistance : undefined,
-      exposureMode: settings.exposureMode,
-      exposureTime: settings.exposureMode === "manual" ? settings.exposureTime : undefined,
-      iso: settings.exposureMode === "manual" ? settings.iso : undefined,
-      exposureCompensation: settings.exposureMode !== "manual" ? settings.exposureCompensation : undefined,
+    const exposureKey = (settings: CameraSettings): string => `${settings.exposureTime}|${settings.iso}`;
+    const exposurePatch = (settings: CameraSettings): CameraPatch => ({
+      exposureMode: "manual",
+      exposureTime: settings.exposureTime,
+      iso: settings.iso,
     });
-    const keyFor = (settings: CameraSettings): string => [settings.focusMode, settings.focusDistance,
-      settings.exposureMode, settings.exposureTime, settings.iso, settings.exposureCompensation].join("|");
-    const applySettled = async (patch: CameraPatch, afterId: number) => {
-      if (!(await this.applyProbe(generation, patch, false))) return undefined;
-      const observation = await this.fresh(generation, afterId);
-      return observation && this.current(generation) ? { settings: this.settings(), observation } : undefined;
+
+    type Candidate = {
+      label: string;
+      settings: CameraSettings;
+      patch: CameraPatch;
+      key: string;
+      signalEV: number;
+      shutterEV: number;
+      samples: PerformanceSample[];
+      windows: ReceivePerformance[];
+      eliminated: boolean;
     };
-    const classify = (candidate: ReceivePerformance, incumbent: ReceivePerformance): "WIN" | "LOSS" | "UNCERTAIN" => {
-      if (candidate.qrAttempts >= 6 && candidate.validDecodes === 0 && incumbent.validDecodes >= 2) return "LOSS";
-      if (incumbent.qrAttempts >= 6 && incumbent.validDecodes === 0 && candidate.validDecodes >= 2) return "WIN";
-      if (candidate.qrAttempts < 3 || incumbent.qrAttempts < 3 || candidate.completedJobs < 2 || incumbent.completedJobs < 2) return "UNCERTAIN";
-      const ratio = candidate.validDecodesPerSecond / Math.max(0.15, incumbent.validDecodesPerSecond);
-      const contaminationMargin = Math.max(candidate.temporalContamination ?? 0, incumbent.temporalContamination ?? 0) > 0.42 ? 0.05 : 0;
-      if (ratio >= CAMERA_TUNING.optimizeWinRatio + contaminationMargin) return "WIN";
-      if (ratio <= CAMERA_TUNING.optimizeLossRatio - contaminationMargin) return "LOSS";
-      if (Math.abs(ratio - 1) < 0.05 && candidate.validDecodes + incumbent.validDecodes >= 8) {
-        if (candidate.usefulSymbolsPerSecond > incumbent.usefulSymbolsPerSecond * 1.08 + 0.2) return "WIN";
-        if (candidate.usefulSymbolsPerSecond < incumbent.usefulSymbolsPerSecond * 0.92) return "LOSS";
-        if (candidate.perQrAttemptSuccessRate > incumbent.perQrAttemptSuccessRate + 0.05) return "WIN";
-        return "LOSS";
+    const candidates = new Map<string, Candidate>();
+    const makeCandidate = (label: string, signalEV: number, shutterEV: number): Candidate => {
+      let exposureTime = this.quantize(originSettings.exposureTime! * 2 ** shutterEV, exposureRange);
+      let iso = this.quantize(originSettings.iso! * 2 ** (signalEV - shutterEV), isoRange);
+      const achievedSignal = () => Math.log2(exposureTime / originSettings.exposureTime!) +
+        Math.log2(iso / originSettings.iso!);
+      exposureTime = this.quantize(exposureTime * 2 ** (signalEV - achievedSignal()), exposureRange);
+      iso = this.quantize(iso * 2 ** (signalEV - achievedSignal()), isoRange);
+      const settings: CameraSettings = { ...originSettings, exposureMode: "manual", exposureTime, iso };
+      return {
+        label, settings, patch: exposurePatch(settings), key: exposureKey(settings), signalEV, shutterEV,
+        samples: [], windows: [], eliminated: false,
+      };
+    };
+    const incumbent = makeCandidate("A", 0, 0);
+    incumbent.settings = originSettings;
+    incumbent.patch = exposurePatch(originSettings);
+    incumbent.key = exposureKey(originSettings);
+    candidates.set(incumbent.key, incumbent);
+    let currentKey = originSettings.exposureMode === "manual" ? incumbent.key : "";
+
+    const spread = (candidate: Candidate): number => {
+      if (candidate.windows.length < 2) return 0;
+      const rates = candidate.windows.map((window) => window.validDecodesPerSecond);
+      return Math.max(...rates) - Math.min(...rates);
+    };
+    const performanceOf = (candidate: Candidate): ReceivePerformance => aggregate(candidate.windows);
+    const robustRate = (candidate: Candidate): number => performanceOf(candidate).validDecodesPerSecond - spread(candidate) * 0.18;
+    const compareCandidates = (a: Candidate, b: Candidate): number => {
+      const ap = performanceOf(a);
+      const bp = performanceOf(b);
+      const rateGap = robustRate(a) - robustRate(b);
+      const meaningful = Math.max(0.25, Math.max(ap.validDecodesPerSecond, bp.validDecodesPerSecond) * 0.05);
+      if (Math.abs(rateGap) > meaningful) return rateGap > 0 ? -1 : 1;
+      if (Math.abs(ap.perQrAttemptSuccessRate - bp.perQrAttemptSuccessRate) > 0.025) {
+        return ap.perQrAttemptSuccessRate > bp.perQrAttemptSuccessRate ? -1 : 1;
       }
+      if (Math.abs(spread(a) - spread(b)) > 0.5) return spread(a) < spread(b) ? -1 : 1;
+      if (Math.abs(ap.usefulSymbolsPerSecond - bp.usefulSymbolsPerSecond) > 0.2) {
+        return ap.usefulSymbolsPerSecond > bp.usefulSymbolsPerSecond ? -1 : 1;
+      }
+      if ((a.settings.exposureTime ?? Infinity) !== (b.settings.exposureTime ?? Infinity)) {
+        return (a.settings.exposureTime ?? Infinity) < (b.settings.exposureTime ?? Infinity) ? -1 : 1;
+      }
+      return (a.settings.iso ?? Infinity) - (b.settings.iso ?? Infinity);
+    };
+    const classify = (challenger: Candidate, base: Candidate): "WIN" | "LOSS" | "UNCERTAIN" => {
+      const candidate = performanceOf(challenger);
+      const incumbentPerformance = performanceOf(base);
+      if (candidate.qrAttempts >= 4 && candidate.validDecodes === 0 && incumbentPerformance.validDecodes > 0) return "LOSS";
+      if (incumbentPerformance.qrAttempts >= 4 && incumbentPerformance.validDecodes === 0 && candidate.validDecodes > 0) return "WIN";
+      if (candidate.qrAttempts < 3 || incumbentPerformance.qrAttempts < 3) return "UNCERTAIN";
+      const ratio = robustRate(challenger) / Math.max(0.15, robustRate(base));
+      if (ratio >= CAMERA_TUNING.optimizeWinRatio &&
+          candidate.validDecodesPerSecond >= incumbentPerformance.validDecodesPerSecond + 0.25) return "WIN";
+      if (ratio <= CAMERA_TUNING.optimizeLossRatio) return "LOSS";
       return "UNCERTAIN";
     };
-
-    const baselineSample = await measure("Baseline");
-    let incumbentPerformance = await baselineSample.result;
-    if (!this.current(generation)) return;
-    const baselineRate = incumbentPerformance.validDecodesPerSecond;
-    if (baselineRate >= 8) deadline = Math.min(deadline, optimizeStartedAt + 8000);
-    let incumbentSettings = this.settings();
-    let incumbentObservation = this.latest ?? initialObservation;
-    let incumbentWindows = [incumbentPerformance];
-    this.optimizeBestPerformance = incumbentPerformance;
-
-    type Collected = { settings: CameraSettings; patch: CameraPatch; key: string; observation: OpticalObservation; samples: PerformanceSample[]; windows: ReceivePerformance[] };
-    const searchNeighborhood = async (patches: CameraPatch[], label: string): Promise<boolean> => {
-      if (performance.now() >= deadline) return false;
-      const incumbentKey = keyFor(incumbentSettings);
-      const incumbentSamples: PerformanceSample[] = [];
-      const candidates: Collected[] = [];
-      incumbentSamples.push(await measure(`${label} · incumbent`));
-      for (const patch of patches) {
-        if (performance.now() >= deadline || !this.current(generation)) break;
-        const applied = await applySettled(patch, this.latest?.id ?? incumbentObservation.id);
-        if (!applied) continue;
-        const key = keyFor(applied.settings);
-        if (key === incumbentKey || candidates.some((candidate) => candidate.key === key)) continue;
-        const cached = this.optimizeCandidates.get(key);
-        if (cached && cached.result !== "uncertain") continue;
-        if (!safe(applied.observation)) {
-          this.optimizeCandidates.set(key, { result: "rejected", at: performance.now(), staticQuality: applied.observation.metrics });
-          this.optimizeReason = "candidate rejected static";
-          continue;
-        }
-        const sample = await measure(`${label} · challenger`);
-        candidates.push({ settings: applied.settings, patch: patchFor(applied.settings), key, observation: applied.observation, samples: [sample], windows: [] });
+    const activate = async (candidate: Candidate, allowPastDeadline = false): Promise<Candidate | undefined> => {
+      if (!this.current(generation) || (!allowPastDeadline && performance.now() >= deadline)) return undefined;
+      this.candidateExposureTime = candidate.patch.exposureTime;
+      this.candidateIso = candidate.patch.iso;
+      this.requestedExposure = candidate.patch.exposureTime;
+      this.requestedIso = candidate.patch.iso;
+      if (currentKey !== candidate.key) {
+        if (!(await this.applyProbe(generation, candidate.patch, false))) return undefined;
+        currentKey = "";
       }
-      const restored = await applySettled(patchFor(incumbentSettings), this.latest?.id ?? incumbentObservation.id);
-      if (restored) incumbentObservation = restored.observation;
-      incumbentSamples.push(await measure(`${label} · incumbent`));
-      const [incumbentResults] = await Promise.all([
-        Promise.all(incumbentSamples.map((sample) => sample.result)),
-        Promise.all(candidates.map(async (candidate) => { candidate.windows.push(...await Promise.all(candidate.samples.map((sample) => sample.result))); })),
-      ]);
-      let raceIncumbent = aggregate(incumbentResults);
-
-      // Initial bursts were collected A,B,C,...,A. Decoder completion may have
-      // happened after the camera moved; scan ranges retain attribution.
-      let promising = candidates.filter((candidate) => classify(aggregate(candidate.windows), raceIncumbent) !== "LOSS");
-      for (let round = 1; round < CAMERA_TUNING.optimizeMaxPairs && promising.length && performance.now() < deadline; round++) {
-        const extra: { candidate: Collected; sample: PerformanceSample }[] = [];
-        // Rotate promising candidates so repeated windows naturally land at a
-        // different sender/camera phase without sleeping for phase drift.
-        promising = [...promising.slice(round % promising.length), ...promising.slice(0, round % promising.length)];
-        for (const candidate of promising) {
-          if (performance.now() >= deadline) break;
-          const applied = await applySettled(candidate.patch, this.latest?.id ?? incumbentObservation.id);
-          if (applied) extra.push({ candidate, sample: await measure(`${label} · finalist`) });
-        }
-        const backToIncumbent = await applySettled(patchFor(incumbentSettings), this.latest?.id ?? incumbentObservation.id);
-        if (backToIncumbent) incumbentObservation = backToIncumbent.observation;
-        const incumbentExtra = await measure(`${label} · incumbent`);
-        await Promise.all(extra.map(async ({ candidate, sample }) => candidate.windows.push(await sample.result)));
-        const incumbentWindow = await incumbentExtra.result;
-        incumbentWindows.push(incumbentWindow);
-        raceIncumbent = aggregate([...incumbentResults, incumbentWindow]);
-        promising = promising.filter((candidate) => classify(aggregate(candidate.windows), raceIncumbent) === "UNCERTAIN" ||
-          classify(aggregate(candidate.windows), raceIncumbent) === "WIN");
-        if (promising.some((candidate) => classify(aggregate(candidate.windows), raceIncumbent) === "WIN")) break;
+      const actual = this.settings();
+      if (actual.exposureTime === undefined || actual.iso === undefined) return undefined;
+      const actualKey = exposureKey(actual);
+      const existing = candidates.get(actualKey);
+      if (existing && existing !== candidate) {
+        currentKey = actualKey;
+        return existing;
       }
-
-      let winner: Collected | undefined;
-      for (const candidate of candidates) {
-        const candidatePerformance = aggregate(candidate.windows);
-        let decision = classify(candidatePerformance, raceIncumbent);
-        const effectivelyEqual = candidatePerformance.qrAttempts >= 3 && raceIncumbent.qrAttempts >= 3 &&
-          Math.abs(candidatePerformance.validDecodesPerSecond - raceIncumbent.validDecodesPerSecond) <=
-          Math.max(0.2, raceIncumbent.validDecodesPerSecond * 0.03) &&
-          Math.abs(candidatePerformance.usefulSymbolsPerSecond - raceIncumbent.usefulSymbolsPerSecond) <=
-            Math.max(0.2, raceIncumbent.usefulSymbolsPerSecond * 0.05) &&
-          Math.abs(candidatePerformance.perQrAttemptSuccessRate - raceIncumbent.perQrAttemptSuccessRate) <= 0.03;
-        if (effectivelyEqual && ((candidate.settings.exposureTime ?? Infinity) < (incumbentSettings.exposureTime ?? Infinity) ||
-            (candidate.settings.exposureTime === incumbentSettings.exposureTime &&
-              (candidate.settings.iso ?? Infinity) < (incumbentSettings.iso ?? Infinity)))) decision = "WIN";
-        this.optimizeCandidatePerformance = candidatePerformance;
-        this.optimizeComparison = decision;
-        this.optimizePairedSamples = candidate.windows.length;
-        if (decision === "WIN" && (!winner || candidatePerformance.validDecodesPerSecond > aggregate(winner.windows).validDecodesPerSecond)) winner = candidate;
-        else this.optimizeCandidates.set(candidate.key, {
-          result: decision === "UNCERTAIN" ? "uncertain" : "rejected", at: performance.now(),
-          performance: candidatePerformance, staticQuality: candidate.observation.metrics,
-        });
+      if (candidate.key !== actualKey) candidates.delete(candidate.key);
+      candidate.settings = actual;
+      candidate.patch = exposurePatch(actual);
+      candidate.key = actualKey;
+      candidates.set(actualKey, candidate);
+      currentKey = actualKey;
+      return candidate;
+    };
+    const captureRound = async (requested: Candidate[], round: "coarse" | "expand" | "refine"): Promise<Candidate[]> => {
+      this.optimizeRound = round;
+      const pending: Promise<void>[] = [];
+      const captured: Candidate[] = [];
+      const visited = new Set<string>();
+      for (let index = 0; index < requested.length && performance.now() < deadline; index++) {
+        const active = await activate(requested[index]!);
+        if (!active || visited.has(active.key)) continue;
+        visited.add(active.key);
+        this.optimizeVisit = `${active.windows.length + 1}/${Math.max(2, active.windows.length + 1)}`;
+        this.optimizeSurvivors = `${index + 1}/${requested.length}`;
+        this.optimizeDecision = "collecting";
+        const sample = await measure(`${round[0]!.toUpperCase()}${round.slice(1)} · ${index + 1}/${requested.length}`);
+        active.samples.push(sample);
+        captured.push(active);
+        pending.push(sample.result.then((result) => { active.windows.push(result); }));
       }
-      if (!winner) {
-        incumbentWindows.push(...incumbentResults);
-        incumbentPerformance = aggregate(incumbentWindows);
-        this.optimizeBestPerformance = incumbentPerformance;
-        this.optimizeReason = promising.length ? "equivalent; incumbent retained" : "challengers lost";
-        return false;
-      }
-      const accepted = await applySettled(winner.patch, this.latest?.id ?? incumbentObservation.id);
-      if (!accepted) return false;
-      incumbentSettings = accepted.settings;
-      incumbentObservation = accepted.observation;
-      incumbentWindows = [...winner.windows];
-      incumbentPerformance = aggregate(winner.windows);
-      this.commitSettings(incumbentSettings);
-      this.optimizeBestPerformance = incumbentPerformance;
-      this.optimizeCandidates.set(winner.key, { result: "accepted", at: performance.now(), performance: incumbentPerformance, staticQuality: winner.observation.metrics });
-      this.optimizeReason = "candidate accepted";
+      await Promise.all(pending);
+      return captured;
+    };
+    const obviousGarbage = (candidate: Candidate, base: Candidate): boolean => {
+      const candidatePerformance = performanceOf(candidate);
+      const basePerformance = performanceOf(base);
+      return candidatePerformance.qrAttempts >= 4 && candidatePerformance.validDecodes === 0 && basePerformance.validDecodes > 0;
+    };
+    const commitCandidate = async (candidate: Candidate): Promise<boolean> => {
+      const active = await activate(candidate, true);
+      if (!active) return false;
+      this.commitSettings(active.settings);
+      this.optimizeBestPerformance = performanceOf(active);
       return true;
     };
 
-    const focusMinimum = focusRange ? Math.max(focusRange.step ?? 0, (focusRange.max - focusRange.min) / 256) : 0;
-    const skipFocus = initialObservation.metrics.focusScore >= CAMERA_TUNING.focusExcellent && incumbentPerformance.perQrAttemptSuccessRate >= 0.65;
-    if (this.manualFocus() && focusRange && incumbentSettings.focusDistance !== undefined && !skipFocus) {
-      this.optimizeState = "focus";
-      this.transition("OPTIMIZE_FOCUS", "adaptive focus pattern search");
-      while ((this.optimizeFocusStep ?? 0) >= focusMinimum && performance.now() < deadline) {
-        const origin = incumbentSettings.focusDistance;
-        const patches = [-1, 1].map((direction) => ({ ...patchFor(incumbentSettings), focusMode: "manual",
-          focusDistance: this.quantize(origin! + direction * this.optimizeFocusStep!, focusRange) }));
-        this.focusProbes += patches.length;
-        if (!(await searchNeighborhood(patches, "Focusing"))) {
-          this.optimizeFocusStep! /= 2;
-          this.optimizeReason = "focus step shrunk";
-        }
+    const coarseRequested = [
+      incumbent,
+      makeCandidate("B brighter", 1, 0),
+      makeCandidate("C darker", -1, 0),
+      makeCandidate("D faster", 0, -1),
+      makeCandidate("E slower", 0, 1),
+    ];
+    this.exposureProbes += coarseRequested.length - 1;
+    const coarse = await captureRound(coarseRequested, "coarse");
+    if (!this.current(generation) || !incumbent.windows.length) return;
+    const baselineRate = performanceOf(incumbent).validDecodesPerSecond;
+    this.optimizeBestPerformance = performanceOf(incumbent);
+
+    for (const candidate of coarse) {
+      candidate.eliminated = candidate !== incumbent && obviousGarbage(candidate, incumbent);
+    }
+    let survivors = coarse.filter((candidate) => !candidate.eliminated).sort(compareCandidates).slice(0, 3);
+    if (!survivors.includes(incumbent) && !incumbent.eliminated &&
+        robustRate(incumbent) >= robustRate(survivors[0] ?? incumbent) * CAMERA_TUNING.optimizeLossRatio) {
+      survivors = [...survivors.slice(0, 2), incumbent];
+    }
+    this.optimizeSurvivors = `${survivors.length}/${coarse.length}`;
+    this.optimizeDecision = `${coarse.length - survivors.length} eliminated`;
+
+    if (survivors.length > 1 && performance.now() < deadline) {
+      const rotated = [survivors.at(-1)!, ...survivors.slice(0, -1)];
+      await captureRound(rotated, "coarse");
+    }
+    survivors.sort(compareCandidates);
+    let winner = survivors[0] ?? incumbent;
+    if (winner !== incumbent) {
+      let decision = classify(winner, incumbent);
+      if (decision === "UNCERTAIN" && performance.now() < deadline - 500) {
+        await captureRound([incumbent, winner], "coarse");
+        decision = classify(winner, incumbent);
       }
-    } else {
-      this.optimizeFocusStep = focusMinimum;
-      this.optimizeReason = skipFocus ? "excellent hardware focus retained" : "focus unavailable";
+      this.optimizeComparison = decision;
+      this.optimizePairedSamples = Math.min(winner.windows.length, incumbent.windows.length);
+      if (decision !== "WIN") winner = incumbent;
+    }
+    this.optimizeCandidatePerformance = performanceOf(winner);
+    this.optimizeDecision = winner === incumbent ? "incumbent" : "winner";
+    await commitCandidate(winner);
+
+    const coarseDirection = { signalEV: winner.signalEV, shutterEV: winner.shutterEV };
+    if ((coarseDirection.signalEV !== 0 || coarseDirection.shutterEV !== 0) && performance.now() < deadline - 700) {
+      for (let expansion = 0; expansion < 2 && performance.now() < deadline - 700; expansion++) {
+        this.optimizeExposureStepEV = 1;
+        this.optimizeShutterStepEV = 1;
+        const challenger = makeCandidate(
+          `Expand ${expansion + 1}`,
+          winner.signalEV + coarseDirection.signalEV,
+          winner.shutterEV + coarseDirection.shutterEV,
+        );
+        const priorKey = winner.key;
+        const captured = await captureRound([challenger, winner], "expand");
+        const actualChallenger = captured.find((candidate) => candidate.key !== priorKey);
+        if (!actualChallenger) break;
+        let decision = classify(actualChallenger, winner);
+        if (decision === "UNCERTAIN" && performance.now() < deadline - 500) {
+          await captureRound([winner, actualChallenger], "expand");
+          decision = classify(actualChallenger, winner);
+        }
+        this.optimizeComparison = decision;
+        this.optimizeCandidatePerformance = performanceOf(actualChallenger);
+        this.optimizeDecision = decision === "WIN" ? "expanded" : "bracketed";
+        if (decision !== "WIN") break;
+        winner = actualChallenger;
+        await commitCandidate(winner);
+      }
     }
 
-    const exposureRange = this.caps.exposureTime;
-    const isoRange = this.caps.iso;
-    if (this.manualExposure() && exposureRange && isoRange && incumbentSettings.exposureTime !== undefined && incumbentSettings.iso !== undefined) {
-      this.optimizeState = "exposure";
-      this.transition("OPTIMIZE_EXPOSURE", "joint exposure and gain pattern search");
-      const minimumEV = 0.125;
-      while ((this.optimizeExposureStepEV >= minimumEV || this.optimizeGainStepEV >= minimumEV) && performance.now() < deadline) {
-        const exposure = incumbentSettings.exposureTime;
-        const iso = incumbentSettings.iso;
-        const e = 2 ** this.optimizeExposureStepEV;
-        const g = 2 ** this.optimizeGainStepEV;
-        const directions = [[exposure / e, iso], [exposure * e, iso], [exposure / e, iso * g], [exposure * e, iso / g]];
-        if (this.optimizeExposureStepEV <= 0.25) directions.push([exposure, iso / g], [exposure, iso * g]);
-        const seen = new Set<string>();
-        const patches = directions.flatMap(([requestedExposure, requestedIso]) => {
-          const actualExposure = this.quantize(requestedExposure, exposureRange);
-          const actualIso = this.quantize(requestedIso, isoRange);
-          const key = `${actualExposure}|${actualIso}`;
-          if (seen.has(key) || (actualExposure === exposure && actualIso === iso)) return [];
-          seen.add(key);
-          return [{ ...patchFor(incumbentSettings), exposureMode: "manual", exposureTime: actualExposure, iso: actualIso }];
-        });
-        this.exposureProbes += patches.length;
-        if (!(await searchNeighborhood(patches, "Tuning exposure"))) {
-          this.optimizeExposureStepEV /= 2;
-          this.optimizeGainStepEV /= 2;
-          this.optimizeReason = "exposure/gain step shrunk";
-        }
+    let refineDirection: { signalEV: number; shutterEV: number } | undefined;
+    for (const step of [0.5, 0.25]) {
+      if (performance.now() >= deadline - 700) break;
+      this.optimizeExposureStepEV = step;
+      this.optimizeShutterStepEV = step;
+      const directions = step === 0.25 && refineDirection
+        ? [refineDirection, { signalEV: -refineDirection.signalEV, shutterEV: -refineDirection.shutterEV }]
+        : [
+          { signalEV: step, shutterEV: 0 }, { signalEV: -step, shutterEV: 0 },
+          { signalEV: 0, shutterEV: -step }, { signalEV: 0, shutterEV: step },
+        ];
+      const refinements = directions.map((direction, index) => makeCandidate(
+        `Refine ${index + 1}`,
+        winner.signalEV + direction.signalEV,
+        winner.shutterEV + direction.shutterEV,
+      ));
+      this.exposureProbes += refinements.length;
+      const captured = await captureRound(refinements, "refine");
+      const promising = captured
+        .filter((candidate) => candidate !== winner && !obviousGarbage(candidate, winner))
+        .sort(compareCandidates)
+        .slice(0, 2);
+      if (!promising.length) break;
+      await captureRound([winner, ...promising.reverse()], "refine");
+      promising.sort(compareCandidates);
+      const challenger = promising[0]!;
+      const decision = classify(challenger, winner);
+      this.optimizeComparison = decision;
+      this.optimizeCandidatePerformance = performanceOf(challenger);
+      this.optimizePairedSamples = Math.min(challenger.windows.length, winner.windows.length);
+      if (decision !== "WIN") {
+        this.optimizeDecision = decision === "LOSS" ? "eliminated" : "incumbent retained";
+        break;
       }
+      refineDirection = {
+        signalEV: challenger.signalEV - winner.signalEV,
+        shutterEV: challenger.shutterEV - winner.shutterEV,
+      };
+      winner = challenger;
+      this.optimizeDecision = "winner";
+      await commitCandidate(winner);
     }
 
     if (!this.current(generation)) return;
     this.optimizeState = "verification";
-    const final = await applySettled(patchFor(incumbentSettings), this.latest?.id ?? incumbentObservation.id);
-    if (!final) {
+    this.optimizeRound = undefined;
+    if (!(await commitCandidate(winner))) {
       this.optimizeState = "paused";
-      this.optimizeReason = "target evidence unavailable";
+      this.optimizeReason = "winning settings could not be restored";
       return;
     }
-    incumbentObservation = final.observation;
-    this.commitSettings(final.settings);
+    const verification = await measure("Winner");
+    winner.samples.push(verification);
+    winner.windows.push(await verification.result);
+    if (!this.current(generation)) return;
+    const finalObservation = this.latest ?? initialObservation;
     this.optimizeState = "complete";
     this.optimizeComparison = undefined;
-    this.optimizeReason = performance.now() >= deadline ? "budget reached; best incumbent committed" : "converged";
-    const gain = baselineRate > 0 ? (incumbentPerformance.validDecodesPerSecond / baselineRate - 1) * 100 : 0;
-    this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${incumbentPerformance.validDecodesPerSecond.toFixed(1)} QR/s`;
-    this.lock(incumbentObservation, "optimizer converged; camera held");
+    this.optimizeVisit = undefined;
+    this.optimizeSurvivors = undefined;
+    this.optimizeDecision = "winner committed";
+    this.optimizeReason = performance.now() >= deadline ? "budget reached; winner committed" : "tournament converged";
+    const finalPerformance = performanceOf(winner);
+    this.optimizeBestPerformance = finalPerformance;
+    const gain = baselineRate > 0 ? (finalPerformance.validDecodesPerSecond / baselineRate - 1) * 100 : 0;
+    this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${finalPerformance.validDecodesPerSecond.toFixed(1)} QR/s`;
+    this.lock(finalObservation, "exposure tournament converged; hardware focus retained");
   }
-
   startOptimizer(measure: (label: string) => Promise<PerformanceSample>): Promise<void> {
     return this.optimize(measure);
   }
@@ -674,18 +768,6 @@ export class FocusController {
     this.optimizeReason = reason;
   }
 
-  resetFocusOptimization(): void {
-    this.optimizeFocusStep = undefined;
-    this.optimizeCandidates.clear();
-  }
-
-  resetAllOptimization(): void {
-    this.optimizeFocusStep = undefined;
-    this.optimizeExposureStepEV = 0.5;
-    this.optimizeGainStepEV = 0.5;
-    this.optimizeCandidates.clear();
-    this.optimizeState = "idle";
-  }
   fullAutoRecovery(reason = "automatic full recovery"): void {
     this.cancel(reason);
     this.beginDecodeGeneration();
@@ -695,11 +777,13 @@ export class FocusController {
     }
     this.fullRecoveryCount++;
     this.optimizeState = "idle";
+    this.optimizeRound = undefined;
+    this.optimizeVisit = undefined;
+    this.optimizeSurvivors = undefined;
+    this.optimizeDecision = undefined;
     this.optimizeCandidatePerformance = undefined;
     this.optimizeBestPerformance = undefined;
     this.optimizeSummary = undefined;
-    this.optimizeCandidates.clear();
-    this.optimizeFocusStep = undefined;
     this.acquisitionBracketRunning = false;
     this.acquisitionBracketTried = false;
     this.stableGeometry = undefined;
@@ -759,7 +843,7 @@ export class FocusController {
     }
     this.repairAcquisitionInvariant();
 
-    if (this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") {
+    if (this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") {
       if (this.geometryChanged(geometry, this.stableGeometry)) {
         if (!this.optimizeMovementSince) this.optimizeMovementSince = now;
         if (now - this.optimizeMovementSince >= CAMERA_TUNING.optimizeMovementConfirmMs) {
@@ -769,7 +853,6 @@ export class FocusController {
           this.stableSince = now;
           this.poiAimed = false;
           this.optimizeMovementSince = 0;
-          this.optimizeFocusStep = undefined;
           this.transition("STABILIZING", "target moved during optimization; exposure best retained and hardware AF restored");
           void this.enterAutoFocusAcquisition("optimization cancelled by movement", this.generation, false, true, geometry);
           return;
@@ -932,7 +1015,7 @@ export class FocusController {
       focusOwner: this.focusOwner(settings),
       invariantWarning,
       calibrationMode: this.calibrationMode,
-      availableModes: this.focusModes(),
+      availableModes: this.overrideFocusModes(),
       requestedMode: this.requestedMode,
       actualMode: settings.focusMode,
       actualDistance: settings.focusDistance,
@@ -977,7 +1060,6 @@ export class FocusController {
       committedExposureMode: this.committedExposureMode,
       committedExposureTime: this.committedExposureTime,
       committedIso: this.committedIso,
-      candidateFocusDistance: this.candidateFocusDistance,
       candidateExposureTime: this.candidateExposureTime,
       candidateIso: this.candidateIso,
       lockedMs: this.state === "LOCKED" ? performance.now() - this.lockedAt : undefined,
@@ -990,12 +1072,15 @@ export class FocusController {
       manualFreezeVerified: this.manualFreezeVerified,
       manualFreezeUnsafe: this.manualFreezeUnsafe,
       optimizeState: this.optimizeState,
+      optimizeRound: this.optimizeRound,
+      optimizeVisit: this.optimizeVisit,
+      optimizeSurvivors: this.optimizeSurvivors,
+      optimizeDecision: this.optimizeDecision,
       optimizeCandidatePerformance: this.optimizeCandidatePerformance,
       optimizeBestPerformance: this.optimizeBestPerformance,
       optimizeSummary: this.optimizeSummary,
-      optimizeFocusStep: this.optimizeFocusStep,
       optimizeExposureStepEV: this.optimizeExposureStepEV,
-      optimizeGainStepEV: this.optimizeGainStepEV,
+      optimizeShutterStepEV: this.optimizeShutterStepEV,
       optimizeComparison: this.optimizeComparison,
       optimizePairedSamples: this.optimizePairedSamples,
       optimizeReason: this.optimizeReason,
@@ -1016,7 +1101,7 @@ export class FocusController {
     this.transition("AUTO_AF_SETTLE", "payload decoded; verifying hardware AF before optional freeze");
     this.focusProbes = 0;
     this.exposureProbes = 0;
-    const baseline = await this.fresh(generation, initial.id, CAMERA_TUNING.physicalSettleMs);
+    const baseline = await this.waitForFocusSettled(generation, initial.id);
     if (!baseline || !this.current(generation) || !this.decodeIsFresh() || baseline.metrics.focusScore <= 0) {
       this.transition("STABILIZING", "hardware AF not yet proven useful; autofocus remains active");
       this.stateSince = performance.now();
@@ -1038,7 +1123,7 @@ export class FocusController {
       this.transition("AUTO_FREEZE_VERIFY", "transactionally verifying the hardware-selected focus distance");
       const requested = settings.focusDistance!;
       const accepted = await this.applyProbe(generation, { focusMode: "manual", focusDistance: requested });
-      const frozen = accepted ? await this.fresh(generation, baseline.id, CAMERA_TUNING.physicalSettleMs) : undefined;
+      const frozen = accepted ? await this.waitForFocusSettled(generation, baseline.id) : undefined;
       const actual = this.settings();
       const staticHeld = Boolean(frozen && frozen.metrics.focusScore >= baseline.metrics.focusScore - 0.06);
       const decodeHeld = Boolean(frozen && this.validDecodesInGeneration > 0 && this.decodeIsFresh());
@@ -1086,7 +1171,6 @@ export class FocusController {
         this.exposureAcceptable(observation.metrics, 0.45) && this.validDecodesInGeneration >= 1) {
       this.bestKnownGood = this.lastWorkingState;
     }
-    this.candidateFocusDistance = undefined;
     this.candidateExposureTime = undefined;
     this.candidateIso = undefined;
     this.lockedAt = performance.now();
@@ -1133,7 +1217,7 @@ export class FocusController {
       this.lock(observation, "exposure recovery rejected; prior camera state retained");
       return;
     }
-    const recovered = await this.fresh(generation, observation.id, CAMERA_TUNING.physicalSettleMs);
+    const recovered = await this.waitForExposureSettled(generation, observation.id);
     if (!recovered || !this.current(generation)) {
       await this.restoreCommittedExposure();
       return;
@@ -1145,60 +1229,57 @@ export class FocusController {
   }
 
   private async beginAcquisitionBrightnessBracket(observation: OpticalObservation): Promise<void> {
-    if (!this.isAcquiring() || this.acquisitionBracketRunning || this.validDecodesInGeneration > 0) return;
+    if (!this.isAcquiring() || this.acquisitionBracketRunning || this.validDecodesInGeneration > 0 || !this.track) return;
     const generation = this.generation;
-    const track = this.track;
-    if (!track) return;
     this.acquisitionBracketRunning = true;
     this.acquisitionBracketTried = true;
     const settings = this.settings();
     const compensation = this.caps.exposureCompensation;
-    const darkerFirst = observation.metrics.clipping > 0.55 || observation.metrics.whiteLevel > 245;
+    const midpoint = (observation.metrics.blackLevel + observation.metrics.whiteLevel) / 2;
+    const clearlyBright = observation.metrics.clipping > 0.55 || observation.metrics.whiteLevel > 245 || midpoint > 190;
+    const clearlyDark = !clearlyBright && (observation.metrics.whiteLevel < 155 || midpoint < 95);
     let afterId = observation.id;
 
     if (compensation && this.exposureModes().some((mode) => mode === "continuous" || mode === "single-shot")) {
       const origin = settings.exposureCompensation ?? 0;
-      const step = Math.max(compensation.step ?? 0, Math.min(0.5, (compensation.max - compensation.min) / 4));
-      const directions = darkerFirst ? [-1, 1] : [1, -1];
-      for (const direction of directions) {
+      const offsets = clearlyBright ? [-1, -2] : clearlyDark ? [1, 2] : [1, -1];
+      for (const offset of offsets) {
         if (!this.acquisitionBracketRunning || !this.current(generation) || this.validDecodesInGeneration > 0) return;
-        const candidate = this.quantize(origin + direction * step, compensation);
+        const candidate = this.quantize(origin + offset, compensation);
         if (candidate === origin) continue;
-        if (!(await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: candidate }))) break;
-        const settled = await this.fresh(generation, afterId);
+        if (!(await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: candidate }, false))) break;
+        const settled = await this.waitForExposureSettled(generation, afterId);
         if (!settled) break;
         afterId = settled.id;
         if (this.validDecodesInGeneration > 0) return;
       }
       if (this.current(generation) && this.validDecodesInGeneration === 0) {
-        await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: origin });
+        await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: origin }, false);
       }
     } else if (this.manualExposure() && this.caps.exposureTime && settings.exposureTime !== undefined) {
       const originExposure = settings.exposureTime;
       const originIso = settings.iso;
-      const directions = darkerFirst ? [1 / Math.SQRT2, Math.SQRT2] : [Math.SQRT2, 1 / Math.SQRT2];
-      for (const factor of directions) {
+      const factors = clearlyBright ? [0.5, 0.25] : clearlyDark ? [2, 4] : [2, 0.5];
+      for (const factor of factors) {
         if (!this.acquisitionBracketRunning || !this.current(generation) || this.validDecodesInGeneration > 0) return;
         const patch: CameraPatch = {
-          focusMode: this.hardwareFocusMode(),
           exposureMode: "manual",
           exposureTime: this.quantize(originExposure * factor, this.caps.exposureTime),
           ...(originIso !== undefined ? { iso: originIso } : {}),
         };
-        if (!(await this.applyProbe(generation, patch))) break;
-        const settled = await this.fresh(generation, afterId);
+        if (!(await this.applyProbe(generation, patch, false))) break;
+        const settled = await this.waitForExposureSettled(generation, afterId);
         if (!settled) break;
         afterId = settled.id;
         if (this.validDecodesInGeneration > 0) return;
       }
       if (this.current(generation) && this.validDecodesInGeneration === 0 && this.exposureModes().includes("continuous")) {
-        await this.applyProbe(generation, { focusMode: this.hardwareFocusMode(), exposureMode: "continuous" });
+        await this.applyProbe(generation, { exposureMode: "continuous" }, false);
       }
     }
     this.acquisitionBracketRunning = false;
-    this.lastReason = "bounded acquisition brightness bracket exhausted; hardware 3A retained";
+    this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
   }
-
   private retryStabilizingAf(geometry: FocusGeometry): void {
     if (this.stabilizingAfRetries < CAMERA_TUNING.maxStabilizingAfRetries) {
       this.stabilizingAfRetries++;
@@ -1274,7 +1355,6 @@ export class FocusController {
         patch.exposureCompensation = this.committedExposureCompensation;
       }
     }
-    this.candidateFocusDistance = undefined;
     this.candidateExposureTime = undefined;
     this.candidateIso = undefined;
     if (Object.keys(patch).length) {
@@ -1312,7 +1392,6 @@ export class FocusController {
   private focusOwner(settings: CameraSettings): FocusOwner {
     if (this.state === "UNAVAILABLE") return "NONE";
     if (this.state === "OVERRIDE" || this.strategy !== "auto") return "DEVELOPER";
-    if (this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") return "OPTIMIZE";
     return settings.focusMode === "manual" ? "MANUAL" : "HARDWARE";
   }
 
@@ -1341,6 +1420,12 @@ export class FocusController {
           (actual.focusDistance !== undefined && Math.abs(actual.focusDistance - requested) > step / 2)) {
         await this.apply(track, { focusMode: "manual", focusDistance: requested });
       }
+    } else if (this.strategy === "camera-auto") {
+      const mode = this.hardwareFocusMode();
+      if (mode) {
+        this.requestedMode = mode;
+        await this.apply(track, { focusMode: mode });
+      }
     } else if (this.focusModes().includes(this.strategy)) {
       this.requestedMode = this.strategy;
       await this.apply(track, { focusMode: this.strategy });
@@ -1357,7 +1442,40 @@ export class FocusController {
     return accepted && this.current(generation);
   }
 
-  private fresh(generation: number, afterId: number, settleMs = CAMERA_TUNING.physicalSettleMs): Promise<OpticalObservation | undefined> {
+  private waitForFocusSettled(
+    generation: number,
+    afterId: number,
+    settleMs = CAMERA_TUNING.focusSettleMs,
+  ): Promise<OpticalObservation | undefined> {
+    return this.waitForObservations(
+      generation,
+      afterId,
+      settleMs,
+      CAMERA_TUNING.focusDiscardFrames,
+      CAMERA_TUNING.focusProbeSamples,
+      1600,
+    );
+  }
+
+  private waitForExposureSettled(generation: number, afterId: number): Promise<OpticalObservation | undefined> {
+    return this.waitForObservations(
+      generation,
+      afterId,
+      0,
+      CAMERA_TUNING.exposureDiscardFrames,
+      1,
+      900,
+    );
+  }
+
+  private waitForObservations(
+    generation: number,
+    afterId: number,
+    settleMs: number,
+    discard: number,
+    requiredSamples: number,
+    minimumTimeoutMs: number,
+  ): Promise<OpticalObservation | undefined> {
     if (!this.current(generation)) return Promise.resolve(undefined);
     return new Promise((resolve) => {
       this.waiter?.resolve(undefined);
@@ -1365,14 +1483,13 @@ export class FocusController {
         generation,
         afterId,
         notBefore: performance.now() + settleMs,
-        discard: CAMERA_TUNING.probeDiscardFrames,
+        discard,
         samples: [],
+        requiredSamples,
         resolve,
       };
-      const frameInterval = this.latest?.captureFps ? 1000 / this.latest.captureFps : 0;
-      const evidenceInterval = Math.max(80, frameInterval, this.medianInterval(this.completionTimes) ?? 0);
-      const timeoutMs = Math.max(1600, Math.min(5000,
-        settleMs + evidenceInterval * (CAMERA_TUNING.probeDiscardFrames + CAMERA_TUNING.probeSamples + 2)));
+      const frameInterval = this.latest?.captureFps ? 1000 / this.latest.captureFps : 50;
+      const timeoutMs = Math.max(minimumTimeoutMs, settleMs + frameInterval * (discard + requiredSamples + 3) * 2);
       setTimeout(() => {
         if (this.waiter?.resolve === resolve) {
           this.waiter = undefined;
@@ -1388,11 +1505,10 @@ export class FocusController {
     waiter.afterId = observation.id;
     if (waiter.discard-- > 0) return;
     waiter.samples.push(observation);
-    if (waiter.samples.length < CAMERA_TUNING.probeSamples) return;
+    if (waiter.samples.length < waiter.requiredSamples) return;
     this.waiter = undefined;
     waiter.resolve(this.aggregate(waiter.samples));
   }
-
   private aggregate(samples: OpticalObservation[]): OpticalObservation {
     const median = (values: number[]): number => {
       values.sort((a, b) => a - b);
@@ -1488,6 +1604,14 @@ export class FocusController {
 
   private settings(): CameraSettings { return (this.track?.getSettings() ?? {}) as CameraSettings; }
   private focusModes(): string[] { return Array.isArray(this.caps.focusMode) ? this.caps.focusMode : []; }
+  private overrideFocusModes(): string[] {
+    const modes = this.focusModes();
+    return [
+      ...(modes.includes("continuous") || modes.includes("single-shot") ? ["camera-auto"] : []),
+      ...(modes.includes("single-shot") ? ["single-shot"] : []),
+      ...(modes.includes("manual") && this.caps.focusDistance ? ["manual"] : []),
+    ];
+  }
   private exposureModes(): string[] { return Array.isArray(this.caps.exposureMode) ? this.caps.exposureMode : []; }
   private hardwareFocusMode(): string | undefined {
     return this.focusModes().includes("continuous") ? "continuous" :
@@ -1499,8 +1623,7 @@ export class FocusController {
     return this.state === "SEEKING" || this.state === "STABILIZING";
   }
   private isOptimizing(): boolean {
-    return this.optimizeState === "baseline" || this.optimizeState === "focus" || this.optimizeState === "exposure" ||
-      this.optimizeState === "verification";
+    return this.optimizeState === "baseline" || this.optimizeState === "exposure" || this.optimizeState === "verification";
   }
 
   private quantize(value: number, range: NumericRange): number {

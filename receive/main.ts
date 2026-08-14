@@ -173,7 +173,7 @@ let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
 let preferredExposureTime: number | undefined;
-let manualFocusMode: Exclude<FocusStrategy, "auto"> = "continuous";
+let manualFocusMode: Exclude<FocusStrategy, "auto"> = "camera-auto";
 let preferredFocusDistance: number | undefined;
 let preferredIso: number | undefined;
 let exposureApplyGeneration = 0;
@@ -305,7 +305,7 @@ function restoreCameraSettings(): void {
     if (typeof saved.automaticIsoAxis === "boolean") automaticIsoAxis = saved.automaticIsoAxis;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
-    if (["continuous", "single-shot", "manual"].includes(saved.manualFocusMode ?? "")) manualFocusMode = saved.manualFocusMode!;
+    if (["camera-auto", "single-shot", "manual"].includes(saved.manualFocusMode ?? "")) manualFocusMode = saved.manualFocusMode!;
     if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
     if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
   } catch { /* Defaults remain usable with blocked or corrupt storage. */ }
@@ -518,6 +518,7 @@ type CandidateEvidence = {
   validDecodes: number;
   usefulSymbols: number;
   temporalSamples: number[];
+  performance?: ReceivePerformance;
 };
 const candidateEvidenceWindows: CandidateEvidence[] = [];
 let optimizeMeasureToken = 0;
@@ -527,17 +528,47 @@ function evidenceForScan(scanId: number | undefined): CandidateEvidence | undefi
   return candidateEvidenceWindows.find((evidence) => scanId >= evidence.boundary && scanId < evidence.endBoundary);
 }
 
-function recentCompletionIntervalMs(now: number): number {
-  const recent = scanCompletionTimes.filter((at) => at > now - 6000);
-  const gaps = recent.slice(1).map((at, index) => at - recent[index]!).filter((gap) => gap > 0).sort((a, b) => a - b);
-  return gaps.length ? gaps[gaps.length >> 1]! : 350;
+function refreshCandidateEvidence(evidence: CandidateEvidence): ReceivePerformance | undefined {
+  if (!evidence.closedAt) return evidence.performance;
+  const seconds = Math.max(0.001, (evidence.closedAt - evidence.startedAt) / 1000);
+  const next: ReceivePerformance = {
+    validDecodesPerSecond: evidence.validDecodes / seconds,
+    usefulSymbolsPerSecond: evidence.usefulSymbols / seconds,
+    perQrAttemptSuccessRate: evidence.qrAttempts ? evidence.validDecodes / evidence.qrAttempts : 0,
+    captureFps: evidence.capturedFrames / seconds,
+    completedJobs: evidence.completedJobs,
+    qrAttempts: evidence.qrAttempts,
+    validDecodes: evidence.validDecodes,
+    measurementMs: seconds * 1000,
+    temporalContamination: evidence.temporalSamples.reduce((sum, value) => sum + value, 0) / evidence.temporalSamples.length,
+  };
+  if (evidence.performance) Object.assign(evidence.performance, next);
+  else evidence.performance = next;
+  return evidence.performance;
+}
+
+function releaseCandidateEvidence(evidence: CandidateEvidence): void {
+  if (!evidence.closedAt || evidence.completedJobs < evidence.targetCompletions) return;
+  const index = candidateEvidenceWindows.indexOf(evidence);
+  if (index >= 0) candidateEvidenceWindows.splice(index, 1);
+}
+
+async function waitForExposureSettled(token: number, label: string): Promise<void> {
+  const firstFrame = totalCaptures;
+  const startedAt = receiverNow();
+  while (token === optimizeMeasureToken && totalCaptures - firstFrame < 2 && receiverNow() - startedAt < 400) {
+    opticsOptimizeStatus.textContent = `${label} · Settling`;
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
 }
 
 async function measureReceivePerformance(label: string): Promise<PerformanceSample> {
   const token = optimizeMeasureToken;
+  await waitForExposureSettled(token, label);
   const startedAt = receiverNow();
-  const interval = recentCompletionIntervalMs(startedAt);
-  const burstMs = Math.max(220, Math.min(650, interval * 1.5));
+  const multiQr = focusController.diagnostics().totalTiles > 1;
+  const targetFrames = multiQr ? 5 : 9;
+  const maxBurstMs = multiQr ? 900 : 1400;
   const evidence: CandidateEvidence = {
     boundary: frameId,
     endBoundary: Infinity,
@@ -554,16 +585,13 @@ async function measureReceivePerformance(label: string): Promise<PerformanceSamp
   };
   candidateEvidenceWindows.push(evidence);
 
-  // This is a settled-frame collection burst, not a phase delay. Once at
-  // least three frames and one throughput-relative burst are captured, the
-  // camera can move while workers finish these fenced scan IDs.
+  // Camera dwell is source-frame based. Decoder workers may finish these
+  // fenced scan IDs after several later camera configurations have run.
   while (token === optimizeMeasureToken) {
-    const elapsed = receiverNow() - startedAt;
     const captures = totalCaptures - evidence.captures;
-    opticsOptimizeStatus.textContent = `${label} · ${captures} frames`;
-    if (captures >= 3 && elapsed >= burstMs) break;
-    if (elapsed >= 850) break;
-    await new Promise((resolve) => setTimeout(resolve, 32));
+    opticsOptimizeStatus.textContent = `${label} · ${captures}/${targetFrames}`;
+    if (captures >= targetFrames || receiverNow() - startedAt >= maxBurstMs) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
   evidence.endBoundary = frameId;
   evidence.closedAt = receiverNow();
@@ -571,28 +599,20 @@ async function measureReceivePerformance(label: string): Promise<PerformanceSamp
   evidence.temporalSamples.push(focusController.diagnostics().optical?.temporalContamination ?? 0);
   const pending = [...scanCapturedAt.keys()].filter((id) => id >= evidence.boundary && id < evidence.endBoundary).length;
   evidence.targetCompletions = evidence.completedJobs + pending;
+  refreshCandidateEvidence(evidence);
+  releaseCandidateEvidence(evidence);
 
   const result = (async (): Promise<ReceivePerformance> => {
-    const maxBackpressureMs = Math.max(900, Math.min(2800, interval * Math.max(3, pending) * 1.25));
+    const waitStartedAt = receiverNow();
     while (token === optimizeMeasureToken && evidence.completedJobs < evidence.targetCompletions &&
-        receiverNow() - evidence.closedAt < maxBackpressureMs) {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+        receiverNow() - waitStartedAt < 2600) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
     }
-    const index = candidateEvidenceWindows.indexOf(evidence);
-    if (index >= 0) candidateEvidenceWindows.splice(index, 1);
-    const seconds = Math.max(0.001, (evidence.closedAt - evidence.startedAt) / 1000);
-    const performanceSample: ReceivePerformance = {
-      validDecodesPerSecond: evidence.validDecodes / seconds,
-      usefulSymbolsPerSecond: evidence.usefulSymbols / seconds,
-      perQrAttemptSuccessRate: evidence.qrAttempts ? evidence.validDecodes / evidence.qrAttempts : 0,
-      captureFps: evidence.capturedFrames / seconds,
-      completedJobs: evidence.completedJobs,
-      qrAttempts: evidence.qrAttempts,
-      validDecodes: evidence.validDecodes,
-      measurementMs: seconds * 1000,
-      temporalContamination: evidence.temporalSamples.reduce((sum, value) => sum + value, 0) / evidence.temporalSamples.length,
-    };
-    if (token === optimizeMeasureToken) opticsOptimizeStatus.textContent = `${label} · ${performanceSample.validDecodesPerSecond.toFixed(1)} QR/s`;
+    const performanceSample = refreshCandidateEvidence(evidence)!;
+    releaseCandidateEvidence(evidence);
+    if (token === optimizeMeasureToken) {
+      opticsOptimizeStatus.textContent = `${label} · ${performanceSample.validDecodesPerSecond.toFixed(1)} QR/s`;
+    }
     return performanceSample;
   })();
   return { result };
@@ -605,7 +625,6 @@ function setOptimizeEnabled(enabled: boolean): void {
   opticsOptimize.textContent = enabled ? "Stop" : "Optimize";
   if (!enabled) {
     optimizeMeasureToken++;
-    candidateEvidenceWindows.length = 0;
     if (optimizeRunning) focusController.cancelOptimize("Optimize stopped");
     if (focusController.diagnostics().optimizeState !== "complete") opticsOptimizeStatus.textContent = "";
   } else {
@@ -626,7 +645,7 @@ function beginOptimizeWhenReady(): void {
     opticsOptimize.setAttribute("aria-pressed", "false");
     opticsOptimize.textContent = "Optimize";
     if (finished.optimizeState === "complete") {
-      opticsOptimizeStatus.textContent = `Optimized · ${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s`;
+      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
     } else opticsOptimizeStatus.textContent = "Paused";
@@ -649,8 +668,10 @@ opticsKeep.addEventListener("click", () => {
   if (acceptedFocusMode === "manual" && actual.focusDistance !== undefined) {
     manualFocusMode = "manual";
     preferredFocusDistance = actual.focusDistance;
-  } else if (acceptedFocusMode === "continuous" || acceptedFocusMode === "single-shot") {
-    manualFocusMode = acceptedFocusMode;
+  } else if (acceptedFocusMode === "continuous") {
+    manualFocusMode = "camera-auto";
+  } else if (acceptedFocusMode === "single-shot") {
+    manualFocusMode = "single-shot";
   }
   if (actual.exposureMode === "manual" && actual.exposureTime !== undefined) {
     automaticExposureAxis = false;
@@ -857,6 +878,8 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   if (evidence) {
     evidence.completedJobs++;
     evidence.qrAttempts += Math.max(1, completion.symbolCount, completion.targetedAttempts + completion.readFullAttempts + Number(completion.fallbackAttempted));
+    refreshCandidateEvidence(evidence);
+    releaseCandidateEvidence(evidence);
   }
   workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
@@ -1534,12 +1557,13 @@ function renderFocusDiagnostics(): void {
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
   }
   const optical = diagnostic.optical;
-  const optimizing = ["baseline", "focus", "exposure", "verification"].includes(diagnostic.optimizeState);
+  const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
   if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = "Stabilizing…";
   else if (optimizing && !candidateEvidenceWindows.length) {
-    opticsOptimizeStatus.textContent = diagnostic.optimizeState === "focus" ? "Focusing…" :
-      diagnostic.optimizeState === "exposure" ? "Tuning exposure…" : "Fine tuning…";
+    opticsOptimizeStatus.textContent = diagnostic.optimizeRound
+      ? `${diagnostic.optimizeRound[0]!.toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${diagnostic.optimizeSurvivors ?? diagnostic.optimizeVisit ?? "Exposure"}`
+      : "Exposure…";
   }
   opticsKeep.hidden = diagnostic.optimizeState !== "complete";
   beginOptimizeWhenReady();
@@ -1553,15 +1577,16 @@ function renderFocusDiagnostics(): void {
     `Owner    ${diagnostic.focusOwner}`,
     `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
     `Freeze   attempted ${diagnostic.manualFreezeAttempted ? "yes" : "no"} · verified ${diagnostic.manualFreezeVerified ? "yes" : "no"} · unsafe ${diagnostic.manualFreezeUnsafe ? "yes" : "no"}`,
-    `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"} · candidate ${diagnostic.candidateFocusDistance ?? "—"}`,
-    `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${diagnostic.actualExposureCompensation ?? "—"} · candidate ${formatExposureMs(diagnostic.candidateExposureTime)}`,
-    `ISO      committed ${diagnostic.committedIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"} · candidate ${diagnostic.candidateIso ?? "—"}`,
+    `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"}`,
+    `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${diagnostic.actualExposureCompensation ?? "—"}`,
+    `ISO      committed ${diagnostic.committedIso ?? "—"} · requested ${diagnostic.candidateIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1000).toFixed(1)}s · decode gap ${diagnostic.recentInterdecodeMs?.toFixed(0) ?? "—"}ms · completion gap ${diagnostic.recentCompletionMs?.toFixed(0) ?? "—"}ms`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === undefined ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1000).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount}`,
-    `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeComparison ? ` · ${diagnostic.optimizeComparison} · ${diagnostic.optimizePairedSamples} samples` : ""}`,
-    `Steps    focus Δ ${diagnostic.optimizeFocusStep?.toPrecision(3) ?? "—"} · exposure Δ ${diagnostic.optimizeExposureStepEV?.toFixed(3) ?? "—"} EV · gain Δ ${diagnostic.optimizeGainStepEV?.toFixed(3) ?? "—"} EV`,
+    `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
+    `Race     survivors ${diagnostic.optimizeSurvivors ?? "—"} · decision ${diagnostic.optimizeDecision ?? "—"}${diagnostic.optimizeComparison ? ` · ${diagnostic.optimizeComparison} · ${diagnostic.optimizePairedSamples} paired` : ""}`,
+    `Steps    signal Δ ${diagnostic.optimizeExposureStepEV?.toFixed(2) ?? "—"} EV · shutter Δ ${diagnostic.optimizeShutterStepEV?.toFixed(2) ?? "—"} EV`,
     diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/attempt` : "",
     diagnostic.optimizeBestPerformance ? `Incumbent ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
     diagnostic.optimizeReason ? `Search   ${diagnostic.optimizeReason}` : "",
@@ -2843,7 +2868,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const { header, block } = parsed;
   focusController.noteValidDecode(info?.scanId);
   const evidence = evidenceForScan(info?.scanId);
-  if (evidence) evidence.validDecodes++;
+  if (evidence) {
+    evidence.validDecodes++;
+    refreshCandidateEvidence(evidence);
+  }
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
     slot: header.slotIndex, esi: header.seq, bytes: header.blockLen, quad: info?.quad,
@@ -2922,7 +2950,10 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     usefulFrameTimes.push(receivedAt);
     focusController.noteUsefulDecode(info?.scanId);
     const usefulEvidence = evidenceForScan(info?.scanId);
-    if (usefulEvidence) usefulEvidence.usefulSymbols += added;
+    if (usefulEvidence) {
+      usefulEvidence.usefulSymbols += added;
+      refreshCandidateEvidence(usefulEvidence);
+    }
   }
   updateProgressEstimate();
 
