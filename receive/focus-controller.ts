@@ -55,6 +55,9 @@ export const CAMERA_TUNING = {
   prolongedSilenceMs: 9000,
   severeBlurConfirmMs: 480,
   fullRecoveryCooldownMs: 12000,
+  automaticRecoveryCooldownMs: 4500,
+  optimizeMovementConfirmMs: 650,
+  optimizeTargetGraceMs: 1200,
 };
 
 export interface FocusGeometry {
@@ -219,7 +222,8 @@ export class FocusController {
   private readonly validDecodeTimes: number[] = [];
   private readonly completionTimes: number[] = [];
   private poorFocusSince = 0;
-  private fullRecoveryAt = 0;
+  private fullRecoveryAt = -Infinity;
+  private optimizeMovementSince = 0;
   private readonly transitions: string[] = [];
   private poiAimed = false;
   private invariantRepairPending = false;
@@ -268,6 +272,7 @@ export class FocusController {
     this.stableSince = 0;
     this.targetMissingSince = 0;
     this.poiAimed = false;
+    this.optimizeMovementSince = 0;
     this.stabilizingAfRetries = 0;
     this.initialLockMs = undefined;
     this.optimizeState = "idle";
@@ -365,6 +370,7 @@ export class FocusController {
     if (!this.optimizeEligible()) return;
     const generation = ++this.generation;
     this.beginDecodeGeneration();
+    this.optimizeMovementSince = 0;
     const baselineObservation = this.latest!;
     const baselineSettings = this.settings();
     this.commitSettings(baselineSettings);
@@ -683,16 +689,21 @@ export class FocusController {
     }
     this.repairAcquisitionInvariant();
 
-    if ((this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") &&
-        this.geometryChanged(geometry, this.stableGeometry)) {
-      this.cancel("target moved during optimization");
-      this.optimizeState = "cancelled";
-      this.stableGeometry = geometry;
-      this.stableSince = now;
-      this.poiAimed = false;
-      this.transition("STABILIZING", "target moved during optimization; exposure best retained and hardware AF restored");
-      void this.enterAutoFocusAcquisition("optimization cancelled by movement", this.generation, false, true, geometry);
-      return;
+    if (this.state === "OPTIMIZE_FOCUS" || this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") {
+      if (this.geometryChanged(geometry, this.stableGeometry)) {
+        if (!this.optimizeMovementSince) this.optimizeMovementSince = now;
+        if (now - this.optimizeMovementSince >= CAMERA_TUNING.optimizeMovementConfirmMs) {
+          this.cancel("target moved during optimization");
+          this.optimizeState = "cancelled";
+          this.stableGeometry = geometry;
+          this.stableSince = now;
+          this.poiAimed = false;
+          this.optimizeMovementSince = 0;
+          this.transition("STABILIZING", "target moved during optimization; exposure best retained and hardware AF restored");
+          void this.enterAutoFocusAcquisition("optimization cancelled by movement", this.generation, false, true, geometry);
+          return;
+        }
+      } else this.optimizeMovementSince = 0;
     }
     if ((this.state === "AUTO_AF_SETTLE" || this.state === "AUTO_FREEZE_VERIFY") &&
         this.geometryChanged(geometry, this.stableGeometry)) {
@@ -754,6 +765,10 @@ export class FocusController {
       } else if (this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
         this.lockedExposureFailures = 0;
         void this.beginExposureRecovery(observation);
+      } else if (decoderActive && noProgress && silence >= Math.max(1400, silenceThreshold * 1.3) &&
+          (metrics.focusScore < CAMERA_TUNING.focusExcellent || metrics.exposureScore < CAMERA_TUNING.exposureExcellent) &&
+          now - this.fullRecoveryAt >= CAMERA_TUNING.automaticRecoveryCooldownMs) {
+        void this.beginAmbiguousRecovery(observation);
       } else if (decoderActive && silence >= Math.max(6000, Math.min(CAMERA_TUNING.prolongedSilenceMs, silenceThreshold * 5)) &&
           !(metrics.focusScore >= CAMERA_TUNING.focusExcellent && metrics.exposureScore >= CAMERA_TUNING.exposureExcellent && metrics.temporalContamination > 0.35) &&
           now - this.fullRecoveryAt >= CAMERA_TUNING.fullRecoveryCooldownMs) {
@@ -798,7 +813,7 @@ export class FocusController {
     this.repairAcquisitionInvariant();
     if (!this.targetMissingSince) this.targetMissingSince = now;
     if (this.isOptimizing()) {
-      this.cancelOptimize("target disappeared during optimization");
+      if (now - this.targetMissingSince >= CAMERA_TUNING.optimizeTargetGraceMs) this.cancelOptimize("target disappeared during optimization");
     } else if (this.state === "AUTO_AF_SETTLE" || this.state === "AUTO_FREEZE_VERIFY") {
       this.cancel("static QR target disappeared during calibration");
       this.stableGeometry = undefined;
@@ -995,6 +1010,18 @@ export class FocusController {
     this.stabilizingAfRetries = 0;
     if (this.initialLockMs === undefined) this.initialLockMs = performance.now() - this.attachedAt;
     this.changed();
+  }
+
+  private async beginAmbiguousRecovery(observation: OpticalObservation): Promise<void> {
+    if (this.state !== "LOCKED") return;
+    const generation = ++this.generation;
+    this.beginDecodeGeneration();
+    this.fullRecoveryAt = performance.now();
+    this.stableGeometry = observation.geometry;
+    this.stableSince = performance.now();
+    this.poiAimed = false;
+    this.transition("STABILIZING", "decoder silent with uncertain optics; hardware AF + AE active");
+    await this.enterAutoFocusAcquisition("automatic targeted AF + AE recovery", generation, true, false, observation.geometry);
   }
 
   private async beginFocusRecovery(observation: OpticalObservation): Promise<void> {
@@ -1200,12 +1227,16 @@ export class FocusController {
         samples: [],
         resolve,
       };
+      const frameInterval = this.latest?.captureFps ? 1000 / this.latest.captureFps : 0;
+      const evidenceInterval = Math.max(80, frameInterval, this.medianInterval(this.completionTimes) ?? 0);
+      const timeoutMs = Math.max(1600, Math.min(5000,
+        settleMs + evidenceInterval * (CAMERA_TUNING.probeDiscardFrames + CAMERA_TUNING.probeSamples + 2)));
       setTimeout(() => {
         if (this.waiter?.resolve === resolve) {
           this.waiter = undefined;
           resolve(undefined);
         }
-      }, 1100);
+      }, timeoutMs);
     });
   }
 

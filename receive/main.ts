@@ -89,7 +89,6 @@ const focusDev = document.getElementById("focus-dev")!;
 const focusMode = document.getElementById("focus-mode") as HTMLSelectElement;
 const focusAxisName = document.getElementById("focus-axis-name")!;
 const focusAxisReset = document.getElementById("focus-axis-reset") as HTMLButtonElement;
-const focusRefocus = document.getElementById("focus-refocus") as HTMLButtonElement;
 const opticsOptimize = document.getElementById("optics-optimize") as HTMLButtonElement;
 const opticsKeep = document.getElementById("optics-keep") as HTMLButtonElement;
 const opticsOptimizeStatus = document.getElementById("optics-optimize-status")!;
@@ -563,52 +562,48 @@ async function measureReceivePerformance(label: string): Promise<ReceivePerforma
   };
 }
 
-let optimizeWaiting = false;
+let optimizeEnabled = false;
 let optimizeRunning = false;
+let nextOptimizeAt = 0;
+function setOptimizeEnabled(enabled: boolean): void {
+  optimizeEnabled = enabled;
+  opticsOptimize.setAttribute("aria-pressed", String(enabled));
+  if (!enabled) {
+    optimizeMeasureToken++;
+    if (optimizeRunning) focusController.cancelOptimize("Optimize stopped");
+    opticsOptimizeStatus.textContent = "Off";
+  } else {
+    nextOptimizeAt = 0;
+    opticsOptimizeStatus.textContent = "Optimize on · stabilizing";
+    beginOptimizeWhenReady();
+  }
+}
 function beginOptimizeWhenReady(): void {
-  if (!optimizeWaiting || optimizeRunning || !focusController.optimizeEligible()) return;
-  optimizeWaiting = false;
+  if (!optimizeEnabled || optimizeRunning || performance.now() < nextOptimizeAt || !focusController.optimizeEligible()) return;
   optimizeRunning = true;
   optimizeMeasureToken++;
   opticsKeep.hidden = true;
-  opticsOptimize.textContent = "Cancel";
   opticsOptimizeStatus.textContent = "Baseline · starting";
   void focusController.optimize(measureReceivePerformance).then(() => {
     const finished = focusController.diagnostics();
+    if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
-      opticsOptimizeStatus.textContent = finished.optimizeSummary ?? "Complete";
+      opticsOptimizeStatus.textContent = `Watching · ${finished.optimizeSummary ?? "best verified"}`;
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
-    } else if (finished.optimizeState === "cancelled") {
-      opticsOptimizeStatus.textContent = finished.optimizeSummary ?? "Cancelled · best restored";
+      nextOptimizeAt = performance.now() + 15_000;
+    } else {
+      opticsOptimizeStatus.textContent = "Optimize on · stabilizing · best kept";
+      nextOptimizeAt = performance.now() + 1200;
     }
-  }).finally(() => {
-    optimizeRunning = false;
-    opticsOptimize.textContent = "Optimize";
-  });
+  }).finally(() => { optimizeRunning = false; });
 }
 opticsOptimize.addEventListener("click", () => {
-  const state = focusController.diagnostics().optimizeState;
-  if (optimizeWaiting && !optimizeRunning) {
-    optimizeWaiting = false;
-    opticsOptimizeStatus.textContent = "Cancelled";
-    return;
-  }
-  if (optimizeRunning || ["baseline", "focus", "exposure", "iso", "verification"].includes(state)) {
-    optimizeWaiting = false;
-    optimizeMeasureToken++;
-    focusController.cancelOptimize("Optimize cancelled");
-    opticsOptimizeStatus.textContent = "Cancelled · best restored";
-    return;
-  }
   if (!automaticOptics) {
     opticsOptimizeStatus.textContent = "Enable Auto";
     return;
   }
-  opticsKeep.hidden = true;
-  optimizeWaiting = true;
-  opticsOptimizeStatus.textContent = focusController.optimizeEligible() ? "Baseline · starting" : "Need stable QR · waiting";
-  beginOptimizeWhenReady();
+  setOptimizeEnabled(!optimizeEnabled);
 });
 opticsKeep.addEventListener("click", () => {
   const diagnostic = focusController.diagnostics();
@@ -638,6 +633,7 @@ opticsKeep.addEventListener("click", () => {
     automaticExposureAxis = true;
     automaticIsoAxis = true;
   }
+  setOptimizeEnabled(false);
   automaticOptics = false;
   cameraExposureAuto.checked = false;
   syncExposureControls();
@@ -1505,16 +1501,12 @@ function renderFocusDiagnostics(): void {
   }
   const optical = diagnostic.optical;
   const optimizing = ["baseline", "focus", "exposure", "iso", "verification"].includes(diagnostic.optimizeState);
-  opticsOptimize.textContent = optimizing ? "Cancel" : "Optimize";
   opticsOptimize.disabled = !automaticOptics && !optimizing;
-  if (!optimizing && !optimizeWaiting && diagnostic.optimizeState !== "complete" && diagnostic.optimizeState !== "cancelled") {
-    opticsOptimizeStatus.textContent = diagnostic.state === "SEEKING" && diagnostic.lastReason.startsWith("Reacquire requested")
-      ? diagnostic.lastReason.includes("rejected") ? "Reacquire requested · AF/AE rejected" : "Reacquire requested · Hardware AF + AE active"
-      : focusController.optimizeEligible() ? "Ready" : "Need stable QR";
+  if (!optimizeEnabled && !optimizing) opticsOptimizeStatus.textContent = "Off";
+  else if (optimizeEnabled && !optimizing && performance.now() >= nextOptimizeAt && !focusController.optimizeEligible()) {
+    opticsOptimizeStatus.textContent = "Optimize on · stabilizing";
   }
-  if (optimizeWaiting) opticsOptimizeStatus.textContent = "Need stable QR · waiting";
   opticsKeep.hidden = diagnostic.optimizeState !== "complete";
-  focusRefocus.disabled = false;
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
   const cameraLine = (value?: CameraPatch) => value
@@ -1548,13 +1540,6 @@ focusMode.addEventListener("change", () => {
   syncExposureControls();
   saveCameraSettings();
   if (!automaticOptics) focusController.setStrategy(manualFocusMode);
-});
-focusRefocus.addEventListener("click", () => {
-  optimizeWaiting = false;
-  optimizeMeasureToken++;
-  opticsKeep.hidden = true;
-  opticsOptimizeStatus.textContent = "Reacquire requested · Hardware AF + AE active";
-  focusController.refocus("Reacquire requested");
 });
 focusDistance.addEventListener("input", () => {
   preferredFocusDistance = Number(focusDistance.value);
@@ -1618,8 +1603,10 @@ cameraExposureAuto.addEventListener("change", () => {
   syncExposureControls();
   saveCameraSettings();
   const track = stream?.getVideoTracks()[0];
-  if (!automaticOptics) focusController.setStrategy(manualFocusMode);
-  else focusController.setStrategy("auto");
+  if (!automaticOptics) {
+    setOptimizeEnabled(false);
+    focusController.setStrategy(manualFocusMode);
+  } else focusController.setStrategy("auto");
   if (track) void applyExposureSetting(track);
 });
 exposureAxisAuto.addEventListener("change", () => {
