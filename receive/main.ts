@@ -901,21 +901,18 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
   type ExposureSettings = MediaTrackSettings & { exposureMode?: string; exposureTime?: number };
-  let active = track.getSettings() as ExposureSettings;
+  const active = track.getSettings() as ExposureSettings;
   const step = Number(cameraExposure.step) || 0.1;
   if ((active.exposureMode && active.exposureMode !== "manual") ||
       (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2)) {
     await applyAdvancedConstraint(track, { exposureMode: "manual", exposureTime: requested });
-    await new Promise((resolve) => setTimeout(resolve, 80));
     if (generation !== exposureApplyGeneration) return;
-    active = track.getSettings() as ExposureSettings;
   }
-  if (active.exposureTime !== undefined) {
-    preferredExposureTime = active.exposureTime;
-    cameraExposure.value = String(active.exposureTime);
-    showExposureTime(active.exposureTime);
-    saveCameraSettings();
-  }
+  // Android camera providers can report a stale exposureTime after accepting
+  // the constraint. Keep the user's requested value as the UI and saved source
+  // of truth instead of letting that delayed camera report move the slider.
+  cameraExposure.value = String(requested);
+  showExposureTime(requested);
 }
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   const caps = track.getCapabilities?.() as (MediaTrackCapabilities & {
