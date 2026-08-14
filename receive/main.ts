@@ -630,11 +630,11 @@ const optimizerEpochHooks = {
     const after = latestSourceFrameSequence;
     const token = optimizeMeasureToken;
     const settleStartedAt = receiverNow();
-    while (token === optimizeMeasureToken && latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames + 1 &&
-        receiverNow() - settleStartedAt < 650) {
+    while (token === optimizeMeasureToken && latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames &&
+        receiverNow() - settleStartedAt < 1800) {
       await new Promise((resolve) => setTimeout(resolve, 8));
     }
-    if (token !== optimizeMeasureToken || latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames + 1) return undefined;
+    if (token !== optimizeMeasureToken || latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames) return undefined;
     const epoch: OptimizerEpoch = {
       id: ++optimizerEpochSequence,
       candidateId: request.candidateId,
@@ -735,7 +735,10 @@ function setOptimizeEnabled(enabled: boolean): void {
 function beginOptimizeWhenReady(): void {
   if (!optimizeEnabled || optimizeRunning || optimizeConverged) return;
   if (!focusController.optimizeEligible()) {
-    opticsOptimizeStatus.textContent = "Camera unavailable";
+    const diagnostic = focusController.diagnostics();
+    opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
+      ? "Camera unavailable"
+      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Waiting for decoded target";
     return;
   }
   if (!snapshotOptimizerGeometry()) {
@@ -1680,7 +1683,11 @@ function renderFocusDiagnostics(): void {
   const optical = diagnostic.optical;
   const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
-  if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = "Camera unavailable";
+  if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) {
+    opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
+      ? "Camera unavailable"
+      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Waiting for decoded target";
+  }
   else if (optimizing && !candidateEvidenceWindows.size) {
     opticsOptimizeStatus.textContent = diagnostic.optimizeRound
       ? `${diagnostic.optimizeRound[0]!.toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${diagnostic.optimizeSurvivors ?? diagnostic.optimizeVisit ?? "Exposure"}`
@@ -2716,7 +2723,6 @@ function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace
   const h = bottom - y;
   if (w < 32 || h < 32) return;
   const image = readBoundedVideoCrop(source, x, y, w, h);
-  inspectStaticQrOptics(source, image, x, y);
   const id = frameId++;
   traceOptimizer({
     time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,

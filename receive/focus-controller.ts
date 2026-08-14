@@ -506,11 +506,7 @@ export class FocusController {
       if (!this.current(generation)) return;
     }
 
-    let origin = this.settings();
-    if (origin.focusMode !== "manual" && origin.focusDistance !== undefined && this.overrideFocusModes().includes("manual")) {
-      await this.applyProbe(generation, { focusMode: "manual", focusDistance: origin.focusDistance }, false);
-      origin = this.settings();
-    }
+    const origin = this.settings();
     const exposureRange = this.caps.exposureTime;
     const isoRange = this.caps.iso;
     if (!this.manualExposure() || !exposureRange || !isoRange || origin.exposureTime === undefined || origin.iso === undefined) {
@@ -520,7 +516,7 @@ export class FocusController {
     }
     this.commitSettings(origin);
     this.optimizeState = "exposure";
-    this.transition("OPTIMIZE_EXPOSURE", "focus frozen; full-range exposure tournament");
+    this.transition("OPTIMIZE_EXPOSURE", "focus unchanged; full-range exposure tournament");
 
     const median = (values: number[]): number => {
       if (!values.length) return 0;
