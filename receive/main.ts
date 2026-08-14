@@ -2739,7 +2739,7 @@ function updateProgressEstimate() {
     : 0;
   etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3
     ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
-    : "Estimating…";
+    : "";
 }
 
 /** Plain text is the complete standard QR payload. It deliberately has no
