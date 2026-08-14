@@ -1,3 +1,4 @@
+import "../shared/service-worker";
 import "../send/main";
 import "../receive/main";
 import { closeOnBackdropClick } from "../shared/dialog";

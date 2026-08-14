@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => ({
     basicSsl(),
     VitePWA({
       registerType: "autoUpdate",
-      injectRegister: "inline",
+      injectRegister: false,
       manifest: {
         name: "AirGapper",
         short_name: "AirGapper",
@@ -38,11 +38,17 @@ export default defineConfig(({ mode }) => ({
       },
       workbox: {
         clientsClaim: true,
+        skipWaiting: true,
         inlineWorkboxRuntime: true,
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         dontCacheBustURLsMatching: /\/assets\/[^/]+-[A-Za-z0-9_-]{8}\.[^/]+$/,
         globPatterns: ["**/*.{html,js,css,wasm}"],
+        navigateFallback: null,
         runtimeCaching: [{
+          urlPattern: ({ request }) => request.mode === "navigate",
+          handler: "NetworkFirst" as const,
+          options: { cacheName: "app-pages", networkTimeoutSeconds: 3, matchOptions: { ignoreSearch: true } },
+        }, {
           urlPattern: /\/received-media\//,
           handler: "CacheOnly" as const,
           options: { cacheName: "received-media", rangeRequests: true, matchOptions: { ignoreSearch: true } },
