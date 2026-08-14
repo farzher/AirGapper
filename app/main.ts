@@ -112,6 +112,11 @@ window.addEventListener("pageshow", resumeActiveView);
 (window as Window & { airgapperResume?: () => void }).airgapperResume = resumeActiveView;
 
 (window as Window & { airgapperHandleBack?: () => boolean }).airgapperHandleBack = () => {
+  const inspectorClose = document.querySelector<HTMLButtonElement>(".media-inspector-close");
+  if (inspectorClose) {
+    inspectorClose.click();
+    return true;
+  }
   if (receiverLinkDialog.open) {
     receiverLinkDialog.close();
     return true;

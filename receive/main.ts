@@ -2757,16 +2757,15 @@ function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void
       if (scale === 1) x = y = 0;
       render();
     };
-    const close = async (): Promise<void> => {
+    const close = (): void => {
       if (!inspector.isConnected) return;
-      if (document.fullscreenElement === inspector) await document.exitFullscreen().catch(() => undefined);
       inspector.remove();
       media.removeAttribute("style");
       placeholder.replaceWith(media);
       document.body.classList.remove("media-inspecting");
       media.focus();
     };
-    closeButton.addEventListener("click", () => void close());
+    closeButton.addEventListener("click", close);
     inspector.addEventListener("pointerdown", (event) => {
       if (event.target === closeButton) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -2799,14 +2798,6 @@ function enableMediaInspection(media: HTMLImageElement | HTMLVideoElement): void
       zoomAt(scale * Math.exp(-event.deltaY * .002), event.clientX, event.clientY);
     }, { passive: false });
     inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
-    const onFullscreenChange = (): void => {
-      if (document.fullscreenElement !== inspector && inspector.isConnected) void close();
-      document.removeEventListener("fullscreenchange", onFullscreenChange);
-    };
-    if (inspector.requestFullscreen) {
-      await inspector.requestFullscreen().catch(() => undefined);
-      if (document.fullscreenElement === inspector) document.addEventListener("fullscreenchange", onFullscreenChange);
-    }
   };
   media.addEventListener("click", () => void open());
   media.addEventListener("keydown", (event) => {
