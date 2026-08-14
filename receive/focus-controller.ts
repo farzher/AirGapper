@@ -61,7 +61,6 @@ export const CAMERA_TUNING = {
   fullRecoveryCooldownMs: 12000,
   automaticRecoveryCooldownMs: 4500,
   optimizeMovementConfirmMs: 650,
-  optimizeTargetGraceMs: 1200,
   optimizeBudgetMs: 9000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
@@ -292,7 +291,8 @@ export class FocusController {
       this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
   }
   get opticalIntervalMs(): number {
-    if (this.strategy !== "auto" || this.calibrationMode === "off" || this.state === "OVERRIDE") return Infinity;
+    if (this.calibrationMode === "off") return Infinity;
+    if (this.strategy !== "auto" || this.state === "OVERRIDE") return CAMERA_TUNING.lockedOpticalIntervalMs;
     if (this.expectsProbeFrame) return 0;
     return this.state === "LOCKED" || this.state === "TARGET_LOST_GRACE"
       ? CAMERA_TUNING.lockedOpticalIntervalMs : CAMERA_TUNING.seekingOpticalIntervalMs;
@@ -356,14 +356,28 @@ export class FocusController {
 
   setStrategy(strategy: FocusStrategy): void {
     const optimizing = this.isOptimizing();
+    const optimizedGeometryStillValid = this.optimizeState === "complete" && Boolean(this.latest && this.stableGeometry) &&
+      !this.geometryChanged(this.latest!.geometry, this.stableGeometry);
     this.cancel("focus ownership changed");
     this.strategy = strategy;
     if (optimizing) this.optimizeState = "cancelled";
     if (strategy === "auto") {
-      this.transition("SEEKING", "automatic optics selected; hardware AF owns focus");
-      const start = () => this.enterAutoFocusAcquisition("automatic focus selected", this.generation, true);
-      if (optimizing) void this.restoreOptimizationBest().then(start);
-      else void start();
+      if (optimizedGeometryStillValid) {
+        this.transition("STABILIZING", "restoring optimized optics for unchanged geometry");
+        const generation = this.generation;
+        void this.restoreOptimizationBest().then(() => {
+          if (!this.current(generation)) return;
+          if (this.latest) this.lock(this.latest, "optimized optics restored");
+        });
+      } else {
+        if (this.optimizeState === "complete") {
+          this.optimizeState = "idle";
+          this.optimizeBestPerformance = undefined;
+          this.optimizeSummary = undefined;
+        }
+        this.transition("SEEKING", "automatic optics selected; hardware AF owns focus");
+        void this.enterAutoFocusAcquisition("automatic focus selected", this.generation, true);
+      }
     } else {
       this.transition("OVERRIDE", "developer owns focus");
       const start = () => this.applyDeveloperFocus();
@@ -406,10 +420,10 @@ export class FocusController {
     void this.restoreOptimizationBest().then(() => this.transition("LOCKED", `${reason}; best settings restored`));
   }
 
-  optimizeEligible(now = performance.now()): boolean {
-    const stable = Boolean(this.stableSince && now - this.stableSince >= CAMERA_TUNING.geometryStabilityMs);
-    return this.strategy === "auto" && this.state === "LOCKED" && !this.isOptimizing() &&
-      Boolean(this.track && this.latest && !this.targetMissingSince) && stable;
+  optimizeEligible(): boolean {
+    return this.strategy === "auto" && !this.isOptimizing() && Boolean(
+      this.track && this.track.readyState === "live" && this.manualExposure() && this.caps.iso,
+    );
   }
 
   async optimize(measure: (label: string) => Promise<PerformanceSample>): Promise<void> {
@@ -428,25 +442,30 @@ export class FocusController {
     this.optimizeDecision = "starting";
     this.optimizeReason = "checking hardware focus";
 
-    const initialObservation = this.latest!;
-    const focusHealthy = this.decodeIsFresh() && initialObservation.metrics.focusScore >= 0.55;
+    const initialObservation = this.latest;
+    if (initialObservation) {
+      this.stableGeometry = initialObservation.geometry;
+      this.stableSince = performance.now();
+    }
+    const focusHealthy = Boolean(initialObservation && this.decodeIsFresh() && initialObservation.metrics.focusScore >= 0.55);
     if (!focusHealthy) {
       const mode = this.hardwareFocusMode();
       const patch: CameraPatch = {};
       if (mode) patch.focusMode = mode;
       if (this.caps.pointsOfInterest) {
-        patch.pointsOfInterest = [{ x: initialObservation.geometry.x, y: initialObservation.geometry.y }];
+        patch.pointsOfInterest = [{
+          x: initialObservation?.geometry.x ?? 0.5,
+          y: initialObservation?.geometry.y ?? 0.5,
+        }];
       }
-      this.transition("OPTIMIZE_EXPOSURE", "hardware AF refresh before exposure tournament");
-      const accepted = Object.keys(patch).length > 0 && await this.applyProbe(generation, patch, false);
-      const focused = accepted
-        ? await this.waitForFocusSettled(generation, initialObservation.id)
-        : initialObservation;
-      if (!focused || focused.metrics.focusScore < 0.28 || !this.current(generation)) {
-        this.optimizeState = "paused";
-        this.optimizeReason = "hardware autofocus has not produced a usable image";
-        return;
+      this.transition("OPTIMIZE_EXPOSURE", "quick hardware AF refresh before exposure tournament");
+      if (Object.keys(patch).length > 0) await this.applyProbe(generation, patch, false);
+      if (initialObservation) {
+        await this.waitForObservations(generation, initialObservation.id, 100, 0, 1, 500);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 160));
       }
+      if (!this.current(generation)) return;
     }
 
     if (!this.current(generation)) return;
@@ -744,7 +763,14 @@ export class FocusController {
     winner.samples.push(verification);
     winner.windows.push(await verification.result);
     if (!this.current(generation)) return;
-    const finalObservation = this.latest ?? initialObservation;
+    const finalObservation = this.latest?.at && this.latest.at >= startedAt ? this.latest : undefined;
+    if (!finalObservation) {
+      this.optimizeState = "paused";
+      this.optimizeReason = "no QR target discovered during tournament";
+      this.transition("STABILIZING", "tournament finished without QR evidence; hardware AF + AE recovery");
+      void this.enterAutoFocusAcquisition(this.optimizeReason, generation, true);
+      return;
+    }
     this.optimizeState = "complete";
     this.optimizeComparison = undefined;
     this.optimizeVisit = undefined;
@@ -974,7 +1000,9 @@ export class FocusController {
     this.repairAcquisitionInvariant();
     if (!this.targetMissingSince) this.targetMissingSince = now;
     if (this.isOptimizing()) {
-      if (now - this.targetMissingSince >= CAMERA_TUNING.optimizeTargetGraceMs) this.cancelOptimize("target disappeared during optimization");
+      this.lastReason = "QR absent; explicit exposure tournament continues";
+      this.changed();
+      return;
     } else if (this.state === "AUTO_AF_SETTLE" || this.state === "AUTO_FREEZE_VERIFY") {
       this.cancel("static QR target disappeared during calibration");
       this.stableGeometry = undefined;

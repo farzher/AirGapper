@@ -628,12 +628,16 @@ function setOptimizeEnabled(enabled: boolean): void {
     if (optimizeRunning) focusController.cancelOptimize("Optimize stopped");
     if (focusController.diagnostics().optimizeState !== "complete") opticsOptimizeStatus.textContent = "";
   } else {
-    opticsOptimizeStatus.textContent = "Stabilizing…";
+    opticsOptimizeStatus.textContent = "Starting…";
     beginOptimizeWhenReady();
   }
 }
 function beginOptimizeWhenReady(): void {
-  if (!optimizeEnabled || optimizeRunning || !focusController.optimizeEligible()) return;
+  if (!optimizeEnabled || optimizeRunning) return;
+  if (!focusController.optimizeEligible()) {
+    opticsOptimizeStatus.textContent = "Camera unavailable";
+    return;
+  }
   optimizeRunning = true;
   optimizeMeasureToken++;
   opticsKeep.hidden = true;
@@ -663,26 +667,26 @@ opticsKeep.addEventListener("click", () => {
   if (diagnostic.optimizeState !== "complete") return;
   const track = stream?.getVideoTracks()[0];
   if (!track) return;
-  const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
-  const acceptedFocusMode = actual.focusMode;
-  if (acceptedFocusMode === "manual" && actual.focusDistance !== undefined) {
+  const winningFocusMode = diagnostic.committedFocusMode;
+  const winningFocusDistance = diagnostic.committedFocusDistance;
+  if (winningFocusMode === "manual" && winningFocusDistance !== undefined) {
     manualFocusMode = "manual";
-    preferredFocusDistance = actual.focusDistance;
-  } else if (acceptedFocusMode === "continuous") {
+    preferredFocusDistance = winningFocusDistance;
+  } else if (winningFocusMode === "continuous") {
     manualFocusMode = "camera-auto";
-  } else if (acceptedFocusMode === "single-shot") {
+  } else if (winningFocusMode === "single-shot") {
     manualFocusMode = "single-shot";
   }
-  if (actual.exposureMode === "manual" && actual.exposureTime !== undefined) {
+  if (diagnostic.committedExposureMode === "manual" && diagnostic.committedExposureTime !== undefined) {
     automaticExposureAxis = false;
-    preferredExposureTime = actual.exposureTime;
-    cameraExposure.value = String(actual.exposureTime);
-    showExposureTime(actual.exposureTime);
-    automaticIsoAxis = actual.iso === undefined;
-    preferredIso = actual.iso;
-    if (actual.iso !== undefined) {
-      cameraIso.value = String(actual.iso);
-      cameraIsoValue.value = String(Number(actual.iso.toPrecision(4)));
+    preferredExposureTime = diagnostic.committedExposureTime;
+    cameraExposure.value = String(diagnostic.committedExposureTime);
+    showExposureTime(diagnostic.committedExposureTime);
+    automaticIsoAxis = diagnostic.committedIso === undefined;
+    preferredIso = diagnostic.committedIso;
+    if (diagnostic.committedIso !== undefined) {
+      cameraIso.value = String(diagnostic.committedIso);
+      cameraIsoValue.value = String(Number(diagnostic.committedIso.toPrecision(4)));
     }
   } else {
     automaticExposureAxis = true;
@@ -1559,7 +1563,7 @@ function renderFocusDiagnostics(): void {
   const optical = diagnostic.optical;
   const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
-  if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = "Stabilizing…";
+  if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = "Camera unavailable";
   else if (optimizing && !candidateEvidenceWindows.length) {
     opticsOptimizeStatus.textContent = diagnostic.optimizeRound
       ? `${diagnostic.optimizeRound[0]!.toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${diagnostic.optimizeSurvivors ?? diagnostic.optimizeVisit ?? "Exposure"}`
