@@ -8,6 +8,7 @@ interface InstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 }
 
+const installShell = document.querySelector<HTMLElement>(".install-shell")!;
 const installMenuButton = document.getElementById("install-menu-button") as HTMLButtonElement;
 const installMenu = document.getElementById("install-menu")!;
 const pwaInstall = document.getElementById("pwa-install") as HTMLButtonElement;
@@ -27,9 +28,7 @@ function installFallback(): string {
   return "Use your browser menu to install AirGapper.";
 }
 function syncInstallUi(): void {
-  installMenuButton.textContent = installed ? "Installed" : "Install App";
-  installMenuButton.disabled = false;
-  pwaInstall.textContent = installed ? "Installed" : "Install App";
+  installShell.hidden = installed;
   pwaInstall.disabled = installed;
   installHelp.hidden = installed || Boolean(deferredInstall);
   installHelp.textContent = installed ? "" : installFallback();
