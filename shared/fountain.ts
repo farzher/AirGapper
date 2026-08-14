@@ -1,96 +1,151 @@
-// Systematic-carousel fountain code — the trick that makes
-// a one-way optical channel practical.
+// Hybrid transport coding for the one-way optical channel.
 //
-// The sender emits an endless carousel: a systematic sweep of all K blocks,
-// then K mid-degree repair frames (XORs of pseudorandom block subsets derived
-// deterministically from `seq`), then the next cycle. A receiver locking on
-// anywhere rebuilds the file from ~K distinct frames at low loss — zero
-// fountain overhead — and repair frames patch what loss takes, in any order:
-// a dropped frame costs a little time, never correctness. No back-channel,
-// no retransmission, and sender and receiver frame rates don't need to match.
+// K=1 is direct. Small transfers use a systematic Cauchy MDS code over
+// GF(256): the first K symbols are the source blocks and any K distinct symbol
+// IDs in the 0..255 row space recover the payload. Larger transfers retain a
+// cheap systematic sparse fountain. Scheduling is shared with the sender so
+// physical slots get distinct rows and each slot remains a complete stream.
 
 import { splitmix32 } from "./protocol";
 
-function frameSeed(sessionId: number, seq: number): number {
-  let h = (Math.imul(sessionId + 1, 0x9e3779b1) ^ (seq + 0x85ebca6b)) | 0;
-  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
-  return (h ^ (h >>> 16)) | 0;
-}
-
-/** Frames per carousel cycle: one systematic sweep of all k blocks, then k
- *  repair frames for whatever the sweep dropped. */
-export function cycleLength(k: number): number {
-  return 2 * k;
-}
-
+export const MDS_MAX_K = 32;
+const MDS_SYMBOLS = 256;
 const REPAIR_DEGREE_MIN = 4;
 const REPAIR_DEGREE_MAX = 24;
 
-/**
- * Repair frames are uniform mid-degree (4–24), NOT robust-soliton. After a
- * sweep the receiver holds most blocks, so a repair frame's effective degree
- * is what remains after XORing the solved ones out — soliton's heavy degree-
- * 1/2 mass just re-sends blocks the sweep already delivered. Measured worst
- * wall-clock (seqs/k, k=179, 20 trials) against sweep + k/2 soliton:
- *
- *     drop            0%    5%    10%   30%   50%
- *     k/2 soliton    1.00  2.31  2.60  3.71  5.40
- *     k uniform4-24  1.00  1.37  1.59  2.11  3.06   ← plain LT: 1.14 at 0%
- */
-function repairIndices(k: number, sessionId: number, seq: number): number[] {
-  const rnd = splitmix32(frameSeed(sessionId, seq));
-  const d = Math.min(k, REPAIR_DEGREE_MIN + (rnd() % (REPAIR_DEGREE_MAX - REPAIR_DEGREE_MIN + 1)));
-  const set = new Set<number>();
-  while (set.size < d) set.add(rnd() % k);
-  return [...set];
+export type CodingMode = "direct" | "mds" | "fountain";
+
+export function codingMode(k: number): CodingMode {
+  return k <= 1 ? "direct" : k <= MDS_MAX_K ? "mds" : "fountain";
 }
 
-/**
- * Block subset for frame `seq`: systematic during the sweep, mid-degree
- * repair after. There is no handshake, and none is needed — the carousel
- * repeats forever, so a receiver locking on anywhere in the cycle takes
- * systematic frames whenever their block is still unsolved, and repair
- * frames from ANY cycle patch the sweep's losses. At low loss a receiver
- * that catches a whole sweep completes in exactly k frames — zero fountain
- * overhead.
- *
- * Repair frames seed from the ABSOLUTE seq, so every cycle's repair frames
- * draw different subsets — re-watching the carousel never replays them.
- *
- * Every physical grid slot owns a complete carousel. Systematic frames use an
- * affine permutation whose stride is the first number at least as large as the
- * grid that is coprime with k. A lone slot therefore visits every source block,
- * while a full grid emits distinct neighboring blocks on each display tick.
- */
+function gcd(a: number, b: number): number {
+  while (b !== 0) [a, b] = [b, a % b];
+  return a;
+}
+
 function coprimeStride(k: number, gridCodes: number): number {
   let stride = Math.max(1, gridCodes);
-  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
   while (gcd(stride, k) !== 1) stride++;
   return stride;
 }
 
-export function frameComposition(
+/**
+ * Coding symbol ID for one globally ordered sender opportunity.
+ *
+ * MDS walks its complete 256-row code and then repeats the same IDs, making a
+ * repeated optical capture a cheap duplicate. Fountain mode repeats source
+ * IDs during each systematic sweep, but allocates every repair a fresh ID.
+ * The affine source permutation lets any one physical slot visit every source
+ * block while neighboring slots remain distinct.
+ */
+export function scheduledEsi(
   k: number,
-  sessionId: number,
-  seq: number,
+  ordinal: number,
   slotIndex: number,
   gridCodes: number,
-): number[] {
-  const pos = seq % cycleLength(k);
-  const frameKey = ((slotIndex & 15) << 24 | (seq & 0x00ffffff)) >>> 0;
-  return pos < k
-    ? [(pos * coprimeStride(k, gridCodes) + slotIndex) % k]
-    : repairIndices(k, sessionId, frameKey);
+): number {
+  const mode = codingMode(k);
+  if (mode === "direct") return 0;
+  if (mode === "mds") return ordinal % MDS_SYMBOLS;
+
+  const state = Math.floor(ordinal / gridCodes);
+  const cycle = Math.floor(state / (2 * k));
+  const pos = state % (2 * k);
+  if (pos < k) return (pos * coprimeStride(k, gridCodes) + slotIndex) % k;
+
+  const repairOrdinal = (cycle * k + pos - k) * gridCodes + slotIndex;
+  const repairSpace = 0x01000000 - k;
+  return k + (repairOrdinal % repairSpace);
+}
+
+function frameSeed(sessionId: number, esi: number): number {
+  let h = (Math.imul(sessionId + 1, 0x9e3779b1) ^ (esi + 0x85ebca6b)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return (h ^ (h >>> 16)) | 0;
+}
+
+/**
+ * Balanced sparse repair support. Consecutive groups of K repair IDs are
+ * shifted windows through one affine permutation, so no two equations in a
+ * group are identical. Epoch-specific permutations retain the old 4..24
+ * mid-degree behavior without the tiny-K full-set collapse.
+ */
+function repairIndices(k: number, sessionId: number, esi: number): number[] {
+  const repair = esi - k;
+  const epoch = Math.floor(repair / k);
+  const start = repair % k;
+  const rnd = splitmix32(frameSeed(sessionId, epoch));
+  const maximumDegree = Math.min(REPAIR_DEGREE_MAX, k - 1);
+  const minimumDegree = Math.min(REPAIR_DEGREE_MIN, maximumDegree);
+  const degree = minimumDegree + (splitmix32(frameSeed(sessionId, esi))() % (maximumDegree - minimumDegree + 1));
+  const offset = rnd() % k;
+  let stride = 1 + (rnd() % (k - 1));
+  while (gcd(stride, k) !== 1) stride = stride === k - 1 ? 1 : stride + 1;
+  const out = new Array<number>(degree);
+  for (let i = 0; i < degree; i++) out[i] = (offset + (start + i) * stride) % k;
+  return out;
+}
+
+export function fountainComposition(k: number, sessionId: number, esi: number): number[] {
+  return esi < k ? [esi] : repairIndices(k, sessionId, esi);
+}
+
+const GF_EXP = new Uint8Array(512);
+const GF_LOG = new Uint8Array(256);
+{
+  let value = 1;
+  for (let i = 0; i < 255; i++) {
+    GF_EXP[i] = value;
+    GF_LOG[value] = i;
+    value <<= 1;
+    if (value & 0x100) value ^= 0x11d;
+  }
+  for (let i = 255; i < GF_EXP.length; i++) GF_EXP[i] = GF_EXP[i - 255]!;
+}
+
+function gfMul(a: number, b: number): number {
+  return a === 0 || b === 0 ? 0 : GF_EXP[GF_LOG[a]! + GF_LOG[b]!]!;
+}
+
+function gfInv(value: number): number {
+  return GF_EXP[255 - GF_LOG[value]!]!;
+}
+
+/** Systematic [I; Cauchy] generator row. Every square Cauchy minor is
+ * nonsingular, so any K distinct rows recover all K blocks. */
+export function mdsCoefficients(k: number, esi: number): Uint8Array {
+  const row = new Uint8Array(k);
+  const id = esi % MDS_SYMBOLS;
+  if (id < k) {
+    row[id] = 1;
+    return row;
+  }
+  // x_i=i and y=id are disjoint. Normalising by C[0,y] makes the k=2
+  // sequence A, B, A+aB, A+bB... explicit without changing rank.
+  for (let i = 0; i < k; i++) row[i] = gfMul(id, gfInv(id ^ i));
+  return row;
 }
 
 function xorInto(dst: Uint32Array, src: Uint32Array): void {
   for (let i = 0; i < dst.length; i++) dst[i] = (dst[i]! ^ src[i]!) >>> 0;
 }
 
-export class LTEncoder {
+function addScaled(dst: Uint8Array, src: Uint8Array, factor: number): void {
+  if (factor === 0) return;
+  if (factor === 1) {
+    for (let i = 0; i < dst.length; i++) dst[i] = dst[i]! ^ src[i]!;
+    return;
+  }
+  for (let i = 0; i < dst.length; i++) dst[i] = dst[i]! ^ gfMul(src[i]!, factor);
+}
+
+export class TransportEncoder {
   readonly k: number;
+  readonly mode: CodingMode;
   private readonly words: number;
-  private readonly blocks: Uint32Array;
+  private readonly xorBlocks: Uint32Array;
+  private readonly byteBlocks: Uint8Array;
 
   constructor(
     payload: Uint8Array,
@@ -98,21 +153,35 @@ export class LTEncoder {
     readonly sessionId: number,
   ) {
     this.k = Math.max(1, Math.ceil(payload.length / blockLen));
+    this.mode = codingMode(this.k);
     this.words = Math.ceil(blockLen / 4);
-    this.blocks = new Uint32Array(this.k * this.words);
-    const bytes = new Uint8Array(this.blocks.buffer);
-    for (let b = 0; b < this.k; b++) {
-      const src = payload.subarray(b * blockLen, Math.min((b + 1) * blockLen, payload.length));
-      bytes.set(src, b * this.words * 4);
+    this.xorBlocks = new Uint32Array(this.k * this.words);
+    this.byteBlocks = new Uint8Array(this.xorBlocks.buffer);
+    for (let block = 0; block < this.k; block++) {
+      const source = payload.subarray(block * blockLen, Math.min((block + 1) * blockLen, payload.length));
+      this.byteBlocks.set(source, block * this.words * 4);
     }
   }
 
-  encode(seq: number, slotIndex: number, gridCodes: number): Uint8Array {
-    const idx = frameComposition(this.k, this.sessionId, seq, slotIndex, gridCodes);
+  encode(esi: number): Uint8Array {
+    if (this.mode === "direct" || this.mode === "mds") {
+      const coefficients = mdsCoefficients(this.k, esi);
+      const out = new Uint8Array(this.blockLen);
+      for (let block = 0; block < this.k; block++) {
+        const factor = coefficients[block]!;
+        if (factor === 0) continue;
+        const offset = block * this.words * 4;
+        addScaled(out, this.byteBlocks.subarray(offset, offset + this.blockLen), factor);
+      }
+      return out;
+    }
+
     const out = new Uint32Array(this.words);
-    for (const b of idx) {
-      const off = b * this.words;
-      for (let w = 0; w < this.words; w++) out[w] = (out[w]! ^ this.blocks[off + w]!) >>> 0;
+    for (const block of fountainComposition(this.k, this.sessionId, esi)) {
+      const offset = block * this.words;
+      for (let word = 0; word < this.words; word++) {
+        out[word] = (out[word]! ^ this.xorBlocks[offset + word]!) >>> 0;
+      }
     }
     return new Uint8Array(out.buffer, 0, this.blockLen);
   }
@@ -123,19 +192,23 @@ interface PendingFrame {
   words: Uint32Array;
 }
 
-export class LTDecoder {
+interface MdsRow {
+  coefficients: Uint8Array;
+  bytes: Uint8Array;
+}
+
+export class TransportDecoder {
+  readonly mode: CodingMode;
   private readonly words: number;
   private readonly solved: (Uint32Array | null)[];
   private readonly byBlock = new Map<number, Set<PendingFrame>>();
   private readonly seen = new Set<number>();
+  private readonly seenCompositions = new Set<string>();
+  private readonly mdsBasis: (MdsRow | null)[];
+  private mdsBlocks: Uint8Array[] | null = null;
   solvedCount = 0;
   framesNew = 0;
   framesDup = 0;
-  /** Frames with a NEW seq that carried no new information — every block
-   *  they cover was already solved. Rare at high catch rates, but a lossy
-   *  multi-code receiver sees the carousel re-sweep blocks it has, and a
-   *  progress bar fed raw framesNew inflates by exactly that fraction
-   *  (measured 96% shown vs ~50% real on a 30%-catch 4-code run). */
   framesRedundant = 0;
 
   constructor(
@@ -144,33 +217,90 @@ export class LTDecoder {
     readonly sessionId: number,
     readonly totalLen: number,
   ) {
+    this.mode = codingMode(k);
     this.words = Math.ceil(blockLen / 4);
     this.solved = new Array<Uint32Array | null>(k).fill(null);
+    this.mdsBasis = new Array<MdsRow | null>(k).fill(null);
   }
 
   get isComplete(): boolean {
     return this.solvedCount >= this.k;
   }
 
-  addFrame(seq: number, slotIndex: number, gridCodes: number, block: Uint8Array): void {
-    const frameKey = ((slotIndex & 15) << 24 | (seq & 0x00ffffff)) >>> 0;
-    if (this.seen.has(frameKey)) {
+  get usefulSymbols(): number {
+    return this.framesNew - this.framesRedundant;
+  }
+
+  addFrame(esi: number, block: Uint8Array): void {
+    if (this.seen.has(esi)) {
       this.framesDup++;
       return;
     }
-    this.seen.add(frameKey);
+    this.seen.add(esi);
     this.framesNew++;
     if (this.isComplete) return;
+    if (this.mode === "direct" || this.mode === "mds") this.addMds(esi, block);
+    else this.addFountain(esi, block);
+  }
 
-    const idx = new Set(frameComposition(this.k, this.sessionId, seq, slotIndex, gridCodes));
+  private addMds(esi: number, block: Uint8Array): void {
+    const coefficients = mdsCoefficients(this.k, esi);
+    const bytes = new Uint8Array(this.blockLen);
+    bytes.set(block.subarray(0, this.blockLen));
+
+    for (let pivot = 0; pivot < this.k; pivot++) {
+      const basis = this.mdsBasis[pivot];
+      const factor = coefficients[pivot]!;
+      if (!basis || factor === 0) continue;
+      addScaled(coefficients, basis.coefficients, factor);
+      addScaled(bytes, basis.bytes, factor);
+    }
+
+    const pivot = coefficients.findIndex((value) => value !== 0);
+    if (pivot < 0) {
+      this.framesRedundant++;
+      return;
+    }
+    const inverse = gfInv(coefficients[pivot]!);
+    if (inverse !== 1) {
+      for (let i = pivot; i < coefficients.length; i++) coefficients[i] = gfMul(coefficients[i]!, inverse);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = gfMul(bytes[i]!, inverse);
+    }
+    this.mdsBasis[pivot] = { coefficients, bytes };
+    this.solvedCount++;
+    if (this.solvedCount === this.k) this.solveMds();
+  }
+
+  private solveMds(): void {
+    const blocks = new Array<Uint8Array>(this.k);
+    for (let pivot = this.k - 1; pivot >= 0; pivot--) {
+      const row = this.mdsBasis[pivot]!;
+      const bytes = row.bytes.slice();
+      for (let column = pivot + 1; column < this.k; column++) {
+        addScaled(bytes, blocks[column]!, row.coefficients[column]!);
+      }
+      blocks[pivot] = bytes;
+    }
+    this.mdsBlocks = blocks;
+  }
+
+  private addFountain(esi: number, block: Uint8Array): void {
+    const composition = fountainComposition(this.k, this.sessionId, esi);
+    const signature = [...composition].sort((a, b) => a - b).join(",");
+    if (this.seenCompositions.has(signature)) {
+      this.framesRedundant++;
+      return;
+    }
+    this.seenCompositions.add(signature);
+
+    const idx = new Set(composition);
     const words = new Uint32Array(this.words);
     new Uint8Array(words.buffer).set(block.subarray(0, this.blockLen));
-    for (const b of [...idx]) {
-      const s = this.solved[b];
-      if (s) {
-        xorInto(words, s);
-        idx.delete(b);
-      }
+    for (const source of [...idx]) {
+      const known = this.solved[source];
+      if (!known) continue;
+      xorInto(words, known);
+      idx.delete(source);
     }
     if (idx.size === 0) {
       this.framesRedundant++;
@@ -180,38 +310,34 @@ export class LTDecoder {
       this.resolve(idx.values().next().value!, words);
       return;
     }
-    const pf: PendingFrame = { idx, words };
-    for (const b of idx) {
-      let set = this.byBlock.get(b);
-      if (!set) {
-        set = new Set();
-        this.byBlock.set(b, set);
+    const pending: PendingFrame = { idx, words };
+    for (const source of idx) {
+      let waiting = this.byBlock.get(source);
+      if (!waiting) {
+        waiting = new Set();
+        this.byBlock.set(source, waiting);
       }
-      set.add(pf);
+      waiting.add(pending);
     }
   }
 
-  /** Peeling cascade: solve a block, reduce every frame waiting on it, repeat.
-   * Note for progress UX: this cascade back-loads — blocks solved hockey-
-   * sticks near the end while frame ARRIVAL is linear. Show frames collected,
-   * not blocks solved, or your progress bar will look stalled then teleport. */
-  private resolve(b0: number, w0: Uint32Array): void {
-    const queue: [number, Uint32Array][] = [[b0, w0]];
+  private resolve(firstBlock: number, firstWords: Uint32Array): void {
+    const queue: [number, Uint32Array][] = [[firstBlock, firstWords]];
     while (queue.length > 0) {
-      const [b, w] = queue.pop()!;
-      if (this.solved[b]) continue;
-      this.solved[b] = w;
+      const [block, words] = queue.pop()!;
+      if (this.solved[block]) continue;
+      this.solved[block] = words;
       this.solvedCount++;
-      const waiting = this.byBlock.get(b);
+      const waiting = this.byBlock.get(block);
       if (!waiting) continue;
-      this.byBlock.delete(b);
-      for (const pf of waiting) {
-        xorInto(pf.words, w);
-        pf.idx.delete(b);
-        if (pf.idx.size === 1) {
-          const r = pf.idx.values().next().value!;
-          this.byBlock.get(r)?.delete(pf);
-          if (!this.solved[r]) queue.push([r, pf.words]);
+      this.byBlock.delete(block);
+      for (const pending of waiting) {
+        xorInto(pending.words, words);
+        pending.idx.delete(block);
+        if (pending.idx.size === 1) {
+          const remaining = pending.idx.values().next().value!;
+          this.byBlock.get(remaining)?.delete(pending);
+          if (!this.solved[remaining]) queue.push([remaining, pending.words]);
         }
       }
     }
@@ -220,10 +346,12 @@ export class LTDecoder {
   assemble(): Uint8Array | null {
     if (!this.isComplete) return null;
     const out = new Uint8Array(this.totalLen);
-    for (let b = 0; b < this.k; b++) {
-      const start = b * this.blockLen;
-      const len = Math.min(this.blockLen, this.totalLen - start);
-      if (len > 0) out.set(new Uint8Array(this.solved[b]!.buffer, 0, len), start);
+    for (let block = 0; block < this.k; block++) {
+      const start = block * this.blockLen;
+      const length = Math.min(this.blockLen, this.totalLen - start);
+      if (length <= 0) continue;
+      const bytes = this.mdsBlocks?.[block] ?? new Uint8Array(this.solved[block]!.buffer, 0, this.blockLen);
+      out.set(bytes.subarray(0, length), start);
     }
     return out;
   }

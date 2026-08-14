@@ -17,12 +17,12 @@ import { rasterizeQr } from "../shared/qr-raster";
 import { formatBytes } from "../shared/format";
 import {
   blockLength,
-  denseBlockLength,
   fitsInOneStream,
+  selectTransportPlan,
   smallestSufficientFrameSize,
   sourceBlockCount,
 } from "../shared/frame-capacity";
-import { LTEncoder } from "../shared/fountain";
+import { scheduledEsi, TransportEncoder } from "../shared/fountain";
 import { MAX_SNIPPET_BYTES, MAX_SNIPPET_LABEL, packSnippet } from "../shared/snippet";
 import {
   MAX_FILE_BYTES,
@@ -614,8 +614,9 @@ async function startStream(revealStage = false) {
   const staticStream = plainSnippet !== null || payload.length <= maximumBlockLen;
   const layoutMode: LayoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
-  const blockLen = denseBlockLength(payload.length, maximumBlockLen, gridCodes);
-  const encoder = new LTEncoder(payload, blockLen, sessionId);
+  const transport = selectTransportPlan(payload.length, frameBytes, gridCodes);
+  const blockLen = transport.blockLen;
+  const encoder = new TransportEncoder(payload, blockLen, sessionId);
   const header: Omit<FrameHeader, "seq" | "slotIndex"> = {
     sessionId,
     layoutId: gridLayoutId(gridCols, gridRows),
@@ -634,7 +635,7 @@ async function startStream(revealStage = false) {
   // the same dimensions), so a mid-stream resize repaints from here instead of
   // leaving blank cells until the stagger rotation reaches them again.
   const cells: (ImageData | null)[] = new Array<ImageData | null>(gridCodes).fill(null);
-  let nextSeq = 0;
+  let symbolOrdinal = 0;
   stage.hidden = false;
   if (sendStart) sendStart.hidden = true;
   showStreamPanels(true);
@@ -709,15 +710,13 @@ async function startStream(revealStage = false) {
         maskPattern: 4,
       });
     }
-    const sequenceCycle = 0x01000000 * gridCodes;
-    if (nextSeq >= sequenceCycle) nextSeq = 0;
-    const slotIndex = nextSeq % gridCodes;
-    const seq = Math.floor(nextSeq / gridCodes);
+    const slotIndex = symbolOrdinal % gridCodes;
+    const seq = scheduledEsi(encoder.k, symbolOrdinal, slotIndex, gridCodes);
     const bytes = packFrame(
       { ...header, seq, slotIndex },
-      encoder.encode(seq, slotIndex, gridCodes),
+      encoder.encode(seq),
     );
-    nextSeq++;
+    symbolOrdinal++;
     // Every code carries the same byte length at the same ECC with the same
     // pinned mask, so once the first one locks the version every later
     // QRCode.create lands on identical geometry — required for tiling.
@@ -783,8 +782,20 @@ async function startStream(revealStage = false) {
               gridMargin: GRID_MARGIN,
               scaling: fitScaling ? "fit" : "integer",
             },
-            qr: { version, modules },
-            fountain: { k: encoder.k, blockLen },
+            qr: {
+              version,
+              modules,
+              encodedBytes: transport.frameBytes,
+              ceilingBytes: frameBytes,
+              headerPercent: Number((transport.headerFraction * 100).toFixed(2)),
+            },
+            fountain: {
+              mode: encoder.mode,
+              k: encoder.k,
+              blockLen,
+              paddingBytes: transport.paddingBytes,
+              paddingPercent: Number((transport.paddingFraction * 100).toFixed(3)),
+            },
             ua: navigator.userAgent,
           }),
         }).catch(() => undefined);

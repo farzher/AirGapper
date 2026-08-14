@@ -9,8 +9,8 @@
  * the odd dropped frame; under real loss the ETA's overshoot handling extends
  * the target instead of this model pretending to know the loss rate.
  */
-export function expectedFountainOverhead(sourceBlocks: number): number {
-  return sourceBlocks <= 1 ? 1 : 1.02;
+export function expectedCodingOverhead(mode: "direct" | "mds" | "fountain"): number {
+  return mode === "fountain" ? 1.02 : 1;
 }
 
 export interface TransferProgressEstimate {
@@ -23,11 +23,25 @@ export interface TransferProgressEstimate {
 
 export function estimateTransferProgress(
   sourceBlocks: number,
-  uniqueFrames: number,
+  usefulSymbols: number,
   elapsedSeconds: number,
-  _solvedBlocks = uniqueFrames,
+  sourceRank = usefulSymbols,
+  mode: "direct" | "mds" | "fountain" = "fountain",
 ): TransferProgressEstimate {
   const minimumFrames = Math.max(1, sourceBlocks);
+  if (mode !== "fountain") {
+    const rank = Math.min(minimumFrames, Math.max(0, sourceRank));
+    const fraction = rank >= minimumFrames ? 1 : 0.98 * rank / minimumFrames;
+    const rate = elapsedSeconds > 0 ? rank / elapsedSeconds : 0;
+    const remainingFrames = minimumFrames - rank;
+    return {
+      fraction,
+      expectedFrames: minimumFrames,
+      remainingFrames,
+      etaSeconds: rank >= 2 && elapsedSeconds >= 1 && rate > 0 ? remainingFrames / rate : undefined,
+      phase: rank < minimumFrames ? "collecting" : "decoding",
+    };
+  }
   // An aligned clean systematic sweep finishes at k, while a mid-cycle join or
   // dropped symbols consumes repair frames. Reserve 20% for that carousel time:
   // enough to avoid camping at 99%, but not the old solved-block estimate that
@@ -44,14 +58,14 @@ export function estimateTransferProgress(
   // This intentionally makes completion arrive a little earlier than the bar
   // predicts instead of promising that an unknown final repair is imminent.
   let fraction: number;
-  if (uniqueFrames <= expectedFrames) {
-    fraction = 0.92 * (uniqueFrames / expectedFrames);
+  if (usefulSymbols <= expectedFrames) {
+    fraction = 0.92 * (usefulSymbols / expectedFrames);
   } else {
     const repairStep = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));
-    fraction = 0.92 + 0.03 * (1 - Math.exp(-(uniqueFrames - expectedFrames) / repairStep));
+    fraction = 0.92 + 0.03 * (1 - Math.exp(-(usefulSymbols - expectedFrames) / repairStep));
   }
-  const phase = uniqueFrames < minimumFrames ? "collecting" : "decoding";
-  const rate = elapsedSeconds > 0 ? uniqueFrames / elapsedSeconds : 0;
+  const phase = usefulSymbols < minimumFrames ? "collecting" : "decoding";
+  const rate = elapsedSeconds > 0 ? usefulSymbols / elapsedSeconds : 0;
 
   // Past the expected frame count the stream is running long — poor light,
   // motion blur, a camera that won't hold focus. That is exactly when someone
@@ -59,15 +73,15 @@ export function estimateTransferProgress(
   // time instead of going silent: extend the target a tenth of the stream at
   // a time. (The carousel's nominal redundancy is only 2%, which as a step
   // size would quote a perpetual "about 1s" — a floor keeps the steps honest.)
-  const overshoot = uniqueFrames - expectedFrames;
+  const overshoot = usefulSymbols - expectedFrames;
   const step = Math.max(expectedRedundancy, Math.ceil(minimumFrames / 10));
   const target =
     overshoot < 0
       ? expectedFrames
       : expectedFrames + step * (Math.floor(overshoot / step) + 1);
-  const remainingFrames = Math.max(0, target - uniqueFrames);
+  const remainingFrames = Math.max(0, target - usefulSymbols);
   const etaSeconds =
-    uniqueFrames >= 3 && elapsedSeconds >= 1 && rate > 0
+    usefulSymbols >= 3 && elapsedSeconds >= 1 && rate > 0
       ? remainingFrames / rate
       : undefined;
   return { fraction, expectedFrames, remainingFrames, etaSeconds, phase };

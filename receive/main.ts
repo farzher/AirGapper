@@ -11,17 +11,16 @@
 //   iOS Safari exposes neither. shared/platform.ts owns
 //   the probing, so everything here is capability-gated rather than UA-gated.
 
-import { LTDecoder } from "../shared/fountain";
+import { TransportDecoder } from "../shared/fountain";
 import { formatBytes } from "../shared/format";
 import {
   completedGoodputKbs,
   estimateTransferProgress,
-  expectedFountainOverhead,
+  expectedCodingOverhead,
   formatDuration,
 } from "../shared/progress";
 import { createDecodeWorker, usesSimpleDecodeWorker } from "./worker-factory";
 import { GridLattice, type GridSnapshot } from "./grid-lattice";
-import { gridLayoutById } from "../shared/grid-layout";
 import {
   DecodeWorkerPool,
   type DecodeCompletion,
@@ -278,7 +277,7 @@ const STATS_WINDOW_MS = 1000;
 const STATS_TICK_MS = 250;
 
 let stream: MediaStream | null = null;
-let decoder: LTDecoder | null = null;
+let decoder: TransportDecoder | null = null;
 let streamKey = "";
 let reportSessionId = 0; // pairs this run with the sender's diagnostics post
 let startTs = 0;
@@ -359,8 +358,6 @@ let trackedAttempts = 0; // crops that TRIED the fast path — hits/attempts is
 let cameraStartedTs = 0; // acquisition latency = first decode − camera start
 let zeroRegionMs = 0; // transfer time spent with tracking fully collapsed
 let degradedMs = 0; // transfer time spent below the expected code count
-let minSeq = Infinity; // seq span ≈ what the sender emitted while we watched;
-let maxSeq = -1; //        framesNew / span is the fraction we actually caught
 // One sample per stats tick (250 ms): elapsed s, framesNew, solved blocks,
 // live regions, capture fps, decode fps. The shape of a bad run — where it
 // stalled, when tracking collapsed — is invisible in run totals.
@@ -388,7 +385,6 @@ interface Region extends SymbolBox {
    * late worker replies harmless: an older frame can fill a gap instead of
    * being discarded merely because a newer worker finished first. */
   sequenceSamples: { seq: number; at: number }[];
-  seqStep?: number;
   qualityLevel: number;
   /** How far the code moved between its last two decodes, in capture px —
    *  a handheld receiver's crops must lead the target, not chase it. */
@@ -434,11 +430,11 @@ const cropAttempts = new Map<number, CropAttempt[]>();
 const scanCapturedAt = new Map<number, number>();
 const localReacquireIds = new Set<number>();
 
-type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; accepted: number };
+type ScanOutcome = { rejected: number; stale: number; otherStream: number; duplicate: number; redundant: number; accepted: number };
 const scanOutcomes = new Map<number, ScanOutcome>();
 function noteScanOutcome(scanId: number | undefined, kind: keyof ScanOutcome): void {
   if (scanId === undefined) return;
-  const outcome = scanOutcomes.get(scanId) ?? { rejected: 0, stale: 0, otherStream: 0, duplicate: 0, accepted: 0 };
+  const outcome = scanOutcomes.get(scanId) ?? { rejected: 0, stale: 0, otherStream: 0, duplicate: 0, redundant: 0, accepted: 0 };
   outcome[kind]++;
   scanOutcomes.set(scanId, outcome);
 }
@@ -496,15 +492,6 @@ function pruneSequenceSamples(region: Region, now: number): void {
 }
 
 function noteSequence(region: Region, seq: number, now: number): void {
-  // Sequence numbers are global across the grid, so one cell normally advances
-  // by the number of cells. The high-water count is stable through a temporary
-  // lost region and is 1 for the common single-code sender.
-  const step = Math.max(1, expectedRegions);
-  if (region.seqStep !== step) {
-    region.seqStep = step;
-    region.sequenceSamples.length = 0;
-    region.qualityLevel = 0;
-  }
   pruneSequenceSamples(region, now);
   // Camera frames are pipelined through several workers and can complete out of
   // order. Retain every distinct sequence in the window so a late completion
@@ -1010,14 +997,11 @@ const overlayCtx = overlay.getContext("2d")!;
 
 function captureQualityRate(region: Region, now: number): number {
   pruneSequenceSamples(region, now);
-  if (region.sequenceSamples.length < 2) return 0;
-  const sequences = region.sequenceSamples.map((sample) => sample.seq);
-  const span = Math.max(...sequences) - Math.min(...sequences);
-  const opportunities = Math.max(1, Math.round(span / Math.max(1, region.seqStep ?? 1)) + 1);
-  // One prior miss makes a newly found code earn confidence instead of turning
-  // blue from two lucky frames. Its influence naturally vanishes during a
-  // sustained run, unlike the old fixed 20-result history.
-  return Math.min(1, region.sequenceSamples.length / (opportunities + 1));
+  // ESI identifies an equation rather than sender wall-clock position. MDS
+  // rows and systematic source IDs intentionally repeat, so an ESI span is not
+  // a capture-opportunity denominator. The scheduler's per-attempt EWMA is the
+  // honest optical success signal.
+  return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
 }
 
 function hasDensityHeadroom(region: Region): boolean {
@@ -1314,8 +1298,6 @@ function stopReceiver(): void {
   cameraStartedTs = 0;
   zeroRegionMs = 0;
   degradedMs = 0;
-  minSeq = Infinity;
-  maxSeq = -1;
   timeline.length = 0;
   plainQrPolicy.reset();
   result.replaceChildren();
@@ -1851,6 +1833,7 @@ function finishScanCapture(id: number, completion: DecodeCompletion): void {
     const details = [
       outcome.accepted && `${outcome.accepted} accepted`,
       outcome.duplicate && `${outcome.duplicate} duplicate`,
+      outcome.redundant && `${outcome.redundant} redundant`,
       outcome.rejected && `${outcome.rejected} rejected`,
       outcome.stale && `${outcome.stale} stale`,
       outcome.otherStream && `${outcome.otherStream} other stream`,
@@ -2230,8 +2213,6 @@ function resetActiveTransfer(): void {
   qrReadTimes.length = 0;
   usefulFrameTimes.length = 0;
   lastDistinctArrivalAt = 0;
-  minSeq = Infinity;
-  maxSeq = -1;
   bar.style.width = "0";
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
@@ -2317,7 +2298,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   // streamIdentity() covers every invariant header field. parseFrame has
   // already checked magic, lengths, field ranges and CRC before this point.
   if (!decoder) {
-    decoder = new LTDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
+    decoder = new TransportDecoder(header.k, header.blockLen, header.sessionId, header.totalLen);
     usefulFrameTimes.length = 0;
     streamKey = identity;
     reportSessionId = header.sessionId;
@@ -2325,21 +2306,23 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
   }
-  const sequenceOrdinal = header.seq;
-  minSeq = Math.min(minSeq, sequenceOrdinal);
-  maxSeq = Math.max(maxSeq, sequenceOrdinal);
   const framesNewBefore = decoder.framesNew;
-  const usefulBefore = decoder.framesNew - decoder.framesRedundant;
-  const layout = gridLayoutById(header.layoutId)!;
-  decoder.addFrame(header.seq, header.slotIndex, layout.cols * layout.rows, block);
+  const usefulBefore = decoder.usefulSymbols;
+  const redundantBefore = decoder.framesRedundant;
+  decoder.addFrame(header.seq, block);
   const receivedAt = receiverNow();
-  noteScanOutcome(info?.scanId, decoder.framesNew > framesNewBefore ? "accepted" : "duplicate");
+  noteScanOutcome(
+    info?.scanId,
+    decoder.framesNew === framesNewBefore
+      ? "duplicate"
+      : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted",
+  );
   if (decoder.framesNew > framesNewBefore) {
     qrReadTimes.push(receivedAt);
     if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
     lastDistinctArrivalAt = receivedAt;
   }
-  if (decoder.framesNew - decoder.framesRedundant > usefulBefore) {
+  if (decoder.usefulSymbols > usefulBefore) {
     usefulFrameTimes.push(receivedAt);
   }
   updateProgressEstimate();
@@ -2361,18 +2344,16 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
 function updateProgressEstimate() {
   if (!decoder) return;
   const elapsed = Math.max(0, (receiverNow() - startTs) / 1000);
-  // Progress runs on frames that carried INFORMATION, not raw arrivals. On a
-  // lossy multi-code run the carousel re-sweeps blocks this receiver already
-  // solved; each re-sweep frame has a fresh seq, so framesNew inflates by the
-  // loss rate — a 30%-catch 4-code run showed 96% on the bar with half the
-  // blocks outstanding, then "finished early". framesRedundant subtracts
-  // exactly those empty arrivals.
-  const usefulFrames = decoder.framesNew - decoder.framesRedundant;
+  // Progress runs on coding innovation, not successful QR decodes. MDS uses
+  // exact matrix rank; fountain mode removes duplicate IDs, repeated supports,
+  // and equations that reduce entirely to solved blocks.
+  const usefulFrames = decoder.usefulSymbols;
   const estimate = estimateTransferProgress(
     decoder.k,
     usefulFrames,
     elapsed,
     decoder.solvedCount,
+    decoder.mode,
   );
   const percent = estimate.fraction * 100;
   const shownPercent = percent < 10 ? percent.toFixed(1) : percent.toFixed(0);
@@ -2383,7 +2364,7 @@ function updateProgressEstimate() {
   transferSizeLabel.textContent = formatBytes(remainingBytes);
   const liveKbs = liveGoodputKbs(receiverNow());
   const liveUsefulFps = liveKbs > 0
-    ? liveKbs * 1024 * expectedFountainOverhead(decoder.k) / decoder.blockLen
+    ? liveKbs * 1024 * expectedCodingOverhead(decoder.mode) / decoder.blockLen
     : 0;
   etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3
     ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
@@ -2418,7 +2399,7 @@ function liveGoodputKbs(now: number): number {
   }
   if (!decoder || !usefulFrameTimes.length) return 0;
   return usefulFrameTimes.length * decoder.blockLen /
-    expectedFountainOverhead(decoder.k) / 1024 / (STATS_WINDOW_MS / 1000);
+    expectedCodingOverhead(decoder.mode) / 1024 / (STATS_WINDOW_MS / 1000);
 }
 
 async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
@@ -2433,8 +2414,6 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
   if (import.meta.env.DEV && import.meta.env.VITE_DIAGNOSTICS === "1") {
     const track = stream?.getVideoTracks()[0];
     const camera = track?.getSettings();
-    const seqSpan = maxSeq >= minSeq ? maxSeq - minSeq + 1 : 0;
-    const parsed = (decoder?.framesNew ?? 0) + (decoder?.framesDup ?? 0);
     diagnosticsBase = {
       role: "receiver",
       when: new Date().toISOString(),
@@ -2442,15 +2421,20 @@ async function finish(container: Uint8Array, hashOk: boolean, seconds: number) {
       acquisitionSeconds: cameraStartedTs ? Number(((startTs - cameraStartedTs) / 1000).toFixed(2)) : null,
       payloadSha256: [...container.slice(9, 41)].map((b) => b.toString(16).padStart(2, "0")).join(""),
       fountain: {
+        mode: decoder?.mode,
         k: decoder?.k,
         blockLen: decoder?.blockLen,
         framesNew: decoder?.framesNew,
         framesDup: decoder?.framesDup,
         framesRedundant: decoder?.framesRedundant,
+        innovativeSymbols: decoder?.usefulSymbols,
+        sourceRank: decoder?.mode === "mds" ? decoder.solvedCount : null,
+        solvedBlocks: decoder?.mode === "fountain" ? decoder.solvedCount : null,
         overhead: decoder ? Number((decoder.framesNew / decoder.k).toFixed(2)) : null,
-        usefulOverhead: decoder ? Number(((decoder.framesNew - decoder.framesRedundant) / decoder.k).toFixed(2)) : null,
-        seqSpan,
-        catchRate: seqSpan ? Number((parsed / seqSpan).toFixed(3)) : null,
+        usefulOverhead: decoder ? Number((decoder.usefulSymbols / decoder.k).toFixed(2)) : null,
+        innovationRate: decoder?.framesNew
+          ? Number((decoder.usefulSymbols / decoder.framesNew).toFixed(3))
+          : null,
       },
       codes: peakRegions,
       grid: lastGridSnapshot ? {

@@ -5,9 +5,9 @@ import { gridLayoutById } from "./grid-layout";
 // id on any frame simply starts a fresh transfer.
 //
 // Layout (little-endian), 17 bytes, followed by `blockLen` payload bytes:
-//   0  u8   magic 0xD1
+//   0  u8   magic 0xD2
 //   1  u16  sessionId   random per sender start
-//   3  u32  seq         drives the fountain PRNG (see fountain.ts)
+//   3  u32  ESI + grid metadata (see fountain.ts)
 //   7  u16  blockLen    payload bytes per frame
 //   9  u32  totalLen    protected file-container length in bytes
 //  13  u32  payloadFnv  FNV-1a of the whole container — verified on completion
@@ -33,7 +33,7 @@ export const MAX_FILE_LABEL = `${MAX_FILE_BYTES / 1024 / 1024} MB`;
 // not need to be stored. The outer framed stream already authenticates this
 // container, so it also needs no magic or version bytes of its own.
 const FILE_HEADER_LEN = 41;
-const MAGIC = 0xd1;
+const MAGIC = 0xd2;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -275,7 +275,7 @@ export async function verifyFile(file: OpticalFile): Promise<boolean> {
 
 export interface FrameHeader {
   sessionId: number;
-  /** Per-slot fountain sequence number. */
+  /** Encoding symbol ID; identical IDs always describe the same equation. */
   seq: number;
   layoutId: number;
   slotIndex: number;
