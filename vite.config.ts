@@ -41,7 +41,7 @@ export default defineConfig(({ mode }) => ({
         clientsClaim: true,
         inlineWorkboxRuntime: true,
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
-        globPatterns: ["**/*.{html,webmanifest,png}"],
+        globPatterns: ["**/*.html"],
         runtimeCaching: [{
           urlPattern: /\/received-media\//,
           handler: "CacheOnly" as const,
