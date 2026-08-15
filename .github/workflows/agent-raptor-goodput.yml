@@ -1,0 +1,65 @@
+name: Agent Raptor goodput metric fix
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/agent-raptor-goodput.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Fix RaptorQ useful-symbol accounting
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: expected one match for {old[:80]!r}, got {text.count(old)}")
+              p.write_text(text.replace(old, new))
+
+          replace("shared/transport.js", '''  addRaptor(block) {
+            const payload = this.raptor.add(block);
+            if (payload) {
+              this.raptorPayload = payload;
+              this.solvedCount = this.k;
+              return;
+            }
+            if (this.framesNew < this.k) {
+              this.solvedCount = this.framesNew;
+            } else {
+              this.framesRedundant++;
+              this.solvedCount = this.k - 1;
+            }
+          }
+          ''', '''  addRaptor(block) {
+            const payload = this.raptor.add(block);
+            if (payload) {
+              this.raptorPayload = payload;
+              this.solvedCount = this.k;
+              return;
+            }
+            // RaptorQ's streaming decoder only tells us when the payload is solved;
+            // it does not tell us whether an individual fresh repair symbol was
+            // algebraically redundant. Do not misclassify every post-k symbol as
+            // redundant: those fresh ESIs are exactly the coding overhead that may
+            // make the decoder complete, and they should contribute to live goodput.
+            this.solvedCount = Math.min(this.framesNew, this.k - 1);
+          }
+          ''')
+          replace("index.html", '<span class="brand">AirGapper <span class="app-version">v0.5.45</span></span>', '<span class="brand">AirGapper <span class="app-version">v0.5.46</span></span>')
+          replace("sw.js", 'const CACHE = "airgapper-static-js-v8";', 'const CACHE = "airgapper-static-js-v9";')
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/agent-raptor-goodput.yml
+          git add shared/transport.js index.html sw.js
+          git commit -m "fix RaptorQ live goodput accounting"
+          git push origin HEAD:master
