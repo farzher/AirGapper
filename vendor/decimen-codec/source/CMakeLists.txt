@@ -33,7 +33,10 @@ add_definitions("-s DISABLE_EXCEPTION_CATCHING=0")
 # and run scalar without this. iOS Safari has shipped wasm SIMD since 16.4;
 # so has every browser this app supports. Set globally so the LIBRARY, where
 # those loops live, gets it — not just the wrapper.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")
+option(DECIMEN_SIMD "Build with WebAssembly SIMD" ON)
+if(DECIMEN_SIMD)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")
+endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxing-cpp/core ${CMAKE_BINARY_DIR}/ZXing)
 # Export QR's bitstream parser so the tracked CRC path can validate uncorrected

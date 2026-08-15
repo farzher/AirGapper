@@ -215,12 +215,12 @@ function packFrame(h, block) {
   );
   return out;
 }
-function parseFrame(bytes) {
+function parseFrameBody(bytes, hasCrc) {
   var _a;
   const mode = modeForMagic((_a = bytes[0]) != null ? _a : -1);
   if (!mode) return null;
   const headerLen = frameHeaderLength(mode);
-  if (bytes.length < headerLen + FRAME_CRC_LEN + 1) return null;
+  if (bytes.length < headerLen + 1 + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
   let bit = 8;
   let seq = 0;
   let layoutId = 0;
@@ -261,9 +261,11 @@ function parseFrame(bytes) {
     if (!layout || slotIndex >= layout.cols * layout.rows) return null;
   }
   const packetLength = headerLen + blockLen;
-  if (bytes.length !== packetLength + FRAME_CRC_LEN) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
+  if (bytes.length !== packetLength + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
+  if (hasCrc) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (view.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
+  }
   const header = {
     mode,
     seq,
@@ -276,15 +278,27 @@ function parseFrame(bytes) {
   };
   return { header, block: bytes.subarray(headerLen, packetLength) };
 }
+function parseFrame(bytes) {
+  return parseFrameBody(bytes, true);
+}
+function parseVerifiedFramePayload(bytes) {
+  return parseFrameBody(bytes, false);
+}
 function streamIdentity(h) {
   return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}:${h.layoutId}`;
 }
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let value = 0; value < 256; value++) {
+    let crc = value;
+    for (let bit = 0; bit < 8; bit++) crc = crc >>> 1 ^ (crc & 1 ? 3988292384 : 0);
+    table[value] = crc >>> 0;
+  }
+  return table;
+})();
 function crc32(bytes) {
   let crc = 4294967295;
-  for (const value of bytes) {
-    crc ^= value;
-    for (let bit = 0; bit < 8; bit++) crc = crc >>> 1 ^ 3988292384 & -(crc & 1);
-  }
+  for (const value of bytes) crc = CRC32_TABLE[(crc ^ value) & 255] ^ crc >>> 8;
   return ~crc >>> 0;
 }
 function fnv1a(bytes) {
@@ -319,6 +333,7 @@ export {
   packFile,
   packFrame,
   parseFrame,
+  parseVerifiedFramePayload,
   splitmix32,
   streamIdentity,
   unpackFile,

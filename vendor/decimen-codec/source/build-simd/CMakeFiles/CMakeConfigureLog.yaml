@@ -1,0 +1,101 @@
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineSystem.cmake:200 (message)"
+      - "CMakeLists.txt:9 (project)"
+    message: |
+      The target system is: Emscripten - 1 - x86
+      The host system is: Linux - 6.17.0-1022-azure - x86_64
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CheckCompilerFlag.cmake:18 (cmake_check_source_compiles)"
+      - "/usr/local/share/cmake-3.31/Modules/CheckCXXCompilerFlag.cmake:55 (cmake_check_compiler_flag)"
+      - "third_party/zxing-cpp/core/CMakeLists.txt:79 (check_cxx_compiler_flag)"
+    checks:
+      - "Performing Test HAS_FILE_PREFIX_ARG"
+    directories:
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-7wOR38"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-7wOR38"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
+      CMAKE_CXX_FLAGS: " -msimd128"
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules"
+    buildResult:
+      variable: "HAS_FILE_PREFIX_ARG"
+      cached: true
+      stdout: |
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-7wOR38'
+        
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_fce48
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DHAS_FILE_PREFIX_ARG  -msimd128  -std=gnu++20   -fmacro-prefix-map=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/third_party/zxing-cpp/core/= -MD -MT CMakeFiles/cmTC_fce48.dir/src.cxx.o -MF CMakeFiles/cmTC_fce48.dir/src.cxx.o.d -o CMakeFiles/cmTC_fce48.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-7wOR38/src.cxx
+        shared:INFO: (Emscripten: Running sanity checks)
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -msimd128  CMakeFiles/cmTC_fce48.dir/src.cxx.o -o cmTC_fce48.js   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "/usr/local/share/cmake-3.31/Modules/CheckCSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "/usr/local/share/cmake-3.31/Modules/FindThreads.cmake:97 (CHECK_C_SOURCE_COMPILES)"
+      - "/usr/local/share/cmake-3.31/Modules/FindThreads.cmake:163 (_threads_check_libc)"
+      - "third_party/zxing-cpp/core/CMakeLists.txt:488 (find_package)"
+    checks:
+      - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
+    directories:
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-26NzAs"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-26NzAs"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
+      CMAKE_C_FLAGS: ""
+      CMAKE_C_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules"
+    buildResult:
+      variable: "CMAKE_HAVE_LIBC_PTHREAD"
+      cached: true
+      stdout: |
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-26NzAs'
+        
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_cdf22
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc -DCMAKE_HAVE_LIBC_PTHREAD   -MD -MT CMakeFiles/cmTC_cdf22.dir/src.c.o -MF CMakeFiles/cmTC_cdf22.dir/src.c.o.d -o CMakeFiles/cmTC_cdf22.dir/src.c.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-26NzAs/src.c
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc   CMakeFiles/cmTC_cdf22.dir/src.c.o -o cmTC_cdf22.js   && :
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CheckCompilerFlag.cmake:18 (cmake_check_source_compiles)"
+      - "/usr/local/share/cmake-3.31/Modules/CheckCXXCompilerFlag.cmake:55 (cmake_check_compiler_flag)"
+      - "third_party/zxing-cpp/core/CMakeLists.txt:686 (check_cxx_compiler_flag)"
+    checks:
+      - "Performing Test COMPILER_KNOWS_Os"
+    directories:
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-q3AS1X"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-q3AS1X"
+    cmakeVariables:
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
+      CMAKE_CXX_FLAGS: " -msimd128"
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules;/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules"
+    buildResult:
+      variable: "COMPILER_KNOWS_Os"
+      cached: true
+      stdout: |
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-q3AS1X'
+        
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_1f8bc
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DCOMPILER_KNOWS_Os  -msimd128  -std=gnu++20   -Os -MD -MT CMakeFiles/cmTC_1f8bc.dir/src.cxx.o -MF CMakeFiles/cmTC_1f8bc.dir/src.cxx.o.d -o CMakeFiles/cmTC_1f8bc.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/CMakeFiles/CMakeScratch/TryCompile-q3AS1X/src.cxx
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -msimd128  CMakeFiles/cmTC_1f8bc.dir/src.cxx.o -o cmTC_1f8bc.js   && :
+        
+      exitCode: 0
+...

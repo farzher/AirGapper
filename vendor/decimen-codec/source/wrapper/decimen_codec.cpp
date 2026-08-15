@@ -27,6 +27,7 @@
  * result's position back in reconstructs the sampling transform.
  */
 
+#include <array>
 #include "ReadBarcode.h"
 #include "HybridBinarizer.h"
 #include "GridSampler.h"
@@ -450,8 +451,6 @@ struct CachedSamplePoint
 {
 	float x;
 	float y;
-	float qx[4];
-	float qy[4];
 };
 
 struct PersistentTrack
@@ -599,14 +598,22 @@ static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits)
 	return QRCode::DecodeBitStream(std::move(data), *version, format.ecLevel);
 }
 
+static const std::array<uint32_t, 256> CRC32_TABLE = [] {
+	std::array<uint32_t, 256> table{};
+	for (uint32_t value = 0; value < table.size(); ++value) {
+		uint32_t crc = value;
+		for (int bit = 0; bit < 8; ++bit)
+			crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+		table[value] = crc;
+	}
+	return table;
+}();
+
 static uint32_t crc32(const uint8_t* data, size_t size)
 {
 	uint32_t crc = 0xffffffffu;
-	for (size_t i = 0; i < size; ++i) {
-		crc ^= data[i];
-		for (int bit = 0; bit < 8; ++bit)
-			crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
-	}
+	for (size_t i = 0; i < size; ++i)
+		crc = (crc >> 8) ^ CRC32_TABLE[(crc ^ data[i]) & 0xffu];
 	return ~crc;
 }
 
@@ -650,36 +657,68 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 			continue;
 		}
 
-		started = emscripten_get_now();
-		bool inFrame = true;
 		const int dim = track.dimension;
-		const bool useMultiSample = track.multiSample && anchor.contrast < 180;
-		for (int y = 0; y < dim; ++y)
-			for (int x = 0; x < dim; ++x) {
-				const auto& p = track.samples[y * dim + x];
-				int lum = 0;
-				if (useMultiSample) {
-					for (int i = 0; i < 4; ++i) {
-						int sample = lumAt(p.qx[i] + track.dx, p.qy[i] + track.dy);
-						if (sample < 0) {
-							inFrame = false;
-							sample = 255;
+		const bool canMultiSample = track.multiSample && anchor.contrast < 180;
+		auto sampleGrid = [&](bool multiSample) {
+			double sampleStarted = emscripten_get_now();
+			bool inFrame = true;
+			for (int y = 0; y < dim; ++y)
+				for (int x = 0; x < dim; ++x) {
+					const auto& p = track.samples[y * dim + x];
+					int lum = 0;
+					if (multiSample) {
+						const auto& left = track.samples[y * dim + (x > 0 ? x - 1 : x)];
+						const auto& right = track.samples[y * dim + (x + 1 < dim ? x + 1 : x)];
+						const auto& up = track.samples[(y > 0 ? y - 1 : y) * dim + x];
+						const auto& down = track.samples[(y + 1 < dim ? y + 1 : y) * dim + x];
+						const float vxX = x + 1 < dim ? right.x - p.x : p.x - left.x;
+						const float vxY = x + 1 < dim ? right.y - p.y : p.y - left.y;
+						const float vyX = y + 1 < dim ? down.x - p.x : p.x - up.x;
+						const float vyY = y + 1 < dim ? down.y - p.y : p.y - up.y;
+						constexpr float offsets[4][2] = {{-0.25f, -0.25f}, {0.25f, -0.25f}, {-0.25f, 0.25f}, {0.25f, 0.25f}};
+						for (const auto& offset : offsets) {
+							int sample = lumAt(p.x + track.dx + offset[0] * vxX + offset[1] * vyX,
+											   p.y + track.dy + offset[0] * vxY + offset[1] * vyY);
+							if (sample < 0) {
+								inFrame = false;
+								sample = 255;
+							}
+							lum += sample;
 						}
-						lum += sample;
+						lum /= 4;
+					} else {
+						lum = lumAt(p.x + track.dx, p.y + track.dy);
+						if (lum < 0) {
+							inFrame = false;
+							lum = 255;
+						}
 					}
-					lum /= 4;
-				} else {
-					lum = lumAt(p.x + track.dx, p.y + track.dy);
-					if (lum < 0) {
-						inFrame = false;
-						lum = 255;
-					}
+					track.sampled.set(x, y, lum <= anchor.threshold);
 				}
-				track.sampled.set(x, y, lum <= anchor.threshold);
+			measured.samples += dim * dim * (multiSample ? 4 : 1);
+			measured.samplingMs += emscripten_get_now() - sampleStarted;
+			return inFrame;
+		};
+		auto fastDecode = [&]() {
+			ByteArray fastPacket;
+			double fastStarted = emscripten_get_now();
+			auto fast = decodeWithoutErrorCorrection(track.sampled);
+			measured.bitExtractionMs += emscripten_get_now() - fastStarted;
+			if (fast.isValid()) {
+				const auto& bytes = fast.content().bytes;
+				fastStarted = emscripten_get_now();
+				const bool crcOK = hasValidCRC32(bytes);
+				measured.crcMs += emscripten_get_now() - fastStarted;
+				if (crcOK) {
+					fastPacket.assign(bytes.begin(), bytes.end() - 4);
+					++measured.crcFastSuccesses;
+				}
 			}
-		measured.samples += dim * dim * (useMultiSample ? 4 : 1);
-		measured.samplingMs += emscripten_get_now() - started;
-		if (!inFrame) {
+			return fastPacket;
+		};
+
+		bool sampledMulti = !track.crc32Payload && canMultiSample;
+		if (!sampleGrid(sampledMulti)) {
 			++track.consecutiveMisses;
 			++measured.misses;
 			result.consecutiveMisses = track.consecutiveMisses;
@@ -688,20 +727,19 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 
 		ByteArray packet;
 		if (track.crc32Payload) {
-			started = emscripten_get_now();
-			auto fast = decodeWithoutErrorCorrection(track.sampled);
-			measured.bitExtractionMs += emscripten_get_now() - started;
-			if (fast.isValid()) {
-				const auto& bytes = fast.content().bytes;
-				started = emscripten_get_now();
-				bool crcOK = hasValidCRC32(bytes);
-				measured.crcMs += emscripten_get_now() - started;
-				if (crcOK) {
-					packet.assign(bytes.begin(), bytes.end() - 4);
-					++measured.crcFastSuccesses;
+			packet = fastDecode();
+			if (packet.empty() && canMultiSample && !sampledMulti) {
+				if (sampleGrid(true)) {
+					sampledMulti = true;
+					packet = fastDecode();
+				} else {
+					// Keep the valid center sample as the RS input when only an edge
+					// quarter-sample falls outside the crop.
+					sampleGrid(false);
 				}
 			}
 		}
+
 		const bool allowRS = !track.crc32Payload || budgetedFallbacks < decoder.maxRSFallbacks;
 		if (packet.empty() && allowRS) {
 			if (track.crc32Payload)
@@ -797,18 +835,12 @@ EMSCRIPTEN_KEEPALIVE int setTrackedDecoderTrack(int handle, int slot, int id, in
 			return 0;
 		auto& track = decoder->tracks[slot];
 		track.samples.resize(dimension * dimension);
-		const PointF quarterOffsets[4] = {{0.25, 0.25}, {0.75, 0.25}, {0.25, 0.75}, {0.75, 0.75}};
 		for (int y = 0; y < dimension; ++y)
 			for (int x = 0; x < dimension; ++x) {
 				auto& cached = track.samples[y * dimension + x];
 				auto p = transform(PointF{x + 0.5, y + 0.5});
 				cached.x = float(p.x);
 				cached.y = float(p.y);
-				for (int i = 0; i < 4; ++i) {
-					auto q = transform(PointF{x + quarterOffsets[i].x, y + quarterOffsets[i].y});
-					cached.qx[i] = float(q.x);
-					cached.qy[i] = float(q.y);
-				}
 			}
 		auto center = transform(PointF{dimension / 2.0, dimension / 2.0});
 		auto adjacent = transform(PointF{dimension / 2.0 + 1.0, dimension / 2.0});

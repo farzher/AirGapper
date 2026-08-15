@@ -1,8 +1,8 @@
 import { shouldRunFullDecode } from "../shared/decode-policy.js";
-import { crc32, parseFrame } from "../shared/protocol.js";
+import { parseFrame, parseVerifiedFramePayload } from "../shared/protocol.js";
 import { gridLayoutById } from "../shared/grid-layout.js";
-import DecimenCodec from "../vendor/decimen-codec/decimen_codec.js";
-const ready = DecimenCodec();
+const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
+const ready = import(scalarCodec ? "../vendor/decimen-codec-android/decimen_codec.js" : "../vendor/decimen-codec/decimen_codec.js").then(({ default: DecimenCodec }) => DecimenCodec());
 const ctx = self;
 function boundsOf(p, ox, oy) {
   const xs = [p.topLeft.x, p.topRight.x, p.bottomRight.x, p.bottomLeft.x];
@@ -60,12 +60,6 @@ function translatedQuad(q, dx, dy) {
     bottomRight: move(q.bottomRight),
     bottomLeft: move(q.bottomLeft)
   };
-}
-function frameWithCRC(payload) {
-  const frame = new Uint8Array(payload.length + 4);
-  frame.set(payload);
-  new DataView(frame.buffer).setUint32(payload.length, crc32(payload), true);
-  return frame;
 }
 function configureNativeBatch(zx, tracks, ox, oy) {
   var _a;
@@ -126,14 +120,27 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
   );
   if (count < 0) return void 0;
   const view = new DataView(zx.HEAPU8.buffer);
-  const successful = view.getUint32(nativeMetricsPtr + 56, true);
-  const crcFastSuccesses = view.getUint32(nativeMetricsPtr + 64, true);
-  const desiredFallbackBudget = successful < Math.ceil(tracks.length * 0.55) ? Math.min(tracks.length, nativeFallbackBudget + 2) : crcFastSuccesses >= Math.max(1, Math.floor(successful * 0.75)) ? Math.max(2, nativeFallbackBudget - 1) : nativeFallbackBudget;
+  const metrics = {
+    anchorMs: view.getFloat64(nativeMetricsPtr, true),
+    samplingMs: view.getFloat64(nativeMetricsPtr + 8, true),
+    bitExtractionMs: view.getFloat64(nativeMetricsPtr + 16, true),
+    crcMs: view.getFloat64(nativeMetricsPtr + 24, true),
+    rsFallbackMs: view.getFloat64(nativeMetricsPtr + 32, true),
+    totalMs: view.getFloat64(nativeMetricsPtr + 40, true),
+    tracks: view.getUint32(nativeMetricsPtr + 48, true),
+    samples: view.getUint32(nativeMetricsPtr + 52, true),
+    successful: view.getUint32(nativeMetricsPtr + 56, true),
+    misses: view.getUint32(nativeMetricsPtr + 60, true),
+    crcFastSuccesses: view.getUint32(nativeMetricsPtr + 64, true),
+    rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true)
+  };
+  const desiredFallbackBudget = metrics.successful < Math.ceil(tracks.length * 0.55) ? Math.min(tracks.length, nativeFallbackBudget + 2) : metrics.crcFastSuccesses >= Math.max(1, Math.floor(metrics.successful * 0.75)) ? Math.max(2, nativeFallbackBudget - 1) : nativeFallbackBudget;
   if (desiredFallbackBudget !== nativeFallbackBudget) {
     nativeFallbackBudget = desiredFallbackBudget;
     zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
   }
-  const symbols = [];
+  const pending = [];
+  let outputEnd = 0;
   for (let index = 0; index < count; index++) {
     const at = nativeResultsPtr + index * NATIVE_TRACK_RESULT_BYTES;
     const id = view.getInt32(at, true);
@@ -148,17 +155,30 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const slot = tracks.indexOf(mapped.input);
     if (misses >= 3 && slot >= 0) nativeRefresh.add(slot);
     if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
-    const rawBytes = zx.HEAPU8.slice(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
-    const bytes = mapped.input.crc32 ? frameWithCRC(rawBytes) : rawBytes;
-    const packet = parseFrame(bytes);
+    const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
+    const packet = mapped.input.crc32 ? parseVerifiedFramePayload(rawView) : parseFrame(rawView);
     if (!packet || mapped.input.slot !== void 0 && packet.header.slotIndex !== mapped.input.slot) {
       if (slot >= 0) nativeRefresh.add(slot);
       continue;
     }
-    const quad = translatedQuad(mapped.configured.baseQuad, dx, dy);
-    symbols.push({ bytes, box: boundsOf(quad, 0, 0), quad, modules: mapped.input.dim, tracked: true, crc32: mapped.input.crc32 });
+    outputEnd = Math.max(outputEnd, bytesOffset + bytesLength);
+    pending.push({ mapped, bytesOffset, bytesLength, dx, dy, header: packet.header });
   }
-  return { symbols, attempted: true };
+  const output = outputEnd ? zx.HEAPU8.slice(nativeOutputPtr, nativeOutputPtr + outputEnd) : new Uint8Array(0);
+  const symbols = pending.map(({ mapped, bytesOffset, bytesLength, dx, dy, header }) => {
+    const quad = translatedQuad(mapped.configured.baseQuad, dx, dy);
+    return {
+      bytes: output.subarray(bytesOffset, bytesOffset + bytesLength),
+      box: boundsOf(quad, 0, 0),
+      quad,
+      modules: mapped.input.dim,
+      tracked: true,
+      crc32: mapped.input.crc32,
+      verifiedPayload: mapped.input.crc32,
+      header
+    };
+  });
+  return { symbols, attempted: true, metrics, outputBuffer: output.buffer };
 }
 function projectedNeighbor(q, dx, dy, stride) {
   const p0 = q.topLeft, p1 = q.topRight, p2 = q.bottomRight, p3 = q.bottomLeft;
@@ -189,29 +209,37 @@ ctx.onmessage = async (e) => {
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
   try {
-    let yOffset = messageYOffset;
-    let yRowStride = messageYStride || w;
+    const usedDirectFrame = Boolean(ownedVideoFrame);
+    let frameCopyMs = 0;
+    let inputOffset = pixelFormat === "y8" ? messageYOffset : 0;
+    let inputStride = pixelFormat === "y8" ? messageYStride || w : w * 4;
+    let decodePixelFormat = pixelFormat;
     let pixels;
+    const zx = await ready;
+    let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const frameBuffer = new ArrayBuffer(ownedVideoFrame.allocationSize({ rect }));
-      const planes = await ownedVideoFrame.copyTo(frameBuffer, { rect });
-      const yPlane = planes[0];
-      if (!yPlane || yPlane.stride < w) throw new Error("Camera frame has no usable Y plane");
-      yOffset = yPlane.offset;
-      yRowStride = yPlane.stride;
-      const byteLength = yOffset + Math.max(0, h - 1) * yRowStride + w;
-      if (byteLength > frameBuffer.byteLength) throw new Error("Camera Y plane is truncated");
-      pixels = new Uint8Array(frameBuffer, 0, byteLength);
+      const copyOptions = pixelFormat === "y8" ? { rect } : { rect, format: "RGBA" };
+      const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
+      ptr = inputBuffer(zx, allocationBytes);
+      const copyStarted = performance.now();
+      const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(ptr, ptr + allocationBytes), copyOptions);
+      frameCopyMs = performance.now() - copyStarted;
+      const plane = planes[0];
+      if (!plane) throw new Error("Camera frame has no usable pixel plane");
+      inputOffset = plane.offset;
+      inputStride = plane.stride;
+      decodePixelFormat = pixelFormat === "y8" ? "y8" : "rgba";
+      if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
+      if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
       ownedVideoFrame.close();
       ownedVideoFrame = null;
     } else {
-      const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || yOffset + Math.max(0, h - 1) * yRowStride + w) : buf.byteLength;
+      const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w) : buf.byteLength;
       pixels = new Uint8Array(buf, 0, byteLength);
+      ptr = inputBuffer(zx, pixels.byteLength);
+      zx.HEAPU8.set(pixels, ptr);
     }
-    const zx = await ready;
-    const ptr = inputBuffer(zx, pixels.byteLength);
-    zx.HEAPU8.set(pixels, ptr);
     const pw = w;
     const ph = h;
     const symbols = [];
@@ -339,18 +367,19 @@ ctx.onmessage = async (e) => {
     if (!full && (tracks == null ? void 0 : tracks.length)) {
       const native = decodeNativeBatch(
         zx,
-        ptr + (pixelFormat === "y8" ? yOffset : 0),
+        ptr + inputOffset,
         pw,
         ph,
         ox,
         oy,
         tracks,
-        pixelFormat,
-        pixelFormat === "y8" ? yRowStride : pw * 4
+        decodePixelFormat,
+        inputStride
       );
-      if (native || pixelFormat === "y8") {
+      if (native || usedDirectFrame) {
         const nativeSymbols = native?.symbols ?? [];
-        ctx.postMessage({
+        const directFrameFailed = usedDirectFrame && !native;
+        const reply = {
           id,
           symbols: nativeSymbols,
           sightings,
@@ -364,8 +393,13 @@ ctx.onmessage = async (e) => {
           targetedAttempts: 0,
           targetedPixels: 0,
           targetedSuccesses: 0,
+          frameCopyMs,
+          nativeMetrics: native?.metrics,
+          directFrameFailed,
           latencyMs: performance.now() - startedAt
-        });
+        };
+        const transfer = native?.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : [];
+        ctx.postMessage(reply, transfer);
         return;
       }
       readFullAttempts++;
@@ -487,19 +521,19 @@ ctx.onmessage = async (e) => {
   } catch (error) {
     ownedVideoFrame?.close();
     ownedVideoFrame = null;
-    const yPlaneFailed = pixelFormat === "y8";
+    const directFrameFailed = Boolean(videoFrame);
     ctx.postMessage({
       id,
       symbols: [],
       sightings: [],
       full,
-      trackedAttempted: yPlaneFailed,
+      trackedAttempted: directFrameFailed,
       trackedHit: false,
       workerWaitMs,
       readFullAttempts,
-      yPlaneFailed,
+      directFrameFailed,
       latencyMs: performance.now() - startedAt,
-      error: yPlaneFailed ? void 0 : error instanceof Error ? error.message : String(error)
+      error: directFrameFailed ? void 0 : error instanceof Error ? error.message : String(error)
     });
   }
 };

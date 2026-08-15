@@ -1,0 +1,14 @@
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/decimen_codec.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/edit_cache.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/rebuild_cache.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/list_install_components.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/install.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/install/local.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/install/strip.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/ZXing.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/edit_cache.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/rebuild_cache.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/list_install_components.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/install.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/install/local.dir
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/ZXing/CMakeFiles/install/strip.dir

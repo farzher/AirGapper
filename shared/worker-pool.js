@@ -3,12 +3,13 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 const WORKER_JOB_TIMEOUT_MS = 12e3;
 class DecodeWorkerPool {
-  constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted) {
+  constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable) {
     this.create = create;
     this.onDecoded = onDecoded;
     this.onSighted = onSighted;
     this.onTrackedAttempt = onTrackedAttempt;
     this.onCompleted = onCompleted;
+    this.onAvailable = onAvailable;
     __publicField(this, "workers", []);
     __publicField(this, "busy", []);
     __publicField(this, "activeIds", []);
@@ -37,8 +38,9 @@ class DecodeWorkerPool {
       this.jobTimers[slot] = void 0;
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
-      this.activeFull[slot] = false;
-      const completion = {
+              this.activeFull[slot] = false;
+        this.onAvailable?.(slot);
+        const completion = {
         full: Boolean(message.full),
         symbolCount: symbols.length,
         sightingCount: sightings.length,
@@ -52,10 +54,14 @@ class DecodeWorkerPool {
         targetedAttempts: (_e = message.targetedAttempts) != null ? _e : 0,
         targetedPixels: (_f = message.targetedPixels) != null ? _f : 0,
         targetedSuccesses: (_g = message.targetedSuccesses) != null ? _g : 0,
-        latencyMs: (_h = message.latencyMs) != null ? _h : 0,
-        symbols,
-        sightings,
-        error: message.error
+                  latencyMs: (_h = message.latencyMs) != null ? _h : 0,
+          frameCopyMs: message.frameCopyMs ?? 0,
+          nativeMetrics: message.nativeMetrics,
+          directFrameFailed: Boolean(message.directFrameFailed),
+          symbols,
+          sightings,
+          error: message.error
+
       };
       try {
         if (message.trackedAttempted) (_i = this.onTrackedAttempt) == null ? void 0 : _i.call(this);
@@ -67,7 +73,9 @@ class DecodeWorkerPool {
             quad: symbol.quad,
             modules: symbol.modules,
             tracked: symbol.tracked,
-            crc32: symbol.crc32
+            crc32: symbol.crc32,
+            verifiedPayload: Boolean(symbol.verifiedPayload),
+            header: symbol.header
           });
         }
         if (this.onSighted) for (const sighting of sightings) this.onSighted(sighting, message.id);
