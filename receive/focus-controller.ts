@@ -666,6 +666,12 @@ export class FocusController {
     };
     let targetedThresholds: QualityThresholds | undefined;
     let globalThresholds: QualityThresholds | undefined;
+    // If the current setting is demonstrably decoding the live QR stream, that
+    // is stronger evidence than an arbitrary photographic threshold. Candidate
+    // optics are judged relative to this proven baseline, while final commit
+    // still requires a fresh QR decode at the actual selected setting.
+    let provenBaseline: QrOpticalMetrics | undefined;
+    let baselineCandidate: Candidate | undefined;
     const thresholdsFrom = (baseline: QrOpticalMetrics, targeted: boolean): QualityThresholds => {
       const noiseRatio = baseline.noise / Math.max(1, baseline.separation);
       return targeted ? {
@@ -689,11 +695,34 @@ export class FocusController {
       const threshold = thresholdFor(candidate);
       if (!metric || !threshold) return { good: false, comfortable: false, margin: -Infinity, needsGain: true };
       const targeted = targetedOf(candidate);
-      const separationFloor = targeted ? Math.max(48, threshold.separation) : threshold.separation;
-      const confidenceFloor = targeted ? Math.max(0.82, threshold.confidence) : threshold.confidence;
-      const noiseRatio = targeted ? Math.min(0.36, threshold.noiseRatio) : threshold.noiseRatio;
-      const clippingCeiling = targeted ? Math.min(0.58, threshold.clipping) : threshold.clipping;
-      const bandingCeiling = targeted ? Math.min(0.38, threshold.banding) : threshold.banding;
+      const provenNoiseRatio = provenBaseline
+        ? provenBaseline.noise / Math.max(1, provenBaseline.separation)
+        : undefined;
+      const separationFloor = targeted
+        ? provenBaseline
+          ? Math.max(18, Math.min(threshold.separation, provenBaseline.separation * 0.68))
+          : Math.max(48, threshold.separation)
+        : threshold.separation;
+      const confidenceFloor = targeted
+        ? provenBaseline
+          ? Math.max(0.64, Math.min(threshold.confidence, provenBaseline.confidence * 0.88))
+          : Math.max(0.82, threshold.confidence)
+        : threshold.confidence;
+      const noiseRatio = targeted
+        ? provenBaseline && provenNoiseRatio !== undefined
+          ? Math.min(0.58, Math.max(threshold.noiseRatio, provenNoiseRatio * 1.45 + 0.03))
+          : Math.min(0.36, threshold.noiseRatio)
+        : threshold.noiseRatio;
+      const clippingCeiling = targeted
+        ? provenBaseline
+          ? Math.min(0.78, Math.max(threshold.clipping, provenBaseline.clipping + 0.18))
+          : Math.min(0.58, threshold.clipping)
+        : threshold.clipping;
+      const bandingCeiling = targeted
+        ? provenBaseline
+          ? Math.min(0.72, Math.max(threshold.banding, provenBaseline.banding + 0.16))
+          : Math.min(0.38, threshold.banding)
+        : threshold.banding;
       const noiseLimit = Math.max(14, metric.separation * noiseRatio);
       const margins = [
         (metric.separation - separationFloor) / Math.max(1, separationFloor),
@@ -702,9 +731,13 @@ export class FocusController {
         (clippingCeiling - metric.clipping) / Math.max(0.1, clippingCeiling),
         (bandingCeiling - metric.banding) / Math.max(0.1, bandingCeiling),
       ];
-      const margin = Math.min(...margins);
+      let margin = Math.min(...margins);
       const needsGain = metric.separation < threshold.separation || metric.confidence < threshold.confidence;
-      return { good: margin >= 0, comfortable: margin >= 0.07, margin, needsGain };
+      // A fresh live decode proves the current setting is usable even when a
+      // rolling-shutter/banding heuristic is pessimistic. Never let the optics
+      // model reject the very baseline the real decoder just demonstrated.
+      if (candidate === baselineCandidate && provenBaseline) margin = Math.max(0, margin);
+      return { good: margin >= 0, comfortable: margin >= 0.07, margin, needsGain: candidate === baselineCandidate && provenBaseline ? false : needsGain };
     };
 
     const refresh = (): void => {
@@ -924,6 +957,7 @@ export class FocusController {
     let winnerDecode: ReceivePerformance | undefined;
     try {
       const baselineRequested = make(autoExposure, autoIso);
+      baselineCandidate = baselineRequested;
       baselineRequested.coarseGrid = true;
       const baseline = await measureCandidate(baselineRequested, "Baseline", "baseline");
       if (!baseline) {
@@ -937,10 +971,30 @@ export class FocusController {
       const baselineMetric = opticsOf(baseline)!;
       if (targetedOf(baseline)) targetedThresholds ??= thresholdsFrom(baselineMetric, true);
       else globalThresholds ??= thresholdsFrom(baselineMetric, false);
-      baseline.state = quality(baseline).good ? "Auto baseline good" : "Auto baseline";
+
+      // The optimizer used to reject an actively-scanning baseline because a
+      // hard optical floor happened to be stricter than the real decoder. Take
+      // a short decode sample (and honor a decode immediately preceding the
+      // run) so a setting that actually scans becomes the reference truth.
+      const hadFreshLiveDecode = targetedOf(baseline) && this.lastValidDecodeAt !== undefined &&
+        startedAt - this.lastValidDecodeAt < 1200;
+      if (targetedOf(baseline)) {
+        const active = await activateExposureCandidate(baseline, true);
+        if (active) {
+          try {
+            this.optimizeRound = "verify";
+            const sample = await measureDecode("Baseline decode", active.epoch);
+            baseline.decode.push(await sample.result);
+          } finally {
+            epochs.close(active.epoch);
+          }
+        }
+        if (hadFreshLiveDecode || decodeOf(baseline).validDecodes > 0) provenBaseline = baselineMetric;
+      }
+      baseline.state = provenBaseline || quality(baseline).good ? "working baseline" : "Auto baseline";
       refresh();
 
-      let lastGood: Candidate | undefined = quality(baseline).good ? baseline : undefined;
+      let lastGood: Candidate | undefined = (provenBaseline || quality(baseline).good) ? baseline : undefined;
       let firstBadExposure: number | undefined;
       let seedIso = baseline.iso;
       // Deliberately narrow: Auto is the bright ceiling; we only search a modest
@@ -992,7 +1046,8 @@ export class FocusController {
       // GLOBAL metrics are never allowed to certify a winner. If discovery
       // acquired a QR during the sweep, re-measure the strongest bootstrap
       // candidates so they receive exact QR-function-module metrics.
-      let passing = measured.filter((candidate) => targetedOf(candidate) && quality(candidate).good)
+      let passing = measured.filter((candidate) => targetedOf(candidate) &&
+        (quality(candidate).good || (candidate === baseline && Boolean(provenBaseline))))
         .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
       if (!passing.length && performance.now() < deadline + 400) {
         const bootstrap = [...measured]
@@ -1002,7 +1057,8 @@ export class FocusController {
           const certified = await measureCandidate(candidate, "QR certify", "verify", true);
           if (certified && targetedOf(certified) && quality(certified).good) break;
         }
-        passing = [...candidates.values()].filter((candidate) => targetedOf(candidate) && quality(candidate).good)
+        passing = [...candidates.values()].filter((candidate) => targetedOf(candidate) &&
+          (quality(candidate).good || (candidate === baseline && Boolean(provenBaseline))))
           .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
       }
       if (!passing.length) {

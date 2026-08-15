@@ -147,7 +147,10 @@ const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 // kill the process on older phones; modern 64-bit devices keep the fast pool.
 const autoWorkerCount = legacyAndroidApp
   ? 1
-  : Math.max(1, Math.min(4, hardwareThreadCount - 2));
+  // Dense grids benefit directly from one worker per visible QR. Leave two
+  // logical CPUs for camera/UI work, but don't artificially cap modern 8-core
+  // phones at four decoders when a common layout contains six cells.
+  : Math.max(1, Math.min(6, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
@@ -652,6 +655,10 @@ const poolBusyTimes: number[] = [];
 // Decoder jobs that actually finished searching a submitted frame or crop,
 // regardless of whether they found a QR code.
 const scanCompletionTimes: number[] = [];
+// Distinct camera frames for which at least one decoder job was accepted. One
+// frame may fan out to several QR workers, so worker completions are not FPS.
+const decodeFrameTimes: number[] = [];
+let lastDecodeSubmittedSourceSequence = -1;
 // Timestamps of frames that contributed new transport information. Unlike the
 // transfer-wide average, this window drops immediately when optical lock is
 // lost, so the speed display works as aiming feedback.
@@ -1079,7 +1086,10 @@ function beginOptimizeWhenReady(): void {
     const reason = finished.optimizeReason ?? "";
     if (finished.optimizeState === "complete") {
       optimizeConverged = true;
-      optimizeRecheckAt = Number.POSITIVE_INFINITY;
+      // Stay in Optimize while the button says Stop. A settled optimum is held
+      // quietly, then challenged again after a few seconds (or immediately when
+      // live QR optics change). This is intentionally not a one-shot button.
+      optimizeRecheckAt = performance.now() + 6_000;
       snapshotOptimizeWatch();
       // A no-baseline optimization used full-frame probes that intentionally did
       // not mutate production tracking. Promote one proven decode only after the
@@ -1087,10 +1097,10 @@ function beginOptimizeWhenReady(): void {
       if (optimizerBootstrapDecode) {
         noteRegion(optimizerBootstrapDecode.box, receiverNow(), true, optimizerBootstrapDecode.info);
       }
-      const performance = finished.optimizeBestPerformance;
-      opticsOptimizeStatus.textContent = performance
-        ? `Optimized · ${performance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
-        : "Optimized · holding";
+      const bestPerformance = finished.optimizeBestPerformance;
+      opticsOptimizeStatus.textContent = bestPerformance
+        ? `Optimizing · best ${bestPerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
+        : "Optimizing · holding best";
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
     } else if (reason.includes("no QR-validated exposure improvement") ||
@@ -1100,7 +1110,7 @@ function beginOptimizeWhenReady(): void {
         // Optimize is a mode, not a one-shot failure. Hold the currently validated
         // exposure, watch live QR optics, then periodically challenge it again.
         optimizeConverged = true;
-        optimizeRecheckAt = performance.now() + 10_000;
+        optimizeRecheckAt = performance.now() + 6_000;
         snapshotOptimizeWatch();
         opticsOptimizeStatus.textContent = "Optimizing · current setting best so far";
       } else {
@@ -2446,6 +2456,8 @@ function stopReceiver(): void {
   qrReadTimes.length = 0;
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
+  decodeFrameTimes.length = 0;
+  lastDecodeSubmittedSourceSequence = -1;
   cropAttempts.clear();
   cropRotate = 0;
   schedulerNoJobs = 0;
@@ -3075,6 +3087,47 @@ function readBoundedVideoCrop(source: ReceiverFrame, x: number, y: number, w: nu
   return ctx.getImageData(0, 0, w, h);
 }
 
+/** Build one isolated QR crop from a single shared camera readback.  The live
+ * grid has only a one-module gutter, so generic QR detection on the whole grid
+ * spends most of its time considering neighboring finder triples.  Copying a
+ * known cell into a synthetic white quiet zone is cheap JS memory bandwidth and
+ * lets each WASM worker solve exactly one QR in parallel. */
+function isolateTrackedQr(
+  shared: ImageData,
+  sharedX: number,
+  sharedY: number,
+  quad: SymbolQuad,
+  modules: number,
+): { image: ImageData; ox: number; oy: number } | undefined {
+  const bounds = trackedQuadBounds(quad);
+  if (!bounds || modules < 21) return undefined;
+  const edge = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top);
+  const moduleSize = Math.max(1, edge / modules);
+  const sourcePad = Math.max(2, Math.round(moduleSize * 1.25));
+  const quiet = Math.max(8, Math.round(moduleSize * 4.5));
+  const sharedRight = sharedX + shared.width;
+  const sharedBottom = sharedY + shared.height;
+  const sx = Math.max(sharedX, Math.floor(bounds.left - sourcePad));
+  const sy = Math.max(sharedY, Math.floor(bounds.top - sourcePad));
+  const sr = Math.min(sharedRight, Math.ceil(bounds.right + sourcePad));
+  const sb = Math.min(sharedBottom, Math.ceil(bounds.bottom + sourcePad));
+  const sw = sr - sx;
+  const sh = sb - sy;
+  if (sw < 24 || sh < 24) return undefined;
+  const image = new ImageData(sw + quiet * 2, sh + quiet * 2);
+  image.data.fill(255);
+  const localX = sx - sharedX;
+  const localY = sy - sharedY;
+  for (let row = 0; row < sh; row++) {
+    const from = ((localY + row) * shared.width + localX) * 4;
+    image.data.set(
+      shared.data.subarray(from, from + sw * 4),
+      ((row + quiet) * image.width + quiet) * 4,
+    );
+  }
+  return { image, ox: sx - quiet, oy: sy - quiet };
+}
+
 type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
 
 function submitReceiverJob(
@@ -3090,7 +3143,12 @@ function submitReceiverJob(
   const accepted = pool.submit(message, transfer);
   if (accepted) {
     submittedJobs++;
-    scanCapturedAt.set(message.id, receiverNow());
+    const submittedAt = receiverNow();
+    scanCapturedAt.set(message.id, submittedAt);
+    if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
+      lastDecodeSubmittedSourceSequence = sourceSequence;
+      decodeFrameTimes.push(submittedAt);
+    }
     if (sourceOpticsEpoch !== undefined) {
       optimizerJobsSubmittedTotal++;
       optimizerJobIds.add(message.id);
@@ -3506,9 +3564,10 @@ function captureFrame(source: ReceiverFrame) {
     quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
   if (batchTracks.length > 1) {
-    // One readback and one worker message per camera frame. Four independent
-    // getImageData calls were stalling camera delivery even though the decode
-    // workers were mostly idle.
+    // Healthy locked grids are already localized. Do ONE camera readback, then
+    // fan isolated QR cells across every free WASM worker. This converts worker
+    // parallelism directly into QR/s instead of asking one worker to run a
+    // heavyweight multi-symbol detector over the entire grid.
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft,
     ]);
@@ -3518,13 +3577,7 @@ function captureFrame(source: ReceiverFrame) {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    // Padding is based on one QR, not the whole lattice. Grow it briefly under
-    // motion so the fallback detector can re-anchor a shaking camera without
-    // turning the normal locked crop back into a full-frame readback.
-    const pad = Math.max(8, Math.round(typicalEdge * (0.18 + Math.min(0.3, worstMisses * 0.06))));
-    // Padding outside the sensor is synthetic white and contains no recovery
-    // information. Do not make the batch fallback search it: benchmark crops
-    // were otherwise routinely larger than the native frame.
+    const pad = Math.max(8, Math.round(typicalEdge * (0.12 + Math.min(0.28, worstMisses * 0.06))));
     const x = Math.max(0, Math.floor(minX - pad));
     const y = Math.max(0, Math.floor(minY - pad));
     const right = Math.min(vw, Math.ceil(maxX + pad));
@@ -3532,13 +3585,62 @@ function captureFrame(source: ReceiverFrame) {
     const w = right - x;
     const h = bottom - y;
     if (w >= 32 && h >= 32) {
-      const img = readBoundedVideoCrop(source, x, y, w, h);
-      inspectStaticQrOptics(source, img, x, y);
-      captureSubmittedScan(img, x, y, false, batchTracks.map((track) => track.quad));
+      const shared = readBoundedVideoCrop(source, x, y, w, h);
+      inspectStaticQrOptics(source, shared, x, y);
+      captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
+
+      const healthyGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
+      if (healthyGrid) {
+        const freeWorkers = Math.max(0, pool.size - pool.busyCount);
+        activeDecodeBudget = Math.min(batchRegions.length, Math.max(1, pool.size));
+        const ordered = [...batchRegions]
+          .sort((a, b) => (a.lastAttemptAt ?? -Infinity) - (b.lastAttemptAt ?? -Infinity) || slotUsefulness(b) - slotUsefulness(a));
+        // Rotate ties so a 6-cell grid on a 4-worker phone does not permanently
+        // favor the same four cells. Skip any slot already represented by an
+        // in-flight worker job.
+        const rotated = ordered.length
+          ? ordered.map((_, index) => ordered[(index + cropRotate) % ordered.length]!)
+          : ordered;
+        let submitted = 0;
+        for (const region of rotated) {
+          if (submitted >= freeWorkers || pool.busyCount >= pool.size) break;
+          if (!region.quad || !region.dim || regionInflightCount(region) > 0) continue;
+          const isolated = isolateTrackedQr(shared, x, y, region.quad, region.dim);
+          if (!isolated) continue;
+          const id = frameId++;
+          cropAttempts.set(id, [{ region, quad: region.quad }]);
+          if (!submitReceiverJob(
+            {
+              id, buf: isolated.image.data.buffer, w: isolated.image.width, h: isolated.image.height,
+              ox: isolated.ox, oy: isolated.oy, full: false, quad: region.quad, dim: region.dim, isolated: true,
+            },
+            [isolated.image.data.buffer], "INDIVIDUAL TRACKED CROP", trace, source.sequence, [region],
+          )) {
+            cropAttempts.delete(id);
+            break;
+          }
+          if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+          cropsSubmitted++;
+          submitted++;
+        }
+        if (!submitted) {
+          poolBusyTimes.push(now);
+          if (trace && !trace.jobs.length) trace.decision = "not scheduled: tracked slots already in flight";
+        }
+        cropRotate++;
+        if (trace) trace.stateAfter = gridLattice.state;
+        activeBenchmarkFrame = undefined;
+        return;
+      }
+
+      // Degraded/missing geometry is the exception: one broad multi-symbol pass
+      // is valuable here because it can re-anchor several slots at once. Once
+      // all slots are healthy the next camera frame returns to the parallel
+      // isolated fast path above.
       const id = frameId++;
       if (submitReceiverJob(
-        { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
-        [img.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, batchRegions,
+        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
+        [shared.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, batchRegions,
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
@@ -4818,6 +4920,11 @@ async function runReceiverBenchmark(): Promise<void> {
 function updateStats() {
   if (done) return;
   const now = receiverNow();
+  // Optimize is a real mode, not a developer-panel animation. The old retry
+  // loop lived inside renderFocusDiagnostics(), so with developer controls
+  // hidden a completed/failed pass never ran again. Drive it from the normal
+  // stats heartbeat instead.
+  if (optimizeEnabled) beginOptimizeWhenReady();
   if (!receiverDevActions.hidden) renderFocusDiagnostics();
   const prune = (a: number[]) => {
     while (a.length > 0 && a[0]! < now - STATS_WINDOW_MS) a.shift();
@@ -4826,24 +4933,30 @@ function updateStats() {
   prune(qrReadTimes);
   prune(poolBusyTimes);
   prune(scanCompletionTimes);
+  prune(decodeFrameTimes);
   const perSecond = (a: number[]) => a.length / (STATS_WINDOW_MS / 1000);
   const cameraRate = perSecond(captureTimes);
-  const scanRate = perSecond(scanCompletionTimes);
+  const completionRate = perSecond(scanCompletionTimes);
+  const decodeFrameRate = perSecond(decodeFrameTimes);
   const qrRate = perSecond(qrReadTimes);
-  // "fps" is camera/source-frame delivery. Worker completion rate can be much
-  // lower when one job decodes many QR symbols, so showing scanRate here made a
-  // healthy dense-grid receiver look like the camera had collapsed to 4 fps.
-  metric("m-cap").textContent = `${cameraRate.toFixed(1)} fps`;
+  // Camera delivery and scanner throughput are separate bottlenecks. Show both:
+  // 18 cam fps / 4 scan fps means the camera is fine and WASM decoding is the
+  // limiter. The scheduler below now fans healthy QR cells across free workers
+  // so scan fps and, more importantly, QR/s can rise independently.
+  metric("m-cap").textContent = `${cameraRate.toFixed(0)} cam · ${decodeFrameRate.toFixed(1)} decode fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
-    scanRate === 0 && pool.busyCount > 0;
+    completionRate === 0 && pool.busyCount > 0;
+  const decoderBound = !stalled && cameraRate >= 5 && decodeFrameRate < cameraRate * 0.65 && poolBusyTimes.length >= 2;
   const limit = metric("m-limit");
   limit.textContent = lastDecodeError
     ? `Scanner error: ${lastDecodeError}`
     : stalled
       ? "Scanner stalled"
-      : "";
-  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
+      : decoderBound
+        ? `Decoder bound · ${decodeFrameRate.toFixed(1)} decode fps`
+        : "";
+  limit.classList.toggle("scanner-bound", stalled || decoderBound || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1000;
   // Diagnostics accounting, gated on a running transfer so camera-pointing

@@ -106,7 +106,7 @@ function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: numbe
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, oracleSeeds = [], sentAt } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -118,6 +118,8 @@ ctx.onmessage = async (e: MessageEvent) => {
     dim?: number;
     tracks?: BatchTrack[];
     optimizerProbe?: boolean;
+    /** True when the input is already one QR with a synthetic white quiet zone. */
+    isolated?: boolean;
     oracle?: boolean;
     oracleSeeds?: { quad: DecimenQuad; modules: number; layoutId: number; slot: number }[];
     sentAt?: number;
@@ -408,9 +410,11 @@ ctx.onmessage = async (e: MessageEvent) => {
           appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
         }
       } else {
-        // Crop fallback stays in the cheapest detector configuration.
+        // Isolated locked-grid jobs already contain exactly one QR plus a
+        // synthetic quiet zone. Stop after one result so several workers can
+        // chew through different cells from the same camera frame in parallel.
         readFullAttempts++;
-        appendResults(zx.readFull(ptr, pw, ph, true, 2, false), false);
+        appendResults(zx.readFull(ptr, pw, ph, true, isolated ? 1 : 2, false), false);
       }
     }
     ctx.postMessage({
