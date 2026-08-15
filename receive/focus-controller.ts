@@ -64,6 +64,17 @@ export const CAMERA_TUNING = {
   acquisitionBracketDelayMs: 900,
 };
 
+// Phone AE is tuned for photographs, where a bright emissive screen is often
+// driven much brighter than a QR decoder needs. Keep hardware AE in charge,
+// but bias it slightly dark and make small, slow corrections from real QR
+// function-module levels. Never brighten above the camera's neutral 0 EV.
+const AUTO_QR_EV_BIAS = -0.7;
+const AUTO_QR_EV_COOLDOWN_MS = 650;
+const AUTO_QR_WHITE_LOW = 155;
+const AUTO_QR_WHITE_HIGH = 225;
+const AUTO_QR_BLACK_HIGH = 92;
+const AUTO_QR_SEPARATION_LOW = 58;
+
 export interface FocusGeometry {
   x: number;
   y: number;
@@ -255,6 +266,9 @@ export class FocusController {
   private baselineFocus?: number;
   private baselineExposure?: number;
   private baselineIso?: number;
+  private autoExposureCompensation?: number;
+  private lastAutoExposureTrimAt = -Infinity;
+  private autoExposureTrimRunning = false;
   private requestedExposure?: number;
   private requestedIso?: number;
   private focusProbes = 0;
@@ -390,6 +404,9 @@ export class FocusController {
     this.committedExposureTime = undefined;
     this.committedIso = undefined;
     this.committedExposureCompensation = undefined;
+    this.autoExposureCompensation = undefined;
+    this.lastAutoExposureTrimAt = -Infinity;
+    this.autoExposureTrimRunning = false;
     if (this.strategy === "auto") {
       this.transition("SEEKING", "camera track changed; one hardware AF sweep, then focus held by camera");
       // Static QR scanning does not benefit from continuous AF hunting. Ask the
@@ -1245,6 +1262,11 @@ export class FocusController {
           metrics.focusScore >= CAMERA_TUNING.focusExcellent && metrics.exposureScore >= CAMERA_TUNING.exposureExcellent
             ? "decoder silent with excellent static optics; camera held" : "decoder silence below recovery threshold";
       }
+      // Auto exposure is hardware-owned, but photographic AE is usually too
+      // bright for an emissive QR screen. Nudge only exposure compensation,
+      // slowly, from targeted QR pixels. This never touches focus or enters
+      // manual shutter/ISO mode.
+      void this.maybeTrimAutomaticExposure(metrics, now);
       this.changed();
       return;
     }
@@ -1408,6 +1430,50 @@ export class FocusController {
     this.changed();
   }
 
+  private async maybeTrimAutomaticExposure(metrics: QrOpticalMetrics, now: number): Promise<void> {
+    if (this.autoExposureTrimRunning || now - this.lastAutoExposureTrimAt < AUTO_QR_EV_COOLDOWN_MS ||
+        this.isOptimizing() || this.strategy !== "auto" || this.state !== "LOCKED" ||
+        !this.track || this.track.readyState !== "live") return;
+    const range = this.caps.exposureCompensation;
+    if (!range || range.min > 0 || range.max < 0 || metrics.confidence < 0.78 ||
+        metrics.focusScore < 0.45 || metrics.banding > 0.5) return;
+
+    const settings = this.settings();
+    // Only tune genuine hardware AE. Chrome/Android sometimes reports no mode
+    // string at all; in that case a defined compensation still proves the axis
+    // exists, so allow it unless the mode explicitly says manual.
+    if (settings.exposureMode === "manual") return;
+
+    const current = this.quantize(Math.min(0, settings.exposureCompensation ?? this.autoExposureCompensation ?? AUTO_QR_EV_BIAS), range);
+    const step = Math.max(range.step ?? 0, 0.25);
+    // Do not use the aggregate clipping metric to decide direction: it counts
+    // BOTH clipped black modules (often desirable) and clipped whites. Absolute
+    // white/black levels tell us which way brightness should move.
+    const tooBright = metrics.whiteLevel > AUTO_QR_WHITE_HIGH ||
+      (metrics.blackLevel > AUTO_QR_BLACK_HIGH && metrics.separation >= AUTO_QR_SEPARATION_LOW);
+    const tooDark = !tooBright && (metrics.whiteLevel < AUTO_QR_WHITE_LOW || metrics.separation < AUTO_QR_SEPARATION_LOW);
+    let next = current;
+    if (tooBright) next = this.quantize(Math.max(range.min, current - step), range);
+    else if (tooDark) next = this.quantize(Math.min(0, current + step), range);
+    if (Math.abs(next - current) < 1e-6) return;
+
+    this.autoExposureTrimRunning = true;
+    this.lastAutoExposureTrimAt = now;
+    try {
+      // AE mode was established once when Auto was entered. Do not keep
+      // re-selecting the mode for tiny EV trims; some Android HALs treat mode
+      // writes as a fresh 3A transition.
+      const accepted = await this.apply(this.track, { exposureCompensation: next });
+      if (accepted) {
+        this.autoExposureCompensation = next;
+        this.committedExposureCompensation = next;
+        this.lastReason = `hardware AE QR bias ${next > 0 ? "+" : ""}${Number(next.toFixed(2))} EV`;
+      }
+    } finally {
+      this.autoExposureTrimRunning = false;
+    }
+  }
+
   private async beginExposureRecovery(observation: OpticalObservation): Promise<void> {
     if (this.state !== "LOCKED" || !this.exposureModes().includes("continuous")) return;
     const generation = ++this.generation;
@@ -1448,14 +1514,14 @@ export class FocusController {
         if (!this.acquisitionBracketRunning || !this.current(generation) || this.validDecodesInGeneration > 0) return;
         const candidate = this.quantize(origin + offset, compensation);
         if (candidate === origin) continue;
-        if (!(await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: candidate }, false))) break;
+        if (!(await this.applyProbe(generation, { exposureCompensation: candidate }, false))) break;
         const settled = await this.waitForExposureSettled(generation, afterId);
         if (!settled) break;
         afterId = settled.id;
         if (this.validDecodesInGeneration > 0) return;
       }
       if (this.current(generation) && this.validDecodesInGeneration === 0) {
-        await this.applyProbe(generation, { exposureMode: "continuous", exposureCompensation: origin }, false);
+        await this.applyProbe(generation, { exposureCompensation: origin }, false);
       }
     } else if (this.manualExposure() && this.caps.exposureTime && settings.exposureTime !== undefined) {
       const originExposure = settings.exposureTime;
@@ -1498,7 +1564,9 @@ export class FocusController {
       patch.exposureMode = "continuous";
       if (this.caps.exposureCompensation &&
           this.caps.exposureCompensation.min <= 0 && this.caps.exposureCompensation.max >= 0) {
-        patch.exposureCompensation = 0;
+        const neutralBias = this.quantize(Math.max(this.caps.exposureCompensation.min, AUTO_QR_EV_BIAS), this.caps.exposureCompensation);
+        patch.exposureCompensation = Math.min(0, neutralBias);
+        this.autoExposureCompensation = patch.exposureCompensation;
       }
     } else if (restoreExposure && this.settings().exposureMode === "manual" &&
         this.manualExposure() && this.committedExposureTime !== undefined) {

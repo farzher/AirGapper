@@ -106,7 +106,7 @@ function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: numbe
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, optimizerProbe = false, oracle = false, oracleSeeds = [], sentAt } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, oracleSeeds = [], sentAt } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -245,47 +245,88 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (!full && tracks?.length) {
-      // Decode the shared crop first with the mechanism that succeeds on real
-      // camera frames instead of running the measured-zero-hit persistent
-      // sampler over every predicted slot.
-      readFullAttempts++;
-      const decoded = zx.readFull(ptr, pw, ph, true, 16, false);
+      // Locked dense grids already give us exact quads and module counts. Run
+      // the cheap tracked sampler first for every known cell; generic detector
+      // acquisition is now a RECOVERY path, not a tax paid on every frame.
+      // This is the critical dense-grid throughput path.
       const decodedSlots = new Set<number>();
-      try {
-        for (let i = 0; i < decoded.size(); i++) {
-          const result = decoded.get(i);
-          if (!result.valid || !result.bytes.length) continue;
-          const packet = parseFrame(result.bytes);
-          if (packet?.header.slotIndex !== undefined) decodedSlots.add(packet.header.slotIndex);
-          symbols.push({
-            bytes: result.bytes,
-            box: boundsOf(result.position, ox, oy),
-            quad: shifted(result.position, ox, oy),
-            modules: result.modules,
-            tracked: false,
-          });
-        }
-      } finally {
-        decoded.delete();
+      const seenBytes = new Set<string>();
+      let trackedAttempts = 0;
+      let trackedHits = 0;
+      const addSymbol = (result: ReturnType<DecimenModule["readTracked"]>, track: BatchTrack): boolean => {
+        if (!result.valid || !result.bytes.length) return false;
+        const packet = parseFrame(result.bytes);
+        if (!packet || (track.slot !== undefined && packet.header.slotIndex !== track.slot)) return false;
+        const key = `${packet.header.slotIndex ?? "?"}:${Array.from(result.bytes as Uint8Array).join(",")}`;
+        if (seenBytes.has(key)) return false;
+        seenBytes.add(key);
+        if (packet.header.slotIndex !== undefined) decodedSlots.add(packet.header.slotIndex);
+        symbols.push({
+          bytes: result.bytes,
+          box: boundsOf(result.position, ox, oy),
+          quad: shifted(result.position, ox, oy),
+          modules: result.modules,
+          tracked: true,
+          crc32: track.crc32,
+        });
+        return true;
+      };
+
+      for (const track of tracks) {
+        trackedAttempts++;
+        const r = zx.readTracked(
+          ptr, pw, ph, track.dim,
+          track.quad.topLeft.x - ox, track.quad.topLeft.y - oy,
+          track.quad.topRight.x - ox, track.quad.topRight.y - oy,
+          track.quad.bottomRight.x - ox, track.quad.bottomRight.y - oy,
+          track.quad.bottomLeft.x - ox, track.quad.bottomLeft.y - oy,
+        );
+        if (addSymbol(r, track)) trackedHits++;
       }
 
-      // A broad multi-code pass can miss an otherwise clean cell when adjacent
-      // finder patterns win detection. Retry missing cells immediately: waiting
-      // for a prior-frame miss left this path unused on alternating displays.
-      // Two tight retries are affordable once neighboring finder patterns make
-      // the broad pass ambiguous. A two-code crop is already isolated enough.
+      // If all cached quads failed, geometry probably moved or the display is in
+      // transition: pay once for the broad detector to re-anchor the batch. On
+      // small grids a majority miss also justifies that recovery pass; on large
+      // grids a few successful tracked cells are enough to keep the cheap path.
+      const broadRecovery = trackedHits === 0 || (tracks.length <= 4 && trackedHits * 2 < tracks.length);
+      if (broadRecovery) {
+        readFullAttempts++;
+        const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(4, tracks.length + 2)), false);
+        try {
+          for (let i = 0; i < decoded.size(); i++) {
+            const result = decoded.get(i);
+            if (!result.valid || !result.bytes.length) continue;
+            const packet = parseFrame(result.bytes);
+            const slot = packet?.header.slotIndex;
+            if (!packet || (slot !== undefined && decodedSlots.has(slot))) continue;
+            const key = `${slot ?? "?"}:${Array.from(result.bytes as Uint8Array).join(",")}`;
+            if (seenBytes.has(key)) continue;
+            seenBytes.add(key);
+            if (slot !== undefined) decodedSlots.add(slot);
+            symbols.push({
+              bytes: result.bytes,
+              box: boundsOf(result.position, ox, oy),
+              quad: shifted(result.position, ox, oy),
+              modules: result.modules,
+              tracked: false,
+            });
+          }
+        } finally {
+          decoded.delete();
+        }
+      }
+
+      // Retry at most two missing cells with isolated generic crops. This keeps
+      // recovery bounded while allowing adjacent finder patterns to stop
+      // confusing the broad detector. Optimize intentionally uses the same
+      // production budget so its QR/s verification predicts real throughput.
       let targetedAttempts = 0;
       let targetedPixels = 0;
       let targetedSuccesses = 0;
       const missingTracks = [...tracks]
         .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
         .sort((a, b) => b.misses - a.misses);
-      // Optimize is a controlled experiment: every frozen slot is an
-      // opportunity, including the common two-slot layout. Production keeps
-      // its bounded retries, but probes must attempt every missing target.
-      const targetedTracks = optimizerProbe
-        ? missingTracks
-        : tracks.length < 3 || tracks.length > 6 ? [] : missingTracks.slice(0, 2);
+      const targetedTracks = missingTracks.slice(0, 2);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);
         const moduleSize = Math.max(expected.w, expected.h) / track.dim;
@@ -333,9 +374,9 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       }
       ctx.postMessage({
-        id, symbols, sightings, full: false, trackedAttempted: false,
-        trackedHit: false, fallbackAttempted: targetedAttempts > 0,
-        fallbackSucceeded: targetedSuccesses > 0,
+        id, symbols, sightings, full: false, trackedAttempted: trackedAttempts > 0,
+        trackedHit: trackedHits > 0, fallbackAttempted: broadRecovery || targetedAttempts > 0,
+        fallbackSucceeded: symbols.some((symbol) => !symbol.tracked),
         readFullAttempts, workerWaitMs, targetedAttempts, targetedPixels, targetedSuccesses,
         latencyMs: performance.now() - startedAt,
       });

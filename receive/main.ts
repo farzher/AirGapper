@@ -171,6 +171,10 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
+// Hardware AE is retained in Auto, but a slightly darker bias is a better
+// default for a bright emissive QR sender than photographic 0 EV. The focus
+// controller fine-tunes this from targeted QR module levels after lock.
+const AUTO_QR_EV_BIAS = -0.7;
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
@@ -1400,9 +1404,10 @@ const REGION_TTL_MS = 5000;
 // through several cold full scans gives its cheap crop path time to recover.
 const SIGHTING_REGION_TTL_MS = 3000;
 // Tracking only revisits known positions, so it cannot discover a larger grid.
-// Keep acquisition sparse enough not to disrupt preview, but frequent enough
-// that one early decode cannot masquerade as the complete layout.
-const FULL_SCAN_INTERVAL_MS = 1500;
+// Once the declared lattice is healthy, a generic full detector is expensive
+// and adds little; missing slots immediately switch to the much faster degraded
+// cadence, so healthy global rescans can stay sparse.
+const FULL_SCAN_INTERVAL_MS = 4000;
 // With no lock at all the receiver used to full-scan EVERY capture — sixty
 // 1.2 MP tryHarder decodes per second for the whole aiming phase, the app's
 // hottest loop (fullScans regularly passed 100 before the first timeline
@@ -1727,7 +1732,10 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
     };
     const patch: CameraPatch = { exposureMode: "continuous" };
     if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
-      patch.exposureCompensation = 0;
+      const step = Math.max((caps.exposureCompensation as { step?: number }).step ?? 0, 0.01);
+      const raw = Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS));
+      patch.exposureCompensation = Math.max(caps.exposureCompensation.min,
+        Math.min(0, Math.round((raw - caps.exposureCompensation.min) / step) * step + caps.exposureCompensation.min));
     }
     await applyCameraConstraint(track, patch);
     if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
@@ -3365,7 +3373,7 @@ function captureFrame(source: ReceiverFrame) {
   // below fills every free worker slot each frame, so any "only scan when a
   // slot is spare" politeness starves the rescan that reacquires a missing
   // code — tried, and it measurably worsened multi-code lock-on. Scans are
-  // rare (1.5 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
+  // rare (4 s healthy, 250 ms degraded, 100 ms cold); crops keep the slot
   // next frame — including crops of probationary sighting regions, which now
   // run between cold scans instead of being crowded out by them.
   // Predicted crops are the fast path, never the only path. A single imperfect
@@ -4755,7 +4763,10 @@ function updateStats() {
   const cameraRate = perSecond(captureTimes);
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${scanRate.toFixed(1)} fps`;
+  // "fps" is camera/source-frame delivery. Worker completion rate can be much
+  // lower when one job decodes many QR symbols, so showing scanRate here made a
+  // healthy dense-grid receiver look like the camera had collapsed to 4 fps.
+  metric("m-cap").textContent = `${cameraRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
