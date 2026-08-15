@@ -15,11 +15,11 @@ jobs:
       - name: Apply reviewed source patch
         shell: bash
         run: |
-          base64 -d .github/locked-hotpath.patch.gz.b64 | gzip -d > /tmp/locked-hotpath.patch
+          cat .github/patch-* | base64 -d | gzip -d > /tmp/locked-hotpath.patch
           echo '1b6fdd4e2b3085562f578acc6114a926bd6c64a8b1e82ac2f15c3d00bd0ad3af  /tmp/locked-hotpath.patch' | sha256sum -c -
           git apply --check /tmp/locked-hotpath.patch
           git apply /tmp/locked-hotpath.patch
-          rm .github/locked-hotpath.patch.gz.b64 .github/workflows/build-locked-hotpath.yml
+          rm .github/patch-* .github/locked-hotpath.patch.gz.b64 .github/workflows/build-locked-hotpath.yml
           node --check receive/main.js
           node --check receive/grid-lattice.js
           node --check shared/transport.js
