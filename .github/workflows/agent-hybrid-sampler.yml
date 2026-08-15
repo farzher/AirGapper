@@ -1,0 +1,48 @@
+name: Agent hybrid sampler rebuild
+on:
+  push:
+    branches: [agent/hybrid-sampler-v56]
+permissions:
+  contents: write
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/hybrid-sampler-v56
+          fetch-depth: 1
+      - name: Apply patch
+        run: python3 .github/agent-hybrid-sampler.py
+      - name: Verify JS syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+      - name: Rebuild SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          ./build.sh
+      - name: Rebuild scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Verify invariants
+        run: |
+          grep -q 'v0.5.56' index.html
+          grep -q 'airgapper-static-js-v19' sw.js
+          grep -q 'decodeBatchBinarized' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          ! grep -q 'TRACK_THRESH_TILES' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'HybridBinarizer + SampleGrid' receive/main.js
+          test -s vendor/decimen-codec/decimen_codec.wasm
+          test -s vendor/decimen-codec-android/decimen_codec.wasm
+      - name: Commit result
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git rm .github/agent-hybrid-sampler.py .github/workflows/agent-hybrid-sampler.yml
+          git add index.html sw.js receive/main.js \
+            vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+            vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+            vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
+          git commit -m 'replace tracked sampler with proven binarizer'
+          git push origin HEAD:agent/hybrid-sampler-v56
