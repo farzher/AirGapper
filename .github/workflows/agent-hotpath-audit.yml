@@ -1,0 +1,38 @@
+name: Agent hot path audit
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/agent-hotpath-audit.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 .github/patch-hotpath-audit.py
+      - name: Verify JS syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check shared/worker-pool.js
+          node --check sw.js
+      - name: Verify strict hot path invariants
+        run: |
+          ! grep -R "strictTracked\|nativeFallbackBudget" receive/main.js receive/worker.js
+          grep -q '_setTrackedDecoderFallbackBudget(nativeBatchHandle, 0)' receive/worker.js
+          grep -q 'v0.5.51' index.html
+          grep -q 'airgapper-static-js-v14' sw.js
+      - name: Commit
+        run: |
+          rm -f .github/patch-hotpath-audit.py .github/workflows/agent-hotpath-audit.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'make tracked hot path auditable'
+          git push origin master
