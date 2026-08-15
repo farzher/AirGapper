@@ -1,0 +1,46 @@
+name: Agent native tracked thresholds
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/agent-native-thresholds.yml
+permissions:
+  contents: write
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply source patch
+        run: python3 .github/patch-native-thresholds.py
+      - name: Verify JS syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+      - name: Rebuild SIMD codec
+        run: |
+          rm -rf vendor/decimen-codec/source/build-simd vendor/decimen-codec/source/build-scalar
+          bash vendor/decimen-codec/source/build.sh
+      - name: Rebuild scalar codec
+        run: DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android bash vendor/decimen-codec/source/build.sh
+      - name: Verify native metrics and no RS hot path
+        run: |
+          grep -q 'NATIVE_BATCH_METRICS_BYTES = 104' receive/worker.js
+          grep -q 'TRACK_THRESH_TILES = 8' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'anchorMisses' receive/main.js
+          grep -q 'v0.5.53' index.html
+          grep -q 'airgapper-static-js-v16' sw.js
+          grep -q '_setTrackedDecoderFallbackBudget(nativeBatchHandle, 0)' receive/worker.js
+          test -s vendor/decimen-codec/decimen_codec.wasm
+          test -s vendor/decimen-codec-android/decimen_codec.wasm
+      - name: Commit
+        run: |
+          rm -f .github/patch-native-thresholds.py .github/workflows/agent-native-thresholds.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix native tracked camera thresholding'
+          git push origin master
