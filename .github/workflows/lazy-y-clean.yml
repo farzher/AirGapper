@@ -1,0 +1,99 @@
+name: Final lazy Y cleanup
+on:
+  push:
+    branches: [agent/lazy-y-clean]
+permissions:
+  contents: write
+jobs:
+  final:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/lazy-y-clean
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Make native camera frame lazy and clean call sites
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('receive/main.js'); s=p.read_text()
+          old='''function cloneDirectLumaFrame(source) {\n  const frame = source.videoFrame;\n  if (directLumaDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;\n  try {\n    return frame.clone();\n  } catch {\n    return null;\n  }\n}\n'''
+          new='''function cloneDirectLumaFrame(source) {\n  if (usesSimpleDecodeWorker || directLumaDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;\n  let frame = source.videoFrame;\n  if (!frame) {\n    try {\n      frame = source.videoFrame = new VideoFrame(video);\n    } catch {\n      return null;\n    }\n  }\n  if (!DIRECT_LUMA_FORMATS.has(frame.format)) return null;\n  try {\n    return frame.clone();\n  } catch {\n    return null;\n  }\n}\n'''
+          if s.count(old)!=1: raise SystemExit('clone helper mismatch')
+          s=s.replace(old,new,1)
+          old='''    if (!usesSimpleDecodeWorker && typeof VideoFrame === "function") {\n      try {\n        frame.videoFrame = new VideoFrame(video);\n      } catch {\n      }\n    }\n'''
+          if s.count(old)!=1: raise SystemExit('eager VideoFrame block mismatch')
+          s=s.replace(old,'',1)
+          s=s.replace('expectedCodingOverhead(decoder.mode)', 'expectedCodingOverhead()')
+          old='''  const estimate = estimateTransferProgress(\n    decoder.k,\n    usefulFrames,\n    elapsed,\n    decoder.solvedCount,\n    decoder.mode\n  );'''
+          new='''  const estimate = estimateTransferProgress(\n    decoder.k,\n    usefulFrames,\n    elapsed,\n    decoder.solvedCount\n  );'''
+          if s.count(old)!=1: raise SystemExit('progress call mismatch')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+
+          p=Path('send/main.js'); s=p.read_text()
+          old='scheduledEsi(encoder.k, symbolOrdinal, slotIndex, gridCodes)'
+          if s.count(old)!=1: raise SystemExit('scheduledEsi call mismatch')
+          p.write_text(s.replace(old,'scheduledEsi(encoder.k, symbolOrdinal)',1))
+          PY
+      - name: Audit exact source
+        shell: bash
+        run: |
+          mkdir -p /tmp/jsaudit
+          npm install --prefix /tmp/jsaudit --no-package-lock --no-save eslint globals >/dev/null
+          cat >/tmp/eslint.config.mjs <<'EOF'
+          import globals from "/tmp/jsaudit/node_modules/globals/index.js";
+          export default [{
+            files: ["main.js", "receive/*.js", "send/*.js", "shared/*.js"],
+            languageOptions: { ecmaVersion: "latest", sourceType: "module", globals: { ...globals.browser, ...globals.worker, ...globals.es2021 } },
+            rules: { "no-undef": "error", "no-unused-vars": ["error", { "args": "after-used", "caughtErrors": "none" }] }
+          }];
+          EOF
+          /tmp/jsaudit/node_modules/.bin/eslint --config /tmp/eslint.config.mjs main.js receive/*.js send/*.js shared/*.js
+          for f in main.js receive/*.js send/*.js shared/*.js; do node --check "$f"; done
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          roots=[Path('main.js'),Path('receive/worker.js'),Path('receive/worker-legacy-android.js')]
+          rx=re.compile(r'(?:from\s*|import\s*)["\']([^"\']+)["\']')
+          seen=set(); stack=roots[:]
+          while stack:
+            p=stack.pop().resolve(); rel=p.relative_to(Path.cwd().resolve())
+            if rel in seen or not p.exists(): continue
+            seen.add(rel)
+            if p.suffix=='.js':
+              for spec in rx.findall(p.read_text()):
+                if spec.startswith('.'):
+                  q=(p.parent/spec.split('?',1)[0]).resolve()
+                  if q.exists(): stack.append(q)
+          runtime=set().union(*(set(Path(r).rglob('*.js')) for r in ('receive','send','shared')))
+          dead=sorted(runtime-seen)
+          if dead: raise SystemExit('unreachable: '+', '.join(map(str,dead)))
+          print(f'{len(runtime)} runtime JS modules; all reachable')
+          PY
+      - name: Rebuild exact APK
+        shell: bash
+        run: |
+          chmod +x android/gradlew
+          cd android && ./gradlew --no-daemon clean assembleRelease && cd ..
+          APK=$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)
+          cp "$APK" AirGapper.apk
+          unzip -p AirGapper.apk assets/receive/main.js | grep -q 'frame = source.videoFrame = new VideoFrame(video)'
+          ! unzip -p AirGapper.apk assets/receive/main.js | grep -q 'frame.videoFrame = new VideoFrame(video)'
+          unzip -p AirGapper.apk assets/receive/worker.js | grep -q 'ownedVideoFrame.copyTo'
+          unzip -p AirGapper.apk assets/receive/worker.js | grep -q '_decodeTrackedBatchY'
+      - name: Commit final result
+        shell: bash
+        run: |
+          rm -rf .github
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "make direct Y capture lazy"
+          git push --force origin HEAD:agent/lazy-y-clean-result
