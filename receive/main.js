@@ -2304,12 +2304,6 @@ function scheduleFrame(gen) {
       scheduleFrame(gen);
       return;
     }
-    if (!usesSimpleDecodeWorker && typeof VideoFrame === "function") {
-      try {
-        frame.videoFrame = new VideoFrame(video);
-      } catch {
-      }
-    }
     void captureFrame(frame).catch((error) => {
       decodeExceptions++;
       lastDecodeError = error instanceof Error ? error.message : String(error);
@@ -2671,8 +2665,16 @@ function opticalSampleDue(source) {
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function cloneDirectLumaFrame(source) {
-  const frame = source.videoFrame;
-  if (directLumaDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;
+  if (usesSimpleDecodeWorker || directLumaDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  let frame = source.videoFrame;
+  if (!frame) {
+    try {
+      frame = source.videoFrame = new VideoFrame(video);
+    } catch {
+      return null;
+    }
+  }
+  if (!DIRECT_LUMA_FORMATS.has(frame.format)) return null;
   try {
     return frame.clone();
   } catch {
@@ -3466,8 +3468,7 @@ function updateProgressEstimate() {
     decoder.k,
     usefulFrames,
     elapsed,
-    decoder.solvedCount,
-    decoder.mode
+    decoder.solvedCount
   );
   const percent = estimate.fraction * 100;
   const shownPercent = percent < 10 ? percent.toFixed(1) : percent.toFixed(0);
@@ -3477,7 +3478,7 @@ function updateProgressEstimate() {
   const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
   transferSizeLabel.textContent = formatBytes(remainingBytes);
   const liveKbs = liveGoodputKbs(receiverNow());
-  const liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 * expectedCodingOverhead(decoder.mode) / decoder.blockLen : 0;
+  const liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 * expectedCodingOverhead() / decoder.blockLen : 0;
   etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3 ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left` : "";
 }
 function finishPlainQr(text) {
@@ -3503,7 +3504,7 @@ function liveGoodputKbs(now) {
     usefulFrameTimes.shift();
   }
   if (!decoder || !usefulFrameTimes.length) return 0;
-  return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead(decoder.mode) / 1024 / (STATS_WINDOW_MS / 1e3);
+  return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3);
 }
 async function finish(container, hashOk, seconds) {
   done = true;

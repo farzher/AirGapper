@@ -569,7 +569,7 @@ async function startStream(revealStage = false) {
       });
     }
     const slotIndex = symbolOrdinal % gridCodes;
-    const seq = scheduledEsi(encoder.k, symbolOrdinal, slotIndex, gridCodes);
+    const seq = scheduledEsi(encoder.k, symbolOrdinal);
     const bytes = packFrame(
       { ...header, seq, slotIndex },
       encoder.encode(seq)
