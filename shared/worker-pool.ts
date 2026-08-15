@@ -43,6 +43,9 @@ export interface SymbolInfo {
   /** Worker submission that produced this symbol. Symbols sharing this id came
    * from one camera scan and must not count as repeated observations. */
   scanId?: number;
+  /** Immutable source-camera attribution copied from the submitted job. */
+  sourceSequence?: number;
+  opticsEpoch?: number;
   quad?: SymbolQuad;
   /** QR dimension in modules; feeds the next tracked decode. */
   modules?: number;
@@ -103,6 +106,7 @@ export class DecodeWorkerPool {
   private readonly activeIds: (number | undefined)[] = [];
   private readonly activeFull: boolean[] = [];
   private readonly jobTimers: (ReturnType<typeof setTimeout> | undefined)[] = [];
+  private readonly jobOptics = new Map<number, { sourceSequence?: number; opticsEpoch?: number }>();
 
   constructor(
     private readonly create: () => PoolWorker,
@@ -131,6 +135,8 @@ export class DecodeWorkerPool {
       if (this.activeIds[slot] !== message.id) return;
       const symbols = message.symbols ?? [];
       const sightings = message.sightings ?? [];
+      const jobOptics = this.jobOptics.get(message.id);
+      this.jobOptics.delete(message.id);
       clearTimeout(this.jobTimers[slot]);
       this.jobTimers[slot] = undefined;
       this.busy[slot] = false;
@@ -159,6 +165,8 @@ export class DecodeWorkerPool {
         for (const symbol of symbols) {
           this.onDecoded(symbol.bytes, symbol.box, {
             scanId: message.id,
+            sourceSequence: jobOptics?.sourceSequence,
+            opticsEpoch: jobOptics?.opticsEpoch,
             quad: symbol.quad,
             modules: symbol.modules,
             tracked: symbol.tracked,
@@ -182,6 +190,7 @@ export class DecodeWorkerPool {
       this.busy[slot] = id === undefined;
       this.activeIds[slot] = undefined;
       this.activeFull[slot] = false;
+      if (id !== undefined) this.jobOptics.delete(id);
       this.onCompleted?.(id ?? -1, {
         full,
         symbolCount: 0,
@@ -241,6 +250,13 @@ export class DecodeWorkerPool {
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : undefined;
     this.activeFull[slot] = Boolean((message as { full?: unknown }).full);
+    if (typeof id === "number") {
+      const metadata = message as { sourceSequence?: unknown; opticsEpoch?: unknown };
+      this.jobOptics.set(id, {
+        sourceSequence: typeof metadata.sourceSequence === "number" ? metadata.sourceSequence : undefined,
+        opticsEpoch: typeof metadata.opticsEpoch === "number" ? metadata.opticsEpoch : undefined,
+      });
+    }
     try {
       if (message && typeof message === "object") (message as { sentAt?: number }).sentAt = performance.now();
       this.workers[slot]!.postMessage(message, transfer);
@@ -248,6 +264,7 @@ export class DecodeWorkerPool {
         const activeId = this.activeIds[slot];
         if (this.workers[slot] === undefined || activeId === undefined || activeId !== id) return;
         const full = this.activeFull[slot] ?? false;
+        this.jobOptics.delete(activeId);
         const failed = this.workers[slot]!;
         this.busy[slot] = false;
         this.activeIds[slot] = undefined;
@@ -272,6 +289,7 @@ export class DecodeWorkerPool {
       this.busy[slot] = false;
       this.activeIds[slot] = undefined;
       this.activeFull[slot] = false;
+      if (typeof id === "number") this.jobOptics.delete(id);
       if (typeof id === "number") this.onCompleted?.(id, {
         full,
         symbolCount: 0,

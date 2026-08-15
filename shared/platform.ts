@@ -60,11 +60,15 @@ export interface CameraCapabilities {
 export function probeCameraCapabilities(track: MediaStreamTrack): CameraCapabilities {
   // getCapabilities itself is optional — Firefox shipped it years after the rest.
   const caps: ExtendedCapabilities = track.getCapabilities?.() ?? {};
+  const focusDistance = caps.focusDistance && Number.isFinite(caps.focusDistance.min) &&
+    Number.isFinite(caps.focusDistance.max) && caps.focusDistance.min >= 0 &&
+    caps.focusDistance.max >= caps.focusDistance.min && caps.focusDistance.max <= 1000
+    ? caps.focusDistance : undefined;
   return {
     torch: caps.torch === true,
     continuousFocus: Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous"),
     focusModes: Array.isArray(caps.focusMode) ? caps.focusMode : [],
-    focusDistance: caps.focusDistance,
+    focusDistance,
     pointsOfInterest: Boolean(caps.pointsOfInterest),
     maxFrameRate: caps.frameRate?.max,
     maxWidth: caps.width?.max,

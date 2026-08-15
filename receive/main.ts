@@ -189,11 +189,17 @@ function mutateCamera(track: MediaStreamTrack, mutation: () => Promise<void>): P
   cameraMutationQueue = operation.catch(() => undefined);
   return operation;
 }
+function sanitizedTrackFocusDistance(track: MediaStreamTrack, value?: number): number | undefined {
+  const range = (track.getCapabilities?.() as MediaTrackCapabilities & { focusDistance?: { min: number; max: number } })?.focusDistance;
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1000 &&
+    Boolean(range && Number.isFinite(range.min) && Number.isFinite(range.max) && value >= range.min && value <= range.max)
+    ? value : undefined;
+}
 function seedDesiredCamera(track: MediaStreamTrack): void {
   const settings = track.getSettings() as MediaTrackSettings & CameraPatch;
   desiredCamera = {
     focusMode: settings.focusMode,
-    focusDistance: settings.focusDistance,
+    focusDistance: sanitizedTrackFocusDistance(track, settings.focusDistance),
     exposureMode: settings.exposureMode,
     exposureTime: settings.exposureTime,
     iso: settings.iso,
@@ -246,7 +252,7 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
       ? (patch.exposureMode !== undefined || patch.exposureTime !== undefined || patch.iso !== undefined ? "focus + exposure" : "focus")
       : patch.iso !== undefined && patch.exposureTime === undefined ? "ISO" : "exposure";
     const optics = (value: MediaTrackSettings & CameraPatch): CameraPatch => ({
-      focusMode: value.focusMode, focusDistance: value.focusDistance,
+      focusMode: value.focusMode, focusDistance: sanitizedTrackFocusDistance(track, value.focusDistance),
       exposureMode: value.exposureMode, exposureTime: value.exposureTime, iso: value.iso,
       exposureCompensation: value.exposureCompensation,
     });
@@ -509,7 +515,8 @@ let cropsSubmitted = 0;
 type OptimizerTraceEvent = {
   time: number;
   event: "APPLY" | "ACTUAL_SETTINGS" | "TRANSITION_FRAME" | "CANDIDATE_OPEN" | "CAPTURE" |
-    "JOB_SUBMIT" | "JOB_COMPLETE" | "VALID_DECODE" | "CANDIDATE_CLOSE" | "CANDIDATE_SCORE";
+    "JOB_SUBMIT" | "JOB_COMPLETE" | "VALID_DECODE" | "USEFUL_SYMBOL" | "ATTRIBUTION_BUG" |
+    "CANDIDATE_CLOSE" | "CANDIDATE_SCORE";
   candidateId?: string;
   candidateEpoch?: number;
   sourceSequence?: number;
@@ -528,6 +535,7 @@ type CandidateEvidence = {
   submittedJobs: number;
   completedJobs: number;
   sourceFrames: Set<number>;
+  successfulSourceFrames: Set<number>;
   qrAttempts: number;
   validDecodes: number;
   usefulSymbols: number;
@@ -558,8 +566,17 @@ type ScanCandidateAttribution = {
 const candidateEvidenceWindows = new Map<number, CandidateEvidence>();
 const scanCandidateEpoch = new Map<number, ScanCandidateAttribution>();
 const optimizerTrace: OptimizerTraceEvent[] = [];
-const OPTIMIZER_TRACE_LIMIT = 700;
+const OPTIMIZER_TRACE_LIMIT = 1200;
+let optimizerJobsSubmittedTotal = 0;
+let optimizerJobsMappedTotal = 0;
+let optimizerCompletionsMappedTotal = 0;
 let optimizerUnattributedResults = 0;
+let optimizerEpochMismatches = 0;
+let optimizerDuplicateValidEvents = 0;
+let optimizerTransitionFramesDiscarded = 0;
+const optimizerJobIds = new Set<number>();
+const optimizerValidEvents = new Set<string>();
+const optimizerEpochs = new Map<number, OptimizerEpoch>();
 let optimizerEpochSequence = 0;
 let optimizerPipelineActive = false;
 let optimizerTransition: { candidateId: string; requestedExposure: number; requestedIso: number } | undefined;
@@ -584,6 +601,7 @@ function refreshCandidateEvidence(evidence: CandidateEvidence): ReceivePerforman
     completedJobs: evidence.completedJobs,
     completionCoverage: evidence.submittedJobs ? evidence.completedJobs / evidence.submittedJobs : 0,
     sourceFrames: evidence.sourceFrames.size,
+    successfulSourceFrames: evidence.successfulSourceFrames.size,
     qrAttempts: evidence.qrAttempts,
     validDecodes: evidence.validDecodes,
     measurementMs: seconds * 1000,
@@ -648,6 +666,7 @@ const optimizerEpochHooks = {
       collecting: false,
     };
     optimizerTransition = undefined;
+    optimizerEpochs.set(epoch.id, epoch);
     activeOptimizerEpoch = epoch;
     traceOptimizer({ time: receiverNow(), event: "CANDIDATE_OPEN", candidateEpoch: epoch.id, ...request });
     return epoch.id;
@@ -678,11 +697,12 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   const startedAt = receiverNow();
   const multiQr = optimizerFixedTargets.length > 1;
   const coarse = label.startsWith("coarse");
-  const targetFrames = coarse ? (multiQr ? 2 : 3) : multiQr ? 3 : 5;
-  const maxBurstMs = coarse ? 480 : multiQr ? 520 : 800;
+  const targetFrames = coarse ? 3 : multiQr ? 3 : 5;
+  const maxBurstMs = coarse ? 650 : multiQr ? 650 : 900;
   const evidence: CandidateEvidence = {
     epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
-    sourceFrames: new Set(), qrAttempts: 0, validDecodes: 0, usefulSymbols: 0,
+    sourceFrames: new Set(), successfulSourceFrames: new Set(),
+    qrAttempts: 0, validDecodes: 0, usefulSymbols: 0,
     temporalSamples: [focusController.diagnostics().optical?.temporalContamination ?? 0],
   };
   candidateEvidenceWindows.set(epochId, evidence);
@@ -700,7 +720,7 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   const result = (async (): Promise<ReceivePerformance> => {
     const waitStartedAt = receiverNow();
     while (token === optimizeMeasureToken && evidence.completedJobs < evidence.submittedJobs &&
-        receiverNow() - waitStartedAt < 2600) {
+        receiverNow() - waitStartedAt < 12_500) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const performanceSample = refreshCandidateEvidence(evidence)!;
@@ -720,6 +740,8 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
 let optimizeEnabled = false;
 let optimizeRunning = false;
 let optimizeConverged = false;
+let manualValidationToken = 0;
+let manualOptimizerValidation: { exposure: number; iso: number; performance: ReceivePerformance } | undefined;
 function setOptimizeEnabled(enabled: boolean): void {
   optimizeEnabled = enabled;
   if (enabled) optimizeConverged = false;
@@ -750,7 +772,17 @@ function beginOptimizeWhenReady(): void {
   optimizeRunning = true;
   optimizeMeasureToken++;
   optimizerTrace.length = 0;
+  optimizerJobsSubmittedTotal = 0;
+  optimizerJobsMappedTotal = 0;
+  optimizerCompletionsMappedTotal = 0;
   optimizerUnattributedResults = 0;
+  optimizerEpochMismatches = 0;
+  optimizerDuplicateValidEvents = 0;
+  optimizerTransitionFramesDiscarded = 0;
+  optimizerJobIds.clear();
+  optimizerValidEvents.clear();
+  optimizerEpochs.clear();
+  manualOptimizerValidation = undefined;
   candidateEvidenceWindows.clear();
   opticsKeep.hidden = true;
   opticsOptimizeStatus.textContent = "Exploring…";
@@ -759,12 +791,53 @@ function beginOptimizeWhenReady(): void {
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
       optimizeConverged = true;
-      opticsOptimizeStatus.textContent = `${finished.optimizeBestPerformance?.validDecodesPerSecond.toFixed(1) ?? "—"} QR/s · Optimal`;
+      const performance = finished.optimizeBestPerformance;
+      opticsOptimizeStatus.textContent = performance
+        ? `${performance.validDecodesPerSecond.toFixed(1)} symbols/s · ${(performance.perQrAttemptSuccessRate * 100).toFixed(0)}% · ${performance.captureFps.toFixed(1)} fps`
+        : "Optimal";
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
     } else opticsOptimizeStatus.textContent = "Waiting…";
   }).finally(() => { optimizeRunning = false; });
 }
+async function applyAndValidateManualExposure(track: MediaStreamTrack): Promise<void> {
+  const run = ++manualValidationToken;
+  const canValidate = !automaticOptics && optimizerFixedTargets.length > 0 &&
+    focusController.diagnostics().optimizeCandidates.length > 0;
+  if (!canValidate) {
+    await applyExposureSetting(track);
+    return;
+  }
+  optimizeMeasureToken++;
+  const before = track.getSettings() as CameraPatch;
+  const requestedExposure = preferredExposureTime ?? before.exposureTime ?? 0;
+  const requestedIso = preferredIso ?? before.iso ?? 0;
+  optimizerEpochHooks.transition({ candidateId: "MANUAL", requestedExposure, requestedIso });
+  await applyExposureSetting(track);
+  const actual = track.getSettings() as CameraPatch;
+  if (run !== manualValidationToken || actual.exposureTime === undefined || actual.iso === undefined) {
+    optimizerEpochHooks.finish();
+    return;
+  }
+  const epoch = await optimizerEpochHooks.open({
+    candidateId: "MANUAL", requestedExposure, requestedIso,
+    actualExposure: actual.exposureTime, actualIso: actual.iso,
+  });
+  if (epoch === undefined || run !== manualValidationToken) {
+    optimizerEpochHooks.finish();
+    return;
+  }
+  const sample = await measureReceivePerformance("Manual", epoch);
+  optimizerEpochHooks.close(epoch);
+  const performance = await sample.result;
+  if (run === manualValidationToken) {
+    manualOptimizerValidation = { exposure: actual.exposureTime, iso: actual.iso, performance };
+    opticsOptimizeStatus.textContent = `${(performance.perQrAttemptSuccessRate * 100).toFixed(0)}% · Manual`;
+  }
+  optimizerEpochHooks.finish();
+  renderFocusDiagnostics();
+}
+
 opticsOptimize.addEventListener("click", () => {
   if (!automaticOptics) {
     opticsOptimizeStatus.textContent = "Enable Auto";
@@ -997,10 +1070,11 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
   completedJobs++;
   focusController.noteDecoderCompletion(id);
   const attribution = scanCandidateEpoch.get(id);
-  if (attribution) {
-    const complete = attribution.scanId === id && attribution.sourceFrameSequence >= 0 &&
+  if (optimizerJobIds.has(id)) {
+    const complete = attribution?.scanId === id && attribution.sourceFrameSequence >= attribution.epoch.firstValidSourceSequence &&
       Number.isFinite(attribution.epoch.actualExposure) && Number.isFinite(attribution.epoch.actualIso);
-    if (complete) {
+    if (attribution && complete) {
+      optimizerCompletionsMappedTotal++;
       attribution.evidence.completedJobs++;
       refreshCandidateEvidence(attribution.evidence);
       traceOptimizer({
@@ -1012,6 +1086,9 @@ function noteDecodeCompleted(id: number, completion: DecodeCompletion): void {
       });
     } else {
       optimizerUnattributedResults++;
+      if (attribution) optimizerEpochMismatches++;
+      console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: id, attribution });
+      traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: id, candidateEpoch: attribution?.epoch.id });
     }
   }
   workerLatencyTotalMs += completion.latencyMs;
@@ -1707,8 +1784,18 @@ function renderFocusDiagnostics(): void {
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
   const candidateTable = diagnostic.optimizeCandidates.map((candidate, index) =>
-    `${index === 0 ? "*" : " "} E ${candidate.exposure} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.validDecodes}/${candidate.qrAttempts} ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)}/s · cov ${(candidate.completionCoverage * 100).toFixed(0)}% · temp ${candidate.temporalContamination.toFixed(2)} · ${candidate.state}`,
+    `${index === 0 ? "*" : " "} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.qrAttempts} opp · ${candidate.validDecodes} valid · ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)} symbols/s · source ${(candidate.successfulSourceFrames / Math.max(1, candidate.sourceFrames) * 100).toFixed(0)}% · complete ${(candidate.completionCoverage * 100).toFixed(0)}% · ${candidate.state}`,
   ).join("\n");
+  const coarseCandidates = diagnostic.optimizeCandidates.filter((candidate) => candidate.coarseGrid);
+  const matrixExposures = [...new Set(coarseCandidates.map((candidate) => candidate.exposure))].sort((a, b) => a - b);
+  const matrixIsos = [...new Set(coarseCandidates.map((candidate) => candidate.iso))].sort((a, b) => a - b);
+  const coverageMatrix = coarseCandidates.length ? [
+    `Exposure(ms) \\ ISO  ${matrixIsos.join("  ")}`,
+    ...matrixExposures.map((exposure) => `${formatExposureMs(exposure).replace(" ms", "").padStart(8)}  ${matrixIsos.map((iso) => {
+      const candidate = coarseCandidates.find((entry) => entry.exposure === exposure && entry.iso === iso);
+      return candidate ? `${(candidate.successRate * 100).toFixed(0)}%` : "—";
+    }).join("  ")}`),
+  ].join("\n") : "";
   const manualCandidate = !automaticOptics && diagnostic.actualExposure && diagnostic.actualIso && diagnostic.optimizeCandidates.length
     ? diagnostic.optimizeCandidates.reduce((closest, candidate) => {
       const distance = Math.hypot(
@@ -1719,12 +1806,16 @@ function renderFocusDiagnostics(): void {
     }, { candidate: diagnostic.optimizeCandidates[0]!, distance: Infinity })
     : undefined;
   const manualQrRate = qrReadTimes.reduce((count, time) => count + Number(time > receiverNow() - STATS_WINDOW_MS), 0);
+  const manualMeasured = manualOptimizerValidation && diagnostic.actualExposure && diagnostic.actualIso &&
+    Math.abs(Math.log2(manualOptimizerValidation.exposure / diagnostic.actualExposure)) < 0.1 &&
+    Math.abs(Math.log2(manualOptimizerValidation.iso / diagnostic.actualIso)) < 0.1
+    ? manualOptimizerValidation : undefined;
   const manualVerdict = manualCandidate
     ? manualCandidate.distance > 0.35
-      ? "MANUAL CONFIG NOT SEARCHED"
-      : manualQrRate > (diagnostic.optimizeCandidates[0]?.normalizedQrRate ?? Infinity) * 1.1
-        ? "MANUAL CONFIG SEARCHED BUT MIS-SCORED"
-        : "manual config searched"
+      ? "manual configuration coarse-search result: NOT TESTED"
+      : manualMeasured && manualMeasured.performance.perQrAttemptSuccessRate > manualCandidate.candidate.successRate + 0.15
+        ? `TESTED AS ${manualCandidate.candidate.candidateId} · Optimize ${(manualCandidate.candidate.successRate * 100).toFixed(0)}% vs live manual ${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}% → MEASUREMENT BUG`
+        : `TESTED AS ${manualCandidate.candidate.candidateId}`
     : "";
   const cameraLine = (value?: CameraPatch) => value
     ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${formatExposureMs(value.exposureTime)} · ISO ${value.iso ?? "—"} · EV ${value.exposureCompensation ?? "—"}`
@@ -1734,7 +1825,6 @@ function renderFocusDiagnostics(): void {
     `State    ${diagnostic.state} · ${(diagnostic.stateMs / 1000).toFixed(1)}s${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
     `Owner    ${diagnostic.focusOwner}`,
     `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
-    `Freeze   attempted ${diagnostic.manualFreezeAttempted ? "yes" : "no"} · verified ${diagnostic.manualFreezeVerified ? "yes" : "no"} · unsafe ${diagnostic.manualFreezeUnsafe ? "yes" : "no"}`,
     `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${diagnostic.actualExposureCompensation ?? "—"}`,
     `ISO      committed ${diagnostic.committedIso ?? "—"} · requested ${diagnostic.candidateIso ?? "—"} · actual ${diagnostic.actualIso ?? "—"}`,
@@ -1745,16 +1835,17 @@ function renderFocusDiagnostics(): void {
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
     `Race     survivors ${diagnostic.optimizeSurvivors ?? "—"} · decision ${diagnostic.optimizeDecision ?? "—"}${diagnostic.optimizeComparison ? ` · ${diagnostic.optimizeComparison} · ${diagnostic.optimizePairedSamples} paired` : ""}`,
     `Steps    signal Δ ${diagnostic.optimizeExposureStepEV?.toFixed(2) ?? "—"} EV · shutter Δ ${diagnostic.optimizeShutterStepEV?.toFixed(2) ?? "—"} EV`,
-    diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/attempt` : "",
-    diagnostic.optimizeBestPerformance ? `Incumbent ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid/s · focus ${diagnostic.committedFocusDistance ?? "—"} · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
+    diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid symbols/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${diagnostic.optimizeCandidatePerformance.captureFps.toFixed(1)} camera FPS` : "",
+    diagnostic.optimizeBestPerformance ? `Winner   ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid symbols/s · ${(diagnostic.optimizeBestPerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${diagnostic.optimizeBestPerformance.captureFps.toFixed(1)} camera FPS · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
     diagnostic.optimizeReason ? `Search   ${diagnostic.optimizeReason}` : "",
-    diagnostic.optimizeExposureVisited ? `Visited  E ${diagnostic.optimizeExposureVisited.min}–${diagnostic.optimizeExposureVisited.max} (${(diagnostic.optimizeExposureVisited.coverage * 100).toFixed(0)}%) · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max} (${((diagnostic.optimizeIsoVisited?.coverage ?? 0) * 100).toFixed(0)}%) · ${diagnostic.optimizeUniqueConfigurations} actual` : "",
-    `Attribution unattributed ${optimizerUnattributedResults} · mapped ${scanCandidateEpoch.size} · trace ${optimizerTrace.length}`,
-    candidateTable ? `Candidates\n${candidateTable}` : "",
+    diagnostic.optimizeExposureVisited ? `Cartesian coverage ${coarseCandidates.length}/25 actual cells · exposure ${formatExposureMs(diagnostic.optimizeExposureVisited.min)}–${formatExposureMs(diagnostic.optimizeExposureVisited.max)} · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max}` : "",
+    `Attribution submitted ${optimizerJobsSubmittedTotal} · mapped ${optimizerJobsMappedTotal} · completions mapped ${optimizerCompletionsMappedTotal} · unattributed ${optimizerUnattributedResults} · epoch mismatches ${optimizerEpochMismatches} · duplicate valid events ${optimizerDuplicateValidEvents} · transition frames ${optimizerTransitionFramesDiscarded}`,
+    candidateTable ? `Candidates\nExposure ISO visits frames opportunities valid success score\n${candidateTable}` : "",
+    coverageMatrix ? `2D coarse coverage\n${coverageMatrix}` : "",
     optimizerTrace.length ? `Optimizer trace\n${optimizerTrace.slice(-20).map((event) =>
       `${event.time.toFixed(0)} ${event.event} ${event.candidateId ?? "—"} ep${event.candidateEpoch ?? "—"} src${event.sourceSequence ?? "—"} scan${event.scanId ?? "—"} E${event.actualExposure ?? event.requestedExposure ?? "—"} ISO${event.actualIso ?? event.requestedIso ?? "—"} valid:${event.validDecode === undefined ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === undefined ? "—" : event.usefulSymbol ? "yes" : "no"}`,
     ).join("\n")}` : "",
-    manualCandidate ? `Current manual E ${diagnostic.actualExposure} · ISO ${diagnostic.actualIso} · ${manualQrRate.toFixed(1)} QR/s\nClosest Optimize E ${manualCandidate.candidate.exposure} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)}/s\n${manualVerdict}` : "",
+    manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} symbols/s · ${manualMeasured.performance.captureFps.toFixed(1)} camera FPS` : `${manualQrRate.toFixed(1)} live valid symbols/s · controlled measurement pending`}\nClosest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} symbols/s\n${manualVerdict}` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(0.001, (performance.now() - opticalTimingStartedAt) / 1000)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${mutation?.kind ?? "—"}`,
@@ -1835,7 +1926,7 @@ cameraExposureAuto.addEventListener("change", () => {
     setOptimizeEnabled(false);
     focusController.setStrategy(manualFocusMode);
   } else focusController.setStrategy("auto");
-  if (track) void applyExposureSetting(track);
+  if (track) void (automaticOptics ? applyExposureSetting(track) : applyAndValidateManualExposure(track));
 });
 exposureAxisAuto.addEventListener("change", () => {
   automaticExposureAxis = exposureAxisAuto.checked;
@@ -1873,7 +1964,7 @@ function queueExposureChange(immediate = false): void {
   clearTimeout(exposureApplyTimer);
   const apply = () => {
     const track = stream?.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyExposureSetting(track);
+    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
   };
   if (immediate) apply();
   else exposureApplyTimer = setTimeout(apply, 80);
@@ -1891,7 +1982,7 @@ function queueIsoChange(immediate = false): void {
   clearTimeout(exposureApplyTimer);
   const apply = () => {
     const track = stream?.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyExposureSetting(track);
+    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
   };
   if (immediate) apply();
   else exposureApplyTimer = setTimeout(apply, 80);
@@ -2057,7 +2148,7 @@ function stopReceiver(): void {
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
-  metric("m-dec").textContent = "— QR/s";
+  metric("m-dec").textContent = "— symbols/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "👀";
   speedFeedback.className = "speed-feedback";
@@ -2252,6 +2343,7 @@ type VideoRVFC = HTMLVideoElement & {
 };
 interface ReceiverFrame {
   sequence: number;
+  readonly opticsEpoch?: number;
   width: number;
   height: number;
   callbackTimeMs: number;
@@ -2314,6 +2406,7 @@ function scheduleFrame(gen: number) {
     const sequence = benchmarkRecordingSequence++;
     latestSourceFrameSequence = sequence;
     if (optimizerPipelineActive && !activeOptimizerEpoch) {
+      optimizerTransitionFramesDiscarded++;
       traceOptimizer({
         time: receiverNow(), event: "TRANSITION_FRAME", candidateId: optimizerTransition?.candidateId,
         sourceSequence: sequence, requestedExposure: optimizerTransition?.requestedExposure,
@@ -2322,7 +2415,8 @@ function scheduleFrame(gen: number) {
     }
     const recorder = benchmarkRecorder;
     const frame: ReceiverFrame = {
-      sequence, width, height, callbackTimeMs: callbackTime,
+      sequence, opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : undefined,
+      width, height, callbackTimeMs: callbackTime,
       mediaTimeMs: (metadata.mediaTime ?? callbackTime / 1000) * 1000,
       presentationTimeMs: metadata.presentationTime ?? callbackTime,
       expectedDisplayTimeMs: metadata.expectedDisplayTime ?? callbackTime,
@@ -2618,27 +2712,36 @@ function submitReceiverJob(
   sourceSequence: number,
   trackedRegions: Region[] = [],
   fixedAttempts = 0,
+  sourceOpticsEpoch?: number,
 ): boolean {
   const accepted = pool.submit(message, transfer);
   if (accepted) {
     submittedJobs++;
     scanCapturedAt.set(message.id, receiverNow());
-    const epoch = activeOptimizerEpoch;
-    const evidence = epoch?.collecting ? candidateEvidenceWindows.get(epoch.id) : undefined;
-    if (epoch && evidence) {
-      const attribution: ScanCandidateAttribution = {
-        scanId: message.id, sourceFrameSequence: sourceSequence, epoch: { ...epoch }, evidence, fixedAttempts,
-        validDecodes: 0, usefulSymbols: 0,
-      };
-      scanCandidateEpoch.set(message.id, attribution);
-      evidence.submittedJobs++;
-      evidence.sourceFrames.add(sourceSequence);
-      evidence.qrAttempts += fixedAttempts;
-      traceOptimizer({
-        time: receiverNow(), event: "JOB_SUBMIT", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
-        sourceSequence, scanId: message.id, requestedExposure: epoch.requestedExposure,
-        requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
-      });
+    if (sourceOpticsEpoch !== undefined) {
+      optimizerJobsSubmittedTotal++;
+      optimizerJobIds.add(message.id);
+      const epoch = optimizerEpochs.get(sourceOpticsEpoch);
+      const evidence = candidateEvidenceWindows.get(sourceOpticsEpoch);
+      if (epoch && evidence && epoch.id === sourceOpticsEpoch) {
+        const attribution: ScanCandidateAttribution = {
+          scanId: message.id, sourceFrameSequence: sourceSequence, epoch: { ...epoch }, evidence, fixedAttempts,
+          validDecodes: 0, usefulSymbols: 0,
+        };
+        scanCandidateEpoch.set(message.id, attribution);
+        optimizerJobsMappedTotal++;
+        evidence.submittedJobs++;
+        evidence.sourceFrames.add(sourceSequence);
+        evidence.qrAttempts += fixedAttempts;
+        traceOptimizer({
+          time: receiverNow(), event: "JOB_SUBMIT", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+          sourceSequence, scanId: message.id, requestedExposure: epoch.requestedExposure,
+          requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+        });
+      } else {
+        console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: message.id, sourceSequence, sourceOpticsEpoch });
+        traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", sourceSequence, scanId: message.id, candidateEpoch: sourceOpticsEpoch });
+      }
     }
     if (kind === "FULL FRAME") {
       fullScanIds.add(message.id);
@@ -2740,8 +2843,12 @@ function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace
     actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
   });
   submitReceiverJob(
-    { id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false, tracks: optimizerFixedTargets },
+    {
+      id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false, tracks: optimizerFixedTargets,
+      sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
+    },
     [image.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, [], optimizerFixedTargets.length,
+    source.opticsEpoch,
   );
 }
 
@@ -3065,6 +3172,16 @@ function resetActiveTransfer(): void {
 
 function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   const optimizerAttribution = info?.scanId === undefined ? undefined : scanCandidateEpoch.get(info.scanId);
+  if (optimizerAttribution && (info?.sourceSequence !== optimizerAttribution.sourceFrameSequence ||
+      info.opticsEpoch !== optimizerAttribution.epoch.id)) {
+    optimizerEpochMismatches++;
+    console.error("OPTIMIZER ATTRIBUTION BUG", { info, optimizerAttribution });
+    traceOptimizer({
+      time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: info?.scanId,
+      sourceSequence: info?.sourceSequence, candidateEpoch: info?.opticsEpoch,
+    });
+    return;
+  }
   if (info?.scanId !== undefined && info.scanId < minimumAcceptedScanId) {
     noteScanOutcome(info.scanId, "stale");
     return;
@@ -3091,6 +3208,17 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     return;
   }
   const { header, block } = parsed;
+  const optimizerValidKey = optimizerAttribution && info?.scanId !== undefined
+    ? `${info.scanId}|${header.layoutId}|${header.slotIndex}|${header.seq}` : undefined;
+  const duplicateOptimizerValid = Boolean(optimizerValidKey && optimizerValidEvents.has(optimizerValidKey));
+  if (optimizerValidKey) optimizerValidEvents.add(optimizerValidKey);
+  if (duplicateOptimizerValid) {
+    optimizerDuplicateValidEvents++;
+    totalDecodes--;
+    if (info?.tracked) trackedDecodes--;
+    qrReadTimes.pop();
+    return;
+  }
   focusController.noteValidDecode(info?.scanId);
   if (optimizerAttribution) {
     const epoch = optimizerAttribution.epoch;
@@ -3098,6 +3226,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       Number.isFinite(epoch.actualExposure) && Number.isFinite(epoch.actualIso);
     if (complete) {
       optimizerAttribution.evidence.validDecodes++;
+      optimizerAttribution.evidence.successfulSourceFrames.add(optimizerAttribution.sourceFrameSequence);
       optimizerAttribution.validDecodes++;
       refreshCandidateEvidence(optimizerAttribution.evidence);
       traceOptimizer({
@@ -3106,7 +3235,11 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
         requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
         actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: false,
       });
-    } else optimizerUnattributedResults++;
+    } else {
+      optimizerEpochMismatches++;
+      console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: info?.scanId, optimizerAttribution });
+      traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: info?.scanId, candidateEpoch: epoch.id });
+    }
   }
   const productionTrace = info?.scanId === undefined ? undefined : benchmarkJobFrames.get(info.scanId);
   if (productionTrace) productionTrace.decoded.push({
@@ -3191,7 +3324,7 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
       refreshCandidateEvidence(optimizerAttribution.evidence);
       const epoch = optimizerAttribution.epoch;
       traceOptimizer({
-        time: receiverNow(), event: "VALID_DECODE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+        time: receiverNow(), event: "USEFUL_SYMBOL", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
         sourceSequence: optimizerAttribution.sourceFrameSequence, scanId: info?.scanId,
         requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
         actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: true,
@@ -4193,7 +4326,7 @@ function updateStats() {
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
   metric("m-cap").textContent = `${scanRate.toFixed(1)} fps`;
-  metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
+  metric("m-dec").textContent = `${qrRate.toFixed(1)} valid symbols/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
