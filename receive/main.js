@@ -1102,6 +1102,13 @@ const hotPathAudit = {
   crcFastSuccesses: 0,
   nativeMisses: 0,
   rsFallbacks: 0,
+  anchorSuccesses: 0,
+  anchorMisses: 0,
+  thresholdFallbacks: 0,
+  outOfFrameMisses: 0,
+  bitstreamFailures: 0,
+  crcFailures: 0,
+  multiSampleRetries: 0,
   localRecoveryAttempts: 0,
   localRecoverySuccesses: 0,
   fullScanJobs: 0,
@@ -1214,6 +1221,13 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.crcFastSuccesses += completion.nativeMetrics.crcFastSuccesses ?? 0;
     hotPathAudit.nativeMisses += completion.nativeMetrics.misses ?? 0;
     hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
+    hotPathAudit.anchorSuccesses += completion.nativeMetrics.anchorSuccesses ?? 0;
+    hotPathAudit.anchorMisses += completion.nativeMetrics.anchorMisses ?? 0;
+    hotPathAudit.thresholdFallbacks += completion.nativeMetrics.thresholdFallbacks ?? 0;
+    hotPathAudit.outOfFrameMisses += completion.nativeMetrics.outOfFrameMisses ?? 0;
+    hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
+    hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
+    hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;
   }
   hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
   if (completion.fallbackAttempted) {
@@ -4406,6 +4420,7 @@ async function runReceiverBenchmark() {
     const benchmarkCrcFast = benchmarkNative.reduce((sum, metrics) => sum + (metrics.crcFastSuccesses ?? 0), 0);
     const benchmarkNativeMisses = benchmarkNative.reduce((sum, metrics) => sum + (metrics.misses ?? 0), 0);
     const benchmarkRsFallbacks = benchmarkNative.reduce((sum, metrics) => sum + (metrics.rsFallbacks ?? 0), 0);
+    const sumNative = (key) => benchmarkNative.reduce((sum, metrics) => sum + (metrics[key] ?? 0), 0);
     const benchmarkFallbackAttempts = jobs.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0);
     const benchmarkFallbackSuccesses = jobs.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0);
     const hotPath = {
@@ -4416,6 +4431,13 @@ async function runReceiverBenchmark() {
       crcFastPercent: benchmarkNativeTracks ? benchmarkCrcFast / benchmarkNativeTracks * 100 : 0,
       nativeMisses: benchmarkNativeMisses,
       qrRsFallbacks: benchmarkRsFallbacks,
+      anchorSuccesses: sumNative("anchorSuccesses"),
+      anchorMisses: sumNative("anchorMisses"),
+      thresholdFallbacks: sumNative("thresholdFallbacks"),
+      outOfFrameMisses: sumNative("outOfFrameMisses"),
+      bitstreamFailures: sumNative("bitstreamFailures"),
+      crcFailures: sumNative("crcFailures"),
+      multiSampleRetries: sumNative("multiSampleRetries"),
       localRecoveryAttempts: benchmarkFallbackAttempts,
       localRecoverySuccesses: benchmarkFallbackSuccesses,
       readFullAttempts: jobs.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0),
@@ -4582,6 +4604,8 @@ ${totals}
 Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "established" : "acquiring"}` : "LIVE"}
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
+Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
+Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;
 }

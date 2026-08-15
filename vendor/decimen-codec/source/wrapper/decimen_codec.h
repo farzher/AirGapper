@@ -37,6 +37,13 @@ struct DecimenBatchMetrics {
 	uint32_t misses;
 	uint32_t crcFastSuccesses;
 	uint32_t rsFallbacks;
+	uint32_t anchorSuccesses;
+	uint32_t anchorMisses;
+	uint32_t thresholdFallbacks;
+	uint32_t outOfFrameMisses;
+	uint32_t bitstreamFailures;
+	uint32_t crcFailures;
+	uint32_t multiSampleRetries;
 };
 
 int createTrackedDecoder(int maxTracks, int maxDimension);

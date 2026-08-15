@@ -257,10 +257,10 @@ CMAKE_TOOLCHAIN_FILE:FILEPATH=/home/runner/work/AirGapper/AirGapper/vendor/decim
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
 //Build id stamped into the module
-DECIMEN_CODEC_BUILD:STRING=f42b142-dirty
+DECIMEN_CODEC_BUILD:STRING=d9e63f4-dirty
 
 //Version stamped into the module
-DECIMEN_CODEC_VERSION:STRING=0.1.1
+DECIMEN_CODEC_VERSION:STRING=0.1.2
 
 //Build with WebAssembly SIMD
 DECIMEN_SIMD:BOOL=OFF

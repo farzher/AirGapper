@@ -496,12 +496,18 @@ struct AnchorReading
 template <class LumAt>
 static AnchorReading readAnchor(const PersistentTrack& track, float dx, float dy, const LumAt& lumAt)
 {
-	uint8_t values[147];
-	uint8_t expected[147];
-	int count = 0, blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
+	// Camera shading/ISP processing can put the three finder patterns at
+	// noticeably different luminance levels. Score each finder with its own
+	// black/white threshold instead of forcing one global finder threshold.
 	const int dim = track.dimension;
 	const PointI corners[3] = {{0, 0}, {dim - 7, 0}, {0, dim - 7}};
-	for (auto corner : corners)
+	AnchorReading out;
+	out.contrast = 255;
+	int globalBlackSum = 0, globalWhiteSum = 0, globalBlackCount = 0, globalWhiteCount = 0;
+	for (auto corner : corners) {
+		uint8_t values[49];
+		bool expected[49];
+		int count = 0, blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
 		for (int my = 0; my < 7; ++my)
 			for (int mx = 0; mx < 7; ++mx) {
 				const auto& p = track.samples[(corner.y + my) * dim + corner.x + mx];
@@ -511,23 +517,24 @@ static AnchorReading readAnchor(const PersistentTrack& track, float dx, float dy
 				bool black = finderIdeal(mx, my);
 				values[count] = static_cast<uint8_t>(lum);
 				expected[count++] = black;
-				if (black) {
-					blackSum += lum;
-					++blackCount;
-				} else {
-					whiteSum += lum;
-					++whiteCount;
-				}
+				if (black) { blackSum += lum; ++blackCount; }
+				else { whiteSum += lum; ++whiteCount; }
 			}
-	int black = blackSum / blackCount;
-	int white = whiteSum / whiteCount;
-	AnchorReading out;
-	out.contrast = white - black;
-	out.threshold = (black + white) / 2;
-	if (out.contrast < 24)
-		return out;
-	for (int i = 0; i < count; ++i)
-		out.score += (values[i] <= out.threshold) == bool(expected[i]);
+		const int black = blackSum / blackCount;
+		const int white = whiteSum / whiteCount;
+		const int contrast = white - black;
+		out.contrast = std::min(out.contrast, contrast);
+		const int threshold = (black + white) / 2;
+		if (contrast >= 24)
+			for (int i = 0; i < count; ++i)
+				out.score += (values[i] <= threshold) == expected[i];
+		globalBlackSum += blackSum; globalBlackCount += blackCount;
+		globalWhiteSum += whiteSum; globalWhiteCount += whiteCount;
+	}
+	const int globalBlack = globalBlackSum / globalBlackCount;
+	const int globalWhite = globalWhiteSum / globalWhiteCount;
+	out.threshold = (globalBlack + globalWhite) / 2;
+	if (out.contrast == 255) out.contrast = 0;
 	return out;
 }
 
@@ -572,6 +579,52 @@ static bool refineAnchor(PersistentTrack& track, const LumAt& lumAt, AnchorReadi
 			if (std::abs(x) > 1 || std::abs(y) > 1)
 				test(originX + float(x), originY + float(y));
 	return reading.score >= 125 && reading.contrast >= 24;
+}
+
+constexpr int TRACK_THRESH_TILES = 8;
+constexpr int TRACK_TILE_SAMPLES = 4;
+
+struct TrackThresholdGrid
+{
+	int t[TRACK_THRESH_TILES][TRACK_THRESH_TILES]{};
+	bool ok = false;
+};
+
+template <class LumAt>
+static TrackThresholdGrid buildTrackThresholds(const PersistentTrack& track, const LumAt& lumAt)
+{
+	TrackThresholdGrid grid;
+	int lo[TRACK_THRESH_TILES][TRACK_THRESH_TILES];
+	int hi[TRACK_THRESH_TILES][TRACK_THRESH_TILES];
+	int gmin = 255, gmax = 0;
+	const int dim = track.dimension;
+	for (int ty = 0; ty < TRACK_THRESH_TILES; ++ty)
+		for (int tx = 0; tx < TRACK_THRESH_TILES; ++tx) {
+			lo[ty][tx] = 255;
+			hi[ty][tx] = 0;
+			for (int sy = 0; sy < TRACK_TILE_SAMPLES; ++sy)
+				for (int sx = 0; sx < TRACK_TILE_SAMPLES; ++sx) {
+					const double fx = (tx + (sx + 0.5) / TRACK_TILE_SAMPLES) / TRACK_THRESH_TILES;
+					const double fy = (ty + (sy + 0.5) / TRACK_TILE_SAMPLES) / TRACK_THRESH_TILES;
+					const int mx = std::clamp(int(fx * dim), 0, dim - 1);
+					const int my = std::clamp(int(fy * dim), 0, dim - 1);
+					const auto& p = track.samples[my * dim + mx];
+					const int lum = lumAt(p.x + track.dx, p.y + track.dy);
+					if (lum < 0) continue;
+					lo[ty][tx] = std::min(lo[ty][tx], lum);
+					hi[ty][tx] = std::max(hi[ty][tx], lum);
+				}
+			gmin = std::min(gmin, lo[ty][tx]);
+			gmax = std::max(gmax, hi[ty][tx]);
+		}
+	if (gmax - gmin < 24)
+		return grid;
+	const int global = (gmin + gmax) / 2;
+	for (int ty = 0; ty < TRACK_THRESH_TILES; ++ty)
+		for (int tx = 0; tx < TRACK_THRESH_TILES; ++tx)
+			grid.t[ty][tx] = hi[ty][tx] - lo[ty][tx] >= 24 ? (lo[ty][tx] + hi[ty][tx]) / 2 : global;
+	grid.ok = true;
+	return grid;
 }
 
 static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits)
@@ -652,12 +705,16 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		if (!anchored) {
 			++track.consecutiveMisses;
 			++measured.misses;
+			++measured.anchorMisses;
 			result.consecutiveMisses = track.consecutiveMisses;
 			result.framesSinceReacquire = track.framesSinceReacquire;
 			continue;
 		}
 
+		++measured.anchorSuccesses;
 		const int dim = track.dimension;
+		const auto thresholds = buildTrackThresholds(track, lumAt);
+		if (!thresholds.ok) ++measured.thresholdFallbacks;
 		const bool canMultiSample = track.multiSample && anchor.contrast < 180;
 		auto sampleGrid = [&](bool multiSample) {
 			double sampleStarted = emscripten_get_now();
@@ -693,7 +750,11 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 							lum = 255;
 						}
 					}
-					track.sampled.set(x, y, lum <= anchor.threshold);
+					const int threshold = thresholds.ok
+						? thresholds.t[std::clamp(y * TRACK_THRESH_TILES / dim, 0, TRACK_THRESH_TILES - 1)]
+						              [std::clamp(x * TRACK_THRESH_TILES / dim, 0, TRACK_THRESH_TILES - 1)]
+						: anchor.threshold;
+					track.sampled.set(x, y, lum <= threshold);
 				}
 			measured.samples += dim * dim * (multiSample ? 4 : 1);
 			measured.samplingMs += emscripten_get_now() - sampleStarted;
@@ -704,6 +765,8 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 			double fastStarted = emscripten_get_now();
 			auto fast = decodeWithoutErrorCorrection(track.sampled);
 			measured.bitExtractionMs += emscripten_get_now() - fastStarted;
+			if (!fast.isValid())
+				++measured.bitstreamFailures;
 			if (fast.isValid()) {
 				const auto& bytes = fast.content().bytes;
 				fastStarted = emscripten_get_now();
@@ -712,6 +775,8 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 				if (crcOK) {
 					fastPacket.assign(bytes.begin(), bytes.end() - 4);
 					++measured.crcFastSuccesses;
+				} else {
+					++measured.crcFailures;
 				}
 			}
 			return fastPacket;
@@ -721,6 +786,7 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		if (!sampleGrid(sampledMulti)) {
 			++track.consecutiveMisses;
 			++measured.misses;
+			++measured.outOfFrameMisses;
 			result.consecutiveMisses = track.consecutiveMisses;
 			continue;
 		}
@@ -729,6 +795,7 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		if (track.crc32Payload) {
 			packet = fastDecode();
 			if (packet.empty() && canMultiSample && !sampledMulti) {
+				++measured.multiSampleRetries;
 				if (sampleGrid(true)) {
 					sampledMulti = true;
 					packet = fastDecode();

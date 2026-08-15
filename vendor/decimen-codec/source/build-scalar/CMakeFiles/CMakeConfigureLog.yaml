@@ -19,8 +19,8 @@ events:
     checks:
       - "Performing Test HAS_FILE_PREFIX_ARG"
     directories:
-      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-zO9PNT"
-      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-zO9PNT"
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-uxy81W"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-uxy81W"
     cmakeVariables:
       CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
       CMAKE_CXX_FLAGS: ""
@@ -31,11 +31,11 @@ events:
       variable: "HAS_FILE_PREFIX_ARG"
       cached: true
       stdout: |
-        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-zO9PNT'
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-uxy81W'
         
-        Run Build Command(s): /usr/local/bin/ninja -v cmTC_462de
-        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DHAS_FILE_PREFIX_ARG  -std=gnu++20   -fmacro-prefix-map=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/third_party/zxing-cpp/core/= -MD -MT CMakeFiles/cmTC_462de.dir/src.cxx.o -MF CMakeFiles/cmTC_462de.dir/src.cxx.o.d -o CMakeFiles/cmTC_462de.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-zO9PNT/src.cxx
-        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++   CMakeFiles/cmTC_462de.dir/src.cxx.o -o cmTC_462de.js   && :
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_7366a
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DHAS_FILE_PREFIX_ARG  -std=gnu++20   -fmacro-prefix-map=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/third_party/zxing-cpp/core/= -MD -MT CMakeFiles/cmTC_7366a.dir/src.cxx.o -MF CMakeFiles/cmTC_7366a.dir/src.cxx.o.d -o CMakeFiles/cmTC_7366a.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-uxy81W/src.cxx
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++   CMakeFiles/cmTC_7366a.dir/src.cxx.o -o cmTC_7366a.js   && :
         
       exitCode: 0
   -
@@ -49,8 +49,8 @@ events:
     checks:
       - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
     directories:
-      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-LxzJey"
-      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-LxzJey"
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-gjJ3O5"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-gjJ3O5"
     cmakeVariables:
       CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
       CMAKE_C_FLAGS: ""
@@ -61,11 +61,11 @@ events:
       variable: "CMAKE_HAVE_LIBC_PTHREAD"
       cached: true
       stdout: |
-        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-LxzJey'
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-gjJ3O5'
         
-        Run Build Command(s): /usr/local/bin/ninja -v cmTC_4ef8f
-        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc -DCMAKE_HAVE_LIBC_PTHREAD   -MD -MT CMakeFiles/cmTC_4ef8f.dir/src.c.o -MF CMakeFiles/cmTC_4ef8f.dir/src.c.o.d -o CMakeFiles/cmTC_4ef8f.dir/src.c.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-LxzJey/src.c
-        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc   CMakeFiles/cmTC_4ef8f.dir/src.c.o -o cmTC_4ef8f.js   && :
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_ced36
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc -DCMAKE_HAVE_LIBC_PTHREAD   -MD -MT CMakeFiles/cmTC_ced36.dir/src.c.o -MF CMakeFiles/cmTC_ced36.dir/src.c.o.d -o CMakeFiles/cmTC_ced36.dir/src.c.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-gjJ3O5/src.c
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emcc   CMakeFiles/cmTC_ced36.dir/src.c.o -o cmTC_ced36.js   && :
         
       exitCode: 0
   -
@@ -78,8 +78,8 @@ events:
     checks:
       - "Performing Test COMPILER_KNOWS_Os"
     directories:
-      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-MkkA0X"
-      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-MkkA0X"
+      source: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-RlBCqp"
+      binary: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-RlBCqp"
     cmakeVariables:
       CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/emscan-deps"
       CMAKE_CXX_FLAGS: ""
@@ -90,11 +90,11 @@ events:
       variable: "COMPILER_KNOWS_Os"
       cached: true
       stdout: |
-        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-MkkA0X'
+        Change Dir: '/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-RlBCqp'
         
-        Run Build Command(s): /usr/local/bin/ninja -v cmTC_babf6
-        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DCOMPILER_KNOWS_Os  -std=gnu++20   -Os -MD -MT CMakeFiles/cmTC_babf6.dir/src.cxx.o -MF CMakeFiles/cmTC_babf6.dir/src.cxx.o.d -o CMakeFiles/cmTC_babf6.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-MkkA0X/src.cxx
-        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++   CMakeFiles/cmTC_babf6.dir/src.cxx.o -o cmTC_babf6.js   && :
+        Run Build Command(s): /usr/local/bin/ninja -v cmTC_e4bb0
+        [1/2] /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DCOMPILER_KNOWS_Os  -std=gnu++20   -Os -MD -MT CMakeFiles/cmTC_e4bb0.dir/src.cxx.o -MF CMakeFiles/cmTC_e4bb0.dir/src.cxx.o.d -o CMakeFiles/cmTC_e4bb0.dir/src.cxx.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-scalar/CMakeFiles/CMakeScratch/TryCompile-RlBCqp/src.cxx
+        [2/2] : && /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++   CMakeFiles/cmTC_e4bb0.dir/src.cxx.o -o cmTC_e4bb0.js   && :
         
       exitCode: 0
 ...
