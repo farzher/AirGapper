@@ -44,6 +44,7 @@ class DecodeWorkerPool {
         sightingCount: sightings.length,
         trackedAttempted: Boolean(message.trackedAttempted),
         trackedHit: Boolean(message.trackedHit),
+        yPlaneFailed: Boolean(message.yPlaneFailed),
         fallbackAttempted: Boolean(message.fallbackAttempted),
         fallbackSucceeded: Boolean(message.fallbackSucceeded),
         readFullAttempts: (_c = message.readFullAttempts) != null ? _c : 0,

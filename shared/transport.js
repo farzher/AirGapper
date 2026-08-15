@@ -5,7 +5,7 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "./coding-mode.js";
 import { RaptorDecoder, RaptorEncoder } from "./raptorq.js";
 const MDS_SYMBOLS = 256;
 const RAPTOR_ESI_SPACE = 16711680;
-function scheduledEsi(k, ordinal, _slotIndex, _gridCodes) {
+function scheduledEsi(k, ordinal) {
   const mode = codingMode(k);
   if (mode === "direct") return 0;
   if (mode === "mds") return ordinal % MDS_SYMBOLS;

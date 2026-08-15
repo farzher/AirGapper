@@ -508,7 +508,6 @@ function releaseTransportDecoder() {
   decoder = null;
 }
 let streamKey = "";
-let reportStreamId = 0;
 let startTs = 0;
 let captureGen = 0;
 let cameraStartGen = 0;
@@ -555,15 +554,9 @@ let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
 let totalCaptures = 0;
 let totalDecodes = 0;
-let totalUsefulSymbols = 0;
 let fullScans = 0;
-let cheapFullScans = 0;
-let thoroughFullScans = 0;
-let localReacquisitions = 0;
-let globalReacquisitions = 0;
 let peakRegions = 0;
 let capturesDropped = 0;
-let cropsSubmitted = 0;
 const candidateEvidenceWindows = /* @__PURE__ */ new Map();
 const scanCandidateEpoch = /* @__PURE__ */ new Map();
 const optimizerTrace = [];
@@ -996,11 +989,7 @@ copyDiagnostics.addEventListener("click", async () => {
     copyDiagnostics.textContent = "Copy diagnostics";
   }, 1500);
 });
-let trackedDecodes = 0;
-let trackedAttempts = 0;
 let cameraStartedTs = 0;
-let zeroRegionMs = 0;
-let degradedMs = 0;
 const timeline = [];
 const TIMELINE_MAX_SAMPLES = 2400;
 const regions = [];
@@ -1028,23 +1017,10 @@ function regionInflightCount(region) {
   }
   return count;
 }
-let schedulerNoJobs = 0;
-let cropMisses = 0;
-let fullDetectorMisses = 0;
-let fullSightings = 0;
-let trackedMissFallbacks = 0;
 let decodeExceptions = 0;
 let lastDecodeError = "";
-let regionExpiries = 0;
-let regionCreations = 0;
 let trackingInvalidations = 0;
-let submittedJobs = 0;
-let completedJobs = 0;
-let workerLatencyTotalMs = 0;
 let workerLatencyMaxMs = 0;
-let fullLatencyTotalMs = 0;
-let fullLatencyCount = 0;
-let lastFullLatencyMs = 0;
 let lastDistinctArrivalAt = 0;
 let lastStreamDecodeAt = 0;
 let maxSequenceGapMs = 0;
@@ -1096,8 +1072,15 @@ function noteDecodeCompleted(id, completion) {
   localReacquireIds.delete(id);
   scanCapturedAt.delete(id);
   scanCompletionTimes.push(receiverNow());
-  completedJobs++;
   focusController.noteDecoderCompletion(id);
+  if (completion.yPlaneFailed) {
+    directLumaDisabled = true;
+    finishScanCapture(id, completion);
+    scanOutcomes.delete(id);
+    cropAttempts.delete(id);
+    optimizerAttributionComplete(id);
+    return;
+  }
   const attribution = scanCandidateEpoch.get(id);
   if (optimizerJobIds.has(id)) {
     const complete = (attribution == null ? void 0 : attribution.scanId) === id && attribution.sourceFrameSequence >= attribution.epoch.firstValidSourceSequence && Number.isFinite(attribution.epoch.actualExposure) && Number.isFinite(attribution.epoch.actualIso);
@@ -1126,12 +1109,8 @@ function noteDecodeCompleted(id, completion) {
       traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: id, candidateEpoch: attribution == null ? void 0 : attribution.epoch.id });
     }
   }
-  workerLatencyTotalMs += completion.latencyMs;
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (fullJob) {
-    lastFullLatencyMs = completion.latencyMs;
-    fullLatencyTotalMs += completion.latencyMs;
-    fullLatencyCount++;
   }
   if (completion.error) {
     decodeExceptions++;
@@ -1141,13 +1120,9 @@ function noteDecodeCompleted(id, completion) {
     lastDecodeError = "";
   }
   if (completion.full) {
-    fullSightings += completion.sightingCount;
-    if (completion.symbolCount === 0 && completion.sightingCount === 0) fullDetectorMisses++;
   } else if (completion.symbolCount === 0) {
-    cropMisses++;
   }
   if (completion.trackedAttempted && !completion.trackedHit && completion.fallbackAttempted) {
-    trackedMissFallbacks++;
   }
   finishScanCapture(id, completion);
   scanOutcomes.delete(id);
@@ -1155,7 +1130,6 @@ function noteDecodeCompleted(id, completion) {
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
   if (!attempts) return;
-  if (completion.trackedAttempted) trackedAttempts += attempts.length;
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
@@ -1181,7 +1155,6 @@ let cropRotate = 0;
 let lastFullScan = 0;
 const fullScanIds = /* @__PURE__ */ new Set();
 const fullScanJobs = /* @__PURE__ */ new Map();
-let currentScanningState = "SEARCH";
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
 function decodedCount() {
@@ -1267,7 +1240,6 @@ function noteRegion(box, now, decoded = true, info) {
     averageDecodeCostMs: 0,
     lastHitScanId: decoded ? info == null ? void 0 : info.scanId : void 0
   });
-  regionCreations++;
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
   if (regions.length > MAX_REGIONS) {
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
@@ -1310,7 +1282,6 @@ function syncGrid(snapshot, now, decodedSlot, info) {
         averageDecodeCostMs: 0
       };
       regions.push(region);
-      regionCreations++;
     }
     Object.assign(region, slot.box, {
       quad: slot.quad,
@@ -1990,7 +1961,6 @@ function offerRetry(message) {
   metricsEl.style.display = "block";
   progressStatus.style.display = "block";
   progressEl.style.display = "block";
-  if (diagnosticsEl) diagnosticsEl.style.display = "none";
   showError(message);
 }
 function stopReceiver() {
@@ -2008,7 +1978,6 @@ function stopReceiver() {
   pool.resize(0);
   releaseTransportDecoder();
   streamKey = "";
-  reportStreamId = 0;
   startTs = 0;
   done = false;
   regions.length = 0;
@@ -2023,7 +1992,6 @@ function stopReceiver() {
   fullScanIds.clear();
   fullScanJobs.clear();
   localReacquireIds.clear();
-  currentScanningState = "SEARCH";
   scanCapturedAt.clear();
   scanOutcomes.clear();
   captureTimes.length = 0;
@@ -2034,23 +2002,10 @@ function stopReceiver() {
   lastDecodeSubmittedSourceSequence = -1;
   cropAttempts.clear();
   cropRotate = 0;
-  schedulerNoJobs = 0;
-  cropMisses = 0;
-  fullDetectorMisses = 0;
-  fullSightings = 0;
-  trackedMissFallbacks = 0;
   decodeExceptions = 0;
   lastDecodeError = "";
-  regionExpiries = 0;
-  regionCreations = 0;
   trackingInvalidations = 0;
-  submittedJobs = 0;
-  completedJobs = 0;
-  workerLatencyTotalMs = 0;
   workerLatencyMaxMs = 0;
-  fullLatencyTotalMs = 0;
-  fullLatencyCount = 0;
-  lastFullLatencyMs = 0;
   lastDistinctArrivalAt = 0;
   lastStreamDecodeAt = 0;
   maxSequenceGapMs = 0;
@@ -2058,17 +2013,9 @@ function stopReceiver() {
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
-  totalUsefulSymbols = 0;
   fullScans = 0;
-  cheapFullScans = 0;
-  thoroughFullScans = 0;
-  localReacquisitions = 0;
-  globalReacquisitions = 0;
   peakRegions = 0;
   capturesDropped = 0;
-  cropsSubmitted = 0;
-  trackedDecodes = 0;
-  trackedAttempts = 0;
   cameraStartedTs = 0;
   lastOpticalSampleAt = -Infinity;
   lastOpticalSourceSequence = -1;
@@ -2076,8 +2023,6 @@ function stopReceiver() {
   opticalAnalyzeTotalMs = 0;
   opticalAnalyzeMaxMs = 0;
   opticalTimingStartedAt = performance.now();
-  zeroRegionMs = 0;
-  degradedMs = 0;
   timeline.length = 0;
   plainQrPolicy.reset();
   result.replaceChildren();
@@ -2164,6 +2109,7 @@ const localCameraMessage = "This browser does not allow camera access from a loc
 async function start() {
   var _a;
   const startAttempt = cameraStartGen;
+  directLumaDisabled = false;
   try {
     await prepareRaptorQ();
   } catch (error) {
@@ -2246,7 +2192,6 @@ async function start() {
   stream = acquiredStream;
   startBtn.style.display = "none";
   preview.style.display = "";
-  if (diagnosticsEl) diagnosticsEl.style.display = "block";
   video.srcObject = stream;
   await video.play().catch(() => void 0);
   preview.classList.remove("camera-loading");
@@ -2600,7 +2545,6 @@ function readBoundedVideoCrop(source, x, y, w, h) {
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
-    submittedJobs++;
     const submittedAt = receiverNow();
     scanCapturedAt.set(message.id, submittedAt);
     if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
@@ -2720,6 +2664,7 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
 }
 
 const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);
+let directLumaDisabled = false;
 function opticalSampleDue(source) {
   if (replayRunning || source.sequence === lastOpticalSourceSequence) return false;
   const interval = focusController.opticalIntervalMs;
@@ -2727,7 +2672,7 @@ function opticalSampleDue(source) {
 }
 function cloneDirectLumaFrame(source) {
   const frame = source.videoFrame;
-  if (source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;
+  if (directLumaDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;
   try {
     return frame.clone();
   } catch {
@@ -2966,7 +2911,6 @@ async function captureFrame(source) {
       source.sequence
     )) {
       fullScans++;
-      thoroughFullScans++;
       fullScanIds.add(id);
       fullScanJobs.set(id, { thorough: true, native: true, reacquire: false });
       scanCapturedAt.set(id, now);
@@ -2983,7 +2927,6 @@ async function captureFrame(source) {
     const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
     if (region.gridSlot === void 0 && now - region.seen > ttl) {
       regions.splice(i, 1);
-      regionExpiries++;
       notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
     }
   }
@@ -3013,7 +2956,6 @@ async function captureFrame(source) {
   const captureHasTrackedWork = gridLattice.active ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const fullScanDue = captureNextScan ? !captureHasTrackedWork : now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
-    schedulerNoJobs++;
     if (trace) {
       trace.decision = "full scan throttled";
       trace.stateAfter = gridLattice.state;
@@ -3130,13 +3072,13 @@ async function captureFrame(source) {
           workerSlot
         );
         if (!accepted) {
+          if (laneFrame) directLumaDisabled = true;
           laneFrame?.close();
           cropAttempts.delete(id);
           continue;
         }
         freeSlots.delete(workerSlot);
         laneJobsSubmitted++;
-        cropsSubmitted += group.tracks.length;
       }
       cropRotate++;
       if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
@@ -3198,13 +3140,13 @@ async function captureFrame(source) {
           source.sequence,
           batchRegions
         )) {
+          if (sharedFrame) directLumaDisabled = true;
           sharedFrame?.close();
           cropAttempts.delete(id2);
           poolBusyTimes.push(now);
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         } else {
           if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
-          cropsSubmitted += batchTracks.length;
         }
         cropRotate++;
         if (trace) trace.stateAfter = gridLattice.state;
@@ -3222,7 +3164,6 @@ async function captureFrame(source) {
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
-        cropsSubmitted += batchTracks.length;
       } else {
         if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         poolBusyTimes.push(now);
@@ -3274,7 +3215,6 @@ async function captureFrame(source) {
       break;
     }
     if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
-    cropsSubmitted++;
     submitted = true;
   }
   if (!submitted && scheduledRegions.length > 0) {
@@ -3288,7 +3228,6 @@ async function captureFrame(source) {
 function resetActiveTransfer() {
   releaseTransportDecoder();
   streamKey = "";
-  reportStreamId = 0;
   startTs = 0;
   regions.length = 0;
   gridLattice.reset();
@@ -3304,7 +3243,6 @@ function resetActiveTransfer() {
   localReacquireIds.clear();
   scanCapturedAt.clear();
   scanOutcomes.clear();
-  currentScanningState = "SEARCH";
   lastFullScan = 0;
   minimumAcceptedScanId = frameId;
   qrReadTimes.length = 0;
@@ -3339,7 +3277,6 @@ function onDecoded(bytes, box, info) {
     return;
   }
   totalDecodes++;
-  if (info == null ? void 0 : info.tracked) trackedDecodes++;
   const decodedAt = receiverNow();
   if (done) return;
   qrReadTimes.push(decodedAt);
@@ -3363,7 +3300,6 @@ function onDecoded(bytes, box, info) {
   if (duplicateOptimizerValid) {
     optimizerDuplicateValidEvents++;
     totalDecodes--;
-    if (info == null ? void 0 : info.tracked) trackedDecodes--;
     qrReadTimes.pop();
     return;
   }
@@ -3466,7 +3402,6 @@ function onDecoded(bytes, box, info) {
     decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
     usefulFrameTimes.length = 0;
     streamKey = identity;
-    reportStreamId = header.payloadId;
     startTs = receiverNow();
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
@@ -3486,7 +3421,6 @@ function onDecoded(bytes, box, info) {
   }
   if (decoder.usefulSymbols > usefulBefore) {
     const added = decoder.usefulSymbols - usefulBefore;
-    totalUsefulSymbols += added;
     usefulFrameTimes.push(receivedAt);
     focusController.noteUsefulDecode(info == null ? void 0 : info.scanId);
     if (optimizerAttribution) {
@@ -3572,7 +3506,6 @@ function liveGoodputKbs(now) {
   return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead(decoder.mode) / 1024 / (STATS_WINDOW_MS / 1e3);
 }
 async function finish(container, hashOk, seconds) {
-  var _a, _b;
   done = true;
   focusController.detach();
   cancelScanCapture();
@@ -4398,9 +4331,6 @@ function updateStats() {
   const elapsed = (now - startTs) / 1e3;
   const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
   const liveNow = gridLattice.active ? activeGrid.filter((region) => region.decoded).length : decodedCount();
-  const expectedNow = gridLattice.active ? activeGrid.length : expectedRegions;
-  if (liveNow === 0) zeroRegionMs += STATS_TICK_MS;
-  if (liveNow < expectedNow) degradedMs += STATS_TICK_MS;
   if (timeline.length < TIMELINE_MAX_SAMPLES) {
     timeline.push([
       Number(elapsed.toFixed(1)),

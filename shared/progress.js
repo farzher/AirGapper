@@ -1,7 +1,7 @@
-function expectedCodingOverhead(_mode) {
+function expectedCodingOverhead() {
   return 1;
 }
-function estimateTransferProgress(sourceBlocks, usefulSymbols, elapsedSeconds, sourceRank = usefulSymbols, _mode = "raptorq") {
+function estimateTransferProgress(sourceBlocks, usefulSymbols, elapsedSeconds, sourceRank = usefulSymbols) {
   const expectedFrames = Math.max(1, sourceBlocks);
   const rank = Math.min(expectedFrames, Math.max(0, sourceRank));
   const complete = rank >= expectedFrames;

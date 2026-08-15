@@ -487,15 +487,19 @@ ctx.onmessage = async (e) => {
   } catch (error) {
     ownedVideoFrame?.close();
     ownedVideoFrame = null;
+    const yPlaneFailed = pixelFormat === "y8";
     ctx.postMessage({
       id,
       symbols: [],
       sightings: [],
       full,
+      trackedAttempted: yPlaneFailed,
+      trackedHit: false,
       workerWaitMs,
       readFullAttempts,
+      yPlaneFailed,
       latencyMs: performance.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error)
+      error: yPlaneFailed ? void 0 : error instanceof Error ? error.message : String(error)
     });
   }
 };
