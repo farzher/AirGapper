@@ -18,42 +18,37 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
+          p = Path("shared/transport.js")
+          text = p.read_text()
+          pattern = re.compile(r'''  addRaptor\(block\) \{\n    const payload = this\.raptor\.add\(block\);\n    if \(payload\) \{\n      this\.raptorPayload = payload;\n      this\.solvedCount = this\.k;\n      return;\n    \}\n    if \(this\.framesNew < this\.k\) \{\n      this\.solvedCount = this\.framesNew;\n    \} else \{\n      this\.framesRedundant\+\+;\n      this\.solvedCount = this\.k - 1;\n    \}\n  \}\n''')
+          replacement = '''  addRaptor(block) {
+            const payload = this.raptor.add(block);
+            if (payload) {
+              this.raptorPayload = payload;
+              this.solvedCount = this.k;
+              return;
+            }
+            // The streaming RaptorQ API only reports completion, not whether an
+            // individual fresh repair symbol was algebraically redundant. Fresh
+            // ESIs can be the coding overhead that completes the transfer, so do
+            // not mark every post-k symbol redundant and make live KB/s drop to 0.
+            this.solvedCount = Math.min(this.framesNew, this.k - 1);
+          }
+          '''
+          text, n = pattern.subn(replacement, text)
+          if n != 1:
+              raise SystemExit(f"shared/transport.js: expected one addRaptor match, got {n}")
+          p.write_text(text)
+
           def replace(path, old, new):
               p = Path(path)
               text = p.read_text()
               if text.count(old) != 1:
-                  raise SystemExit(f"{path}: expected one match for {old[:80]!r}, got {text.count(old)}")
+                  raise SystemExit(f"{path}: expected one match, got {text.count(old)}")
               p.write_text(text.replace(old, new))
 
-          replace("shared/transport.js", '''  addRaptor(block) {
-            const payload = this.raptor.add(block);
-            if (payload) {
-              this.raptorPayload = payload;
-              this.solvedCount = this.k;
-              return;
-            }
-            if (this.framesNew < this.k) {
-              this.solvedCount = this.framesNew;
-            } else {
-              this.framesRedundant++;
-              this.solvedCount = this.k - 1;
-            }
-          }
-          ''', '''  addRaptor(block) {
-            const payload = this.raptor.add(block);
-            if (payload) {
-              this.raptorPayload = payload;
-              this.solvedCount = this.k;
-              return;
-            }
-            // RaptorQ's streaming decoder only tells us when the payload is solved;
-            // it does not tell us whether an individual fresh repair symbol was
-            // algebraically redundant. Do not misclassify every post-k symbol as
-            // redundant: those fresh ESIs are exactly the coding overhead that may
-            // make the decoder complete, and they should contribute to live goodput.
-            this.solvedCount = Math.min(this.framesNew, this.k - 1);
-          }
-          ''')
           replace("index.html", '<span class="brand">AirGapper <span class="app-version">v0.5.45</span></span>', '<span class="brand">AirGapper <span class="app-version">v0.5.46</span></span>')
           replace("sw.js", 'const CACHE = "airgapper-static-js-v8";', 'const CACHE = "airgapper-static-js-v9";')
           PY
