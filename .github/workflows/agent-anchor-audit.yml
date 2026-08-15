@@ -1,0 +1,41 @@
+name: Agent anchor audit fix
+on:
+  push:
+    branches: [agent/anchor-audit-fix]
+permissions:
+  contents: write
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/anchor-audit-fix
+      - name: Apply patch
+        run: python3 .github/agent-anchor-audit.py
+      - name: Verify JS syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+      - name: Rebuild SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          ./build.sh
+      - name: Rebuild scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=OFF ./build.sh android
+      - name: Verify invariants
+        run: |
+          grep -q 'anchorBypassAttempts' receive/worker.js
+          grep -q 'Anchor bypass CRC' receive/main.js
+          grep -q 'setTrackedDecoderFallbackBudget(nativeBatchHandle, 0)' receive/worker.js
+          ! grep -q 'v0.5.54' index.html
+      - name: Commit result
+        run: |
+          rm -f .github/agent-anchor-audit.py .github/workflows/agent-anchor-audit.yml
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add -A
+          git commit -m 'make tracked anchor advisory'
+          git push origin HEAD:agent/anchor-audit-fix
