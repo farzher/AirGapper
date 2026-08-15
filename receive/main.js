@@ -585,10 +585,6 @@ function drainPendingGridLane(workerSlot) {
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
   (bytes, box, info) => onDecoded(bytes, box, info),
-  // A sighting is a detected-but-undecoded code: no bytes, but a position.
-  // Heavily gated in noteRegion (refresh-only on matches, size-checked on
-  // creation) because failed quads are often junk — but a plausible one lets
-  // the crop path go decode what the full frame could not.
   (sighting) => {
     if (!gridLattice.active) noteRegion(sighting, receiverNow(), false);
   },
@@ -759,17 +755,7 @@ const optimizerEpochHooks = {
     if ((activeOptimizerEpoch == null ? void 0 : activeOptimizerEpoch.id) !== epochId) return;
     activeOptimizerEpoch.collecting = false;
     activeOptimizerEpoch.lastValidSourceSequence = latestSourceFrameSequence;
-    traceOptimizer({
-      time: receiverNow(),
-      event: "CANDIDATE_CLOSE",
-      candidateId: activeOptimizerEpoch.candidateId,
-      candidateEpoch: epochId,
-      sourceSequence: latestSourceFrameSequence,
-      requestedExposure: activeOptimizerEpoch.requestedExposure,
-      requestedIso: activeOptimizerEpoch.requestedIso,
-      actualExposure: activeOptimizerEpoch.actualExposure,
-      actualIso: activeOptimizerEpoch.actualIso
-    });
+    traceOptimizer({ time: receiverNow(), event: "CANDIDATE_CLOSE", candidateId: activeOptimizerEpoch.candidateId, candidateEpoch: epochId, sourceSequence: latestSourceFrameSequence, requestedExposure: activeOptimizerEpoch.requestedExposure, requestedIso: activeOptimizerEpoch.requestedIso, actualExposure: activeOptimizerEpoch.actualExposure, actualIso: activeOptimizerEpoch.actualIso });
     activeOptimizerEpoch = void 0;
   },
   finish() {
@@ -829,24 +815,10 @@ async function measureReceivePerformance(label, epochId) {
   refreshCandidateEvidence(evidence);
   const result2 = (async () => {
     const waitStartedAt = receiverNow();
-    while (token === optimizeMeasureToken && evidence.completedJobs < evidence.submittedJobs && receiverNow() - waitStartedAt < 6e3) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    while (token === optimizeMeasureToken && evidence.completedJobs < evidence.submittedJobs && receiverNow() - waitStartedAt < 6e3) await new Promise((resolve) => setTimeout(resolve, 20));
     const performanceSample = refreshCandidateEvidence(evidence);
-    traceOptimizer({
-      time: receiverNow(),
-      event: "CANDIDATE_SCORE",
-      candidateId: epoch.candidateId,
-      candidateEpoch: epochId,
-      requestedExposure: epoch.requestedExposure,
-      requestedIso: epoch.requestedIso,
-      actualExposure: epoch.actualExposure,
-      actualIso: epoch.actualIso,
-      validDecode: performanceSample.validDecodes > 0
-    });
-    if (token === optimizeMeasureToken) {
-      opticsOptimizeStatus.textContent = `${label} · ${(performanceSample.perQrAttemptSuccessRate * 100).toFixed(0)}%`;
-    }
+    traceOptimizer({ time: receiverNow(), event: "CANDIDATE_SCORE", candidateId: epoch.candidateId, candidateEpoch: epochId, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: performanceSample.validDecodes > 0 });
+    if (token === optimizeMeasureToken) opticsOptimizeStatus.textContent = `${label} · ${(performanceSample.perQrAttemptSuccessRate * 100).toFixed(0)}%`;
     return performanceSample;
   })();
   return { result: result2 };
@@ -924,9 +896,7 @@ function beginOptimizeWhenReady() {
       optimizeConverged = true;
       const exposureImproved = (optimizePassBaseline == null ? void 0 : optimizePassBaseline.exposure) !== void 0 && finished.committedExposureTime !== void 0 && finished.committedExposureTime < optimizePassBaseline.exposure * 0.97;
       optimizeRecheckAt = performance.now() + (exposureImproved ? 2500 : 12e3);
-      if (optimizerBootstrapDecode) {
-        noteRegion(optimizerBootstrapDecode.box, receiverNow(), true, optimizerBootstrapDecode.info);
-      }
+      if (optimizerBootstrapDecode) noteRegion(optimizerBootstrapDecode.box, receiverNow(), true, optimizerBootstrapDecode.info);
       const bestPerformance = finished.optimizeBestPerformance;
       opticsOptimizeStatus.textContent = bestPerformance ? `Optimizing · best ${bestPerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${(_b = finished.committedIso) != null ? _b : "—"}` : "Optimizing · holding best";
       opticsOptimizeStatus.title = (_c = finished.optimizeSummary) != null ? _c : "";
@@ -974,13 +944,7 @@ async function applyAndValidateManualExposure(track) {
     optimizerEpochHooks.finish();
     return;
   }
-  const epoch = await optimizerEpochHooks.open({
-    candidateId: "MANUAL",
-    requestedExposure,
-    requestedIso,
-    actualExposure: actual.exposureTime,
-    actualIso: actual.iso
-  });
+  const epoch = await optimizerEpochHooks.open({ candidateId: "MANUAL", requestedExposure, requestedIso, actualExposure: actual.exposureTime, actualIso: actual.iso });
   if (epoch === void 0 || run !== manualValidationToken) {
     optimizerEpochHooks.finish();
     return;
@@ -1036,9 +1000,7 @@ copyDiagnostics.addEventListener("click", async () => {
   } catch {
     copyDiagnostics.textContent = "Copy failed";
   }
-  setTimeout(() => {
-    copyDiagnostics.textContent = "Copy diagnostics";
-  }, 1500);
+  setTimeout(() => { copyDiagnostics.textContent = "Copy diagnostics"; }, 1500);
 });
 let cameraStartedTs = 0;
 const timeline = [];
@@ -1063,9 +1025,7 @@ function noteScanOutcome(scanId, kind) {
 }
 function regionInflightCount(region) {
   let count = 0;
-  for (const attempts of cropAttempts.values()) {
-    if (attempts.some((attempt) => attempt.region === region)) count++;
-  }
+  for (const attempts of cropAttempts.values()) if (attempts.some((attempt) => attempt.region === region)) count++;
   return count;
 }
 let decodeExceptions = 0;
@@ -1080,17 +1040,11 @@ const pipelineEvents = [];
 const PIPELINE_EVENT_LIMIT = 80;
 function notePipelineEvent(kind, value = 0) {
   if (pipelineEvents.length >= PIPELINE_EVENT_LIMIT) return;
-  pipelineEvents.push([
-    Number(((receiverNow() - cameraStartedTs) / 1e3).toFixed(2)),
-    kind,
-    value
-  ]);
+  pipelineEvents.push([Number(((receiverNow() - cameraStartedTs) / 1e3).toFixed(2)), kind, value]);
 }
 const QUALITY_WINDOW_MS = 3e3;
 function pruneSequenceSamples(region, now) {
-  while (region.sequenceSamples.length && region.sequenceSamples[0].at < now - QUALITY_WINDOW_MS) {
-    region.sequenceSamples.shift();
-  }
+  while (region.sequenceSamples.length && region.sequenceSamples[0].at < now - QUALITY_WINDOW_MS) region.sequenceSamples.shift();
 }
 function noteSequence(region, seq, now) {
   pruneSequenceSamples(region, now);
@@ -1140,20 +1094,7 @@ function noteDecodeCompleted(id, completion) {
       optimizerCompletionsMappedTotal++;
       attribution.evidence.completedJobs++;
       refreshCandidateEvidence(attribution.evidence);
-      traceOptimizer({
-        time: receiverNow(),
-        event: "JOB_COMPLETE",
-        candidateId: attribution.epoch.candidateId,
-        candidateEpoch: attribution.epoch.id,
-        sourceSequence: attribution.sourceFrameSequence,
-        scanId: id,
-        requestedExposure: attribution.epoch.requestedExposure,
-        requestedIso: attribution.epoch.requestedIso,
-        actualExposure: attribution.epoch.actualExposure,
-        actualIso: attribution.epoch.actualIso,
-        validDecode: attribution.validDecodes > 0,
-        usefulSymbol: attribution.usefulSymbols > 0
-      });
+      traceOptimizer({ time: receiverNow(), event: "JOB_COMPLETE", candidateId: attribution.epoch.candidateId, candidateEpoch: attribution.epoch.id, sourceSequence: attribution.sourceFrameSequence, scanId: id, requestedExposure: attribution.epoch.requestedExposure, requestedIso: attribution.epoch.requestedIso, actualExposure: attribution.epoch.actualExposure, actualIso: attribution.epoch.actualIso, validDecode: attribution.validDecodes > 0, usefulSymbol: attribution.usefulSymbols > 0 });
     } else {
       optimizerUnattributedResults++;
       if (attribution) optimizerEpochMismatches++;
@@ -1169,9 +1110,7 @@ function noteDecodeCompleted(id, completion) {
     decodeExceptions++;
     lastDecodeError = completion.error;
     notePipelineEvent("decode-exception", decodeExceptions);
-  } else if (completion.symbolCount > 0) {
-    lastDecodeError = "";
-  }
+  } else if (completion.symbolCount > 0) lastDecodeError = "";
   if (completion.full) {
   } else if (completion.symbolCount === 0) {
   }
@@ -1269,29 +1208,7 @@ function noteRegion(box, now, decoded = true, info) {
     }
   }
   if (decoded) lastDecodedRegionSize = Math.max(box.w, box.h);
-  regions.push({
-    ...box,
-    id: nextRegionId++,
-    seen: now,
-    decoded,
-    decodedSeen: decoded ? now : void 0,
-    sightedSeen: now,
-    sequenceSamples: [],
-    qualityLevel: 0,
-    quad: info == null ? void 0 : info.quad,
-    dim: info == null ? void 0 : info.modules,
-    crc32: info == null ? void 0 : info.crc32,
-    consecutiveMisses: 0,
-    detectionConfidence: decoded ? 1 : 0.35,
-    decodeConfidence: decoded ? 1 : 0,
-    globalGridConfidence: 0,
-    visibleFraction: 1,
-    pixelsPerModule: 0,
-    decodeAttempts: 0,
-    decodeSuccesses: 0,
-    averageDecodeCostMs: 0,
-    lastHitScanId: decoded ? info == null ? void 0 : info.scanId : void 0
-  });
+  regions.push({ ...box, id: nextRegionId++, seen: now, decoded, decodedSeen: decoded ? now : void 0, sightedSeen: now, sequenceSamples: [], qualityLevel: 0, quad: info == null ? void 0 : info.quad, dim: info == null ? void 0 : info.modules, crc32: info == null ? void 0 : info.crc32, consecutiveMisses: 0, detectionConfidence: decoded ? 1 : 0.35, decodeConfidence: decoded ? 1 : 0, globalGridConfidence: 0, visibleFraction: 1, pixelsPerModule: 0, decodeAttempts: 0, decodeSuccesses: 0, averageDecodeCostMs: 0, lastHitScanId: decoded ? info == null ? void 0 : info.scanId : void 0 });
   notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
   if (regions.length > MAX_REGIONS) {
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
@@ -1311,35 +1228,10 @@ function syncGrid(snapshot, now, decodedSlot, info) {
   for (const slot of snapshot.slots) {
     let region = regions.find((candidate) => candidate.gridSlot === slot.index);
     if (!region) {
-      region = {
-        ...slot.box,
-        id: nextRegionId++,
-        seen: now,
-        decoded: false,
-        sightedSeen: now,
-        sequenceSamples: [],
-        qualityLevel: 0,
-        quad: slot.quad,
-        dim: snapshot.modules,
-        crc32: true,
-        consecutiveMisses: 0,
-        gridSlot: slot.index,
-        detectionConfidence: 0,
-        decodeConfidence: 0,
-        globalGridConfidence: snapshot.confidence,
-        visibleFraction: 0,
-        pixelsPerModule: 0,
-        decodeAttempts: 0,
-        decodeSuccesses: 0,
-        averageDecodeCostMs: 0
-      };
+      region = { ...slot.box, id: nextRegionId++, seen: now, decoded: false, sightedSeen: now, sequenceSamples: [], qualityLevel: 0, quad: slot.quad, dim: snapshot.modules, crc32: true, consecutiveMisses: 0, gridSlot: slot.index, detectionConfidence: 0, decodeConfidence: 0, globalGridConfidence: snapshot.confidence, visibleFraction: 0, pixelsPerModule: 0, decodeAttempts: 0, decodeSuccesses: 0, averageDecodeCostMs: 0 };
       regions.push(region);
     }
-    Object.assign(region, slot.box, {
-      quad: slot.quad,
-      dim: snapshot.modules,
-      globalGridConfidence: snapshot.confidence
-    });
+    Object.assign(region, slot.box, { quad: slot.quad, dim: snapshot.modules, globalGridConfidence: snapshot.confidence });
     if (slot.index === decodedSlot) {
       region.decoded = true;
       region.seen = now;
@@ -1389,9 +1281,7 @@ function classifyGridSlots(vw, vh) {
   return visible;
 }
 function isGridDecodeCandidate(region) {
-  return region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY" || // A narrow clipped edge can remain recoverable through QR error correction
-  // and the known transform. Do not spend work on substantially absent codes.
-  region.slotState === "PARTIAL" && region.visibleFraction >= 0.85;
+  return region.slotState === "ACTIVE" || region.slotState === "LOST" || region.slotState === "LOW_QUALITY" || region.slotState === "PARTIAL" && region.visibleFraction >= 0.85;
 }
 function slotUsefulness(region) {
   const success = region.decodeAttempts ? region.decodeConfidence : 0.65;
@@ -1420,15 +1310,9 @@ function showNegotiatedWebMode(track, prefix = "") {
   const size = active.width && active.height ? formatCameraSize(active.width, active.height) : "Camera active";
   cameraActual.textContent = `${prefix ? `${prefix} · ` : ""}${size}${active.frameRate ? ` · ${Math.round(active.frameRate)} fps` : ""}`;
 }
-function sameModeSize(a, b) {
-  return a.width === b.width && a.height === b.height || a.width === b.height && a.height === b.width;
-}
-function formatExposureMs(value) {
-  return value === void 0 ? "—" : `${Number((value * 0.1).toPrecision(3))} ms`;
-}
-function showExposureTime(value) {
-  cameraExposureValue.value = formatExposureMs(value);
-}
+function sameModeSize(a, b) { return a.width === b.width && a.height === b.height || a.width === b.height && a.height === b.width; }
+function formatExposureMs(value) { return value === void 0 ? "—" : `${Number((value * 0.1).toPrecision(3))} ms`; }
+function showExposureTime(value) { cameraExposureValue.value = formatExposureMs(value); }
 function syncExposureControls() {
   cameraExposureAuto.checked = automaticOptics;
   exposureAxisAuto.checked = automaticExposureAxis;
@@ -1443,10 +1327,7 @@ function syncExposureControls() {
   focusDistanceValue.hidden = !manualFocus;
   focusAxisReset.hidden = !manualFocus;
   focusAxisName.hidden = manualFocus;
-  for (const [automatic, toggle, slider, output, reset, name] of [
-    [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName],
-    [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName]
-  ]) {
+  for (const [automatic, toggle, slider, output, reset, name] of [[automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName], [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName]]) {
     toggle.hidden = !automatic;
     slider.hidden = automatic;
     output.hidden = automatic;
@@ -1467,10 +1348,7 @@ async function applyExposureSetting(track) {
     if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
       const step = Math.max((_b = caps.exposureCompensation.step) != null ? _b : 0, 0.01);
       const raw = Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS));
-      patch.exposureCompensation = Math.max(
-        caps.exposureCompensation.min,
-        Math.min(0, Math.round((raw - caps.exposureCompensation.min) / step) * step + caps.exposureCompensation.min)
-      );
+      patch.exposureCompensation = Math.max(caps.exposureCompensation.min, Math.min(0, Math.round((raw - caps.exposureCompensation.min) / step) * step + caps.exposureCompensation.min));
     }
     await applyCameraConstraint(track, patch);
     if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
@@ -1493,11 +1371,7 @@ async function applyExposureSetting(track) {
   preferredExposureTime = requestedExposure;
   if (requestedIso !== void 0) preferredIso = requestedIso;
   if (automaticIsoAxis) delete desiredCamera.iso;
-  await applyCameraConstraint(track, {
-    exposureMode: "manual",
-    exposureTime: requestedExposure,
-    ...requestedIso !== void 0 ? { iso: requestedIso } : {}
-  });
+  await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: requestedExposure, ...requestedIso !== void 0 ? { iso: requestedIso } : {} });
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
   cameraExposure.value = String(requestedExposure);
   showExposureTime(requestedExposure);
@@ -1527,9 +1401,7 @@ function populateBrowserCapabilities(track) {
     showExposureTime(current);
     syncExposureControls();
     void applyExposureSetting(track);
-  } else {
-    cameraOpticsManual.hidden = true;
-  }
+  } else cameraOpticsManual.hidden = true;
   const iso = caps.iso;
   cameraIsoControl.hidden = !iso;
   if (iso) {
@@ -1549,33 +1421,15 @@ function populateBrowserCapabilities(track) {
   const active = track.getSettings();
   if (cameraResolution.value === "auto" && active.width && active.height) {
     const fps = Math.round((_m = active.frameRate) != null ? _m : 30);
-    automaticBrowserMode = {
-      key: "auto",
-      width: active.width,
-      height: active.height,
-      fps,
-      label: formatCameraMode(active.width, active.height, fps)
-    };
+    automaticBrowserMode = { key: "auto", width: active.width, height: active.height, fps, label: formatCameraMode(active.width, active.height, fps) };
   }
   browserModes = standardBrowserModes().filter((mode) => mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax && mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false && !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
   const prior = cameraResolution.value;
-  const options = browserModes.map((mode) => ({
-    width: mode.width,
-    height: mode.height,
-    fps: mode.fps,
-    option: new Option(`${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key)
-  }));
+  const options = browserModes.map((mode) => ({ width: mode.width, height: mode.height, fps: mode.fps, option: new Option(`${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key) }));
   if (automaticBrowserMode) {
-    options.push({
-      width: automaticBrowserMode.width,
-      height: automaticBrowserMode.height,
-      fps: automaticBrowserMode.fps,
-      option: new Option(`${automaticBrowserMode.label} · Auto`, "auto")
-    });
+    options.push({ width: automaticBrowserMode.width, height: automaticBrowserMode.height, fps: automaticBrowserMode.fps, option: new Option(`${automaticBrowserMode.label} · Auto`, "auto") });
     options.sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
-  } else {
-    options.unshift({ width: 0, height: 0, fps: 0, option: new Option("Auto", "auto") });
-  }
+  } else options.unshift({ width: 0, height: 0, fps: 0, option: new Option("Auto", "auto") });
   cameraResolution.replaceChildren(...options.map(({ option }) => option));
   cameraResolution.value = browserModes.some((mode) => mode.key === prior) ? prior : "auto";
   readRequestedCameraSettings();
@@ -1589,18 +1443,10 @@ const SIGHTING_FADE_MS = 450;
 const MAX_QR_MODULES = 177;
 const BLUE_MIN_PIXELS_PER_MODULE = 4.5;
 const overlayCtx = overlay.getContext("2d");
-function captureQualityRate(region, now) {
-  pruneSequenceSamples(region, now);
-  return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
-}
+function captureQualityRate(region, now) { pruneSequenceSamples(region, now); return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0; }
 function hasDensityHeadroom(region) {
   if (!region.quad || !region.dim || region.dim >= MAX_QR_MODULES) return false;
-  const corners = [
-    region.quad.topLeft,
-    region.quad.topRight,
-    region.quad.bottomRight,
-    region.quad.bottomLeft
-  ];
+  const corners = [region.quad.topLeft, region.quad.topRight, region.quad.bottomRight, region.quad.bottomLeft];
   let shortestEdge = Infinity;
   for (let i = 0; i < corners.length; i++) {
     const a = corners[i];
@@ -1638,10 +1484,7 @@ function drawOverlay(now) {
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(cw * dpr);
   const ph = Math.round(ch * dpr);
-  if (overlay.width !== pw || overlay.height !== ph) {
-    overlay.width = pw;
-    overlay.height = ph;
-  }
+  if (overlay.width !== pw || overlay.height !== ph) { overlay.width = pw; overlay.height = ph; }
   overlayCtx.clearRect(0, 0, pw, ph);
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
@@ -1671,28 +1514,17 @@ function drawOverlay(now) {
     const fade = successful ? INDICATOR_FADE_MS : SIGHTING_FADE_MS;
     overlayCtx.globalAlpha = successful ? 1 - 0.65 * age / fade : 0.7 * (1 - age / fade);
     overlayCtx.beginPath();
-    overlayCtx.moveTo(x, y + len);
-    overlayCtx.lineTo(x, y);
-    overlayCtx.lineTo(x + len, y);
-    overlayCtx.moveTo(x + w - len, y);
-    overlayCtx.lineTo(x + w, y);
-    overlayCtx.lineTo(x + w, y + len);
-    overlayCtx.moveTo(x + w, y + h - len);
-    overlayCtx.lineTo(x + w, y + h);
-    overlayCtx.lineTo(x + w - len, y + h);
-    overlayCtx.moveTo(x + len, y + h);
-    overlayCtx.lineTo(x, y + h);
-    overlayCtx.lineTo(x, y + h - len);
+    overlayCtx.moveTo(x, y + len); overlayCtx.lineTo(x, y); overlayCtx.lineTo(x + len, y);
+    overlayCtx.moveTo(x + w - len, y); overlayCtx.lineTo(x + w, y); overlayCtx.lineTo(x + w, y + len);
+    overlayCtx.moveTo(x + w, y + h - len); overlayCtx.lineTo(x + w, y + h); overlayCtx.lineTo(x + w - len, y + h);
+    overlayCtx.moveTo(x + len, y + h); overlayCtx.lineTo(x, y + h); overlayCtx.lineTo(x, y + h - len);
     overlayCtx.stroke();
   }
   const optimizerFadeMs = Math.max(INDICATOR_FADE_MS, 650);
   for (let i = optimizerOverlayHits.length - 1; i >= 0; i--) {
     const hit = optimizerOverlayHits[i];
     const age = now - hit.at;
-    if (age > optimizerFadeMs) {
-      optimizerOverlayHits.splice(i, 1);
-      continue;
-    }
+    if (age > optimizerFadeMs) { optimizerOverlayHits.splice(i, 1); continue; }
     const r = hit.box;
     const pad = 0.06 * Math.max(r.w, r.h) * scale;
     const x = offX + r.x * scale - pad;
@@ -1707,18 +1539,10 @@ function drawOverlay(now) {
     overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);
     overlayCtx.setLineDash([]);
     overlayCtx.beginPath();
-    overlayCtx.moveTo(x, y + len);
-    overlayCtx.lineTo(x, y);
-    overlayCtx.lineTo(x + len, y);
-    overlayCtx.moveTo(x + w - len, y);
-    overlayCtx.lineTo(x + w, y);
-    overlayCtx.lineTo(x + w, y + len);
-    overlayCtx.moveTo(x + w, y + h - len);
-    overlayCtx.lineTo(x + w, y + h);
-    overlayCtx.lineTo(x + w - len, y + h);
-    overlayCtx.moveTo(x + len, y + h);
-    overlayCtx.lineTo(x, y + h);
-    overlayCtx.lineTo(x, y + h - len);
+    overlayCtx.moveTo(x, y + len); overlayCtx.lineTo(x, y); overlayCtx.lineTo(x + len, y);
+    overlayCtx.moveTo(x + w - len, y); overlayCtx.lineTo(x + w, y); overlayCtx.lineTo(x + w, y + len);
+    overlayCtx.moveTo(x + w, y + h - len); overlayCtx.lineTo(x + w, y + h); overlayCtx.lineTo(x + w - len, y + h);
+    overlayCtx.moveTo(x + len, y + h); overlayCtx.lineTo(x, y + h); overlayCtx.lineTo(x, y + h - len);
     overlayCtx.stroke();
   }
   overlayCtx.globalAlpha = 1;
@@ -1740,14 +1564,7 @@ function focusGeometry() {
   const bottomEdge = Math.hypot(representative.bottomRight.x - representative.bottomLeft.x, representative.bottomRight.y - representative.bottomLeft.y);
   const leftEdge = Math.hypot(representative.bottomLeft.x - representative.topLeft.x, representative.bottomLeft.y - representative.topLeft.y);
   const rightEdge = Math.hypot(representative.bottomRight.x - representative.topRight.x, representative.bottomRight.y - representative.topRight.y);
-  return {
-    x: Math.max(0, Math.min(1, (left + right) / 2 / receiverFrameWidth)),
-    y: Math.max(0, Math.min(1, (top + bottom) / 2 / receiverFrameHeight)),
-    scale: Math.sqrt(Math.max(1, (right - left) * (bottom - top)) / (receiverFrameWidth * receiverFrameHeight)),
-    perspectiveX: Math.log(Math.max(1e-4, topEdge) / Math.max(1e-4, bottomEdge)),
-    perspectiveY: Math.log(Math.max(1e-4, leftEdge) / Math.max(1e-4, rightEdge)),
-    quality
-  };
+  return { x: Math.max(0, Math.min(1, (left + right) / 2 / receiverFrameWidth)), y: Math.max(0, Math.min(1, (top + bottom) / 2 / receiverFrameHeight)), scale: Math.sqrt(Math.max(1, (right - left) * (bottom - top)) / (receiverFrameWidth * receiverFrameHeight)), perspectiveX: Math.log(Math.max(1e-4, topEdge) / Math.max(1e-4, bottomEdge)), perspectiveY: Math.log(Math.max(1e-4, leftEdge) / Math.max(1e-4, rightEdge)), quality };
 }
 function renderFocusDiagnostics() {
   var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
@@ -1759,24 +1576,16 @@ function renderFocusDiagnostics() {
   const range = diagnostic.distanceRange;
   focusDistanceControl.hidden = automaticOptics || !range && diagnostic.availableModes.length === 0;
   if (range) {
-    focusDistance.min = String(range.min);
-    focusDistance.max = String(range.max);
-    focusDistance.step = String(range.step || (range.max - range.min) / 100 || 0.01);
+    focusDistance.min = String(range.min); focusDistance.max = String(range.max); focusDistance.step = String(range.step || (range.max - range.min) / 100 || 0.01);
     if (document.activeElement !== focusDistance) focusDistance.value = String((_a = preferredFocusDistance != null ? preferredFocusDistance : diagnostic.actualDistance) != null ? _a : range.min);
     focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   }
-  for (const input of focusTuningInputs) {
-    const key = input.dataset.cameraTuning;
-    if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
-  }
+  for (const input of focusTuningInputs) { const key = input.dataset.cameraTuning; if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]); }
   const optical = diagnostic.optical;
   const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
-  if (optimizeEnabled && !optimizeConverged && !optimizing && !focusController.optimizeEligible()) {
-    opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE" ? "Camera unavailable" : diagnostic.optimizeState === "paused" ? (_b = diagnostic.optimizeReason) != null ? _b : "Optimize paused" : "Ready";
-  } else if (optimizing && !candidateEvidenceWindows.size) {
-    opticsOptimizeStatus.textContent = diagnostic.optimizeRound ? `${diagnostic.optimizeRound[0].toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${(_d = (_c = diagnostic.optimizeSurvivors) != null ? _c : diagnostic.optimizeVisit) != null ? _d : "Exposure"}` : "Exposure…";
-  }
+  if (optimizeEnabled && !optimizeConverged && !optimizing && !focusController.optimizeEligible()) opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE" ? "Camera unavailable" : diagnostic.optimizeState === "paused" ? (_b = diagnostic.optimizeReason) != null ? _b : "Optimize paused" : "Ready";
+  else if (optimizing && !candidateEvidenceWindows.size) opticsOptimizeStatus.textContent = diagnostic.optimizeRound ? `${diagnostic.optimizeRound[0].toUpperCase()}${diagnostic.optimizeRound.slice(1)} · ${(_d = (_c = diagnostic.optimizeSurvivors) != null ? _c : diagnostic.optimizeVisit) != null ? _d : "Exposure"}` : "Exposure…";
   opticsKeep.hidden = diagnostic.optimizeState !== "complete";
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
@@ -1788,19 +1597,13 @@ function renderFocusDiagnostics() {
     return `${marker} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · ${opticalMode} ${opticalState} · margin ${candidate.opticalMargin.toFixed(2)} · sep ${candidate.opticalSeparation.toFixed(0)} · noise ${candidate.opticalNoise.toFixed(1)} · clip ${candidate.opticalClipping.toFixed(2)} · band ${candidate.opticalBanding.toFixed(2)} · ${candidate.sourceFrames} optical frames${qr} · ${candidate.state}`;
   }).join("\n");
   const manualCandidate = !automaticOptics && diagnostic.actualExposure && diagnostic.actualIso && diagnostic.optimizeCandidates.length ? diagnostic.optimizeCandidates.reduce((closest, candidate) => {
-    const distance = Math.hypot(
-      Math.log2(candidate.exposure / diagnostic.actualExposure),
-      Math.log2(candidate.iso / diagnostic.actualIso)
-    );
+    const distance = Math.hypot(Math.log2(candidate.exposure / diagnostic.actualExposure), Math.log2(candidate.iso / diagnostic.actualIso));
     return distance < closest.distance ? { candidate, distance } : closest;
   }, { candidate: diagnostic.optimizeCandidates[0], distance: Infinity }) : void 0;
   const manualQrRate = qrReadTimes.reduce((count, time) => count + Number(time > receiverNow() - STATS_WINDOW_MS), 0);
   const manualMeasured = manualOptimizerValidation && diagnostic.actualExposure && diagnostic.actualIso && Math.abs(Math.log2(manualOptimizerValidation.exposure / diagnostic.actualExposure)) < 0.1 && Math.abs(Math.log2(manualOptimizerValidation.iso / diagnostic.actualIso)) < 0.1 ? manualOptimizerValidation : void 0;
   const manualVerdict = manualCandidate ? manualCandidate.distance > 0.35 ? "manual configuration coarse-search result: NOT TESTED" : manualMeasured && manualMeasured.performance.perQrAttemptSuccessRate > manualCandidate.candidate.successRate + 0.15 ? `TESTED AS ${manualCandidate.candidate.candidateId} · Optimize ${(manualCandidate.candidate.successRate * 100).toFixed(0)}% vs live manual ${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}% → MEASUREMENT BUG` : `TESTED AS ${manualCandidate.candidate.candidateId}` : "";
-  const cameraLine = (value) => {
-    var _a2, _b2, _c2, _d2, _e2;
-    return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
-  };
+  const cameraLine = (value) => value ? `${value.focusMode ?? "—"}/${value.focusDistance ?? "—"} · ${value.exposureMode ?? "—"}/${formatExposureMs(value.exposureTime)} · ISO ${value.iso ?? "—"} · EV ${value.exposureCompensation ?? "—"}` : "—";
   focusDiagnostics.textContent = [
     diagnostic.invariantWarning ? `!!! ${diagnostic.invariantWarning} — SELF-HEALING TO HARDWARE AF !!!` : "",
     `State    ${diagnostic.state} · ${(diagnostic.stateMs / 1e3).toFixed(1)}s${diagnostic.lockedMs === void 0 ? "" : ` · locked ${(diagnostic.lockedMs / 1e3).toFixed(1)}s`}`,
@@ -1822,73 +1625,33 @@ function renderFocusDiagnostics() {
     diagnostic.optimizeReason ? `Result   ${diagnostic.optimizeReason}` : "",
     diagnostic.optimizeExposureVisited ? `Visited  ${diagnostic.optimizeCandidates.length} settings · exposure ${formatExposureMs(diagnostic.optimizeExposureVisited.min)}–${formatExposureMs(diagnostic.optimizeExposureVisited.max)} · ISO ${(_t = diagnostic.optimizeIsoVisited) == null ? void 0 : _t.min}–${(_u = diagnostic.optimizeIsoVisited) == null ? void 0 : _u.max}` : "",
     `Attribution submitted ${optimizerJobsSubmittedTotal} · mapped ${optimizerJobsMappedTotal} · completions mapped ${optimizerCompletionsMappedTotal} · unattributed ${optimizerUnattributedResults} · epoch mismatches ${optimizerEpochMismatches} · duplicate valid events ${optimizerDuplicateValidEvents} · transition frames ${optimizerTransitionFramesDiscarded}`,
-    candidateTable ? `Candidates
-${candidateTable}` : "",
-    optimizerTrace.length ? `Optimizer trace
-${optimizerTrace.slice(-20).map(
-      (event) => {
-        var _a2, _b2, _c2, _d2, _e2, _f2, _g2, _h2;
-        return `${event.time.toFixed(0)} ${event.event} ${(_a2 = event.candidateId) != null ? _a2 : "—"} ep${(_b2 = event.candidateEpoch) != null ? _b2 : "—"} src${(_c2 = event.sourceSequence) != null ? _c2 : "—"} scan${(_d2 = event.scanId) != null ? _d2 : "—"} E${(_f2 = (_e2 = event.actualExposure) != null ? _e2 : event.requestedExposure) != null ? _f2 : "—"} ISO${(_h2 = (_g2 = event.actualIso) != null ? _g2 : event.requestedIso) != null ? _h2 : "—"} valid:${event.validDecode === void 0 ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === void 0 ? "—" : event.usefulSymbol ? "yes" : "no"}`;
-      }
-    ).join("\n")}` : "",
-    manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} QR/s` : `${manualQrRate.toFixed(1)} live QR/s · controlled measurement pending`}
-Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
-${manualVerdict}` : "",
+    candidateTable ? `Candidates\n${candidateTable}` : "",
+    manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} QR/s` : `${manualQrRate.toFixed(1)} live QR/s · controlled measurement pending`}\nClosest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s\n${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
-    mutation ? `  before    ${cameraLine(mutation.before)}
-  requested ${cameraLine(mutation.requested)}
-  after     ${cameraLine(mutation.after)}` : "",
-    diagnostic.transitions.length ? `Transitions
-${diagnostic.transitions.join("\n")}` : ""
+    mutation ? `  before    ${cameraLine(mutation.before)}\n  requested ${cameraLine(mutation.requested)}\n  after     ${cameraLine(mutation.after)}` : "",
+    diagnostic.transitions.length ? `Transitions\n${diagnostic.transitions.join("\n")}` : ""
   ].filter(Boolean).join("\n");
 }
-focusMode.addEventListener("change", () => {
-  manualFocusMode = focusMode.value;
-  syncExposureControls();
-  saveCameraSettings();
-  focusController.setStrategy(manualFocusMode);
-});
-focusDistance.addEventListener("input", () => {
-  preferredFocusDistance = Number(focusDistance.value);
-  focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
-  saveCameraSettings();
-  focusController.setManualDistance(preferredFocusDistance);
-});
-for (const input of focusTuningInputs) input.addEventListener("change", () => {
-  const key = input.dataset.cameraTuning;
-  const value = Number(input.value);
-  if (Number.isFinite(value)) CAMERA_TUNING[key] = value;
-  renderFocusDiagnostics();
-});
+focusMode.addEventListener("change", () => { manualFocusMode = focusMode.value; syncExposureControls(); saveCameraSettings(); focusController.setStrategy(manualFocusMode); });
+focusDistance.addEventListener("input", () => { preferredFocusDistance = Number(focusDistance.value); focusDistanceValue.value = Number(focusDistance.value).toPrecision(4); saveCameraSettings(); focusController.setManualDistance(preferredFocusDistance); });
+for (const input of focusTuningInputs) input.addEventListener("change", () => { const key = input.dataset.cameraTuning; const value = Number(input.value); if (Number.isFinite(value)) CAMERA_TUNING[key] = value; renderFocusDiagnostics(); });
 startBtn.onclick = () => void start();
 const changeCameraSettings = async () => {
   var _a, _b;
-  showRequestedCameraSettings();
-  saveCameraSettings();
+  showRequestedCameraSettings(); saveCameraSettings();
   const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
-    await mutateCamera(track, () => track.applyConstraints({
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 60 }
-    })).catch(() => void 0);
-    populateBrowserCapabilities(track);
-    showNegotiatedWebMode(track);
-    attachCameraController(track);
-    return;
+    await mutateCamera(track, () => track.applyConstraints({ width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } })).catch(() => void 0);
+    populateBrowserCapabilities(track); showNegotiatedWebMode(track); attachCameraController(track); return;
   }
   const attempted = browserModes.find((mode) => mode.key === cameraResolution.value);
   if (!attempted) return;
   try {
-    await mutateCamera(track, () => track.applyConstraints({
-      width: { exact: attempted.width },
-      height: { exact: attempted.height },
-      frameRate: { exact: attempted.fps }
-    }));
+    await mutateCamera(track, () => track.applyConstraints({ width: { exact: attempted.width }, height: { exact: attempted.height }, frameRate: { exact: attempted.fps } }));
     const active = track.getSettings();
     const exactSize = active.width === attempted.width && active.height === attempted.height || active.width === attempted.height && active.height === attempted.width;
     const exact = exactSize && Math.abs(((_a = active.frameRate) != null ? _a : attempted.fps) - attempted.fps) < 1;
@@ -1896,422 +1659,85 @@ const changeCameraSettings = async () => {
     saveBrowserModeResult(attempted.key, true);
     const option = [...cameraResolution.options].find((candidate) => candidate.value === attempted.key);
     if (option) option.textContent = attempted.label;
-    populateBrowserCapabilities(track);
-    showNegotiatedWebMode(track);
-    attachCameraController(track);
+    populateBrowserCapabilities(track); showNegotiatedWebMode(track); attachCameraController(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
     (_b = cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)) == null ? void 0 : _b.remove();
-    cameraResolution.value = "auto";
-    populateBrowserCapabilities(track);
-    showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
-    saveCameraSettings();
-    attachCameraController(track);
+    cameraResolution.value = "auto"; populateBrowserCapabilities(track); showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`); saveCameraSettings(); attachCameraController(track);
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
-cameraExposureAuto.addEventListener("change", () => {
-  automaticOptics = cameraExposureAuto.checked;
-  clearTimeout(exposureApplyTimer);
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (!automaticOptics) {
-    setOptimizeEnabled(false);
-    if (track) void applyAndValidateManualExposure(track);
-    return;
-  }
-  if (track) void applyExposureSetting(track);
-});
-exposureAxisAuto.addEventListener("change", () => {
-  automaticExposureAxis = exposureAxisAuto.checked;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-isoAxisAuto.addEventListener("change", () => {
-  automaticIsoAxis = isoAxisAuto.checked;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-exposureAxisReset.addEventListener("click", () => {
-  automaticExposureAxis = true;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-isoAxisReset.addEventListener("click", () => {
-  automaticIsoAxis = true;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
+cameraExposureAuto.addEventListener("change", () => { automaticOptics = cameraExposureAuto.checked; clearTimeout(exposureApplyTimer); syncExposureControls(); saveCameraSettings(); const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (!automaticOptics) { setOptimizeEnabled(false); if (track) void applyAndValidateManualExposure(track); return; } if (track) void applyExposureSetting(track); });
+exposureAxisAuto.addEventListener("change", () => { automaticExposureAxis = exposureAxisAuto.checked; syncExposureControls(); saveCameraSettings(); const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track) void applyExposureSetting(track); });
+isoAxisAuto.addEventListener("change", () => { automaticIsoAxis = isoAxisAuto.checked; syncExposureControls(); saveCameraSettings(); const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track) void applyExposureSetting(track); });
+exposureAxisReset.addEventListener("click", () => { automaticExposureAxis = true; syncExposureControls(); saveCameraSettings(); const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track) void applyExposureSetting(track); });
+isoAxisReset.addEventListener("click", () => { automaticIsoAxis = true; syncExposureControls(); saveCameraSettings(); const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track) void applyExposureSetting(track); });
 function queueExposureChange(immediate = false) {
-  preferredExposureTime = Number(cameraExposure.value);
-  focusController.developerOverride("developer changed exposure time");
-  showExposureTime(preferredExposureTime);
-  saveCameraSettings();
-  clearTimeout(exposureApplyTimer);
-  const apply = () => {
-    const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
-  };
-  if (immediate) apply();
-  else exposureApplyTimer = setTimeout(apply, 80);
+  preferredExposureTime = Number(cameraExposure.value); focusController.developerOverride("developer changed exposure time"); showExposureTime(preferredExposureTime); saveCameraSettings(); clearTimeout(exposureApplyTimer);
+  const apply = () => { const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track && !automaticOptics) void applyAndValidateManualExposure(track); };
+  if (immediate) apply(); else exposureApplyTimer = setTimeout(apply, 80);
 }
 cameraExposure.addEventListener("input", () => queueExposureChange());
 cameraExposure.addEventListener("change", () => queueExposureChange(true));
 function queueIsoChange(immediate = false) {
-  preferredIso = Number(cameraIso.value);
-  automaticIsoAxis = false;
-  isoAxisAuto.checked = false;
-  cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
-  syncExposureControls();
-  saveCameraSettings();
-  focusController.developerOverride("developer changed ISO");
-  clearTimeout(exposureApplyTimer);
-  const apply = () => {
-    const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
-  };
-  if (immediate) apply();
-  else exposureApplyTimer = setTimeout(apply, 80);
+  preferredIso = Number(cameraIso.value); automaticIsoAxis = false; isoAxisAuto.checked = false; cameraIsoValue.value = String(Number(preferredIso.toPrecision(4))); syncExposureControls(); saveCameraSettings(); focusController.developerOverride("developer changed ISO"); clearTimeout(exposureApplyTimer);
+  const apply = () => { const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (track && !automaticOptics) void applyAndValidateManualExposure(track); };
+  if (immediate) apply(); else exposureApplyTimer = setTimeout(apply, 80);
 }
 cameraIso.addEventListener("input", () => queueIsoChange());
 cameraIso.addEventListener("change", () => queueIsoChange(true));
-decodeWorkers.addEventListener("change", () => {
-  saveCameraSettings();
-  if (!stream || done) return;
-  minimumAcceptedScanId = frameId;
-  cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  clearPendingGridLanes();
-  pool.resize(selectedWorkerCount());
-});
-window.addEventListener("airgapper:enter-receive", () => {
-  if (!stream && !startBtn.disabled) void start();
-});
+decodeWorkers.addEventListener("change", () => { saveCameraSettings(); if (!stream || done) return; minimumAcceptedScanId = frameId; cropAttempts.clear(); fullScanIds.clear(); fullScanJobs.clear(); localReacquireIds.clear(); scanCapturedAt.clear(); clearPendingGridLanes(); pool.resize(selectedWorkerCount()); });
+window.addEventListener("airgapper:enter-receive", () => { if (!stream && !startBtn.disabled) void start(); });
 const { setStatus, showError } = statusLine(stats);
-function restartButton(label) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary-button";
-  button.textContent = label;
-  button.addEventListener("click", () => window.location.reload());
-  return button;
-}
-function offerRetry(message) {
-  startBtn.disabled = false;
-  startBtn.hidden = false;
-  startBtn.style.display = "";
-  startBtn.textContent = "Try camera again";
-  preview.style.display = "";
-  preview.classList.remove("camera-loading");
-  metricsEl.style.display = "block";
-  progressStatus.style.display = "block";
-  progressEl.style.display = "block";
-  showError(message);
-}
+function restartButton(label) { const button = document.createElement("button"); button.type = "button"; button.className = "secondary-button"; button.textContent = label; button.addEventListener("click", () => window.location.reload()); return button; }
+function offerRetry(message) { startBtn.disabled = false; startBtn.hidden = false; startBtn.style.display = ""; startBtn.textContent = "Try camera again"; preview.style.display = ""; preview.classList.remove("camera-loading"); metricsEl.style.display = "block"; progressStatus.style.display = "block"; progressEl.style.display = "block"; showError(message); }
 function stopReceiver() {
-  cameraStartGen++;
-  focusController.detach();
-  captureGen++;
-  receiverPaused = false;
-  pauseStartedAt = 0;
-  releaseScreenWakeLock();
-  document.body.classList.remove("receive-complete");
-  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
-  stream = null;
-  clearInterval(statsTimer);
-  statsTimer = void 0;
-  clearPendingGridLanes();
-  pool.resize(0);
-  releaseTransportDecoder();
-  streamKey = "";
-  startTs = 0;
-  done = false;
-  regions.length = 0;
-  gridLattice.reset();
-  gridShape = "";
-  lastGridSnapshot = void 0;
-  activeDecodeBudget = 0;
-  lastDecodedRegionSize = 0;
-  expectedRegions = 0;
-  expectedRegionsAt = 0;
-  lastFullScan = 0;
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  scanOutcomes.clear();
-  captureTimes.length = 0;
-  qrReadTimes.length = 0;
-  poolBusyTimes.length = 0;
-  scanCompletionTimes.length = 0;
-  decodeFrameTimes.length = 0;
-  lastDecodeSubmittedSourceSequence = -1;
-  cropAttempts.clear();
-  cropRotate = 0;
-  decodeExceptions = 0;
-  lastDecodeError = "";
-  lastNativeMetrics = void 0;
-  trackingInvalidations = 0;
-  workerLatencyMaxMs = 0;
-  lastDistinctArrivalAt = 0;
-  lastStreamDecodeAt = 0;
-  maxSequenceGapMs = 0;
-  pipelineEvents.length = 0;
-  usefulFrameTimes.length = 0;
-  totalCaptures = 0;
-  totalDecodes = 0;
-  fullScans = 0;
-  peakRegions = 0;
-  capturesDropped = 0;
-  cameraStartedTs = 0;
-  lastOpticalSampleAt = -Infinity;
-  lastOpticalSourceSequence = -1;
-  opticalAnalyzeCount = 0;
-  opticalAnalyzeTotalMs = 0;
-  opticalAnalyzeMaxMs = 0;
-  opticalTimingStartedAt = performance.now();
-  timeline.length = 0;
-  plainQrPolicy.reset();
-  result.replaceChildren();
-  purgeReceivedData();
-  preview.style.display = "none";
-  preview.classList.remove("camera-loading");
-  cameraActual.textContent = "";
-  clearTimeout(scanCaptureTimer);
-  scanCaptureTimer = void 0;
-  pendingScanCapture = null;
-  captureNextScan = false;
-  minimumAcceptedScanId = frameId;
-  captureScanBtn.textContent = "Capture";
-  captureScanBtn.disabled = false;
-  if (scanDialog.open) scanDialog.close();
-  scanCapture.width = 0;
-  scanCapture.height = 0;
-  lastRawScanImage = null;
-  cancelScanHold();
-  progressEl.style.display = "none";
-  progressEl.setAttribute("aria-valuenow", "0");
-  progressStatus.style.display = "none";
-  progressLabel.textContent = "0%";
-  transferSizeLabel.textContent = "";
-  etaLabel.textContent = "";
-  bar.style.width = "0";
-  bar.classList.remove("error");
-  metricsEl.style.display = "none";
-  metric("m-cap").textContent = "— fps";
-  metric("m-dec").textContent = "— QR/s";
-  metric("m-limit").textContent = "";
-  metric("m-rate").textContent = "👀";
-  speedFeedback.className = "speed-feedback";
-  pipelineMetrics.style.display = "";
-  startBtn.disabled = false;
-  startBtn.hidden = false;
-  startBtn.style.display = "";
-  startBtn.textContent = "Enable camera";
-  setStatus("");
+  cameraStartGen++; focusController.detach(); captureGen++; receiverPaused = false; pauseStartedAt = 0; releaseScreenWakeLock(); document.body.classList.remove("receive-complete"); stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop()); stream = null; clearInterval(statsTimer); statsTimer = void 0; clearPendingGridLanes(); pool.resize(0); releaseTransportDecoder(); streamKey = ""; startTs = 0; done = false; regions.length = 0; gridLattice.reset(); gridShape = ""; lastGridSnapshot = void 0; activeDecodeBudget = 0; lastDecodedRegionSize = 0; expectedRegions = 0; expectedRegionsAt = 0; lastFullScan = 0; fullScanIds.clear(); fullScanJobs.clear(); localReacquireIds.clear(); scanCapturedAt.clear(); scanOutcomes.clear(); captureTimes.length = 0; qrReadTimes.length = 0; poolBusyTimes.length = 0; scanCompletionTimes.length = 0; decodeFrameTimes.length = 0; lastDecodeSubmittedSourceSequence = -1; cropAttempts.clear(); cropRotate = 0; decodeExceptions = 0; lastDecodeError = ""; lastNativeMetrics = void 0; trackingInvalidations = 0; workerLatencyMaxMs = 0; lastDistinctArrivalAt = 0; lastStreamDecodeAt = 0; maxSequenceGapMs = 0; pipelineEvents.length = 0; usefulFrameTimes.length = 0; totalCaptures = 0; totalDecodes = 0; fullScans = 0; peakRegions = 0; capturesDropped = 0; cameraStartedTs = 0; lastOpticalSampleAt = -Infinity; lastOpticalSourceSequence = -1; opticalAnalyzeCount = 0; opticalAnalyzeTotalMs = 0; opticalAnalyzeMaxMs = 0; opticalTimingStartedAt = performance.now(); timeline.length = 0; plainQrPolicy.reset(); result.replaceChildren(); purgeReceivedData(); preview.style.display = "none"; preview.classList.remove("camera-loading"); cameraActual.textContent = ""; clearTimeout(scanCaptureTimer); scanCaptureTimer = void 0; pendingScanCapture = null; captureNextScan = false; minimumAcceptedScanId = frameId; captureScanBtn.textContent = "Capture"; captureScanBtn.disabled = false; if (scanDialog.open) scanDialog.close(); scanCapture.width = 0; scanCapture.height = 0; lastRawScanImage = null; cancelScanHold(); progressEl.style.display = "none"; progressEl.setAttribute("aria-valuenow", "0"); progressStatus.style.display = "none"; progressLabel.textContent = "0%"; transferSizeLabel.textContent = ""; etaLabel.textContent = ""; bar.style.width = "0"; bar.classList.remove("error"); metricsEl.style.display = "none"; metric("m-cap").textContent = "— fps"; metric("m-dec").textContent = "— QR/s"; metric("m-limit").textContent = ""; metric("m-rate").textContent = "👀"; speedFeedback.className = "speed-feedback"; pipelineMetrics.style.display = ""; startBtn.disabled = false; startBtn.hidden = false; startBtn.style.display = ""; startBtn.textContent = "Enable camera"; setStatus("");
 }
-function pauseReceiver() {
-  if (receiverPaused || done) return;
-  focusController.detach();
-  receiverPaused = true;
-  pauseStartedAt = receiverNow();
-  cameraStartGen++;
-  captureGen++;
-  releaseScreenWakeLock();
-  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
-  stream = null;
-  video.srcObject = null;
-  clearInterval(statsTimer);
-  statsTimer = void 0;
-  clearPendingGridLanes();
-  pool.resize(0);
-  cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  minimumAcceptedScanId = frameId;
-}
-function resumeReceiver() {
-  if (!receiverPaused || done) return;
-  const pausedFor = receiverNow() - pauseStartedAt;
-  receiverPaused = false;
-  if (startTs) startTs += pausedFor;
-  if (cameraStartedTs) cameraStartedTs += pausedFor;
-  void start();
-}
-window.addEventListener("airgapper:leave-mode", () => {
-  var _a;
-  if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) stopReceiver();
-});
+function pauseReceiver() { if (receiverPaused || done) return; focusController.detach(); receiverPaused = true; pauseStartedAt = receiverNow(); cameraStartGen++; captureGen++; releaseScreenWakeLock(); stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop()); stream = null; video.srcObject = null; clearInterval(statsTimer); statsTimer = void 0; clearPendingGridLanes(); pool.resize(0); cropAttempts.clear(); fullScanIds.clear(); fullScanJobs.clear(); localReacquireIds.clear(); scanCapturedAt.clear(); minimumAcceptedScanId = frameId; }
+function resumeReceiver() { if (!receiverPaused || done) return; const pausedFor = receiverNow() - pauseStartedAt; receiverPaused = false; if (startTs) startTs += pausedFor; if (cameraStartedTs) cameraStartedTs += pausedFor; void start(); }
+window.addEventListener("airgapper:leave-mode", () => { var _a; if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) stopReceiver(); });
 window.addEventListener("pagehide", stopReceiver);
-window.addEventListener("airgapper:pause-mode", () => {
-  var _a;
-  if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) pauseReceiver();
-});
-window.addEventListener("airgapper:resume-mode", () => {
-  var _a;
-  if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) resumeReceiver();
-});
+window.addEventListener("airgapper:pause-mode", () => { var _a; if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) pauseReceiver(); });
+window.addEventListener("airgapper:resume-mode", () => { var _a; if ((_a = document.getElementById("receiveView")) == null ? void 0 : _a.classList.contains("active")) resumeReceiver(); });
 const localCameraMessage = "This browser does not allow camera access from a local file. Use the installed offline PWA for receiving.";
 async function start() {
   var _a;
-  const startAttempt = cameraStartGen;
-  directFrameDisabled = false;
-  clearPendingGridLanes();
-  try {
-    await prepareRaptorQ();
-  } catch (error) {
-    offerRetry(`Transport: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
+  const startAttempt = cameraStartGen; directFrameDisabled = false; clearPendingGridLanes();
+  try { await prepareRaptorQ(); } catch (error) { offerRetry(`Transport: ${error instanceof Error ? error.message : String(error)}`); return; }
   if (startAttempt !== cameraStartGen || receiverPaused) return;
-  preview.style.display = "";
-  preview.classList.add("camera-loading");
-  metricsEl.style.display = "block";
-  progressStatus.style.display = "block";
-  progressEl.style.display = "block";
-  showRequestedCameraSettings();
-  if (!((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia)) {
-    offerRetry(
-      location.protocol === "file:" ? localCameraMessage : "Camera access needs HTTPS. Open the hosted app or its installed offline PWA."
-    );
-    return;
-  }
-  const captureWidth = requestedWidth;
-  const captureHeight = requestedHeight;
-  const captureFps = requestedFps;
-  startBtn.disabled = true;
-  startBtn.style.display = "none";
-  const base = {
-    facingMode: "environment",
-    width: { exact: captureWidth },
-    height: { exact: captureHeight }
-  };
+  preview.style.display = ""; preview.classList.add("camera-loading"); metricsEl.style.display = "block"; progressStatus.style.display = "block"; progressEl.style.display = "block"; showRequestedCameraSettings();
+  if (!((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia)) { offerRetry(location.protocol === "file:" ? localCameraMessage : "Camera access needs HTTPS. Open the hosted app or its installed offline PWA."); return; }
+  const captureWidth = requestedWidth, captureHeight = requestedHeight, captureFps = requestedFps;
+  startBtn.disabled = true; startBtn.style.display = "none";
+  const base = { facingMode: "environment", width: { exact: captureWidth }, height: { exact: captureHeight } };
   let acquiredStream;
   try {
-    if (legacyAndroidApp) {
-      acquiredStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: "environment",
-          width: { ideal: captureWidth },
-          height: { ideal: captureHeight }
-        }
-      });
-    } else if (cameraResolution.value === "auto") {
-      acquiredStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
-      });
-    } else if (isAndroidApp()) {
-      try {
-        acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: captureFps } } });
-      } catch {
-        acquiredStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
-        });
-      }
-    } else {
-      try {
-        acquiredStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { ...base, frameRate: { exact: captureFps } }
-        });
-      } catch {
-        acquiredStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
-        });
-      }
-    }
+    if (legacyAndroidApp) acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight } } });
+    else if (cameraResolution.value === "auto") acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } } });
+    else if (isAndroidApp()) { try { acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: captureFps } } }); } catch { acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } } }); } }
+    else { try { acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: captureFps } } }); } catch { acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } } }); } }
   } catch (err) {
     if (startAttempt !== cameraStartGen || receiverPaused) return;
     const denied = err instanceof DOMException && err.name === "NotAllowedError";
-    offerRetry(
-      denied ? location.protocol === "file:" ? localCameraMessage : "Camera permission denied — allow it, then tap Enable camera again." : `Camera: ${err instanceof Error ? err.message : String(err)}`
-    );
+    offerRetry(denied ? location.protocol === "file:" ? localCameraMessage : "Camera permission denied — allow it, then tap Enable camera again." : `Camera: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  if (startAttempt !== cameraStartGen || receiverPaused) {
-    acquiredStream.getTracks().forEach((track) => track.stop());
-    return;
-  }
-  stream = acquiredStream;
-  startBtn.style.display = "none";
-  preview.style.display = "";
-  video.srcObject = stream;
-  await video.play().catch(() => void 0);
-  preview.classList.remove("camera-loading");
+  if (startAttempt !== cameraStartGen || receiverPaused) { acquiredStream.getTracks().forEach((track) => track.stop()); return; }
+  stream = acquiredStream; startBtn.style.display = "none"; preview.style.display = ""; video.srcObject = stream; await video.play().catch(() => void 0); preview.classList.remove("camera-loading");
   const activeTrack = stream.getVideoTracks()[0];
-  if (activeTrack) {
-    populateBrowserCapabilities(activeTrack);
-    showNegotiatedWebMode(activeTrack);
-    if (!legacyAndroidApp) attachCameraController(activeTrack);
-  }
-  syncPreviewAspect();
-  setStatus("");
-  pool.resize(selectedWorkerCount());
-  cameraStartedTs = receiverNow();
-  captureGen++;
-  scheduleFrame(captureGen);
-  statsTimer = setInterval(updateStats, STATS_TICK_MS);
-  await requestScreenWakeLock();
+  if (activeTrack) { populateBrowserCapabilities(activeTrack); showNegotiatedWebMode(activeTrack); if (!legacyAndroidApp) attachCameraController(activeTrack); }
+  syncPreviewAspect(); setStatus(""); pool.resize(selectedWorkerCount()); cameraStartedTs = receiverNow(); captureGen++; scheduleFrame(captureGen); statsTimer = setInterval(updateStats, STATS_TICK_MS); await requestScreenWakeLock();
 }
-const CORPUS_DEVICE_NAMES = {
-  "0dc8b7d5f6e84e81cf126349d821a9d948a6db87ea4a810c04a51aec6999401c": "OP5",
-  "5e792630f18c1d6bc5fc26e8ce6d90a27163fd50f32c7631256aa9e7bc7b193e": "OP12R"
-};
-function compactDeviceName(header) {
-  var _a, _b;
-  const id = String((_a = header.cameraSettings.deviceId) != null ? _a : "");
-  return (_b = CORPUS_DEVICE_NAMES[id]) != null ? _b : `D${id.slice(0, 4) || "unk"}`;
-}
-function compactVersionName(version) {
-  return version.replace(/^v?0\./, "v").replace(/^([^v])/, "v$1");
-}
-function compactTimeName(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  const two = (number) => String(number).padStart(2, "0");
-  return `${two(date.getUTCMonth() + 1)}${two(date.getUTCDate())}-${two(date.getUTCHours())}${two(date.getUTCMinutes())}`;
-}
+const CORPUS_DEVICE_NAMES = { "0dc8b7d5f6e84e81cf126349d821a9d948a6db87ea4a810c04a51aec6999401c": "OP5", "5e792630f18c1d6bc5fc26e8ce6d90a27163fd50f32c7631256aa9e7bc7b193e": "OP12R" };
+function compactDeviceName(header) { var _a, _b; const id = String((_a = header.cameraSettings.deviceId) != null ? _a : ""); return (_b = CORPUS_DEVICE_NAMES[id]) != null ? _b : `D${id.slice(0, 4) || "unk"}`; }
+function compactVersionName(version) { return version.replace(/^v?0\./, "v").replace(/^([^v])/, "v$1"); }
+function compactTimeName(value) { const date = value instanceof Date ? value : new Date(value); const two = (number) => String(number).padStart(2, "0"); return `${two(date.getUTCMonth() + 1)}${two(date.getUTCDate())}-${two(date.getUTCHours())}${two(date.getUTCMinutes())}`; }
 async function finishCorpusRecording(recorder) {
-  if (benchmarkRecorder !== recorder) return;
-  benchmarkRecorder = void 0;
-  recordCorpusBtn.disabled = true;
-  recordCorpusBtn.textContent = "Saving…";
-  try {
-    const { blob, header, corpus } = await recorder.finish();
-    benchmarkPendingBlob = void 0;
-    benchmarkCorpus = corpus;
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `cap-${compactDeviceName(header)}-${compactVersionName(header.airgapperVersion)}-${compactTimeName(header.startedAt)}.agcap`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 2e3);
-    benchmarkStatus.textContent = `Downloaded ${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops · ready to run`;
-    runBenchmarkBtn.disabled = false;
-    benchmarkDialog.showModal();
-  } catch (error) {
-    showError(error instanceof Error ? error.message : String(error));
-  } finally {
-    recordCorpusBtn.disabled = false;
-    recordCorpusBtn.textContent = "Record";
-    setStatus("");
-  }
+  if (benchmarkRecorder !== recorder) return; benchmarkRecorder = void 0; recordCorpusBtn.disabled = true; recordCorpusBtn.textContent = "Saving…";
+  try { const { blob, header, corpus } = await recorder.finish(); benchmarkPendingBlob = void 0; benchmarkCorpus = corpus; const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `cap-${compactDeviceName(header)}-${compactVersionName(header.airgapperVersion)}-${compactTimeName(header.startedAt)}.agcap`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 2e3); benchmarkStatus.textContent = `Downloaded ${header.framesStored} lossless frames · ${header.recorderDrops} recorder drops · ${header.estimatedCameraDrops} estimated camera drops · ready to run`; runBenchmarkBtn.disabled = false; benchmarkDialog.showModal(); }
+  catch (error) { showError(error instanceof Error ? error.message : String(error)); }
+  finally { recordCorpusBtn.disabled = false; recordCorpusBtn.textContent = "Record"; setStatus(""); }
 }
 function scheduleFrame(gen) {
   if (done || gen !== captureGen) return;
@@ -2319,64 +1745,19 @@ function scheduleFrame(gen) {
   const next = (callbackTime = performance.now(), metadata = {}) => {
     var _a, _b, _c, _d, _e, _f;
     if (done || gen !== captureGen) return;
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-    const sequence = benchmarkRecordingSequence++;
+    const width = video.videoWidth, height = video.videoHeight, sequence = benchmarkRecordingSequence++;
     latestSourceFrameSequence = sequence;
-    if (optimizerPipelineActive && !activeOptimizerEpoch) {
-      optimizerTransitionFramesDiscarded++;
-      traceOptimizer({
-        time: receiverNow(),
-        event: "TRANSITION_FRAME",
-        candidateId: optimizerTransition == null ? void 0 : optimizerTransition.candidateId,
-        sourceSequence: sequence,
-        requestedExposure: optimizerTransition == null ? void 0 : optimizerTransition.requestedExposure,
-        requestedIso: optimizerTransition == null ? void 0 : optimizerTransition.requestedIso
-      });
-    }
+    if (optimizerPipelineActive && !activeOptimizerEpoch) { optimizerTransitionFramesDiscarded++; traceOptimizer({ time: receiverNow(), event: "TRANSITION_FRAME", candidateId: optimizerTransition == null ? void 0 : optimizerTransition.candidateId, sourceSequence: sequence, requestedExposure: optimizerTransition == null ? void 0 : optimizerTransition.requestedExposure, requestedIso: optimizerTransition == null ? void 0 : optimizerTransition.requestedIso }); }
     const recorder = benchmarkRecorder;
-    const frame = {
-      sequence,
-      opticsEpoch: (activeOptimizerEpoch == null ? void 0 : activeOptimizerEpoch.collecting) ? activeOptimizerEpoch.id : void 0,
-      width,
-      height,
-      callbackTimeMs: callbackTime,
-      mediaTimeMs: ((_a = metadata.mediaTime) != null ? _a : callbackTime / 1e3) * 1e3,
-      presentationTimeMs: (_b = metadata.presentationTime) != null ? _b : callbackTime,
-      expectedDisplayTimeMs: (_c = metadata.expectedDisplayTime) != null ? _c : callbackTime
-    };
+    const frame = { sequence, opticsEpoch: (activeOptimizerEpoch == null ? void 0 : activeOptimizerEpoch.collecting) ? activeOptimizerEpoch.id : void 0, width, height, callbackTimeMs: callbackTime, mediaTimeMs: ((_a = metadata.mediaTime) != null ? _a : callbackTime / 1e3) * 1e3, presentationTimeMs: (_b = metadata.presentationTime) != null ? _b : callbackTime, expectedDisplayTimeMs: (_c = metadata.expectedDisplayTime) != null ? _c : callbackTime };
     if (recorder && width && height) {
       const orientation = (_f = (_d = screen.orientation) == null ? void 0 : _d.type) != null ? _f : `${(_e = window.orientation) != null ? _e : 0}`;
-      const frameMeta = {
-        sequence,
-        mediaTimeMs: frame.mediaTimeMs,
-        presentationTimeMs: frame.presentationTimeMs,
-        expectedDisplayTimeMs: frame.expectedDisplayTimeMs,
-        callbackTimeMs: frame.callbackTimeMs,
-        width,
-        height,
-        stride: width * 4,
-        orientation
-      };
-      recorder.addVideo(frameMeta, video);
-      recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
-      drawOverlay(receiverNow());
-      if (recorder.complete) void finishCorpusRecording(recorder);
-      scheduleFrame(gen);
-      return;
+      recorder.addVideo({ sequence, mediaTimeMs: frame.mediaTimeMs, presentationTimeMs: frame.presentationTimeMs, expectedDisplayTimeMs: frame.expectedDisplayTimeMs, callbackTimeMs: frame.callbackTimeMs, width, height, stride: width * 4, orientation }, video);
+      recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`; drawOverlay(receiverNow()); if (recorder.complete) void finishCorpusRecording(recorder); scheduleFrame(gen); return;
     }
-    void captureFrame(frame).catch((error) => {
-      decodeExceptions++;
-      lastDecodeError = error instanceof Error ? error.message : String(error);
-    }).finally(() => {
-      frame.videoFrame?.close();
-      if (done || gen !== captureGen) return;
-      drawOverlay(receiverNow());
-      scheduleFrame(gen);
-    });
+    void captureFrame(frame).catch((error) => { decodeExceptions++; lastDecodeError = error instanceof Error ? error.message : String(error); }).finally(() => { frame.videoFrame?.close(); if (done || gen !== captureGen) return; drawOverlay(receiverNow()); scheduleFrame(gen); });
   };
-  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
-  else requestAnimationFrame((now) => next(now));
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next); else requestAnimationFrame((now) => next(now));
 }
 const grab = document.createElement("canvas");
 const replaySourceCanvas = document.createElement("canvas");
@@ -2391,285 +1772,67 @@ let scanHoldTimer;
 let scanHoldStart;
 let scanSaveInProgress = false;
 async function saveRawScan() {
-  const image = lastRawScanImage;
-  if (!image || scanSaveInProgress) return;
-  scanSaveInProgress = true;
-  try {
-    scanSaveCanvas.width = image.width;
-    scanSaveCanvas.height = image.height;
-    scanSaveCanvas.getContext("2d").putImageData(image, 0, 0);
-    const blob = await new Promise((resolve) => scanSaveCanvas.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-    const name = `airgapper-scan-${stamp}.png`;
-    if (!saveFileOnAndroid(name, "image/png", bytes)) {
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = name;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 1e3);
-    }
-  } finally {
-    scanSaveInProgress = false;
-  }
+  const image = lastRawScanImage; if (!image || scanSaveInProgress) return; scanSaveInProgress = true;
+  try { scanSaveCanvas.width = image.width; scanSaveCanvas.height = image.height; scanSaveCanvas.getContext("2d").putImageData(image, 0, 0); const blob = await new Promise((resolve) => scanSaveCanvas.toBlob(resolve, "image/png")); if (!blob) return; const bytes = new Uint8Array(await blob.arrayBuffer()); const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-"); const name = `airgapper-scan-${stamp}.png`; if (!saveFileOnAndroid(name, "image/png", bytes)) { const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1e3); } }
+  finally { scanSaveInProgress = false; }
 }
-function cancelScanHold() {
-  clearTimeout(scanHoldTimer);
-  scanHoldTimer = void 0;
-  scanHoldStart = void 0;
-}
-scanCapture.addEventListener("pointerdown", (event) => {
-  if (!lastRawScanImage || event.button !== 0 || !isAndroidApp()) return;
-  cancelScanHold();
-  scanHoldStart = { x: event.clientX, y: event.clientY };
-  scanHoldTimer = setTimeout(() => {
-    var _a;
-    cancelScanHold();
-    (_a = navigator.vibrate) == null ? void 0 : _a.call(navigator, 30);
-    showScanCaptureMenuOnAndroid();
-  }, 550);
-});
-scanCapture.addEventListener("pointermove", (event) => {
-  if (scanHoldStart && Math.hypot(event.clientX - scanHoldStart.x, event.clientY - scanHoldStart.y) > 12) cancelScanHold();
-});
-scanCapture.addEventListener("pointerup", cancelScanHold);
-scanCapture.addEventListener("pointercancel", cancelScanHold);
-scanCapture.addEventListener("contextmenu", (event) => {
-  if (!lastRawScanImage || !isAndroidApp()) return;
-  event.preventDefault();
-  cancelScanHold();
-  showScanCaptureMenuOnAndroid();
-});
+function cancelScanHold() { clearTimeout(scanHoldTimer); scanHoldTimer = void 0; scanHoldStart = void 0; }
+scanCapture.addEventListener("pointerdown", (event) => { if (!lastRawScanImage || event.button !== 0 || !isAndroidApp()) return; cancelScanHold(); scanHoldStart = { x: event.clientX, y: event.clientY }; scanHoldTimer = setTimeout(() => { var _a; cancelScanHold(); (_a = navigator.vibrate) == null ? void 0 : _a.call(navigator, 30); showScanCaptureMenuOnAndroid(); }, 550); });
+scanCapture.addEventListener("pointermove", (event) => { if (scanHoldStart && Math.hypot(event.clientX - scanHoldStart.x, event.clientY - scanHoldStart.y) > 12) cancelScanHold(); });
+scanCapture.addEventListener("pointerup", cancelScanHold); scanCapture.addEventListener("pointercancel", cancelScanHold);
+scanCapture.addEventListener("contextmenu", (event) => { if (!lastRawScanImage || !isAndroidApp()) return; event.preventDefault(); cancelScanHold(); showScanCaptureMenuOnAndroid(); });
 window.airgapperSaveRawScan = () => void saveRawScan();
-captureScanBtn.addEventListener("click", () => {
-  if (captureNextScan || pendingScanCapture) return;
-  captureNextScan = true;
-  captureScanBtn.textContent = "Capturing…";
-  captureScanBtn.disabled = true;
-  scanCapture.width = 0;
-  scanCapture.height = 0;
-  lastRawScanImage = null;
-  scanDialogStatus.textContent = "Capturing the next fresh camera frame…";
-  scanSightingLegend.hidden = true;
-  if (!scanDialog.open) scanDialog.showModal();
-  clearTimeout(scanCaptureTimer);
-  scanCaptureTimer = setTimeout(() => {
-    scanDialogStatus.textContent = "Capture timed out — try again.";
-    cancelScanCapture();
-  }, SCAN_CAPTURE_TIMEOUT_MS);
-});
+captureScanBtn.addEventListener("click", () => { if (captureNextScan || pendingScanCapture) return; captureNextScan = true; captureScanBtn.textContent = "Capturing…"; captureScanBtn.disabled = true; scanCapture.width = 0; scanCapture.height = 0; lastRawScanImage = null; scanDialogStatus.textContent = "Capturing the next fresh camera frame…"; scanSightingLegend.hidden = true; if (!scanDialog.open) scanDialog.showModal(); clearTimeout(scanCaptureTimer); scanCaptureTimer = setTimeout(() => { scanDialogStatus.textContent = "Capture timed out — try again."; cancelScanCapture(); }, SCAN_CAPTURE_TIMEOUT_MS); });
 closeScanBtn.addEventListener("click", () => scanDialog.close());
-scanDialog.addEventListener("click", (event) => {
-  if (event.target === scanDialog) scanDialog.close();
-});
-scanDialog.addEventListener("close", () => {
-  if (captureNextScan || pendingScanCapture) cancelScanCapture();
-});
-function trackedQuadBounds(quad) {
-  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
-  if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
-  return {
-    left: Math.min(...points.map((point) => point.x)),
-    top: Math.min(...points.map((point) => point.y)),
-    right: Math.max(...points.map((point) => point.x)),
-    bottom: Math.max(...points.map((point) => point.y))
-  };
-}
-function validTrackedQuad(region, vw, vh) {
-  if (!region.quad) return false;
-  const bounds = trackedQuadBounds(region.quad);
-  if (!bounds) return false;
-  const width = bounds.right - bounds.left;
-  const height = bounds.bottom - bounds.top;
-  const regionSize = Math.max(region.w, region.h);
-  const quadSize = Math.max(width, height);
-  return width >= 24 && height >= 24 && Math.max(width / height, height / width) <= 2.5 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < vw && bounds.top < vh && quadSize >= regionSize * 0.4 && quadSize <= regionSize * 2.5;
-}
-function invalidateTrackedQuad(region) {
-  region.quad = void 0;
-  region.dim = void 0;
-  region.consecutiveMisses = 0;
-  trackingInvalidations++;
-  notePipelineEvent("tracking-invalidated", trackingInvalidations);
-}
+scanDialog.addEventListener("click", (event) => { if (event.target === scanDialog) scanDialog.close(); });
+scanDialog.addEventListener("close", () => { if (captureNextScan || pendingScanCapture) cancelScanCapture(); });
+function trackedQuadBounds(quad) { const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]; if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null; return { left: Math.min(...points.map((point) => point.x)), top: Math.min(...points.map((point) => point.y)), right: Math.max(...points.map((point) => point.x)), bottom: Math.max(...points.map((point) => point.y)) }; }
+function validTrackedQuad(region, vw, vh) { if (!region.quad) return false; const bounds = trackedQuadBounds(region.quad); if (!bounds) return false; const width = bounds.right - bounds.left, height = bounds.bottom - bounds.top, regionSize = Math.max(region.w, region.h), quadSize = Math.max(width, height); return width >= 24 && height >= 24 && Math.max(width / height, height / width) <= 2.5 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < vw && bounds.top < vh && quadSize >= regionSize * 0.4 && quadSize <= regionSize * 2.5; }
+function invalidateTrackedQuad(region) { region.quad = void 0; region.dim = void 0; region.consecutiveMisses = 0; trackingInvalidations++; notePipelineEvent("tracking-invalidated", trackingInvalidations); }
 function captureSubmittedScan(image, ox, oy, full, tracks = [], scaleX = 1, scaleY = 1) {
   if (!captureNextScan) return;
   captureNextScan = false;
-  pendingScanCapture = {
-    image: new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
-    ox,
-    oy,
-    full,
-    tracks,
-    scaleX,
-    scaleY
-  };
-  scanCapture.width = image.width;
-  scanCapture.height = image.height;
-  scanCapture.getContext("2d").putImageData(pendingScanCapture.image, 0, 0);
-  scanDialogStatus.textContent = `${full ? "Full-frame scan" : `${tracks.length || 1} tracked region${tracks.length === 1 ? "" : "s"}`} · ${image.width}×${image.height} · decoding…`;
-  scanSightingLegend.hidden = true;
-  if (!scanDialog.open) scanDialog.showModal();
+  pendingScanCapture = { image: new ImageData(new Uint8ClampedArray(image.data), image.width, image.height), ox, oy, full, tracks, scaleX, scaleY };
+  scanCapture.width = image.width; scanCapture.height = image.height; scanCapture.getContext("2d").putImageData(pendingScanCapture.image, 0, 0);
+  scanDialogStatus.textContent = `${full ? "Full-frame scan" : `${tracks.length || 1} tracked region${tracks.length === 1 ? "" : "s"}`} · ${image.width}×${image.height} · decoding…`; scanSightingLegend.hidden = true; if (!scanDialog.open) scanDialog.showModal();
 }
-function cancelScanCapture() {
-  clearTimeout(scanCaptureTimer);
-  scanCaptureTimer = void 0;
-  pendingScanCapture = null;
-  captureNextScan = false;
-  captureScanBtn.textContent = "Capture";
-  captureScanBtn.disabled = false;
-}
+function cancelScanCapture() { clearTimeout(scanCaptureTimer); scanCaptureTimer = void 0; pendingScanCapture = null; captureNextScan = false; captureScanBtn.textContent = "Capture"; captureScanBtn.disabled = false; }
 function finishScanCapture(id, completion) {
-  const capture = pendingScanCapture;
-  if (!capture || capture.id !== id) return;
-  cancelScanCapture();
-  lastRawScanImage = capture.image;
-  scanCapture.width = capture.image.width;
-  scanCapture.height = capture.image.height;
-  const ctx = scanCapture.getContext("2d");
-  ctx.putImageData(capture.image, 0, 0);
-  const drawQuad = (quad, color, width) => {
-    const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
-    ctx.beginPath();
-    points.forEach((point, index) => {
-      const x = (point.x - capture.ox) / capture.scaleX;
-      const y = (point.y - capture.oy) / capture.scaleY;
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.stroke();
-  };
-  for (const quad of capture.tracks) drawQuad(quad, "#248cff", 3);
-  for (const symbol of completion.symbols) if (symbol.quad) drawQuad(symbol.quad, "#20c969", 5);
-  ctx.strokeStyle = "#f2a51a";
-  ctx.lineWidth = 4;
-  for (const box of completion.sightings) ctx.strokeRect(
-    (box.x - capture.ox) / capture.scaleX,
-    (box.y - capture.oy) / capture.scaleY,
-    box.w / capture.scaleX,
-    box.h / capture.scaleY
-  );
-  const tracked = !capture.full;
-  const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
+  const capture = pendingScanCapture; if (!capture || capture.id !== id) return; cancelScanCapture(); lastRawScanImage = capture.image; scanCapture.width = capture.image.width; scanCapture.height = capture.image.height;
+  const ctx = scanCapture.getContext("2d"); ctx.putImageData(capture.image, 0, 0);
+  const drawQuad = (quad, color, width) => { const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]; ctx.beginPath(); points.forEach((point, index) => { const x = (point.x - capture.ox) / capture.scaleX, y = (point.y - capture.oy) / capture.scaleY; if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.closePath(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke(); };
+  for (const quad of capture.tracks) drawQuad(quad, "#248cff", 3); for (const symbol of completion.symbols) if (symbol.quad) drawQuad(symbol.quad, "#20c969", 5);
+  ctx.strokeStyle = "#f2a51a"; ctx.lineWidth = 4; for (const box of completion.sightings) ctx.strokeRect((box.x - capture.ox) / capture.scaleX, (box.y - capture.oy) / capture.scaleY, box.w / capture.scaleX, box.h / capture.scaleY);
+  const tracked = !capture.full; const mode = capture.full ? "Full-frame scan" : `${capture.tracks.length || 1} tracked region${capture.tracks.length === 1 ? "" : "s"}`;
   scanDialogStatus.textContent = completion.error ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.error}` : tracked ? `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded${completion.fallbackAttempted ? ` · fallback searched${completion.sightingCount ? ` · ${completion.sightingCount} found` : ""}` : ""}` : `${mode} · ${capture.image.width}×${capture.image.height} · ${completion.symbolCount} decoded · ${completion.sightingCount} found`;
-  const outcome = scanOutcomes.get(id);
-  if (outcome && completion.symbolCount > 0) {
-    const details = [
-      outcome.accepted && `${outcome.accepted} accepted`,
-      outcome.duplicate && `${outcome.duplicate} duplicate`,
-      outcome.redundant && `${outcome.redundant} redundant`,
-      outcome.rejected && `${outcome.rejected} rejected`,
-      outcome.stale && `${outcome.stale} stale`,
-      outcome.otherStream && `${outcome.otherStream} other stream`
-    ].filter(Boolean).join(" · ");
-    if (details) scanDialogStatus.textContent += ` · ${details}`;
-  }
-  const gridSummary = gridDebugSummary();
-  if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
-  scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
-  if (!scanDialog.open) scanDialog.showModal();
+  const outcome = scanOutcomes.get(id); if (outcome && completion.symbolCount > 0) { const details = [outcome.accepted && `${outcome.accepted} accepted`, outcome.duplicate && `${outcome.duplicate} duplicate`, outcome.redundant && `${outcome.redundant} redundant`, outcome.rejected && `${outcome.rejected} rejected`, outcome.stale && `${outcome.stale} stale`, outcome.otherStream && `${outcome.otherStream} other stream`].filter(Boolean).join(" · "); if (details) scanDialogStatus.textContent += ` · ${details}`; }
+  const gridSummary = gridDebugSummary(); if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`; scanSightingLegend.hidden = tracked && !completion.fallbackAttempted; if (!scanDialog.open) scanDialog.showModal();
 }
 function readBoundedVideoCrop(source, x, y, w, h) {
-  if (grab.width < w) grab.width = w;
-  if (grab.height < h) grab.height = h;
-  const ctx = grab.getContext("2d", { willReadFrequently: true });
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, w, h);
-  const sx = Math.max(0, x);
-  const sy = Math.max(0, y);
-  const right = Math.min(source.width, x + w);
-  const bottom = Math.min(source.height, y + h);
+  if (grab.width < w) grab.width = w; if (grab.height < h) grab.height = h;
+  const ctx = grab.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+  const sx = Math.max(0, x), sy = Math.max(0, y), right = Math.min(source.width, x + w), bottom = Math.min(source.height, y + h);
   if (right > sx && bottom > sy) {
-    if (source.image) {
-      if (replaySourceCanvas.width !== source.width || replaySourceCanvas.height !== source.height) {
-        replaySourceCanvas.width = source.width;
-        replaySourceCanvas.height = source.height;
-      }
-      replaySourceCanvas.getContext("2d").putImageData(source.image, 0, 0);
-      ctx.drawImage(replaySourceCanvas, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
-    } else {
-      ctx.drawImage(video, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
-    }
+    if (source.image) { if (replaySourceCanvas.width !== source.width || replaySourceCanvas.height !== source.height) { replaySourceCanvas.width = source.width; replaySourceCanvas.height = source.height; } replaySourceCanvas.getContext("2d").putImageData(source.image, 0, 0); ctx.drawImage(replaySourceCanvas, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy); }
+    else ctx.drawImage(video, sx, sy, right - sx, bottom - sy, sx - x, sy - y, right - sx, bottom - sy);
   }
   return ctx.getImageData(0, 0, w, h);
 }
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
-    const submittedAt = receiverNow();
-    scanCapturedAt.set(message.id, submittedAt);
-    if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
-      lastDecodeSubmittedSourceSequence = sourceSequence;
-      decodeFrameTimes.push(submittedAt);
-    }
+    const submittedAt = receiverNow(); scanCapturedAt.set(message.id, submittedAt); if (sourceSequence !== lastDecodeSubmittedSourceSequence) { lastDecodeSubmittedSourceSequence = sourceSequence; decodeFrameTimes.push(submittedAt); }
     if (sourceOpticsEpoch !== void 0) {
-      optimizerJobsSubmittedTotal++;
-      optimizerJobIds.add(message.id);
-      const epoch = optimizerEpochs.get(sourceOpticsEpoch);
-      const evidence = candidateEvidenceWindows.get(sourceOpticsEpoch);
-      if (epoch && evidence && epoch.id === sourceOpticsEpoch) {
-        const attribution = {
-          scanId: message.id,
-          sourceFrameSequence: sourceSequence,
-          epoch: { ...epoch },
-          evidence,
-          fixedAttempts,
-          validDecodes: 0,
-          usefulSymbols: 0
-        };
-        scanCandidateEpoch.set(message.id, attribution);
-        optimizerJobsMappedTotal++;
-        evidence.submittedJobs++;
-        evidence.sourceFrames.add(sourceSequence);
-        evidence.qrAttempts += fixedAttempts;
-        traceOptimizer({
-          time: receiverNow(),
-          event: "JOB_SUBMIT",
-          candidateId: epoch.candidateId,
-          candidateEpoch: epoch.id,
-          sourceSequence,
-          scanId: message.id,
-          requestedExposure: epoch.requestedExposure,
-          requestedIso: epoch.requestedIso,
-          actualExposure: epoch.actualExposure,
-          actualIso: epoch.actualIso
-        });
-      } else {
-        console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: message.id, sourceSequence, sourceOpticsEpoch });
-        traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", sourceSequence, scanId: message.id, candidateEpoch: sourceOpticsEpoch });
-      }
+      optimizerJobsSubmittedTotal++; optimizerJobIds.add(message.id); const epoch = optimizerEpochs.get(sourceOpticsEpoch), evidence = candidateEvidenceWindows.get(sourceOpticsEpoch);
+      if (epoch && evidence && epoch.id === sourceOpticsEpoch) { const attribution = { scanId: message.id, sourceFrameSequence: sourceSequence, epoch: { ...epoch }, evidence, fixedAttempts, validDecodes: 0, usefulSymbols: 0 }; scanCandidateEpoch.set(message.id, attribution); optimizerJobsMappedTotal++; evidence.submittedJobs++; evidence.sourceFrames.add(sourceSequence); evidence.qrAttempts += fixedAttempts; traceOptimizer({ time: receiverNow(), event: "JOB_SUBMIT", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence, scanId: message.id, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso }); }
+      else { console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: message.id, sourceSequence, sourceOpticsEpoch }); traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", sourceSequence, scanId: message.id, candidateEpoch: sourceOpticsEpoch }); }
     }
-    if (kind === "FULL FRAME") {
-      fullScanIds.add(message.id);
-      fullScanJobs.set(message.id, { thorough: false, native: true, reacquire: gridLattice.state === "REACQUIRE" });
-    }
+    if (kind === "FULL FRAME") { fullScanIds.add(message.id); fullScanJobs.set(message.id, { thorough: false, native: true, reacquire: gridLattice.state === "REACQUIRE" }); }
   }
   if (trace) {
     trace.decision = accepted ? kind : "worker busy";
-    const job = {
-      id: message.id,
-      kind,
-      pixels: message.w * message.h,
-      bytes: message.payloadBytes ?? message.buf?.byteLength ?? message.w * message.h * 4,
-      width: message.w,
-      height: message.h,
-      x: Number(message.ox) || 0,
-      y: Number(message.oy) || 0,
-      tracks: trackedRegions.map((region) => {
-        var _a;
-        return (_a = region.gridSlot) != null ? _a : region.id;
-      }),
-      submittedAt: receiverNow()
-    };
-    trace.jobs.push(job);
-    if (accepted) {
-      benchmarkJobFrames.set(message.id, trace);
-      for (const predicted of trace.predicted) if (job.tracks.includes(predicted.slot)) predicted.submitted = true;
-    }
+    const job = { id: message.id, kind, pixels: message.w * message.h, bytes: message.payloadBytes ?? message.buf?.byteLength ?? message.w * message.h * 4, width: message.w, height: message.h, x: Number(message.ox) || 0, y: Number(message.oy) || 0, tracks: trackedRegions.map((region) => region.gridSlot ?? region.id), submittedAt: receiverNow() };
+    trace.jobs.push(job); if (accepted) { benchmarkJobFrames.set(message.id, trace); for (const predicted of trace.predicted) if (job.tracks.includes(predicted.slot)) predicted.submitted = true; }
   }
   return accepted;
 }
@@ -2682,42 +1845,24 @@ let opticalAnalyzeMaxMs = 0;
 let opticalTimingStartedAt = performance.now();
 function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
   if (replayRunning || source.sequence === lastOpticalSourceSequence) return;
-  const now = receiverNow();
-  const interval = focusController.opticalIntervalMs;
+  const now = receiverNow(), interval = focusController.opticalIntervalMs;
   if (!Number.isFinite(interval) || now - lastOpticalSampleAt < interval) return;
-  opticalTargets.length = 0;
-  let eligibleTargetExists = false;
+  opticalTargets.length = 0; let eligibleTargetExists = false;
   for (const region of regions) {
     if (!region.quad || !region.dim || region.visibleFraction < 0.85) continue;
     eligibleTargetExists = true;
-    const q = region.quad;
-    const inside = (point) => point.x >= ox + 2 && point.y >= oy + 2 && point.x < ox + image.width - 2 && point.y < oy + image.height - 2;
-    if (inside(q.topLeft) && inside(q.topRight) && inside(q.bottomRight) && inside(q.bottomLeft)) {
-      opticalTargets.push({ quad: q, modules: region.dim });
-    }
+    const q = region.quad, inside = (point) => point.x >= ox + 2 && point.y >= oy + 2 && point.x < ox + image.width - 2 && point.y < oy + image.height - 2;
+    if (inside(q.topLeft) && inside(q.topRight) && inside(q.bottomRight) && inside(q.bottomLeft)) opticalTargets.push({ quad: q, modules: region.dim });
   }
-  if (!opticalTargets.length) {
-    if (!eligibleTargetExists) focusController.noteTargetAbsent(now);
-    return;
-  }
-  lastOpticalSourceSequence = source.sequence;
-  lastOpticalSampleAt = now;
-  const analyzeStarted = performance.now();
-  const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);
-  const analyzeMs = performance.now() - analyzeStarted;
-  opticalAnalyzeCount++;
-  opticalAnalyzeTotalMs += analyzeMs;
-  opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs);
-  if (!metrics || metrics.confidence < 0.55 && !focusController.expectsProbeFrame) {
-    focusController.noteTargetAbsent(now);
-    return;
-  }
-  const geometry = focusGeometry();
-  if (!geometry) return;
+  if (!opticalTargets.length) { if (!eligibleTargetExists) focusController.noteTargetAbsent(now); return; }
+  lastOpticalSourceSequence = source.sequence; lastOpticalSampleAt = now;
+  const analyzeStarted = performance.now(), metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy), analyzeMs = performance.now() - analyzeStarted;
+  opticalAnalyzeCount++; opticalAnalyzeTotalMs += analyzeMs; opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs);
+  if (!metrics || metrics.confidence < 0.55 && !focusController.expectsProbeFrame) { focusController.noteTargetAbsent(now); return; }
+  const geometry = focusGeometry(); if (!geometry) return;
   const captureFps = captureTimes.reduce((count, at) => count + Number(at > now - STATS_WINDOW_MS), 0);
   focusController.observe(source.sequence, geometry, metrics, Math.max(1, expectedRegions), now, captureFps);
 }
-
 const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);
 let directFrameDisabled = false;
 function opticalSampleDue(source) {
@@ -2726,1652 +1871,327 @@ function opticalSampleDue(source) {
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function cloneDirectDecodeFrame(source) {
-  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
   let frame = source.videoFrame;
-  if (!frame) {
-    try {
-      frame = source.videoFrame = new VideoFrame(video);
-    } catch {
-      return null;
-    }
-  }
-  try {
-    return { frame: frame.clone(), pixelFormat: DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" };
-  } catch {
-    return null;
-  }
+  if (!frame) { try { frame = source.videoFrame = new VideoFrame(video); } catch { return null; } }
+  try { return { frame: frame.clone(), pixelFormat: DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" }; } catch { return null; }
 }
-
+function sampleLockedQrOptics(source, candidates) {
+  if (!opticalSampleDue(source)) return;
+  const target = candidates.find((region) => region.quad && region.dim && region.visibleFraction >= 0.95 && validTrackedQuad(region, source.width, source.height));
+  if (!target) return;
+  const bounds = trackedQuadBounds(target.quad);
+  if (!bounds) return;
+  const pad = 4;
+  const x = Math.max(0, Math.floor(bounds.left - pad));
+  const y = Math.max(0, Math.floor(bounds.top - pad));
+  const right = Math.min(source.width, Math.ceil(bounds.right + pad));
+  const bottom = Math.min(source.height, Math.ceil(bounds.bottom + pad));
+  const w = right - x, h = bottom - y;
+  if (w < 32 || h < 32) return;
+  inspectStaticQrOptics(source, readBoundedVideoCrop(source, x, y, w, h), x, y);
+}
 function captureOptimizerOpticalSample(source) {
   const epoch = activeOptimizerEpoch;
   if (!(epoch == null ? void 0 : epoch.collecting) || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
-  const evidence = candidateEvidenceWindows.get(epoch.id);
-  if (!evidence || evidence.opticalSourceFrames.has(source.sequence)) return;
-  const image = readBoundedVideoCrop(source, 0, 0, source.width, source.height);
-  const analyzeStarted = performance.now();
-  let metrics;
-  let targeted = false;
-  if (optimizerFixedTargets.length) {
-    const targets = optimizerFixedTargets.filter((target) => target.dim >= 21 && target.dim <= 177).map((target) => ({ quad: target.quad, modules: target.dim }));
-    metrics = targets.length ? opticsAnalyzer.analyze(image, targets) : void 0;
-    targeted = Boolean(metrics);
-    if (!metrics) return;
-    if (evidence.opticalTargetedSamples === 0 && evidence.opticalSamples.length) {
-      evidence.opticalSamples.length = 0;
-      evidence.opticalSourceFrames.clear();
-    }
-  } else {
-    metrics = opticsAnalyzer.analyzeGlobal(image);
-    targeted = false;
-  }
-  const analyzeMs = performance.now() - analyzeStarted;
-  opticalAnalyzeCount++;
-  opticalAnalyzeTotalMs += analyzeMs;
-  opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs);
-  if (!metrics) return;
-  evidence.opticalSourceFrames.add(source.sequence);
-  evidence.opticalSamples.push(metrics);
-  if (targeted) evidence.opticalTargetedSamples++;
-  evidence.temporalSamples.push(metrics.temporalContamination);
-  traceOptimizer({
-    time: receiverNow(),
-    event: targeted ? "OPTICS_QR" : "OPTICS_GLOBAL",
-    candidateId: epoch.candidateId,
-    candidateEpoch: epoch.id,
-    sourceSequence: source.sequence,
-    requestedExposure: epoch.requestedExposure,
-    requestedIso: epoch.requestedIso,
-    actualExposure: epoch.actualExposure,
-    actualIso: epoch.actualIso
-  });
+  const evidence = candidateEvidenceWindows.get(epoch.id); if (!evidence || evidence.opticalSourceFrames.has(source.sequence)) return;
+  const image = readBoundedVideoCrop(source, 0, 0, source.width, source.height); const analyzeStarted = performance.now(); let metrics; let targeted = false;
+  if (optimizerFixedTargets.length) { const targets = optimizerFixedTargets.filter((target) => target.dim >= 21 && target.dim <= 177).map((target) => ({ quad: target.quad, modules: target.dim })); metrics = targets.length ? opticsAnalyzer.analyze(image, targets) : void 0; targeted = Boolean(metrics); if (!metrics) return; if (evidence.opticalTargetedSamples === 0 && evidence.opticalSamples.length) { evidence.opticalSamples.length = 0; evidence.opticalSourceFrames.clear(); } }
+  else { metrics = opticsAnalyzer.analyzeGlobal(image); targeted = false; }
+  const analyzeMs = performance.now() - analyzeStarted; opticalAnalyzeCount++; opticalAnalyzeTotalMs += analyzeMs; opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs); if (!metrics) return;
+  evidence.opticalSourceFrames.add(source.sequence); evidence.opticalSamples.push(metrics); if (targeted) evidence.opticalTargetedSamples++; evidence.temporalSamples.push(metrics.temporalContamination);
+  traceOptimizer({ time: receiverNow(), event: targeted ? "OPTICS_QR" : "OPTICS_GLOBAL", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: source.sequence, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso });
 }
 function captureOptimizerProbe(source, trace) {
   const epoch = activeOptimizerEpoch;
   if (!(epoch == null ? void 0 : epoch.collecting) || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
-  const evidence = candidateEvidenceWindows.get(epoch.id);
-  if (!evidence) return;
+  const evidence = candidateEvidenceWindows.get(epoch.id); if (!evidence) return;
   if (optimizerDiscoveryMode || !optimizerFixedTargets.length) {
-    const image2 = readBoundedVideoCrop(source, 0, 0, source.width, source.height);
-    const id2 = frameId++;
-    traceOptimizer({
-      time: receiverNow(),
-      event: "CAPTURE",
-      candidateId: epoch.candidateId,
-      candidateEpoch: epoch.id,
-      sourceSequence: source.sequence,
-      requestedExposure: epoch.requestedExposure,
-      requestedIso: epoch.requestedIso,
-      actualExposure: epoch.actualExposure,
-      actualIso: epoch.actualIso
-    });
-    submitReceiverJob(
-      {
-        id: id2,
-        buf: image2.data.buffer,
-        w: source.width,
-        h: source.height,
-        ox: 0,
-        oy: 0,
-        full: true,
-        thorough: true,
-        optimizerProbe: true,
-        sourceSequence: source.sequence,
-        opticsEpoch: source.opticsEpoch
-      },
-      [image2.data.buffer],
-      "FULL FRAME",
-      trace,
-      source.sequence,
-      [],
-      1,
-      source.opticsEpoch
-    );
-    return;
+    const image2 = readBoundedVideoCrop(source, 0, 0, source.width, source.height), id2 = frameId++;
+    traceOptimizer({ time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: source.sequence, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso });
+    submitReceiverJob({ id: id2, buf: image2.data.buffer, w: source.width, h: source.height, ox: 0, oy: 0, full: true, thorough: true, optimizerProbe: true, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch }, [image2.data.buffer], "FULL FRAME", trace, source.sequence, [], 1, source.opticsEpoch); return;
   }
   const targets = optimizerFixedTargets;
-  const points = targets.flatMap((target) => [
-    target.quad.topLeft,
-    target.quad.topRight,
-    target.quad.bottomRight,
-    target.quad.bottomLeft
-  ]);
-  const targetEdge = Math.max(...targets.map((target) => {
-    const bounds = trackedQuadBounds(target.quad);
-    return bounds ? Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) : 60;
-  }));
-  const moduleSize = targetEdge / Math.max(21, targets[0].dim);
+  const points = targets.flatMap((target) => [target.quad.topLeft, target.quad.topRight, target.quad.bottomRight, target.quad.bottomLeft]);
+  const targetEdge = Math.max(...targets.map((target) => { const bounds = trackedQuadBounds(target.quad); return bounds ? Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) : 60; }));
   const pad = Math.max(12, Math.round(targetEdge * 0.2));
-  let x = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - pad));
-  let y = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - pad));
-  const right = Math.min(source.width, Math.ceil(Math.max(...points.map((point) => point.x)) + pad));
-  const bottom = Math.min(source.height, Math.ceil(Math.max(...points.map((point) => point.y)) + pad));
-  let w = right - x;
-  let h = bottom - y;
-  if (w < 32 || h < 32) return;
-  let image = readBoundedVideoCrop(source, x, y, w, h);
-  const id = frameId++;
-  traceOptimizer({
-    time: receiverNow(),
-    event: "CAPTURE",
-    candidateId: epoch.candidateId,
-    candidateEpoch: epoch.id,
-    sourceSequence: source.sequence,
-    requestedExposure: epoch.requestedExposure,
-    requestedIso: epoch.requestedIso,
-    actualExposure: epoch.actualExposure,
-    actualIso: epoch.actualIso
-  });
-  submitReceiverJob(
-    {
-      id,
-      buf: image.data.buffer,
-      w,
-      h,
-      ox: x,
-      oy: y,
-      full: false,
-      tracks: targets,
-      // Keep the frozen geometry for apples-to-apples comparison, but use the
-      // SAME fallback budget as production. The previous optimizerProbe=true
-      // path retried every missing QR and could make very dark settings look
-      // artificially good even though normal receiving could not sustain them.
-      optimizerProbe: false,
-      sourceSequence: source.sequence,
-      opticsEpoch: source.opticsEpoch
-    },
-    [image.data.buffer],
-    "SHARED TRACKED BATCH CROP",
-    trace,
-    source.sequence,
-    [],
-    targets.length,
-    source.opticsEpoch
-  );
+  let x = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - pad)), y = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - pad));
+  const right = Math.min(source.width, Math.ceil(Math.max(...points.map((point) => point.x)) + pad)), bottom = Math.min(source.height, Math.ceil(Math.max(...points.map((point) => point.y)) + pad));
+  const w = right - x, h = bottom - y; if (w < 32 || h < 32) return;
+  const image = readBoundedVideoCrop(source, x, y, w, h), id = frameId++;
+  traceOptimizer({ time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: source.sequence, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso });
+  submitReceiverJob({ id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false, tracks: targets, optimizerProbe: false, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch }, [image.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, [], targets.length, source.opticsEpoch);
 }
 async function captureFrame(source) {
   var _a, _b, _c, _d, _e;
-  const vw = source.width;
-  const vh = source.height;
+  const vw = source.width, vh = source.height;
   if (!vw || !vh) return;
-  receiverFrameWidth = vw;
-  receiverFrameHeight = vh;
+  receiverFrameWidth = vw; receiverFrameHeight = vh;
   const now = receiverNow();
-  const trace = replayRunning ? {
-    sequence: source.sequence,
-    timestampMs: now,
-    stateBefore: gridLattice.state,
-    stateAfter: gridLattice.state,
-    decision: "not scheduled",
-    workerBusyFraction: pool.size ? pool.busyCount / pool.size : 0,
-    jobs: [],
-    decoded: [],
-    sightings: [],
-    reference: [],
-    predicted: [],
-    transitions: []
-  } : void 0;
-  if (trace) {
-    benchmarkTraces.push(trace);
-    activeBenchmarkFrame = trace;
-  }
-  captureTimes.push(now);
-  totalCaptures++;
+  const trace = replayRunning ? { sequence: source.sequence, timestampMs: now, stateBefore: gridLattice.state, stateAfter: gridLattice.state, decision: "not scheduled", workerBusyFraction: pool.size ? pool.busyCount / pool.size : 0, jobs: [], decoded: [], sightings: [], reference: [], predicted: [], transitions: [] } : void 0;
+  if (trace) { benchmarkTraces.push(trace); activeBenchmarkFrame = trace; }
+  captureTimes.push(now); totalCaptures++;
   if (optimizerPipelineActive) {
     captureOptimizerOpticalSample(source);
-    if (pool.busyCount === pool.size) {
-      capturesDropped++;
-      poolBusyTimes.push(now);
-      if (trace) {
-        trace.decision = "optimizer optics only · worker busy";
-        trace.stateAfter = gridLattice.state;
-      }
-      activeBenchmarkFrame = void 0;
-      return;
-    }
-    captureOptimizerProbe(source, trace);
-    activeBenchmarkFrame = void 0;
-    return;
+    if (pool.busyCount === pool.size) { capturesDropped++; poolBusyTimes.push(now); if (trace) { trace.decision = "optimizer optics only · worker busy"; trace.stateAfter = gridLattice.state; } activeBenchmarkFrame = void 0; return; }
+    captureOptimizerProbe(source, trace); activeBenchmarkFrame = void 0; return;
   }
-  if (pool.busyCount === pool.size && !gridLattice.active) {
-    capturesDropped++;
-    poolBusyTimes.push(now);
-    if (trace) {
-      trace.decision = "worker busy";
-      trace.stateAfter = gridLattice.state;
-    }
-    activeBenchmarkFrame = void 0;
-    return;
-  }
+  if (pool.busyCount === pool.size && !gridLattice.active) { capturesDropped++; poolBusyTimes.push(now); if (trace) { trace.decision = "worker busy"; trace.stateAfter = gridLattice.state; } activeBenchmarkFrame = void 0; return; }
   for (let i = regions.length - 1; i >= 0; i--) {
-    const region = regions[i];
-    const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
-    if (region.gridSlot === void 0 && now - region.seen > ttl) {
-      regions.splice(i, 1);
-      notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
-    }
+    const region = regions[i], ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
+    if (region.gridSlot === void 0 && now - region.seen > ttl) { regions.splice(i, 1); notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length); }
   }
   const latticeSnapshot = gridLattice.tick(now);
   if (latticeSnapshot) syncGrid(latticeSnapshot, now);
-  else if (gridLattice.state === "REACQUIRE") {
-    for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot !== void 0) regions.splice(i, 1);
-    gridShape = "";
-  }
-  const live = decodedCount();
-  peakRegions = Math.max(peakRegions, live);
-  if (live >= expectedRegions || now - expectedRegionsAt > EXPECTED_REGIONS_DECAY_MS) {
-    expectedRegions = live;
-    expectedRegionsAt = now;
-  }
+  else if (gridLattice.state === "REACQUIRE") { for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot !== void 0) regions.splice(i, 1); gridShape = ""; }
+  const live = decodedCount(); peakRegions = Math.max(peakRegions, live);
+  if (live >= expectedRegions || now - expectedRegionsAt > EXPECTED_REGIONS_DECAY_MS) { expectedRegions = live; expectedRegionsAt = now; }
   const visibleGridSlots = classifyGridSlots(vw, vh);
-  if (trace) trace.predicted = visibleGridSlots.map((region) => ({
-    slot: region.gridSlot,
-    state: region.slotState,
-    quad: region.quad,
-    submitted: false
-  }));
-  const gridNeedsDiscovery = visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
+  if (trace) trace.predicted = visibleGridSlots.map((region) => ({ slot: region.gridSlot, state: region.slotState, quad: region.quad, submitted: false }));
+  const lockedGrid = gridLattice.locked;
+  const decodableGridSlots = visibleGridSlots.filter(isGridDecodeCandidate);
+  if (lockedGrid) { expectedRegions = decodableGridSlots.length; expectedRegionsAt = now; }
+  const gridNeedsDiscovery = decodableGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
   gridLattice.noteMissing(gridNeedsDiscovery, now);
-  const needsRecoveryScan = live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
+  const needsRecoveryScan = !lockedGrid && (live === 0 || live < expectedRegions || trackingUnhealthy);
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
-  const captureHasTrackedWork = gridLattice.active ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const captureHasTrackedWork = lockedGrid ? decodableGridSlots.some((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const fullScanDue = captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
-  if (!fullScanDue && regions.length === 0) {
-    if (trace) {
-      trace.decision = "full scan throttled";
-      trace.stateAfter = gridLattice.state;
-    }
-    activeBenchmarkFrame = void 0;
-    return;
-  }
-  if (grab.width !== vw || grab.height !== vh) {
-    grab.width = vw;
-    grab.height = vh;
-  }
-  const ctx = grab.getContext("2d", { willReadFrequently: true });
-  if (fullScanDue && pool.busyCount === pool.size) {
-    capturesDropped++;
-    poolBusyTimes.push(now);
-    activeBenchmarkFrame = void 0;
-    return;
-  }
+  if (!fullScanDue && regions.length === 0) { if (trace) { trace.decision = lockedGrid ? "locked: no visible grid cells" : "full scan throttled"; trace.stateAfter = gridLattice.state; } activeBenchmarkFrame = void 0; return; }
+  if (fullScanDue && pool.busyCount === pool.size) { capturesDropped++; poolBusyTimes.push(now); activeBenchmarkFrame = void 0; return; }
   if (fullScanDue) {
-    lastFullScan = now;
-    fullScans++;
+    if (grab.width !== vw || grab.height !== vh) { grab.width = vw; grab.height = vh; }
+    const ctx = grab.getContext("2d", { willReadFrequently: true });
+    lastFullScan = now; fullScans++;
     const img = source.image ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh) : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
-    inspectStaticQrOptics(source, img);
-    captureSubmittedScan(img, 0, 0, true);
-    const id = frameId++;
-    if (submitReceiverJob(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
-      [img.data.buffer],
-      "FULL FRAME",
-      trace,
-      source.sequence
-    )) {
-      if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
-    } else if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) {
-      cancelScanCapture();
-    }
-    if (trace) trace.stateAfter = gridLattice.state;
-    activeBenchmarkFrame = void 0;
-    return;
+    inspectStaticQrOptics(source, img); captureSubmittedScan(img, 0, 0, true); const id = frameId++;
+    if (submitReceiverJob({ id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true }, [img.data.buffer], "FULL FRAME", trace, source.sequence)) { if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; }
+    else if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
+    if (trace) trace.stateAfter = gridLattice.state; activeBenchmarkFrame = void 0; return;
   }
-  for (const region of regions) {
-    if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
-  }
-  const batchRegions = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 15);
-  const batchTracks = batchRegions.map((region) => ({
-    id: region.id,
-    slot: region.gridSlot,
-    misses: region.consecutiveMisses,
-    quad: region.quad,
-    dim: region.dim,
-    crc32: Boolean(region.crc32)
-  }));
+  for (const region of regions) if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
+  const batchRegions = (lockedGrid ? decodableGridSlots : regions.filter((region) => region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 15);
+  const batchTracks = batchRegions.map((region) => ({ id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses, quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32) }));
+  if (lockedGrid) sampleLockedQrOptics(source, batchRegions);
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
   const laneLayout = lockedLayout && (lockedLayout.cols === 3 && lockedLayout.rows === 5 || lockedLayout.cols === 5 && lockedLayout.rows === 3);
-  const healthyTrackedGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
-  if (healthyTrackedGrid && laneLayout && batchTracks.length === 15 && pool.size >= 3) {
-    const groups = Array.from(
-      { length: 3 },
-      () => ({ tracks: [], regions: [] })
-    );
+  const hotTrackedGrid = !captureNextScan && lockedGrid && !trackingUnhealthy;
+  if (hotTrackedGrid && laneLayout && batchTracks.length > 0 && pool.size >= 3) {
+    const groups = Array.from({ length: 3 }, () => ({ tracks: [], regions: [] }));
     for (let index = 0; index < batchTracks.length; index++) {
-      const track = batchTracks[index];
-      const region = batchRegions[index];
+      const track = batchTracks[index], region = batchRegions[index];
       if (track.slot === void 0) continue;
       const groupIndex = lockedLayout.cols === 3 ? track.slot % 3 : Math.floor(track.slot / lockedLayout.cols);
       if (groupIndex < 0 || groupIndex >= groups.length) continue;
-      groups[groupIndex].tracks.push(track);
-      groups[groupIndex].regions.push(region);
+      groups[groupIndex].tracks.push(track); groups[groupIndex].regions.push(region);
     }
-    if (groups.every((group) => group.tracks.length === 5)) {
-      const freeSlots = new Set(pool.freeSlots);
-      let laneJobsSubmitted = 0;
-      activeDecodeBudget = 15;
+    if (groups.some((group) => group.tracks.length)) {
+      const freeSlots = new Set(pool.freeSlots); let laneJobsSubmitted = 0; activeDecodeBudget = batchTracks.length;
       for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
         const group = groups[groupIndex];
+        if (!group.tracks.length) { discardPendingGridLane(groupIndex); continue; }
         const workerSlot = [...freeSlots].find((slot) => slot % 3 === groupIndex);
-        const points = group.tracks.flatMap((track) => [
-          track.quad.topLeft,
-          track.quad.topRight,
-          track.quad.bottomRight,
-          track.quad.bottomLeft
-        ]);
-        const minX = Math.min(...points.map((point) => point.x));
-        const minY = Math.min(...points.map((point) => point.y));
-        const maxX = Math.max(...points.map((point) => point.x));
-        const maxY = Math.max(...points.map((point) => point.y));
-        const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
+        const points = group.tracks.flatMap((track) => [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft]);
+        const minX = Math.min(...points.map((point) => point.x)), minY = Math.min(...points.map((point) => point.y)), maxX = Math.max(...points.map((point) => point.x)), maxY = Math.max(...points.map((point) => point.y));
         const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
-        const pad = Math.max(10, Math.round(typicalEdge * (0.14 + Math.min(0.18, worstMisses * 0.04))));
-        const cropQuantum = 16;
-        const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
-        const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
-        const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
-        const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
-        const w = right - x;
-        const h = bottom - y;
-        if (w < 32 || h < 32) continue;
+        const pad = Math.max(8, 6 + Math.min(6, worstMisses * 2));
+        const cropQuantum = 2;
+        const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum), y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+        const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum), bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
+        const w = right - x, h = bottom - y; if (w < 32 || h < 32) { discardPendingGridLane(groupIndex); continue; }
         const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence };
-        if (workerSlot === void 0) {
-          queuePendingGridLane(groupIndex, source, geometry);
-          continue;
-        }
+        if (workerSlot === void 0) { queuePendingGridLane(groupIndex, source, geometry); continue; }
         discardPendingGridLane(groupIndex);
-        let laneImage;
-        const direct = cloneDirectDecodeFrame(source);
-        if (!direct) {
-          laneImage = readBoundedVideoCrop(source, x, y, w, h);
-          if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
-        }
+        let laneImage; const direct = cloneDirectDecodeFrame(source);
+        if (!direct) laneImage = readBoundedVideoCrop(source, x, y, w, h);
         const id = frameId++;
-        const laneMessage = direct
-          ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat }
-          : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
+        const laneMessage = direct ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat } : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
         const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
-        const accepted = submitReceiverJob(
-          laneMessage,
-          laneTransfer,
-          direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
-          trace,
-          source.sequence,
-          group.regions,
-          0,
-          void 0,
-          workerSlot
-        );
-        if (!accepted) {
-          direct?.frame.close();
-          continue;
-        }
-        cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
-        freeSlots.delete(workerSlot);
-        laneJobsSubmitted++;
+        const accepted = submitReceiverJob(laneMessage, laneTransfer, direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID", trace, source.sequence, group.regions, 0, void 0, workerSlot);
+        if (!accepted) { direct?.frame.close(); continue; }
+        cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad }))); freeSlots.delete(workerSlot); laneJobsSubmitted++;
       }
-      cropRotate++;
-      if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
-      if (trace) trace.stateAfter = gridLattice.state;
-      activeBenchmarkFrame = void 0;
-      return;
+      cropRotate++; if (laneJobsSubmitted === 0) poolBusyTimes.push(now); if (trace) trace.stateAfter = gridLattice.state; activeBenchmarkFrame = void 0; return;
     }
   }
+  clearPendingGridLanes();
   if (batchTracks.length > 1) {
-    const points = batchTracks.flatMap((track) => [
-      track.quad.topLeft,
-      track.quad.topRight,
-      track.quad.bottomRight,
-      track.quad.bottomLeft
-    ]);
-    const minX = Math.min(...points.map((point) => point.x));
-    const minY = Math.min(...points.map((point) => point.y));
-    const maxX = Math.max(...points.map((point) => point.x));
-    const maxY = Math.max(...points.map((point) => point.y));
-    const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
-    const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    const pad = Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
-    const cropQuantum = 16;
-    const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
-    const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
-    const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
-    const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
-    const w = right - x;
-    const h = bottom - y;
+    const points = batchTracks.flatMap((track) => [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft]);
+    const minX = Math.min(...points.map((point) => point.x)), minY = Math.min(...points.map((point) => point.y)), maxX = Math.max(...points.map((point) => point.x)), maxY = Math.max(...points.map((point) => point.y));
+    const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h))), worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
+    const lockedPad = Math.max(8, 6 + Math.min(6, worstMisses * 2));
+    const pad = lockedGrid ? lockedPad : Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
+    const cropQuantum = lockedGrid ? 2 : 16;
+    const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum), y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+    const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum), bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
+    const w = right - x, h = bottom - y;
     if (w >= 32 && h >= 32) {
-      const healthyGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
       const freeWorkers = Math.max(0, pool.size - pool.busyCount);
-      if (healthyGrid && freeWorkers === 0) {
-        poolBusyTimes.push(now);
-        if (trace) trace.decision = "not scheduled: workers busy";
-        activeBenchmarkFrame = void 0;
-        return;
-      }
-      let shared;
-      const sharedDirect = healthyGrid ? cloneDirectDecodeFrame(source) : null;
-      if (!sharedDirect) {
-        shared = readBoundedVideoCrop(source, x, y, w, h);
-        inspectStaticQrOptics(source, shared, x, y);
-        captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
-      }
-      if (healthyGrid) {
-        activeDecodeBudget = batchTracks.length;
-        const id2 = frameId++;
-        const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat }
-          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
-        const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
-        cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
-        if (!submitReceiverJob(
-          sharedMessage,
-          sharedTransfer,
-          sharedDirect ? sharedDirect.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
-          trace,
-          source.sequence,
-          batchRegions
-        )) {
-          sharedDirect?.frame.close();
-          cropAttempts.delete(id2);
-          poolBusyTimes.push(now);
-          if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
-        } else {
-          if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
-        }
-        cropRotate++;
-        if (trace) trace.stateAfter = gridLattice.state;
-        activeBenchmarkFrame = void 0;
-        return;
+      if (hotTrackedGrid && freeWorkers === 0) { poolBusyTimes.push(now); if (trace) trace.decision = "not scheduled: workers busy"; activeBenchmarkFrame = void 0; return; }
+      let shared; const sharedDirect = hotTrackedGrid ? cloneDirectDecodeFrame(source) : null;
+      if (!sharedDirect) { shared = readBoundedVideoCrop(source, x, y, w, h); if (!lockedGrid) inspectStaticQrOptics(source, shared, x, y); captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad)); }
+      if (hotTrackedGrid) {
+        activeDecodeBudget = batchTracks.length; const id2 = frameId++;
+        const sharedMessage = sharedDirect ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat } : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
+        const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer]; cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
+        if (!submitReceiverJob(sharedMessage, sharedTransfer, sharedDirect ? sharedDirect.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID", trace, source.sequence, batchRegions)) { sharedDirect?.frame.close(); cropAttempts.delete(id2); poolBusyTimes.push(now); if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture(); }
+        else if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
+        cropRotate++; if (trace) trace.stateAfter = gridLattice.state; activeBenchmarkFrame = void 0; return;
       }
       const id = frameId++;
-      if (submitReceiverJob(
-        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
-        [shared.data.buffer],
-        "SHARED TRACKED BATCH CROP",
-        trace,
-        source.sequence,
-        batchRegions
-      )) {
-        cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
-        if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
-      } else {
-        if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
-        poolBusyTimes.push(now);
-      }
+      if (submitReceiverJob({ id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks }, [shared.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, batchRegions)) { cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad }))); if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; }
+      else { if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture(); poolBusyTimes.push(now); }
     }
-    cropRotate++;
-    if (trace) trace.stateAfter = gridLattice.state;
-    activeBenchmarkFrame = void 0;
-    return;
+    cropRotate++; if (trace) trace.stateAfter = gridLattice.state; activeBenchmarkFrame = void 0; return;
   }
-  const eligible = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate).sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : [...regions];
-  activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
-  const scheduledRegions = eligible.slice(0, activeDecodeBudget);
-  const trackedCapacity = Math.max(1, pool.size);
-  const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
+  const eligible = lockedGrid ? decodableGridSlots.sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : [...regions];
+  activeDecodeBudget = lockedGrid ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
+  const scheduledRegions = eligible.slice(0, activeDecodeBudget), trackedCapacity = Math.max(1, pool.size), perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
   let submitted = false;
   for (let i = 0; i < scheduledRegions.length; i++) {
-    const r = scheduledRegions[(i + cropRotate) % scheduledRegions.length];
-    if (regionInflightCount(r) >= perRegionCapacity) continue;
+    const r = scheduledRegions[(i + cropRotate) % scheduledRegions.length]; if (regionInflightCount(r) >= perRegionCapacity) continue;
     const quadBounds = r.quad ? trackedQuadBounds(r.quad) : null;
-    const left = (_a = quadBounds == null ? void 0 : quadBounds.left) != null ? _a : r.x;
-    const top = (_b = quadBounds == null ? void 0 : quadBounds.top) != null ? _b : r.y;
-    const right = (_c = quadBounds == null ? void 0 : quadBounds.right) != null ? _c : r.x + r.w;
-    const bottom = (_d = quadBounds == null ? void 0 : quadBounds.bottom) != null ? _d : r.y + r.h;
-    const size = Math.max(right - left, bottom - top);
-    const missPad = r.gridSlot === void 0 ? 0 : Math.min(0.9, r.consecutiveMisses * 0.08);
-    const pad = Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * ((_e = r.drift) != null ? _e : 0)));
-    const x = Math.floor(left - pad);
-    const y = Math.floor(top - pad);
-    const w = Math.ceil(right + pad) - x;
-    const h = Math.ceil(bottom + pad) - y;
-    if (w < 32 || h < 32) continue;
-    const img = readBoundedVideoCrop(source, x, y, w, h);
-    inspectStaticQrOptics(source, img, x, y);
-    captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
-    const id = frameId++;
-    cropAttempts.set(id, [{ region: r, quad: r.quad }]);
-    if (!submitReceiverJob(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
-      [img.data.buffer],
-      "INDIVIDUAL TRACKED CROP",
-      trace,
-      source.sequence,
-      [r]
-    )) {
-      cropAttempts.delete(id);
-      if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
-      poolBusyTimes.push(receiverNow());
-      break;
-    }
-    if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
-    submitted = true;
+    const left = (_a = quadBounds == null ? void 0 : quadBounds.left) != null ? _a : r.x, top = (_b = quadBounds == null ? void 0 : quadBounds.top) != null ? _b : r.y, right = (_c = quadBounds == null ? void 0 : quadBounds.right) != null ? _c : r.x + r.w, bottom = (_d = quadBounds == null ? void 0 : quadBounds.bottom) != null ? _d : r.y + r.h;
+    const size = Math.max(right - left, bottom - top), missPad = r.gridSlot === void 0 ? 0 : Math.min(0.9, r.consecutiveMisses * 0.08);
+    const pad = lockedGrid && r.gridSlot !== void 0 ? Math.max(8, 6 + Math.min(6, r.consecutiveMisses * 2)) : Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * ((_e = r.drift) != null ? _e : 0)));
+    const x = Math.floor(left - pad), y = Math.floor(top - pad), w = Math.ceil(right + pad) - x, h = Math.ceil(bottom + pad) - y; if (w < 32 || h < 32) continue;
+    const img = readBoundedVideoCrop(source, x, y, w, h); if (!lockedGrid) inspectStaticQrOptics(source, img, x, y); captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
+    const id = frameId++; cropAttempts.set(id, [{ region: r, quad: r.quad }]);
+    if (!submitReceiverJob({ id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim }, [img.data.buffer], "INDIVIDUAL TRACKED CROP", trace, source.sequence, [r])) { cropAttempts.delete(id); if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture(); poolBusyTimes.push(receiverNow()); break; }
+    if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; submitted = true;
   }
-  if (!submitted && scheduledRegions.length > 0) {
-    poolBusyTimes.push(now);
-    if (trace && !trace.jobs.length) trace.decision = "not scheduled: in-flight track limit";
-  }
-  cropRotate++;
-  if (trace) trace.stateAfter = gridLattice.state;
-  activeBenchmarkFrame = void 0;
+  if (!submitted && scheduledRegions.length > 0) { poolBusyTimes.push(now); if (trace && !trace.jobs.length) trace.decision = "not scheduled: in-flight track limit"; }
+  cropRotate++; if (trace) trace.stateAfter = gridLattice.state; activeBenchmarkFrame = void 0;
 }
-function resetActiveTransfer() {
-  releaseTransportDecoder();
-  streamKey = "";
-  startTs = 0;
-  regions.length = 0;
-  gridLattice.reset();
-  gridShape = "";
-  lastGridSnapshot = void 0;
-  activeDecodeBudget = 0;
-  expectedRegions = 0;
-  expectedRegionsAt = 0;
-  lastDecodedRegionSize = 0;
-  cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  scanOutcomes.clear();
-  lastFullScan = 0;
-  minimumAcceptedScanId = frameId;
-  qrReadTimes.length = 0;
-  usefulFrameTimes.length = 0;
-  lastDistinctArrivalAt = 0;
-  bar.style.width = "0";
-  progressEl.setAttribute("aria-valuenow", "0");
-  progressLabel.textContent = "0%";
-  transferSizeLabel.textContent = "";
-  etaLabel.textContent = "";
-  metric("m-rate").textContent = "👀";
-  speedFeedback.className = "speed-feedback";
-  plainQrPolicy.reset();
-}
+function resetActiveTransfer() { releaseTransportDecoder(); streamKey = ""; startTs = 0; regions.length = 0; gridLattice.reset(); gridShape = ""; lastGridSnapshot = void 0; activeDecodeBudget = 0; expectedRegions = 0; expectedRegionsAt = 0; lastDecodedRegionSize = 0; cropAttempts.clear(); fullScanIds.clear(); fullScanJobs.clear(); localReacquireIds.clear(); scanCapturedAt.clear(); scanOutcomes.clear(); lastFullScan = 0; minimumAcceptedScanId = frameId; qrReadTimes.length = 0; usefulFrameTimes.length = 0; lastDistinctArrivalAt = 0; bar.style.width = "0"; progressEl.setAttribute("aria-valuenow", "0"); progressLabel.textContent = "0%"; transferSizeLabel.textContent = ""; etaLabel.textContent = ""; metric("m-rate").textContent = "👀"; speedFeedback.className = "speed-feedback"; plainQrPolicy.reset(); }
 function onDecoded(bytes, box, info) {
   var _a, _b, _c;
   const optimizerAttribution = (info == null ? void 0 : info.scanId) === void 0 ? void 0 : scanCandidateEpoch.get(info.scanId);
-  if (optimizerAttribution && ((info == null ? void 0 : info.sourceSequence) !== optimizerAttribution.sourceFrameSequence || info.opticsEpoch !== optimizerAttribution.epoch.id)) {
-    optimizerEpochMismatches++;
-    console.error("OPTIMIZER ATTRIBUTION BUG", { info, optimizerAttribution });
-    traceOptimizer({
-      time: receiverNow(),
-      event: "ATTRIBUTION_BUG",
-      scanId: info == null ? void 0 : info.scanId,
-      sourceSequence: info == null ? void 0 : info.sourceSequence,
-      candidateEpoch: info == null ? void 0 : info.opticsEpoch
-    });
-    return;
-  }
-  if ((info == null ? void 0 : info.scanId) !== void 0 && info.scanId < minimumAcceptedScanId) {
-    noteScanOutcome(info.scanId, "stale");
-    return;
-  }
-  totalDecodes++;
-  const decodedAt = receiverNow();
-  if (done) return;
-  qrReadTimes.push(decodedAt);
+  if (optimizerAttribution && ((info == null ? void 0 : info.sourceSequence) !== optimizerAttribution.sourceFrameSequence || info.opticsEpoch !== optimizerAttribution.epoch.id)) { optimizerEpochMismatches++; console.error("OPTIMIZER ATTRIBUTION BUG", { info, optimizerAttribution }); traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: info == null ? void 0 : info.scanId, sourceSequence: info == null ? void 0 : info.sourceSequence, candidateEpoch: info == null ? void 0 : info.opticsEpoch }); return; }
+  if ((info == null ? void 0 : info.scanId) !== void 0 && info.scanId < minimumAcceptedScanId) { noteScanOutcome(info.scanId, "stale"); return; }
+  totalDecodes++; const decodedAt = receiverNow(); if (done) return; qrReadTimes.push(decodedAt);
   const parsed = info?.verifiedPayload && info.header ? { header: info.header, block: bytes.subarray(frameHeaderLength(info.header.mode)) } : parseFrame(bytes);
-  if (!parsed) {
-    noteScanOutcome(info == null ? void 0 : info.scanId, "rejected");
-    if (decoder) return;
-    try {
-      const text = plainQrDecoder.decode(bytes);
-      if (box && !optimizerAttribution) noteRegion(box, decodedAt, true, info);
-      const settled = plainQrPolicy.addPlain(text, (_a = info == null ? void 0 : info.scanId) != null ? _a : -1);
-      if (settled) finishPlainQr(settled);
-    } catch {
-    }
-    return;
-  }
+  if (!parsed) { noteScanOutcome(info == null ? void 0 : info.scanId, "rejected"); if (decoder) return; try { const text = plainQrDecoder.decode(bytes); if (box && !optimizerAttribution) noteRegion(box, decodedAt, true, info); const settled = plainQrPolicy.addPlain(text, (_a = info == null ? void 0 : info.scanId) != null ? _a : -1); if (settled) finishPlainQr(settled); } catch {} return; }
   const { header, block } = parsed;
   const optimizerValidKey = optimizerAttribution && (info == null ? void 0 : info.scanId) !== void 0 ? `${info.scanId}|${header.layoutId}|${header.slotIndex}|${header.seq}` : void 0;
-  const duplicateOptimizerValid = Boolean(optimizerValidKey && optimizerValidEvents.has(optimizerValidKey));
-  if (optimizerValidKey) optimizerValidEvents.add(optimizerValidKey);
-  if (duplicateOptimizerValid) {
-    optimizerDuplicateValidEvents++;
-    totalDecodes--;
-    qrReadTimes.pop();
-    return;
-  }
+  const duplicateOptimizerValid = Boolean(optimizerValidKey && optimizerValidEvents.has(optimizerValidKey)); if (optimizerValidKey) optimizerValidEvents.add(optimizerValidKey); if (duplicateOptimizerValid) { optimizerDuplicateValidEvents++; totalDecodes--; qrReadTimes.pop(); return; }
   focusController.noteValidDecode(info == null ? void 0 : info.scanId);
-  if (optimizerAttribution && box) {
-    optimizerOverlayHits.push({ box: { ...box }, at: decodedAt });
-    if (optimizerOverlayHits.length > 80) optimizerOverlayHits.splice(0, optimizerOverlayHits.length - 80);
-    if (optimizerDiscoveryMode) {
-      optimizerBootstrapDecode = { box: { ...box }, info };
-      if ((info == null ? void 0 : info.quad) && info.modules) {
-        optimizerFixedTargets = [{
-          id: -1,
-          slot: header.slotIndex,
-          misses: 0,
-          quad: {
-            topLeft: { ...info.quad.topLeft },
-            topRight: { ...info.quad.topRight },
-            bottomRight: { ...info.quad.bottomRight },
-            bottomLeft: { ...info.quad.bottomLeft }
-          },
-          dim: info.modules,
-          crc32: true
-        }];
-        optimizerDiscoveryMode = false;
-      }
-    }
-  }
-  if (optimizerAttribution) {
-    const epoch = optimizerAttribution.epoch;
-    const complete = (info == null ? void 0 : info.scanId) !== void 0 && optimizerAttribution.sourceFrameSequence >= epoch.firstValidSourceSequence && Number.isFinite(epoch.actualExposure) && Number.isFinite(epoch.actualIso);
-    if (complete) {
-      optimizerAttribution.evidence.validDecodes++;
-      optimizerAttribution.evidence.successfulSourceFrames.add(optimizerAttribution.sourceFrameSequence);
-      optimizerAttribution.validDecodes++;
-      refreshCandidateEvidence(optimizerAttribution.evidence);
-      traceOptimizer({
-        time: receiverNow(),
-        event: "VALID_DECODE",
-        candidateId: epoch.candidateId,
-        candidateEpoch: epoch.id,
-        sourceSequence: optimizerAttribution.sourceFrameSequence,
-        scanId: info.scanId,
-        requestedExposure: epoch.requestedExposure,
-        requestedIso: epoch.requestedIso,
-        actualExposure: epoch.actualExposure,
-        actualIso: epoch.actualIso,
-        validDecode: true,
-        usefulSymbol: false
-      });
-    } else {
-      optimizerEpochMismatches++;
-      console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: info == null ? void 0 : info.scanId, optimizerAttribution });
-      traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: info == null ? void 0 : info.scanId, candidateEpoch: epoch.id });
-    }
-  }
+  if (optimizerAttribution && box) { optimizerOverlayHits.push({ box: { ...box }, at: decodedAt }); if (optimizerOverlayHits.length > 80) optimizerOverlayHits.splice(0, optimizerOverlayHits.length - 80); if (optimizerDiscoveryMode) { optimizerBootstrapDecode = { box: { ...box }, info }; if ((info == null ? void 0 : info.quad) && info.modules) { optimizerFixedTargets = [{ id: -1, slot: header.slotIndex, misses: 0, quad: { topLeft: { ...info.quad.topLeft }, topRight: { ...info.quad.topRight }, bottomRight: { ...info.quad.bottomRight }, bottomLeft: { ...info.quad.bottomLeft } }, dim: info.modules, crc32: true }]; optimizerDiscoveryMode = false; } } }
+  if (optimizerAttribution) { const epoch = optimizerAttribution.epoch; const complete = (info == null ? void 0 : info.scanId) !== void 0 && optimizerAttribution.sourceFrameSequence >= epoch.firstValidSourceSequence && Number.isFinite(epoch.actualExposure) && Number.isFinite(epoch.actualIso); if (complete) { optimizerAttribution.evidence.validDecodes++; optimizerAttribution.evidence.successfulSourceFrames.add(optimizerAttribution.sourceFrameSequence); optimizerAttribution.validDecodes++; refreshCandidateEvidence(optimizerAttribution.evidence); traceOptimizer({ time: receiverNow(), event: "VALID_DECODE", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: optimizerAttribution.sourceFrameSequence, scanId: info.scanId, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: false }); } else { optimizerEpochMismatches++; console.error("OPTIMIZER ATTRIBUTION BUG", { scanId: info == null ? void 0 : info.scanId, optimizerAttribution }); traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: info == null ? void 0 : info.scanId, candidateEpoch: epoch.id }); } }
   const productionTrace = (info == null ? void 0 : info.scanId) === void 0 ? void 0 : benchmarkJobFrames.get(info.scanId);
-  if (productionTrace) productionTrace.decoded.push({
-    slot: header.slotIndex,
-    esi: header.seq,
-    bytes: header.blockLen,
-    quad: info == null ? void 0 : info.quad
-  });
+  if (productionTrace) productionTrace.decoded.push({ slot: header.slotIndex, esi: header.seq, bytes: header.blockLen, quad: info == null ? void 0 : info.quad });
   const identity = streamIdentity(header);
-  if (decoder && streamKey !== identity) {
-    if (decodedAt - lastStreamDecodeAt < 1800) {
-      noteScanOutcome(info == null ? void 0 : info.scanId, "otherStream");
-      return;
-    }
-    resetActiveTransfer();
-  }
-  lastStreamDecodeAt = decodedAt;
-  plainQrPolicy.noteFramed();
-  let decodedRegion;
+  if (decoder && streamKey !== identity) { if (decodedAt - lastStreamDecodeAt < 1800) { noteScanOutcome(info == null ? void 0 : info.scanId, "otherStream"); return; } resetActiveTransfer(); }
+  lastStreamDecodeAt = decodedAt; plainQrPolicy.noteFramed(); let decodedRegion;
   if (!optimizerAttribution && box && (info == null ? void 0 : info.quad) && info.modules) {
-    const priorBenchmarkFrame = activeBenchmarkFrame;
-    if (productionTrace) activeBenchmarkFrame = productionTrace;
-    const snapshot = gridLattice.accept({
-      identity,
-      layoutId: header.layoutId,
-      slotIndex: header.slotIndex,
-      at: info.scanId === void 0 ? decodedAt : (_b = scanCapturedAt.get(info.scanId)) != null ? _b : decodedAt,
-      scanId: (_c = info.scanId) != null ? _c : -1,
-      box,
-      quad: info.quad,
-      modules: info.modules
-    }, receiverFrameWidth, receiverFrameHeight);
-    if (snapshot) {
-      decodedRegion = syncGrid(
-        snapshot,
-        decodedAt,
-        header.slotIndex,
-        { ...info, crc32: true }
-      );
-    }
-    if (productionTrace) productionTrace.stateAfter = gridLattice.state;
-    activeBenchmarkFrame = priorBenchmarkFrame;
+    const priorBenchmarkFrame = activeBenchmarkFrame; if (productionTrace) activeBenchmarkFrame = productionTrace;
+    const snapshot = gridLattice.accept({ identity, layoutId: header.layoutId, slotIndex: header.slotIndex, at: info.scanId === void 0 ? decodedAt : (_b = scanCapturedAt.get(info.scanId)) != null ? _b : decodedAt, scanId: (_c = info.scanId) != null ? _c : -1, box, quad: info.quad, modules: info.modules }, receiverFrameWidth, receiverFrameHeight);
+    if (snapshot) decodedRegion = syncGrid(snapshot, decodedAt, header.slotIndex, { ...info, crc32: true });
+    if (productionTrace) productionTrace.stateAfter = gridLattice.state; activeBenchmarkFrame = priorBenchmarkFrame;
   }
   if (decodedRegion) noteSequence(decodedRegion, header.seq, decodedAt);
-  if (!decoder) {
-    decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
-    usefulFrameTimes.length = 0;
-    streamKey = identity;
-    startTs = receiverNow();
-    progressEl.style.display = "block";
-    progressStatus.style.display = "block";
-  }
-  const framesNewBefore = decoder.framesNew;
-  const usefulBefore = decoder.usefulSymbols;
-  const redundantBefore = decoder.framesRedundant;
+  if (!decoder) { decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen); usefulFrameTimes.length = 0; streamKey = identity; startTs = receiverNow(); progressEl.style.display = "block"; progressStatus.style.display = "block"; }
+  const framesNewBefore = decoder.framesNew, usefulBefore = decoder.usefulSymbols, redundantBefore = decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
-  const receivedAt = receiverNow();
-  noteScanOutcome(
-    info == null ? void 0 : info.scanId,
-    decoder.framesNew === framesNewBefore ? "duplicate" : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted"
-  );
-  if (decoder.framesNew > framesNewBefore) {
-    if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt);
-    lastDistinctArrivalAt = receivedAt;
-  }
-  if (decoder.usefulSymbols > usefulBefore) {
-    const added = decoder.usefulSymbols - usefulBefore;
-    usefulFrameTimes.push(receivedAt);
-    focusController.noteUsefulDecode(info == null ? void 0 : info.scanId);
-    if (optimizerAttribution) {
-      optimizerAttribution.evidence.usefulSymbols += added;
-      optimizerAttribution.usefulSymbols += added;
-      refreshCandidateEvidence(optimizerAttribution.evidence);
-      const epoch = optimizerAttribution.epoch;
-      traceOptimizer({
-        time: receiverNow(),
-        event: "USEFUL_SYMBOL",
-        candidateId: epoch.candidateId,
-        candidateEpoch: epoch.id,
-        sourceSequence: optimizerAttribution.sourceFrameSequence,
-        scanId: info == null ? void 0 : info.scanId,
-        requestedExposure: epoch.requestedExposure,
-        requestedIso: epoch.requestedIso,
-        actualExposure: epoch.actualExposure,
-        actualIso: epoch.actualIso,
-        validDecode: true,
-        usefulSymbol: true
-      });
-    }
-  }
-  if (decoder.isComplete && replayRunning) {
-    if (!benchmarkCompletionChecked) {
-      benchmarkCompletionChecked = true;
-      const payload = decoder.assemble();
-      if (fnv1a(payload) === header.payloadId) benchmarkVerifiedBytes = header.totalLen;
-    }
-  } else if (decoder.isComplete) {
-    const payload = decoder.assemble();
-    const seconds = (receiverNow() - startTs) / 1e3;
-    const ok = fnv1a(payload) === header.payloadId;
-    void finish(payload, ok, seconds);
-  }
+  const receivedAt = receiverNow(); noteScanOutcome(info == null ? void 0 : info.scanId, decoder.framesNew === framesNewBefore ? "duplicate" : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted");
+  if (decoder.framesNew > framesNewBefore) { if (lastDistinctArrivalAt) maxSequenceGapMs = Math.max(maxSequenceGapMs, receivedAt - lastDistinctArrivalAt); lastDistinctArrivalAt = receivedAt; }
+  if (decoder.usefulSymbols > usefulBefore) { const added = decoder.usefulSymbols - usefulBefore; usefulFrameTimes.push(receivedAt); focusController.noteUsefulDecode(info == null ? void 0 : info.scanId); if (optimizerAttribution) { optimizerAttribution.evidence.usefulSymbols += added; optimizerAttribution.usefulSymbols += added; refreshCandidateEvidence(optimizerAttribution.evidence); const epoch = optimizerAttribution.epoch; traceOptimizer({ time: receiverNow(), event: "USEFUL_SYMBOL", candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: optimizerAttribution.sourceFrameSequence, scanId: info == null ? void 0 : info.scanId, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso, actualExposure: epoch.actualExposure, actualIso: epoch.actualIso, validDecode: true, usefulSymbol: true }); } }
+  if (decoder.isComplete && replayRunning) { if (!benchmarkCompletionChecked) { benchmarkCompletionChecked = true; const payload = decoder.assemble(); if (fnv1a(payload) === header.payloadId) benchmarkVerifiedBytes = header.totalLen; } }
+  else if (decoder.isComplete) { const payload = decoder.assemble(); const seconds = (receiverNow() - startTs) / 1e3; const ok = fnv1a(payload) === header.payloadId; void finish(payload, ok, seconds); }
 }
-function updateProgressEstimate() {
-  if (!decoder) return;
-  const elapsed = Math.max(0, (receiverNow() - startTs) / 1e3);
-  const usefulFrames = decoder.usefulSymbols;
-  const estimate = estimateTransferProgress(
-    decoder.k,
-    usefulFrames,
-    elapsed,
-    decoder.solvedCount
-  );
-  const percent = estimate.fraction * 100;
-  const shownPercent = percent < 10 ? percent.toFixed(1) : percent.toFixed(0);
-  bar.style.width = `${percent.toFixed(1)}%`;
-  progressEl.setAttribute("aria-valuenow", String(Math.floor(percent)));
-  progressLabel.textContent = `${shownPercent}%`;
-  const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction)));
-  transferSizeLabel.textContent = formatBytes(remainingBytes);
-  const liveKbs = liveGoodputKbs(receiverNow());
-  const liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 * expectedCodingOverhead() / decoder.blockLen : 0;
-  etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3 ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left` : "";
-}
-function finishPlainQr(text) {
-  done = true;
-  focusController.detach();
-  cancelScanCapture();
-  if (scanDialog.open) scanDialog.close();
-  releaseScreenWakeLock();
-  captureGen++;
-  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
-  clearInterval(statsTimer);
-  statsTimer = void 0;
-  pool.resize(0);
-  preview.style.display = "none";
-  metricsEl.style.display = "none";
-  document.body.classList.add("receive-complete");
-  document.body.classList.remove("receive-mode");
-  setStatus("");
-  showSnippet(text);
-}
-function liveGoodputKbs(now) {
-  while (usefulFrameTimes.length && usefulFrameTimes[0] <= now - STATS_WINDOW_MS) {
-    usefulFrameTimes.shift();
-  }
-  if (!decoder || !usefulFrameTimes.length) return 0;
-  return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3);
-}
+function updateProgressEstimate() { if (!decoder) return; const elapsed = Math.max(0, (receiverNow() - startTs) / 1e3), usefulFrames = decoder.usefulSymbols, estimate = estimateTransferProgress(decoder.k, usefulFrames, elapsed, decoder.solvedCount), percent = estimate.fraction * 100, shownPercent = percent < 10 ? percent.toFixed(1) : percent.toFixed(0); bar.style.width = `${percent.toFixed(1)}%`; progressEl.setAttribute("aria-valuenow", String(Math.floor(percent))); progressLabel.textContent = `${shownPercent}%`; const remainingBytes = Math.max(1, Math.ceil(decoder.totalLen * (1 - estimate.fraction))); transferSizeLabel.textContent = formatBytes(remainingBytes); const liveKbs = liveGoodputKbs(receiverNow()), liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 * expectedCodingOverhead() / decoder.blockLen : 0; etaLabel.textContent = liveUsefulFps > 0 && usefulFrames >= 3 ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left` : ""; }
+function finishPlainQr(text) { done = true; focusController.detach(); cancelScanCapture(); if (scanDialog.open) scanDialog.close(); releaseScreenWakeLock(); captureGen++; stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop()); clearInterval(statsTimer); statsTimer = void 0; pool.resize(0); preview.style.display = "none"; metricsEl.style.display = "none"; document.body.classList.add("receive-complete"); document.body.classList.remove("receive-mode"); setStatus(""); showSnippet(text); }
+function liveGoodputKbs(now) { while (usefulFrameTimes.length && usefulFrameTimes[0] <= now - STATS_WINDOW_MS) usefulFrameTimes.shift(); if (!decoder || !usefulFrameTimes.length) return 0; return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3); }
 async function finish(container, hashOk, seconds) {
-  done = true;
-  focusController.detach();
-  cancelScanCapture();
-  if (scanDialog.open) scanDialog.close();
-  releaseScreenWakeLock();
-  const finishGen = ++captureGen;
-  stream == null ? void 0 : stream.getTracks().forEach((t) => t.stop());
-  clearInterval(statsTimer);
-  statsTimer = void 0;
-  pool.resize(0);
-  preview.style.display = "none";
-  bar.style.width = "100%";
-  progressEl.setAttribute("aria-valuenow", "100");
-  transferSizeLabel.textContent = "";
-  etaLabel.textContent = `${formatDuration(seconds)} total`;
+  done = true; focusController.detach(); cancelScanCapture(); if (scanDialog.open) scanDialog.close(); releaseScreenWakeLock(); const finishGen = ++captureGen; stream == null ? void 0 : stream.getTracks().forEach((t) => t.stop()); clearInterval(statsTimer); statsTimer = void 0; pool.resize(0); preview.style.display = "none"; bar.style.width = "100%"; progressEl.setAttribute("aria-valuenow", "100"); transferSizeLabel.textContent = ""; etaLabel.textContent = `${formatDuration(seconds)} total`;
   try {
-    if (!hashOk) throw new Error("The optical stream checksum did not match.");
-    const file = await unpackFile(container);
-    if (!await verifyFile(file)) throw new Error("The recovered file failed SHA-256 verification.");
-    if (finishGen !== captureGen) {
-      file.bytes.fill(0);
-      return;
-    }
-    seconds = (receiverNow() - startTs) / 1e3;
-    document.body.classList.add("receive-complete");
-    document.body.classList.remove("receive-mode");
-    transferSizeLabel.textContent = "";
-    etaLabel.textContent = `${formatBytes(file.transmittedSize)} · ${formatDuration(seconds)}`;
-    pipelineMetrics.style.display = "none";
-    const rate = completedGoodputKbs(file.transmittedSize, seconds);
-    metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`;
-    speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
-    progressLabel.textContent = "✓ Complete";
-    etaLabel.textContent = `${formatBytes(file.transmittedSize)} in ${formatDuration(seconds)}`;
-    if (isSnippet(file)) {
-      setStatus("");
-      showSnippet(snippetText(file));
-      return;
-    }
-    setStatus("");
-    result.replaceChildren();
-    if (file.type === "application/vnd.airgapper.files+zip") {
-      const entries = readStoredZip(file.bytes);
-      for (const entry of entries) {
-        if (finishGen !== captureGen) {
-          file.bytes.fill(0);
-          return;
-        }
-        await appendReceivedFile(entry, result);
-      }
-      const archive = document.createElement("section");
-      archive.className = "received-file received-archive";
-      const archiveType = document.createElement("span");
-      archiveType.className = "received-file-type";
-      archiveType.textContent = "ZIP";
-      const archiveRow = document.createElement("div");
-      archiveRow.className = "received-file-download";
-      const archiveLink = downloadLink(file.name, "application/zip", file.bytes, file.name);
-      archiveLink.title = file.name;
-      const archiveSize = document.createElement("span");
-      archiveSize.textContent = formatBytes(file.bytes.length);
-      archiveRow.append(archiveLink, archiveSize);
-      archive.append(archiveType, archiveRow);
-      result.append(archive);
-    } else {
-      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type, true);
-    }
-  } catch (error) {
-    if (finishGen !== captureGen) return;
-    bar.classList.add("error");
-    etaLabel.textContent = "Transfer failed";
-    speedFeedback.className = "speed-feedback speed-low";
-    showError(error instanceof Error ? error.message : String(error));
-    const heading = document.createElement("div");
-    heading.className = "failed";
-    heading.textContent = "Transfer failed";
-    const detail = document.createElement("p");
-    detail.className = "received-note";
-    detail.textContent = "Nothing usable came out of that stream. Restart the sender, then scan it again — a partial transfer costs nothing but the time.";
-    result.replaceChildren(heading, detail, restartButton("Try again"));
-  } finally {
-    releaseTransportDecoder();
-    container.fill(0);
-  }
+    if (!hashOk) throw new Error("The optical stream checksum did not match."); const file = await unpackFile(container); if (!await verifyFile(file)) throw new Error("The recovered file failed SHA-256 verification."); if (finishGen !== captureGen) { file.bytes.fill(0); return; } seconds = (receiverNow() - startTs) / 1e3; document.body.classList.add("receive-complete"); document.body.classList.remove("receive-mode"); transferSizeLabel.textContent = ""; etaLabel.textContent = `${formatBytes(file.transmittedSize)} · ${formatDuration(seconds)}`; pipelineMetrics.style.display = "none"; const rate = completedGoodputKbs(file.transmittedSize, seconds); metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`; speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`; progressLabel.textContent = "✓ Complete"; etaLabel.textContent = `${formatBytes(file.transmittedSize)} in ${formatDuration(seconds)}`;
+    if (isSnippet(file)) { setStatus(""); showSnippet(snippetText(file)); return; }
+    setStatus(""); result.replaceChildren();
+    if (file.type === "application/vnd.airgapper.files+zip") { const entries = readStoredZip(file.bytes); for (const entry of entries) { if (finishGen !== captureGen) { file.bytes.fill(0); return; } await appendReceivedFile(entry, result); } const archive = document.createElement("section"); archive.className = "received-file received-archive"; const archiveType = document.createElement("span"); archiveType.className = "received-file-type"; archiveType.textContent = "ZIP"; const archiveRow = document.createElement("div"); archiveRow.className = "received-file-download"; const archiveLink = downloadLink(file.name, "application/zip", file.bytes, file.name); archiveLink.title = file.name; const archiveSize = document.createElement("span"); archiveSize.textContent = formatBytes(file.bytes.length); archiveRow.append(archiveLink, archiveSize); archive.append(archiveType, archiveRow); result.append(archive); }
+    else await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type, true);
+  } catch (error) { if (finishGen !== captureGen) return; bar.classList.add("error"); etaLabel.textContent = "Transfer failed"; speedFeedback.className = "speed-feedback speed-low"; showError(error instanceof Error ? error.message : String(error)); const heading = document.createElement("div"); heading.className = "failed"; heading.textContent = "Transfer failed"; const detail = document.createElement("p"); detail.className = "received-note"; detail.textContent = "Nothing usable came out of that stream. Restart the sender, then scan it again — a partial transfer costs nothing but the time."; result.replaceChildren(heading, detail, restartButton("Try again")); }
+  finally { releaseTransportDecoder(); container.fill(0); }
 }
-const MIME_BY_EXTENSION = {
-  apng: "image/apng",
-  gif: "image/gif",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  png: "image/png",
-  svg: "image/svg+xml",
-  webp: "image/webp",
-  mp3: "audio/mpeg",
-  m4a: "audio/mp4",
-  oga: "audio/ogg",
-  ogg: "audio/ogg",
-  wav: "audio/wav",
-  m4v: "video/mp4",
-  mov: "video/quicktime",
-  mp4: "video/mp4",
-  ogv: "video/ogg",
-  webm: "video/webm",
-  css: "text/css",
-  csv: "text/csv",
-  html: "text/html",
-  json: "application/json",
-  md: "text/markdown",
-  pdf: "application/pdf",
-  txt: "text/plain",
-  zip: "application/zip"
-};
-function inferredType(name) {
-  var _a;
-  const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
-  return (_a = MIME_BY_EXTENSION[extension]) != null ? _a : "application/octet-stream";
-}
-function downloadLink(name, type, bytes, label = `Save ${name}`) {
-  const link = document.createElement("a");
-  link.className = "download";
-  link.href = receivedObjectUrl(new Blob([bytes], { type }));
-  link.download = name;
-  link.textContent = label;
-  link.addEventListener("click", (event) => {
-    if (!saveFileOnAndroid(name, type, bytes)) return;
-    event.preventDefault();
-  });
-  return link;
-}
+const MIME_BY_EXTENSION = { apng: "image/apng", gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg", png: "image/png", svg: "image/svg+xml", webp: "image/webp", mp3: "audio/mpeg", m4a: "audio/mp4", oga: "audio/ogg", ogg: "audio/ogg", wav: "audio/wav", m4v: "video/mp4", mov: "video/quicktime", mp4: "video/mp4", ogv: "video/ogg", webm: "video/webm", css: "text/css", csv: "text/csv", html: "text/html", json: "application/json", md: "text/markdown", pdf: "application/pdf", txt: "text/plain", zip: "application/zip" };
+function inferredType(name) { var _a; const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase(); return (_a = MIME_BY_EXTENSION[extension]) != null ? _a : "application/octet-stream"; }
+function downloadLink(name, type, bytes, label = `Save ${name}`) { const link = document.createElement("a"); link.className = "download"; link.href = receivedObjectUrl(new Blob([bytes], { type })); link.download = name; link.textContent = label; link.addEventListener("click", (event) => { if (!saveFileOnAndroid(name, type, bytes)) return; event.preventDefault(); }); return link; }
 async function appendReceivedFile(entry, parent, declaredType, autoplayVideo = false) {
-  const dataGeneration = receivedDataGeneration;
-  const type = declaredType || inferredType(entry.name);
-  const container = document.createElement("section");
-  container.className = "received-file";
-  const url = receivedObjectUrl(new Blob([entry.bytes], { type }));
-  let receivedVideo;
-  if (type.startsWith("image/")) {
-    const image = document.createElement("img");
-    image.className = "received";
-    image.alt = `Received file preview: ${entry.name}`;
-    image.src = url;
-    enableMediaInspection(image);
-    container.append(image);
-  } else if (type.startsWith("video/") || type.startsWith("audio/")) {
-    const player = document.createElement(type.startsWith("video/") ? "video" : "audio");
-    player.className = "received";
-    player.controls = true;
-    player.preload = "metadata";
-    player.setAttribute("aria-label", `Received file: ${entry.name}`);
-    if (player instanceof HTMLVideoElement) {
-      player.playsInline = true;
-      if (autoplayVideo) {
-        player.autoplay = true;
-        receivedVideo = player;
-      }
-    }
-    const src = await servableMediaUrl(entry.bytes, type, url);
-    if (dataGeneration !== receivedDataGeneration) {
-      purgeReceivedData();
-      return;
-    }
-    if (src !== url) player.addEventListener("error", () => {
-      player.src = url;
-    }, { once: true });
-    player.src = src;
-    if (player instanceof HTMLVideoElement) enableMediaInspection(player);
-    container.append(player);
-  }
-  const downloadRow = document.createElement("div");
-  downloadRow.className = "received-file-download";
-  const link = downloadLink(entry.name, type, entry.bytes, entry.name);
-  link.title = entry.name;
-  const fileSize = document.createElement("span");
-  fileSize.textContent = formatBytes(entry.bytes.length);
-  downloadRow.append(link, fileSize);
-  container.append(downloadRow);
-  parent.append(container);
-  if (receivedVideo) {
-    void receivedVideo.play().catch(async () => {
-      receivedVideo.muted = true;
-      await receivedVideo.play().catch(() => void 0);
-    });
-  }
+  const dataGeneration = receivedDataGeneration, type = declaredType || inferredType(entry.name), container = document.createElement("section"); container.className = "received-file"; const url = receivedObjectUrl(new Blob([entry.bytes], { type })); let receivedVideo;
+  if (type.startsWith("image/")) { const image = document.createElement("img"); image.className = "received"; image.alt = `Received file preview: ${entry.name}`; image.src = url; enableMediaInspection(image); container.append(image); }
+  else if (type.startsWith("video/") || type.startsWith("audio/")) { const player = document.createElement(type.startsWith("video/") ? "video" : "audio"); player.className = "received"; player.controls = true; player.preload = "metadata"; player.setAttribute("aria-label", `Received file: ${entry.name}`); if (player instanceof HTMLVideoElement) { player.playsInline = true; if (autoplayVideo) { player.autoplay = true; receivedVideo = player; } } const src = await servableMediaUrl(entry.bytes, type, url); if (dataGeneration !== receivedDataGeneration) { purgeReceivedData(); return; } if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true }); player.src = src; if (player instanceof HTMLVideoElement) enableMediaInspection(player); container.append(player); }
+  const downloadRow = document.createElement("div"); downloadRow.className = "received-file-download"; const link = downloadLink(entry.name, type, entry.bytes, entry.name); link.title = entry.name; const fileSize = document.createElement("span"); fileSize.textContent = formatBytes(entry.bytes.length); downloadRow.append(link, fileSize); container.append(downloadRow); parent.append(container); if (receivedVideo) void receivedVideo.play().catch(async () => { receivedVideo.muted = true; await receivedVideo.play().catch(() => void 0); });
 }
 function enableMediaInspection(media) {
-  media.classList.add("inspectable");
-  media.tabIndex = 0;
-  media.title = media instanceof HTMLImageElement ? "Tap to view and zoom" : "Tap to view full screen";
+  media.classList.add("inspectable"); media.tabIndex = 0; media.title = media instanceof HTMLImageElement ? "Tap to view and zoom" : "Tap to view full screen";
   const open = async () => {
-    if (media instanceof HTMLVideoElement) {
-      const iosVideo = media;
-      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) iosVideo.webkitEnterFullscreen();
-      else if (media.requestFullscreen) await media.requestFullscreen().catch(() => void 0);
-      else window.open(media.currentSrc || media.src, "_blank", "noopener");
-      void media.play();
-      return;
-    }
-    const placeholder = document.createComment("received image");
-    media.replaceWith(placeholder);
-    const inspector = document.createElement("div");
-    inspector.className = "media-inspector";
-    inspector.setAttribute("role", "dialog");
-    inspector.setAttribute("aria-label", "Image viewer");
-    const closeButton = document.createElement("button");
-    closeButton.className = "media-inspector-close";
-    closeButton.type = "button";
-    closeButton.setAttribute("aria-label", "Close image");
-    closeButton.textContent = "×";
-    inspector.append(media, closeButton);
-    document.body.append(inspector);
-    document.body.classList.add("media-inspecting");
-    let scale = 1;
-    let x = 0;
-    let y = 0;
-    const pointers = /* @__PURE__ */ new Map();
-    const render = () => {
-      media.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
-    };
-    const zoomAt = (nextScale, clientX, clientY) => {
-      const clamped = Math.max(1, Math.min(6, nextScale));
-      const ratio = clamped / scale;
-      x = clientX - innerWidth / 2 - (clientX - innerWidth / 2 - x) * ratio;
-      y = clientY - innerHeight / 2 - (clientY - innerHeight / 2 - y) * ratio;
-      scale = clamped;
-      if (scale === 1) x = y = 0;
-      render();
-    };
-    const close = () => {
-      if (!inspector.isConnected) return;
-      inspector.remove();
-      media.removeAttribute("style");
-      placeholder.replaceWith(media);
-      document.body.classList.remove("media-inspecting");
-      media.focus();
-    };
-    closeButton.addEventListener("click", close);
-    inspector.addEventListener("pointerdown", (event) => {
-      if (event.target === closeButton) return;
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      inspector.setPointerCapture(event.pointerId);
-      media.classList.add("dragging");
-    });
-    inspector.addEventListener("pointermove", (event) => {
-      var _a;
-      const previous = pointers.get(event.pointerId);
-      if (!previous) return;
-      if (pointers.size === 1) {
-        if (scale > 1) {
-          x += event.clientX - previous.x;
-          y += event.clientY - previous.y;
-          render();
-        }
-      } else {
-        const other = (_a = [...pointers.entries()].find(([id]) => id !== event.pointerId)) == null ? void 0 : _a[1];
-        if (other) {
-          const oldDistance = Math.hypot(previous.x - other.x, previous.y - other.y);
-          const newDistance = Math.hypot(event.clientX - other.x, event.clientY - other.y);
-          zoomAt(scale * newDistance / Math.max(1, oldDistance), (event.clientX + other.x) / 2, (event.clientY + other.y) / 2);
-        }
-      }
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    });
-    const releasePointer = (event) => {
-      pointers.delete(event.pointerId);
-      if (!pointers.size) media.classList.remove("dragging");
-    };
-    inspector.addEventListener("pointerup", releasePointer);
-    inspector.addEventListener("pointercancel", releasePointer);
-    inspector.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      zoomAt(scale * Math.exp(-event.deltaY * 2e-3), event.clientX, event.clientY);
-    }, { passive: false });
-    inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
+    if (media instanceof HTMLVideoElement) { const iosVideo = media; if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) iosVideo.webkitEnterFullscreen(); else if (media.requestFullscreen) await media.requestFullscreen().catch(() => void 0); else window.open(media.currentSrc || media.src, "_blank", "noopener"); void media.play(); return; }
+    const placeholder = document.createComment("received image"); media.replaceWith(placeholder); const inspector = document.createElement("div"); inspector.className = "media-inspector"; inspector.setAttribute("role", "dialog"); inspector.setAttribute("aria-label", "Image viewer"); const closeButton = document.createElement("button"); closeButton.className = "media-inspector-close"; closeButton.type = "button"; closeButton.setAttribute("aria-label", "Close image"); closeButton.textContent = "×"; inspector.append(media, closeButton); document.body.append(inspector); document.body.classList.add("media-inspecting"); let scale = 1, x = 0, y = 0; const pointers = /* @__PURE__ */ new Map(); const render = () => { media.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`; }; const zoomAt = (nextScale, clientX, clientY) => { const clamped = Math.max(1, Math.min(6, nextScale)), ratio = clamped / scale; x = clientX - innerWidth / 2 - (clientX - innerWidth / 2 - x) * ratio; y = clientY - innerHeight / 2 - (clientY - innerHeight / 2 - y) * ratio; scale = clamped; if (scale === 1) x = y = 0; render(); }; const close = () => { if (!inspector.isConnected) return; inspector.remove(); media.removeAttribute("style"); placeholder.replaceWith(media); document.body.classList.remove("media-inspecting"); media.focus(); }; closeButton.addEventListener("click", close); inspector.addEventListener("pointerdown", (event) => { if (event.target === closeButton) return; pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); inspector.setPointerCapture(event.pointerId); media.classList.add("dragging"); }); inspector.addEventListener("pointermove", (event) => { var _a; const previous = pointers.get(event.pointerId); if (!previous) return; if (pointers.size === 1) { if (scale > 1) { x += event.clientX - previous.x; y += event.clientY - previous.y; render(); } } else { const other = (_a = [...pointers.entries()].find(([id]) => id !== event.pointerId)) == null ? void 0 : _a[1]; if (other) { const oldDistance = Math.hypot(previous.x - other.x, previous.y - other.y), newDistance = Math.hypot(event.clientX - other.x, event.clientY - other.y); zoomAt(scale * newDistance / Math.max(1, oldDistance), (event.clientX + other.x) / 2, (event.clientY + other.y) / 2); } } pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); }); const releasePointer = (event) => { pointers.delete(event.pointerId); if (!pointers.size) media.classList.remove("dragging"); }; inspector.addEventListener("pointerup", releasePointer); inspector.addEventListener("pointercancel", releasePointer); inspector.addEventListener("wheel", (event) => { event.preventDefault(); zoomAt(scale * Math.exp(-event.deltaY * 2e-3), event.clientX, event.clientY); }, { passive: false }); inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
   };
-  media.addEventListener("click", () => void open());
-  media.addEventListener("keydown", (event) => {
-    if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    void open();
-  });
+  media.addEventListener("click", () => void open()); media.addEventListener("keydown", (event) => { if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); void open(); });
 }
-async function servableMediaUrl(bytes, type, blobUrl) {
-  var _a;
-  try {
-    if (!((_a = navigator.serviceWorker) == null ? void 0 : _a.controller)) return blobUrl;
-    const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href;
-    const cache = await caches.open(RECEIVED_MEDIA_CACHE);
-    await cache.put(
-      target,
-      new Response(new Blob([bytes]), {
-        headers: {
-          "Content-Type": type,
-          "Content-Length": String(bytes.length)
-        }
-      })
-    );
-    return `${target}?v=${Date.now()}`;
-  } catch {
-    return blobUrl;
-  }
-}
+async function servableMediaUrl(bytes, type, blobUrl) { var _a; try { if (!((_a = navigator.serviceWorker) == null ? void 0 : _a.controller)) return blobUrl; const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href; const cache = await caches.open(RECEIVED_MEDIA_CACHE); await cache.put(target, new Response(new Blob([bytes]), { headers: { "Content-Type": type, "Content-Length": String(bytes.length) } })); return `${target}?v=${Date.now()}`; } catch { return blobUrl; } }
 const SNIPPET_LINK = /(?:https?:\/\/|www\.)[^\s<>]+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gi;
 const TRAILING_LINK_PUNCTUATION = /[.,;:!?\])}]+$/;
-function appendLinkifiedText(parent, text) {
-  SNIPPET_LINK.lastIndex = 0;
-  let cursor = 0;
-  for (let match = SNIPPET_LINK.exec(text); match; match = SNIPPET_LINK.exec(text)) {
-    const candidate = match[0].replace(TRAILING_LINK_PUNCTUATION, "");
-    if (!candidate) continue;
-    parent.append(document.createTextNode(text.slice(cursor, match.index)));
-    const isEmail = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/.test(candidate);
-    const href = isEmail ? `mailto:${candidate}` : candidate.toLowerCase().startsWith("www.") ? `https://${candidate}` : candidate;
-    try {
-      const url = new URL(href);
-      if (!["http:", "https:", "mailto:"].includes(url.protocol)) throw new Error("unsupported link");
-      const link = document.createElement("a");
-      link.href = url.href;
-      link.textContent = candidate;
-      link.className = "snippet-link";
-      if (url.protocol !== "mailto:") {
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-      }
-      parent.append(link);
-    } catch {
-      parent.append(document.createTextNode(candidate));
-    }
-    cursor = match.index + candidate.length;
-  }
-  parent.append(document.createTextNode(text.slice(cursor)));
-}
-function showSnippet(text) {
-  const body = document.createElement("p");
-  body.className = "received-note";
-  appendLinkifiedText(body, text);
-  const actions = document.createElement("div");
-  actions.className = "note-actions";
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "download";
-  copy.textContent = "Copy";
-  copy.addEventListener("click", async () => {
-    try {
-      if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
-      copy.textContent = "Copied";
-      setTimeout(() => {
-        copy.textContent = "Copy";
-      }, 1500);
-    } catch {
-      copy.textContent = "Copy failed";
-    }
-  });
-  actions.append(copy);
-  result.replaceChildren(body, actions);
-}
-function speedQualityClass(rate) {
-  return rate < 5 ? "speed-low" : rate < 25 ? "speed-mid" : rate < 75 ? "speed-good" : "speed-high";
-}
-recordCorpusBtn.addEventListener("click", () => {
-  var _a, _b, _c, _d, _e, _f;
-  if (benchmarkRecorder) {
-    void finishCorpusRecording(benchmarkRecorder);
-    return;
-  }
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (!track || !video.videoWidth || !video.videoHeight) {
-    showError("Start the camera before recording.");
-    return;
-  }
-  const version = (_c = (_b = (_a = document.querySelector(".app-version")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.replace(/^v/, "")) != null ? _c : "unknown";
-  benchmarkRecordingSequence = 0;
-  benchmarkRecorder = new AgcapRecorder(7e3, {
-    width: video.videoWidth,
-    height: video.videoHeight,
-    stride: video.videoWidth * 4,
-    orientation: (_f = (_d = screen.orientation) == null ? void 0 : _d.type) != null ? _f : `${(_e = window.orientation) != null ? _e : 0}`,
-    cameraSettings: track.getSettings(),
-    airgapperVersion: version,
-    userAgent: navigator.userAgent
-  });
-  benchmarkCorpus = void 0;
-  benchmarkPendingBlob = void 0;
-  recordCorpusBtn.textContent = "Stop · 7s";
-  setStatus("Recording lossless frames… decoding paused");
-});
+function appendLinkifiedText(parent, text) { SNIPPET_LINK.lastIndex = 0; let cursor = 0; for (let match = SNIPPET_LINK.exec(text); match; match = SNIPPET_LINK.exec(text)) { const candidate = match[0].replace(TRAILING_LINK_PUNCTUATION, ""); if (!candidate) continue; parent.append(document.createTextNode(text.slice(cursor, match.index))); const isEmail = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/.test(candidate); const href = isEmail ? `mailto:${candidate}` : candidate.toLowerCase().startsWith("www.") ? `https://${candidate}` : candidate; try { const url = new URL(href); if (!["http:", "https:", "mailto:"].includes(url.protocol)) throw new Error("unsupported link"); const link = document.createElement("a"); link.href = url.href; link.textContent = candidate; link.className = "snippet-link"; if (url.protocol !== "mailto:") { link.target = "_blank"; link.rel = "noopener noreferrer"; } parent.append(link); } catch { parent.append(document.createTextNode(candidate)); } cursor = match.index + candidate.length; } parent.append(document.createTextNode(text.slice(cursor))); }
+function showSnippet(text) { const body = document.createElement("p"); body.className = "received-note"; appendLinkifiedText(body, text); const actions = document.createElement("div"); actions.className = "note-actions"; const copy = document.createElement("button"); copy.type = "button"; copy.className = "download"; copy.textContent = "Copy"; copy.addEventListener("click", async () => { try { if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1500); } catch { copy.textContent = "Copy failed"; } }); actions.append(copy); result.replaceChildren(body, actions); }
+function speedQualityClass(rate) { return rate < 5 ? "speed-low" : rate < 25 ? "speed-mid" : rate < 75 ? "speed-good" : "speed-high"; }
+recordCorpusBtn.addEventListener("click", () => { var _a, _b, _c, _d, _e, _f; if (benchmarkRecorder) { void finishCorpusRecording(benchmarkRecorder); return; } const track = stream == null ? void 0 : stream.getVideoTracks()[0]; if (!track || !video.videoWidth || !video.videoHeight) { showError("Start the camera before recording."); return; } const version = (_c = (_b = (_a = document.querySelector(".app-version")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.replace(/^v/, "")) != null ? _c : "unknown"; benchmarkRecordingSequence = 0; benchmarkRecorder = new AgcapRecorder(7e3, { width: video.videoWidth, height: video.videoHeight, stride: video.videoWidth * 4, orientation: (_f = (_d = screen.orientation) == null ? void 0 : _d.type) != null ? _f : `${(_e = window.orientation) != null ? _e : 0}`, cameraSettings: track.getSettings(), airgapperVersion: version, userAgent: navigator.userAgent }); benchmarkCorpus = void 0; benchmarkPendingBlob = void 0; recordCorpusBtn.textContent = "Stop · 7s"; setStatus("Recording lossless frames… decoding paused"); });
 loadCorpusBtn.addEventListener("click", () => corpusFile.click());
-corpusFile.addEventListener("change", async () => {
-  var _a;
-  const file = (_a = corpusFile.files) == null ? void 0 : _a[0];
-  if (!file) return;
-  try {
-    benchmarkStatus.textContent = "Loading lossless corpus…";
-    if (!benchmarkDialog.open) benchmarkDialog.showModal();
-    benchmarkCorpus = await AgcapCorpus.load(file);
-    benchmarkPendingBlob = void 0;
-    benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} RGBA · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
-    runBenchmarkBtn.disabled = false;
-  } catch (error) {
-    benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
-  } finally {
-    corpusFile.value = "";
-  }
-});
-closeBenchmarkBtn.addEventListener("click", () => benchmarkDialog.close());
-runBenchmarkBtn.addEventListener("click", () => void runReceiverBenchmark());
-saveBenchmarkBtn.addEventListener("click", () => {
-  var _a;
-  if (!benchmarkResult) return;
-  const blob = new Blob([JSON.stringify(benchmarkResult, null, 2)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  const header = benchmarkCorpus == null ? void 0 : benchmarkCorpus.header;
-  const device = header ? compactDeviceName(header) : "Dunk";
-  const mode = replayMode.value === "maximum" ? "max" : "dp";
-  const version = compactVersionName(String((_a = benchmarkResult.version) != null ? _a : "v0"));
-  link.download = `bm-${device}-${version}-${mode}-${compactTimeName(/* @__PURE__ */ new Date())}.json`;
-  link.click();
-  saveBenchmarkBtn.textContent = "Downloaded";
-  setTimeout(() => {
-    URL.revokeObjectURL(link.href);
-    saveBenchmarkBtn.textContent = "Save results";
-  }, 1500);
-});
-function waitForWorkers() {
-  return new Promise((resolve) => {
-    const poll = () => pool.busyCount ? setTimeout(poll, 10) : resolve();
-    poll();
-  });
-}
+corpusFile.addEventListener("change", async () => { var _a; const file = (_a = corpusFile.files) == null ? void 0 : _a[0]; if (!file) return; try { benchmarkStatus.textContent = "Loading lossless corpus…"; if (!benchmarkDialog.open) benchmarkDialog.showModal(); benchmarkCorpus = await AgcapCorpus.load(file); benchmarkPendingBlob = void 0; benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} RGBA · ${benchmarkCorpus.header.recorderDrops} recorder drops`; runBenchmarkBtn.disabled = false; } catch (error) { benchmarkStatus.textContent = error instanceof Error ? error.message : String(error); } finally { corpusFile.value = ""; } });
+closeBenchmarkBtn.addEventListener("click", () => benchmarkDialog.close()); runBenchmarkBtn.addEventListener("click", () => void runReceiverBenchmark());
+saveBenchmarkBtn.addEventListener("click", () => { var _a; if (!benchmarkResult) return; const blob = new Blob([JSON.stringify(benchmarkResult, null, 2)], { type: "application/json" }), link = document.createElement("a"); link.href = URL.createObjectURL(blob); const header = benchmarkCorpus == null ? void 0 : benchmarkCorpus.header, device = header ? compactDeviceName(header) : "Dunk", mode = replayMode.value === "maximum" ? "max" : "dp", version = compactVersionName(String((_a = benchmarkResult.version) != null ? _a : "v0")); link.download = `bm-${device}-${version}-${mode}-${compactTimeName(/* @__PURE__ */ new Date())}.json`; link.click(); saveBenchmarkBtn.textContent = "Downloaded"; setTimeout(() => { URL.revokeObjectURL(link.href); saveBenchmarkBtn.textContent = "Save results"; }, 1500); });
+function waitForWorkers() { return new Promise((resolve) => { const poll = () => pool.busyCount ? setTimeout(poll, 10) : resolve(); poll(); }); }
 async function runOracle(corpus) {
-  const latencies = [];
-  const firstPass = new Array(corpus.length);
+  const latencies = [], firstPass = new Array(corpus.length);
   const runPass = async (label, seedsFor, saveReplies) => {
-    const workers = Array.from(
-      { length: Math.min(corpus.length, selectedWorkerCount()) },
-      () => createDecodeWorker()
-    );
-    let nextIndex = 0;
-    let completed = 0;
-    try {
-      await Promise.all(workers.map(async (worker) => {
-        var _a, _b;
-        while (nextIndex < corpus.length) {
-          const index = nextIndex++;
-          const frame = await corpus.frame(index);
-          const reply = await new Promise((resolve, reject) => {
-            const id = (saveReplies ? 1e6 : 2e6) + index;
-            worker.onmessage = (event) => {
-              if (event.data.id === -1) return;
-              if (event.data.id === id) resolve(event.data);
-            };
-            worker.onerror = (event) => reject(new Error(event.message || "Reference worker failed"));
-            const pixels = frame.rgba.slice();
-            worker.postMessage({
-              id,
-              oracle: true,
-              oracleSeeds: seedsFor(index),
-              full: true,
-              buf: pixels.buffer,
-              w: frame.meta.width,
-              h: frame.meta.height
-            }, [pixels.buffer]);
-          });
-          if (reply.error) throw new Error(reply.error);
-          latencies.push((_a = reply.latencyMs) != null ? _a : 0);
-          if (saveReplies) firstPass[index] = reply;
-          const trace = benchmarkTraces[index];
-          if (trace) {
-            const known = new Set(trace.reference.map((item) => item.esi));
-            for (const symbol of (_b = reply.symbols) != null ? _b : []) {
-              const parsed = parseFrame(symbol.bytes);
-              if (!parsed) continue;
-              const esi = parsed.header.seq;
-              if (known.has(esi)) continue;
-              known.add(esi);
-              trace.reference.push({ slot: parsed.header.slotIndex, esi, quad: symbol.quad });
-            }
-          }
-          benchmarkStatus.textContent = `${label} ${++completed}/${corpus.length}`;
-          await new Promise(requestAnimationFrame);
-        }
-      }));
-    } finally {
-      for (const worker of workers) worker.terminate();
-    }
+    const workers = Array.from({ length: Math.min(corpus.length, selectedWorkerCount()) }, () => createDecodeWorker()); let nextIndex = 0, completed = 0;
+    try { await Promise.all(workers.map(async (worker) => { var _a, _b; while (nextIndex < corpus.length) { const index = nextIndex++, frame = await corpus.frame(index); const reply = await new Promise((resolve, reject) => { const id = (saveReplies ? 1e6 : 2e6) + index; worker.onmessage = (event) => { if (event.data.id === -1) return; if (event.data.id === id) resolve(event.data); }; worker.onerror = (event) => reject(new Error(event.message || "Reference worker failed")); const pixels = frame.rgba.slice(); worker.postMessage({ id, oracle: true, oracleSeeds: seedsFor(index), full: true, buf: pixels.buffer, w: frame.meta.width, h: frame.meta.height }, [pixels.buffer]); }); if (reply.error) throw new Error(reply.error); latencies.push((_a = reply.latencyMs) != null ? _a : 0); if (saveReplies) firstPass[index] = reply; const trace = benchmarkTraces[index]; if (trace) { const known = new Set(trace.reference.map((item) => item.esi)); for (const symbol of (_b = reply.symbols) != null ? _b : []) { const parsed = parseFrame(symbol.bytes); if (!parsed) continue; const esi = parsed.header.seq; if (known.has(esi)) continue; known.add(esi); trace.reference.push({ slot: parsed.header.slotIndex, esi, quad: symbol.quad }); } } benchmarkStatus.textContent = `${label} ${++completed}/${corpus.length}`; await new Promise(requestAnimationFrame); } })); }
+    finally { for (const worker of workers) worker.terminate(); }
   };
   await runPass("Reference map", () => [], true);
-  const templates = firstPass.flatMap((reply, index) => {
-    var _a;
-    return ((_a = reply == null ? void 0 : reply.symbols) != null ? _a : []).flatMap((symbol) => {
-      const parsed = parseFrame(symbol.bytes);
-      const layoutId = parsed == null ? void 0 : parsed.header.layoutId;
-      const slot = parsed == null ? void 0 : parsed.header.slotIndex;
-      return symbol.quad && symbol.modules && layoutId !== void 0 && slot !== void 0 ? [{ index, seed: { quad: symbol.quad, modules: symbol.modules, layoutId, slot } }] : [];
-    });
-  });
-  if (templates.length) {
-    await runPass("Reference refine", (index) => {
-      let nearest = templates[0];
-      for (const template of templates) {
-        if (Math.abs(template.index - index) < Math.abs(nearest.index - index)) nearest = template;
-      }
-      return [nearest.seed];
-    }, false);
-  }
+  const templates = firstPass.flatMap((reply, index) => { var _a; return ((_a = reply == null ? void 0 : reply.symbols) != null ? _a : []).flatMap((symbol) => { const parsed = parseFrame(symbol.bytes), layoutId = parsed == null ? void 0 : parsed.header.layoutId, slot = parsed == null ? void 0 : parsed.header.slotIndex; return symbol.quad && symbol.modules && layoutId !== void 0 && slot !== void 0 ? [{ index, seed: { quad: symbol.quad, modules: symbol.modules, layoutId, slot } }] : []; }); });
+  if (templates.length) await runPass("Reference refine", (index) => { let nearest = templates[0]; for (const template of templates) if (Math.abs(template.index - index) < Math.abs(nearest.index - index)) nearest = template; return [nearest.seed]; }, false);
   return latencies;
 }
-function percentile(values, fraction) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))];
-}
-function missedReason(trace, slot) {
-  if (trace.decision === "worker busy") return "worker busy";
-  const predicted = trace.predicted.find((item) => item.slot === slot);
-  if ((predicted == null ? void 0 : predicted.state) === "OFFSCREEN") return "offscreen threshold";
-  if (!trace.jobs.length) return trace.decision;
-  if (trace.jobs.some((job) => job.kind === "FULL FRAME")) return "full-frame decoder miss";
-  if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track";
-  const submitted = trace.jobs.some((job) => slot !== void 0 && job.tracks.includes(slot));
-  if (!submitted && trace.jobs.some((job) => job.kind !== "FULL FRAME")) return "crop excluded slot";
-  if (trace.jobs.some((job) => job.trackedMisses)) {
-    return trace.jobs.some((job) => job.fallbackAttempts && !job.fallbackSuccesses) ? "tracked sampler failed; fallback failed" : "tracked sampler failed";
-  }
-  return "decoder miss";
-}
-async function inspectBenchmarkFrame(index) {
-  if (!benchmarkCorpus) return;
-  const frame = await benchmarkCorpus.frame(index);
-  const trace = benchmarkTraces[index];
-  benchmarkFrame.width = frame.meta.width;
-  benchmarkFrame.height = frame.meta.height;
-  const ctx = benchmarkFrame.getContext("2d");
-  ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height), 0, 0);
-  const quad = (value, color, width) => {
-    if (!value) return;
-    const points = [value.topLeft, value.topRight, value.bottomRight, value.bottomLeft];
-    ctx.beginPath();
-    points.forEach((point, i) => i ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
-    ctx.closePath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.stroke();
-  };
-  for (const job of trace.jobs) {
-    ctx.strokeStyle = "#f2a51a";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(job.x, job.y, job.width, job.height);
-  }
-  for (const sighting of trace.sightings) {
-    ctx.strokeStyle = "#b87500";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(sighting.x, sighting.y, sighting.w, sighting.h);
-  }
-  for (const item of trace.predicted) quad(item.quad, item.submitted ? "#248cff" : "#777", 3);
-  for (const item of trace.decoded) quad(item.quad, "#20c969", 5);
-  for (const item of trace.reference) quad(item.quad, "#e43d3d", 5);
-  const production = new Set(trace.decoded.map((item) => item.esi));
-  const missed = trace.reference.filter((item) => !production.has(item.esi));
-  benchmarkFrameStatus.textContent = `frame ${trace.sequence} · ${trace.stateBefore} → ${trace.stateAfter} · ${trace.decision} · missed ${missed.map((item) => {
-    var _a;
-    return `${(_a = item.slot) != null ? _a : "?"}: ${missedReason(trace, item.slot)}`;
-  }).join(", ") || "none"}`;
-}
+function percentile(values, fraction) { if (!values.length) return 0; const sorted = [...values].sort((a, b) => a - b); return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))]; }
+function missedReason(trace, slot) { if (trace.decision === "worker busy") return "worker busy"; const predicted = trace.predicted.find((item) => item.slot === slot); if ((predicted == null ? void 0 : predicted.state) === "OFFSCREEN") return "offscreen threshold"; if (!trace.jobs.length) return trace.decision; if (trace.jobs.some((job) => job.kind === "FULL FRAME")) return "full-frame decoder miss"; if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track"; const submitted = trace.jobs.some((job) => slot !== void 0 && job.tracks.includes(slot)); if (!submitted && trace.jobs.some((job) => job.kind !== "FULL FRAME")) return "crop excluded slot"; if (trace.jobs.some((job) => job.trackedMisses)) return trace.jobs.some((job) => job.fallbackAttempts && !job.fallbackSuccesses) ? "tracked sampler failed; fallback failed" : "tracked sampler failed"; return "decoder miss"; }
+async function inspectBenchmarkFrame(index) { if (!benchmarkCorpus) return; const frame = await benchmarkCorpus.frame(index), trace = benchmarkTraces[index]; benchmarkFrame.width = frame.meta.width; benchmarkFrame.height = frame.meta.height; const ctx = benchmarkFrame.getContext("2d"); ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height), 0, 0); const quad = (value, color, width) => { if (!value) return; const points = [value.topLeft, value.topRight, value.bottomRight, value.bottomLeft]; ctx.beginPath(); points.forEach((point, i) => i ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.closePath(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke(); }; for (const job of trace.jobs) { ctx.strokeStyle = "#f2a51a"; ctx.lineWidth = 3; ctx.strokeRect(job.x, job.y, job.width, job.height); } for (const sighting of trace.sightings) { ctx.strokeStyle = "#b87500"; ctx.lineWidth = 3; ctx.strokeRect(sighting.x, sighting.y, sighting.w, sighting.h); } for (const item of trace.predicted) quad(item.quad, item.submitted ? "#248cff" : "#777", 3); for (const item of trace.decoded) quad(item.quad, "#20c969", 5); for (const item of trace.reference) quad(item.quad, "#e43d3d", 5); const production = new Set(trace.decoded.map((item) => item.esi)), missed = trace.reference.filter((item) => !production.has(item.esi)); benchmarkFrameStatus.textContent = `frame ${trace.sequence} · ${trace.stateBefore} → ${trace.stateAfter} · ${trace.decision} · missed ${missed.map((item) => `${item.slot ?? "?"}: ${missedReason(trace, item.slot)}`).join(", ") || "none"}`; }
 async function runReceiverBenchmark() {
   var _a, _b, _c, _d, _e, _f, _g, _h;
-  if (replayRunning) return;
-  runBenchmarkBtn.disabled = true;
-  saveBenchmarkBtn.disabled = true;
-  saveBenchmarkBtn.textContent = "Save results";
-  benchmarkResult = void 0;
-  benchmarkSummary.replaceChildren();
-  benchmarkFrame.width = 0;
-  benchmarkFrame.height = 0;
-  benchmarkFrameStatus.textContent = "";
-  if (!benchmarkCorpus && benchmarkPendingBlob) {
-    benchmarkStatus.textContent = "Loading recorded frames…";
-    await new Promise(requestAnimationFrame);
-    try {
-      benchmarkCorpus = await AgcapCorpus.load(benchmarkPendingBlob);
-    } catch (error) {
-      benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
-      runBenchmarkBtn.disabled = false;
-      return;
-    }
-  }
-  const corpus = benchmarkCorpus;
-  if (!corpus) {
-    benchmarkStatus.textContent = "Record or load an .agcap first.";
-    runBenchmarkBtn.disabled = false;
-    return;
-  }
-  stopReceiver();
-  replayRunning = true;
-  benchmarkTraces = [];
-  benchmarkJobFrames.clear();
-  benchmarkVerifiedBytes = 0;
-  benchmarkCompletionChecked = false;
-  done = false;
-  pool.resize(selectedWorkerCount());
-  const firstTime = (_b = (_a = corpus.meta(0)) == null ? void 0 : _a.callbackTimeMs) != null ? _b : 0;
-  cameraStartedTs = firstTime;
-  const wallStart = performance.now();
-  const maximum = replayMode.value === "maximum";
+  if (replayRunning) return; runBenchmarkBtn.disabled = true; saveBenchmarkBtn.disabled = true; saveBenchmarkBtn.textContent = "Save results"; benchmarkResult = void 0; benchmarkSummary.replaceChildren(); benchmarkFrame.width = 0; benchmarkFrame.height = 0; benchmarkFrameStatus.textContent = "";
+  if (!benchmarkCorpus && benchmarkPendingBlob) { benchmarkStatus.textContent = "Loading recorded frames…"; await new Promise(requestAnimationFrame); try { benchmarkCorpus = await AgcapCorpus.load(benchmarkPendingBlob); } catch (error) { benchmarkStatus.textContent = error instanceof Error ? error.message : String(error); runBenchmarkBtn.disabled = false; return; } }
+  const corpus = benchmarkCorpus; if (!corpus) { benchmarkStatus.textContent = "Record or load an .agcap first."; runBenchmarkBtn.disabled = false; return; }
+  stopReceiver(); replayRunning = true; benchmarkTraces = []; benchmarkJobFrames.clear(); benchmarkVerifiedBytes = 0; benchmarkCompletionChecked = false; done = false; pool.resize(selectedWorkerCount()); const firstTime = (_b = (_a = corpus.meta(0)) == null ? void 0 : _a.callbackTimeMs) != null ? _b : 0, wallStart = performance.now(), maximum = replayMode.value === "maximum";
   try {
-    for (let index = 0; index < corpus.length; index++) {
-      const frame = await corpus.frame(index);
-      if (!maximum) {
-        const target = wallStart + frame.meta.callbackTimeMs - firstTime;
-        const delay = target - performance.now();
-        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-      replayClock = frame.meta.callbackTimeMs;
-      benchmarkStatus.textContent = `Production ${index + 1}/${corpus.length}`;
-      if (index % 4 === 0) await new Promise(requestAnimationFrame);
-      captureFrame({
-        sequence: frame.meta.sequence,
-        width: frame.meta.width,
-        height: frame.meta.height,
-        callbackTimeMs: frame.meta.callbackTimeMs,
-        mediaTimeMs: frame.meta.mediaTimeMs,
-        presentationTimeMs: frame.meta.presentationTimeMs,
-        expectedDisplayTimeMs: frame.meta.expectedDisplayTimeMs,
-        image: new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height)
-      });
-    }
-    await waitForWorkers();
-    const savedReference = window.__airgapperBenchmarkReference;
-    const savedCorpus = savedReference == null ? void 0 : savedReference.corpus;
-    const savedFrames = savedReference == null ? void 0 : savedReference.frames;
-    let oracleLatencies = [];
-    if ((savedCorpus == null ? void 0 : savedCorpus.width) === corpus.header.width && savedCorpus.height === corpus.header.height && savedCorpus.startedAt === corpus.header.startedAt && savedCorpus.framesStored === corpus.header.framesStored && (savedFrames == null ? void 0 : savedFrames.length) === benchmarkTraces.length && savedFrames.every((item, index) => item.sequence === benchmarkTraces[index].sequence)) {
-      for (let index = 0; index < benchmarkTraces.length; index++) {
-        benchmarkTraces[index].reference = savedFrames[index].reference;
-      }
-      benchmarkStatus.textContent = "Reference map reused";
-    } else {
-      oracleLatencies = await runOracle(corpus);
-    }
-    for (const trace of benchmarkTraces) {
-      const known = new Set(trace.reference.map((item) => item.esi));
-      for (const packet of trace.decoded) {
-        if (known.has(packet.esi)) continue;
-        known.add(packet.esi);
-        trace.reference.push({ slot: packet.slot, esi: packet.esi, quad: packet.quad });
-      }
-    }
-    const durationSeconds = Math.max(1e-3, (((_d = (_c = corpus.meta(corpus.length - 1)) == null ? void 0 : _c.callbackTimeMs) != null ? _d : firstTime) - firstTime) / 1e3);
-    const productionPackets = benchmarkTraces.flatMap((trace) => trace.decoded);
-    const opportunities = benchmarkTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0);
-    const captured = benchmarkTraces.reduce((sum, trace) => {
-      const production = new Set(trace.decoded.map((item) => item.esi));
-      return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size;
-    }, 0);
-    const jobs = benchmarkTraces.flatMap((trace) => trace.jobs);
-    const decodeLatencies = jobs.flatMap((job) => job.decodeMs === void 0 ? [] : [job.decodeMs]);
-    const transitions = benchmarkTraces.flatMap((trace) => trace.transitions);
-    const firstReference = benchmarkTraces.findIndex((trace) => trace.reference.length > 0);
-    const firstProduction = benchmarkTraces.findIndex((trace) => trace.decoded.length > 0);
-    const firstLayout = benchmarkTraces.findIndex((trace) => trace.decoded.some((item) => item.slot !== void 0));
-    const firstLock = benchmarkTraces.findIndex((trace) => trace.transitions.some((item) => item.to === "GRID_LOCK"));
-    const lockLoss = benchmarkTraces.findIndex((trace, index) => index > firstLock && trace.transitions.some((item) => item.to === "PARTIAL_LOSS" || item.to === "REACQUIRE"));
-    const localRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "PARTIAL_LOSS"));
-    const globalRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "REACQUIRE"));
-    const firstRecovered = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.decoded.length > 0);
-    const restored = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.transitions.some((item) => item.to === "TRACK"));
-    const lockedTraces = benchmarkTraces.filter((trace) => ["GRID_LOCK", "TRACK", "PARTIAL_LOSS"].includes(trace.stateBefore));
-    const lockedOpportunities = lockedTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0);
-    const lockedCaptured = lockedTraces.reduce((sum, trace) => {
-      const production = new Set(trace.decoded.map((item) => item.esi));
-      return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size;
-    }, 0);
-    const uniquePackets = /* @__PURE__ */ new Map();
-    for (const packet of productionPackets) if (!uniquePackets.has(packet.esi)) uniquePackets.set(packet.esi, packet);
-    const uniqueUseful = uniquePackets.size;
-    const uniqueUsefulBytes = [...uniquePackets.values()].reduce((sum, packet) => sum + packet.bytes, 0);
-    const extraPackets = benchmarkTraces.flatMap((trace) => {
-      const reference = new Set(trace.reference.map((item) => item.esi));
-      return trace.decoded.filter((item) => !reference.has(item.esi));
-    });
-    const extraUniqueSymbols = new Set(extraPackets.map((item) => item.esi)).size;
-    const workerCpuSeconds = Math.max(1e-3, decodeLatencies.reduce((sum, value) => sum + value, 0) / 1e3);
-    const processedPixels = jobs.reduce((sum, job) => {
-      var _a2;
-      return sum + job.pixels + ((_a2 = job.targetedPixels) != null ? _a2 : 0);
-    }, 0);
-    const byKind = Object.fromEntries(["FULL FRAME", "SHARED TRACKED BATCH CROP", "INDIVIDUAL TRACKED CROP"].map((kind) => {
-      const selected = jobs.filter((job) => job.kind === kind);
-      return [kind, {
-        jobs: selected.length,
-        pixels: selected.reduce((sum, job) => sum + job.pixels, 0),
-        processedPixels: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + job.pixels + ((_a2 = job.targetedPixels) != null ? _a2 : 0);
-        }, 0),
-        bytes: selected.reduce((sum, job) => sum + job.bytes, 0),
-        tracks: selected.reduce((sum, job) => sum + job.tracks.length, 0),
-        outputSymbols: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.symbols) != null ? _a2 : 0);
-        }, 0),
-        hits: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.trackedHits) != null ? _a2 : 0);
-        }, 0),
-        misses: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.trackedMisses) != null ? _a2 : 0);
-        }, 0),
-        readFullAttempts: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.readFullAttempts) != null ? _a2 : 0);
-        }, 0),
-        fallbackAttempts: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.fallbackAttempts) != null ? _a2 : 0);
-        }, 0),
-        fallbackSuccesses: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.fallbackSuccesses) != null ? _a2 : 0);
-        }, 0),
-        fallbackFailures: selected.reduce((sum, job) => {
-          var _a2, _b2;
-          return sum + ((_a2 = job.fallbackAttempts) != null ? _a2 : 0) - ((_b2 = job.fallbackSuccesses) != null ? _b2 : 0);
-        }, 0),
-        targetedAttempts: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.targetedAttempts) != null ? _a2 : 0);
-        }, 0),
-        targetedPixels: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.targetedPixels) != null ? _a2 : 0);
-        }, 0),
-        targetedSuccesses: selected.reduce((sum, job) => {
-          var _a2;
-          return sum + ((_a2 = job.targetedSuccesses) != null ? _a2 : 0);
-        }, 0)
-      }];
-    }));
-    const failures = benchmarkTraces.flatMap((trace, index) => {
-      const production = new Set(trace.decoded.map((item) => item.esi));
-      return trace.reference.filter((item) => !production.has(item.esi)).map((item) => ({
-        frameIndex: index,
-        frameSequence: trace.sequence,
-        slot: item.slot,
-        esi: item.esi,
-        reason: missedReason(trace, item.slot)
-      }));
-    });
-    benchmarkResult = {
-      format: "AirGapper receiver benchmark",
-      version: (_e = document.querySelector(".app-version")) == null ? void 0 : _e.textContent,
-      corpus: corpus.header,
-      replay: { mode: replayMode.value, workers: pool.size, device: navigator.userAgent },
-      acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference].sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction].sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction].timestampMs - benchmarkTraces[firstReference].timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout].sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock].sequence },
-      recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss].sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery].sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery].sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered].sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored].sequence },
-      throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
-      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(1e-3, processedPixels / 1e6), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(1e-3, processedPixels / 1e6), decodeP50Ms: percentile(decodeLatencies, 0.5), decodeP95Ms: percentile(decodeLatencies, 0.95), oracleP50Ms: percentile(oracleLatencies, 0.5), workerBusyDrops: capturesDropped, byKind },
-      transitions,
-      failures,
-      frames: benchmarkTraces
-    };
-    benchmarkSummary.textContent = `opportunities  ${captured}/${opportunities} (${(opportunities ? captured / opportunities * 100 : 0).toFixed(1)}%)
-QR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}
-useful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}
-verified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}
-decode p50/95 ${percentile(decodeLatencies, 0.5).toFixed(1)} / ${percentile(decodeLatencies, 0.95).toFixed(1)} ms
-busy drops    ${capturesDropped}
-pixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}
-misses        ${failures.length}`;
-    const buttons = document.createElement("div");
-    buttons.className = "benchmark-controls";
-    if (failures.length) {
-      const label = document.createElement("strong");
-      label.textContent = "Missed frames";
-      buttons.append(label);
-    }
-    for (const failure of failures.slice(0, 40)) {
-      const button = document.createElement("button");
-      button.className = "secondary-button";
-      button.textContent = `Frame ${failure.frameSequence} · slot ${(_f = failure.slot) != null ? _f : "?"}`;
-      button.addEventListener("click", () => void inspectBenchmarkFrame(failure.frameIndex));
-      buttons.append(button);
-    }
-    if (failures.length) benchmarkSummary.append(buttons);
-    benchmarkStatus.textContent = `Run complete · ${(_h = (_g = replayMode.selectedOptions[0]) == null ? void 0 : _g.textContent) != null ? _h : replayMode.value} · ${selectedWorkerCount()} worker${selectedWorkerCount() === 1 ? "" : "s"} · save this run to compare later`;
-    saveBenchmarkBtn.disabled = false;
-  } catch (error) {
-    benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
-  } finally {
-    replayRunning = false;
-    replayClock = void 0;
-    activeBenchmarkFrame = void 0;
-    pool.resize(0);
-    runBenchmarkBtn.disabled = false;
-  }
+    for (let index = 0; index < corpus.length; index++) { const frame = await corpus.frame(index); if (!maximum) { const target = wallStart + frame.meta.callbackTimeMs - firstTime, delay = target - performance.now(); if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay)); } replayClock = frame.meta.callbackTimeMs; benchmarkStatus.textContent = `Production ${index + 1}/${corpus.length}`; if (index % 4 === 0) await new Promise(requestAnimationFrame); captureFrame({ sequence: frame.meta.sequence, width: frame.meta.width, height: frame.meta.height, callbackTimeMs: frame.meta.callbackTimeMs, mediaTimeMs: frame.meta.mediaTimeMs, presentationTimeMs: frame.meta.presentationTimeMs, expectedDisplayTimeMs: frame.meta.expectedDisplayTimeMs, image: new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height) }); }
+    await waitForWorkers(); const savedReference = window.__airgapperBenchmarkReference, savedCorpus = savedReference == null ? void 0 : savedReference.corpus, savedFrames = savedReference == null ? void 0 : savedReference.frames; let oracleLatencies = [];
+    if ((savedCorpus == null ? void 0 : savedCorpus.width) === corpus.header.width && savedCorpus.height === corpus.header.height && savedCorpus.startedAt === corpus.header.startedAt && savedCorpus.framesStored === corpus.header.framesStored && (savedFrames == null ? void 0 : savedFrames.length) === benchmarkTraces.length && savedFrames.every((item, index) => item.sequence === benchmarkTraces[index].sequence)) { for (let index = 0; index < benchmarkTraces.length; index++) benchmarkTraces[index].reference = savedFrames[index].reference; benchmarkStatus.textContent = "Reference map reused"; }
+    else oracleLatencies = await runOracle(corpus);
+    for (const trace of benchmarkTraces) { const known = new Set(trace.reference.map((item) => item.esi)); for (const packet of trace.decoded) { if (known.has(packet.esi)) continue; known.add(packet.esi); trace.reference.push({ slot: packet.slot, esi: packet.esi, quad: packet.quad }); } }
+    const durationSeconds = Math.max(1e-3, (((_d = (_c = corpus.meta(corpus.length - 1)) == null ? void 0 : _c.callbackTimeMs) != null ? _d : firstTime) - firstTime) / 1e3), productionPackets = benchmarkTraces.flatMap((trace) => trace.decoded), opportunities = benchmarkTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0), captured = benchmarkTraces.reduce((sum, trace) => { const production = new Set(trace.decoded.map((item) => item.esi)); return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size; }, 0), jobs = benchmarkTraces.flatMap((trace) => trace.jobs), decodeLatencies = jobs.flatMap((job) => job.decodeMs === void 0 ? [] : [job.decodeMs]), transitions = benchmarkTraces.flatMap((trace) => trace.transitions);
+    const firstReference = benchmarkTraces.findIndex((trace) => trace.reference.length > 0), firstProduction = benchmarkTraces.findIndex((trace) => trace.decoded.length > 0), firstLayout = benchmarkTraces.findIndex((trace) => trace.decoded.some((item) => item.slot !== void 0)), firstLock = benchmarkTraces.findIndex((trace) => trace.transitions.some((item) => item.to === "GRID_LOCK")), lockLoss = benchmarkTraces.findIndex((trace, index) => index > firstLock && trace.transitions.some((item) => item.to === "PARTIAL_LOSS" || item.to === "REACQUIRE")), localRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "PARTIAL_LOSS")), globalRecovery = benchmarkTraces.findIndex((trace, index) => index >= Math.max(0, lockLoss) && trace.transitions.some((item) => item.to === "REACQUIRE")), firstRecovered = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.decoded.length > 0), restored = benchmarkTraces.findIndex((trace, index) => index > lockLoss && trace.transitions.some((item) => item.to === "TRACK"));
+    const lockedTraces = benchmarkTraces.filter((trace) => ["GRID_LOCK", "TRACK", "PARTIAL_LOSS"].includes(trace.stateBefore)), lockedOpportunities = lockedTraces.reduce((sum, trace) => sum + new Set(trace.reference.map((item) => item.esi)).size, 0), lockedCaptured = lockedTraces.reduce((sum, trace) => { const production = new Set(trace.decoded.map((item) => item.esi)); return sum + new Set(trace.reference.filter((item) => production.has(item.esi)).map((item) => item.esi)).size; }, 0);
+    const uniquePackets = /* @__PURE__ */ new Map(); for (const packet of productionPackets) if (!uniquePackets.has(packet.esi)) uniquePackets.set(packet.esi, packet); const uniqueUseful = uniquePackets.size, uniqueUsefulBytes = [...uniquePackets.values()].reduce((sum, packet) => sum + packet.bytes, 0), extraPackets = benchmarkTraces.flatMap((trace) => { const reference = new Set(trace.reference.map((item) => item.esi)); return trace.decoded.filter((item) => !reference.has(item.esi)); }), extraUniqueSymbols = new Set(extraPackets.map((item) => item.esi)).size, workerCpuSeconds = Math.max(1e-3, decodeLatencies.reduce((sum, value) => sum + value, 0) / 1e3), processedPixels = jobs.reduce((sum, job) => sum + job.pixels + (job.targetedPixels ?? 0), 0);
+    const byKind = Object.fromEntries(["FULL FRAME", "SHARED TRACKED BATCH CROP", "INDIVIDUAL TRACKED CROP"].map((kind) => { const selected = jobs.filter((job) => job.kind === kind); return [kind, { jobs: selected.length, pixels: selected.reduce((sum, job) => sum + job.pixels, 0), processedPixels: selected.reduce((sum, job) => sum + job.pixels + (job.targetedPixels ?? 0), 0), bytes: selected.reduce((sum, job) => sum + job.bytes, 0), tracks: selected.reduce((sum, job) => sum + job.tracks.length, 0), outputSymbols: selected.reduce((sum, job) => sum + (job.symbols ?? 0), 0), hits: selected.reduce((sum, job) => sum + (job.trackedHits ?? 0), 0), misses: selected.reduce((sum, job) => sum + (job.trackedMisses ?? 0), 0), readFullAttempts: selected.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0), fallbackAttempts: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0), fallbackSuccesses: selected.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0), fallbackFailures: selected.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0) - (job.fallbackSuccesses ?? 0), 0), targetedAttempts: selected.reduce((sum, job) => sum + (job.targetedAttempts ?? 0), 0), targetedPixels: selected.reduce((sum, job) => sum + (job.targetedPixels ?? 0), 0), targetedSuccesses: selected.reduce((sum, job) => sum + (job.targetedSuccesses ?? 0), 0) }]; }));
+    const failures = benchmarkTraces.flatMap((trace, index) => { const production = new Set(trace.decoded.map((item) => item.esi)); return trace.reference.filter((item) => !production.has(item.esi)).map((item) => ({ frameIndex: index, frameSequence: trace.sequence, slot: item.slot, esi: item.esi, reason: missedReason(trace, item.slot) })); });
+    benchmarkResult = { format: "AirGapper receiver benchmark", version: (_e = document.querySelector(".app-version")) == null ? void 0 : _e.textContent, corpus: corpus.header, replay: { mode: replayMode.value, workers: pool.size, device: navigator.userAgent }, acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference].sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction].sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction].timestampMs - benchmarkTraces[firstReference].timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout].sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock].sequence }, recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss].sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery].sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery].sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered].sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored].sequence }, throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds }, performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(1e-3, processedPixels / 1e6), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(1e-3, processedPixels / 1e6), decodeP50Ms: percentile(decodeLatencies, 0.5), decodeP95Ms: percentile(decodeLatencies, 0.95), oracleP50Ms: percentile(oracleLatencies, 0.5), workerBusyDrops: capturesDropped, byKind }, transitions, failures, frames: benchmarkTraces };
+    benchmarkSummary.textContent = `opportunities  ${captured}/${opportunities} (${(opportunities ? captured / opportunities * 100 : 0).toFixed(1)}%)\nQR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}\nuseful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}\nverified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}\ndecode p50/95 ${percentile(decodeLatencies, 0.5).toFixed(1)} / ${percentile(decodeLatencies, 0.95).toFixed(1)} ms\nbusy drops    ${capturesDropped}\npixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}\nmisses        ${failures.length}`;
+    const buttons = document.createElement("div"); buttons.className = "benchmark-controls"; if (failures.length) { const label = document.createElement("strong"); label.textContent = "Missed frames"; buttons.append(label); } for (const failure of failures.slice(0, 40)) { const button = document.createElement("button"); button.className = "secondary-button"; button.textContent = `Frame ${failure.frameSequence} · slot ${(_f = failure.slot) != null ? _f : "?"}`; button.addEventListener("click", () => void inspectBenchmarkFrame(failure.frameIndex)); buttons.append(button); } if (failures.length) benchmarkSummary.append(buttons); benchmarkStatus.textContent = `Run complete · ${(_h = (_g = replayMode.selectedOptions[0]) == null ? void 0 : _g.textContent) != null ? _h : replayMode.value} · ${selectedWorkerCount()} worker${selectedWorkerCount() === 1 ? "" : "s"} · save this run to compare later`; saveBenchmarkBtn.disabled = false;
+  } catch (error) { benchmarkStatus.textContent = error instanceof Error ? error.message : String(error); }
+  finally { replayRunning = false; replayClock = void 0; activeBenchmarkFrame = void 0; pool.resize(0); runBenchmarkBtn.disabled = false; }
 }
 function updateStats() {
   if (done) return;
-  const now = receiverNow();
-  if (optimizeEnabled) beginOptimizeWhenReady();
-  if (!receiverDevActions.hidden) renderFocusDiagnostics();
-  const prune = (a) => {
-    while (a.length > 0 && a[0] < now - STATS_WINDOW_MS) a.shift();
-  };
-  prune(captureTimes);
-  prune(qrReadTimes);
-  prune(poolBusyTimes);
-  prune(scanCompletionTimes);
-  prune(decodeFrameTimes);
-  const perSecond = (a) => a.length / (STATS_WINDOW_MS / 1e3);
-  const cameraRate = perSecond(captureTimes);
-  const completionRate = perSecond(scanCompletionTimes);
-  const decodeFrameRate = perSecond(decodeFrameTimes);
-  const qrRate = perSecond(qrReadTimes);
-  metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
-  metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
-  const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;
-  const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : "";
-  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
+  const now = receiverNow(); if (optimizeEnabled) beginOptimizeWhenReady(); if (!receiverDevActions.hidden) renderFocusDiagnostics();
+  const prune = (a) => { while (a.length > 0 && a[0] < now - STATS_WINDOW_MS) a.shift(); };
+  prune(captureTimes); prune(qrReadTimes); prune(poolBusyTimes); prune(scanCompletionTimes); prune(decodeFrameTimes);
+  const perSecond = (a) => a.length / (STATS_WINDOW_MS / 1e3), cameraRate = perSecond(captureTimes), completionRate = perSecond(scanCompletionTimes), decodeFrameRate = perSecond(decodeFrameTimes), qrRate = perSecond(qrReadTimes);
+  metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`; metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
+  const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0, limit = metric("m-limit"); limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : ""; limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
-  const elapsed = (now - startTs) / 1e3;
-  const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
-  const liveNow = gridLattice.active ? activeGrid.filter((region) => region.decoded).length : decodedCount();
-  if (timeline.length < TIMELINE_MAX_SAMPLES) {
-    timeline.push([
-      Number(elapsed.toFixed(1)),
-      decoder.framesNew,
-      decoder.solvedCount,
-      liveNow,
-      regions.length,
-      Number(cameraRate.toFixed(1)),
-      Number(qrRate.toFixed(1)),
-      fullScans
-    ]);
-  }
-  updateProgressEstimate();
-  const liveRate = liveGoodputKbs(now);
-  metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;
-  speedFeedback.className = `speed-feedback ${speedQualityClass(liveRate)}`;
+  const elapsed = (now - startTs) / 1e3, activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE"), liveNow = gridLattice.active ? activeGrid.filter((region) => region.decoded).length : decodedCount();
+  if (timeline.length < TIMELINE_MAX_SAMPLES) timeline.push([Number(elapsed.toFixed(1)), decoder.framesNew, decoder.solvedCount, liveNow, regions.length, Number(cameraRate.toFixed(1)), Number(qrRate.toFixed(1)), fullScans]);
+  updateProgressEstimate(); const liveRate = liveGoodputKbs(now); metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`; speedFeedback.className = `speed-feedback ${speedQualityClass(liveRate)}`;
 }
