@@ -40,7 +40,6 @@ let nativeOutputPtr = 0;
 let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
-let nativeFallbackBudget = 1;
 const nativeRefresh = /* @__PURE__ */ new Set();
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
@@ -49,7 +48,7 @@ function ensureNativeBatch(zx) {
   nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
   nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
   nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
   return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
 }
 function translatedQuad(q, dx, dy) {
@@ -102,12 +101,14 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4, strictTracked = false) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
-  const appliedFallbackBudget = strictTracked ? tracks.length : nativeFallbackBudget;
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, appliedFallbackBudget);
+  // The tracked hot path never spends CPU rescuing a QR with QR-level
+  // Reed-Solomon. AirGapper's RaptorQ transport is designed to tolerate whole
+  // packet loss; a sampled matrix that cannot pass the cheap CRC path is a miss.
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
   const count = decode(
     nativeBatchHandle,
     ptr,
@@ -136,11 +137,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     crcFastSuccesses: view.getUint32(nativeMetricsPtr + 64, true),
     rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true)
   };
-  if (!strictTracked) {
-  const crcTracks = tracks.reduce((count2, track) => count2 + Number(Boolean(track.crc32)), 0);
-  const fastEnough = crcTracks > 0 && metrics.crcFastSuccesses >= Math.ceil(crcTracks * 0.8);
-  nativeFallbackBudget = fastEnough ? 0 : 1;
-}
   const pending = [];
   let outputEnd = 0;
   for (let index = 0; index < count; index++) {
@@ -306,7 +302,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictTracked = false, diagnoseSampler = false } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, diagnoseSampler = false } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -315,7 +311,7 @@ ctx.onmessage = async (e) => {
     // A persistent native miss is a local decoder problem, not a reason to
     // wait for a whole-grid recovery scan. After two misses, copy this same
     // bounded crop as RGBA so the robust stock decoder can rescue/re-anchor it.
-    const robustTrackedRecovery = !full && Array.isArray(tracks) && tracks.some((track) => (track.misses ?? 0) >= 2);
+    const robustTrackedRecovery = !strictHotPath && !full && Array.isArray(tracks) && tracks.some((track) => (track.misses ?? 0) >= 2);
     let frameCopyMs = 0;
     let inputOffset = pixelFormat === "y8" ? messageYOffset : 0;
     let inputStride = pixelFormat === "y8" ? messageYStride || w : w * 4;
@@ -482,8 +478,7 @@ ctx.onmessage = async (e) => {
         oy,
         tracks,
         decodePixelFormat,
-        inputStride,
-        strictTracked
+        inputStride
       );
       const nativeSymbols = native?.symbols ?? [];
       const robustFallback = robustTrackedRecovery && decodePixelFormat === "rgba" && nativeSymbols.length === 0;
@@ -596,7 +591,7 @@ ctx.onmessage = async (e) => {
         trackedHit = true;
       }
     }
-    if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+    if (!strictHotPath && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       fallbackAttempted = !full;
       const appendResults = (vec, includeErrors) => {
         try {

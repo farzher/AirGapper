@@ -43,6 +43,7 @@ const cameraResolution = document.getElementById("camera-resolution");
 const cameraResolutionLabel = document.getElementById("camera-resolution-label");
 const decodeWorkers = document.getElementById("decode-workers");
 const decodeWorkersControl = document.getElementById("decode-workers-control");
+const strictHotPathToggle = document.getElementById("strict-hot-path");
 const cameraActual = document.getElementById("camera-actual");
 const cameraExposureControl = document.getElementById("camera-exposure-control");
 const cameraExposureAuto = document.getElementById("camera-exposure-auto");
@@ -141,6 +142,14 @@ for (let count = 1; count <= hardwareThreadCount; count++) {
 }
 function selectedWorkerCount() {
   return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
+}
+let strictHotPathEnabled = false;
+strictHotPathToggle.addEventListener("change", () => {
+  strictHotPathEnabled = strictHotPathToggle.checked;
+  resetHotPathAudit();
+});
+function strictHotPathActive() {
+  return strictHotPathEnabled || replayRunning && replayMode.value === "correctness";
 }
 const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v8";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
@@ -1084,6 +1093,25 @@ let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
 let lastSamplerDiagnostics = [];
+const hotPathAudit = {
+  trackedJobs: 0,
+  nativeTracks: 0,
+  nativeSuccessful: 0,
+  crcFastSuccesses: 0,
+  nativeMisses: 0,
+  rsFallbacks: 0,
+  localRecoveryAttempts: 0,
+  localRecoverySuccesses: 0,
+  fullScanJobs: 0,
+  fullScanSuccesses: 0,
+  acquisitionFullScans: 0,
+  reacquireFullScans: 0,
+  readFullAttempts: 0
+};
+function resetHotPathAudit() {
+  for (const key of Object.keys(hotPathAudit)) hotPathAudit[key] = 0;
+  lastSamplerDiagnostics = [];
+}
 let trackingInvalidations = 0;
 let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
@@ -1129,6 +1157,7 @@ function noteDecodeCompleted(id, completion) {
     benchmarkJob.readFullAttempts = completion.readFullAttempts;
     benchmarkJob.fallbackAttempts = Number(completion.fallbackAttempted);
     benchmarkJob.fallbackSuccesses = Number(completion.fallbackSucceeded);
+    benchmarkJob.nativeMetrics = completion.nativeMetrics ? { ...completion.nativeMetrics } : null;
   }
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
@@ -1175,10 +1204,27 @@ function noteDecodeCompleted(id, completion) {
     }
   }
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
-  if (completion.nativeMetrics) lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
-  if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
-  if (fullJob) {
+  if (completion.nativeMetrics) {
+    lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
+    hotPathAudit.trackedJobs++;
+    hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
+    hotPathAudit.nativeSuccessful += completion.nativeMetrics.successful ?? 0;
+    hotPathAudit.crcFastSuccesses += completion.nativeMetrics.crcFastSuccesses ?? 0;
+    hotPathAudit.nativeMisses += completion.nativeMetrics.misses ?? 0;
+    hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
   }
+  hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
+  if (completion.fallbackAttempted) {
+    hotPathAudit.localRecoveryAttempts++;
+    if (completion.fallbackSucceeded) hotPathAudit.localRecoverySuccesses++;
+  }
+  if (completion.full) {
+    hotPathAudit.fullScanJobs++;
+    if (completion.symbolCount > 0) hotPathAudit.fullScanSuccesses++;
+    if (fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
+    else if (fullJob?.acquisition) hotPathAudit.acquisitionFullScans++;
+  }
+  if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
   if (completion.error) {
     decodeExceptions++;
     lastDecodeError = completion.error;
@@ -1861,7 +1907,7 @@ ${manualVerdict}` : "",
     lastSamplerDiagnostics.length ? `Sampler  ${lastSamplerDiagnostics.map((item) => item.error
       ? `s${item.slot ?? "?"} error ${item.error}`
       : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} (${item.cached.percent.toFixed(2)}%) Δ${item.cachedDeltaPx?.toFixed(2) ?? "?"}px · lattice ${item.current.mismatches}/${item.current.total} (${item.current.percent.toFixed(2)}%) Δ${item.currentDeltaPx?.toFixed(2) ?? "?"}px · fresh ${item.fresh.mismatches}/${item.fresh.total} (${item.fresh.percent.toFixed(2)}%)`
-    ).join(" | ")}` : "",
+    ).join(" | ")}` : "Sampler  no matrix-oracle recovery event",
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
@@ -2106,7 +2152,7 @@ function stopReceiver() {
   decodeExceptions = 0;
   lastDecodeError = "";
   lastNativeMetrics = void 0;
-  lastSamplerDiagnostics = [];
+  resetHotPathAudit();
   trackingInvalidations = 0;
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
@@ -2687,9 +2733,14 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
         traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", sourceSequence, scanId: message.id, candidateEpoch: sourceOpticsEpoch });
       }
     }
-    if (kind === "FULL FRAME") {
+    if (message.full) {
       fullScanIds.add(message.id);
-      fullScanJobs.set(message.id, { thorough: false, native: true, reacquire: gridLattice.state === "REACQUIRE" });
+      fullScanJobs.set(message.id, {
+        thorough: Boolean(message.thorough),
+        native: true,
+        reacquire: gridLattice.state === "REACQUIRE",
+        acquisition: !gridLattice.active
+      });
     }
   }
   if (trace) {
@@ -2707,6 +2758,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
         var _a;
         return (_a = region.gridSlot) != null ? _a : region.id;
       }),
+      full: Boolean(message.full),
       submittedAt: receiverNow()
     };
     trace.jobs.push(job);
@@ -3199,8 +3251,8 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       const id = frameId++;
       const laneMessage = direct
-        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictTracked: false, diagnoseSampler: !receiverDevActions.hidden }
-        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictTracked: Boolean(source.image), diagnoseSampler: !receiverDevActions.hidden };
+        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden }
+        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
       const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
       const accepted = submitReceiverJob(
         laneMessage,
@@ -3269,8 +3321,8 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictTracked: false, diagnoseSampler: !receiverDevActions.hidden }
-          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictTracked: Boolean(source.image), diagnoseSampler: !receiverDevActions.hidden };
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden }
+          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(
@@ -3341,7 +3393,16 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
+    const individualTrack = {
+      id: r.id,
+      slot: r.gridSlot,
+      misses: r.consecutiveMisses,
+      quad: r.quad,
+      dim: r.dim,
+      crc32: Boolean(r.crc32)
+    };
     if (!submitReceiverJob(
+      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden },
       [img.data.buffer],
       "INDIVIDUAL TRACKED CROP",
       trace,
@@ -3388,6 +3449,7 @@ function resetActiveTransfer() {
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
   usefulFrameTimes.length = 0;
+  resetHotPathAudit();
   lastDistinctArrivalAt = 0;
   bar.style.width = "0";
   progressEl.setAttribute("aria-valuenow", "0");
@@ -4330,6 +4392,25 @@ async function runReceiverBenchmark() {
     });
     const extraUniqueSymbols = new Set(extraPackets.map((item) => item.esi)).size;
     const workerCpuSeconds = Math.max(1e-3, decodeLatencies.reduce((sum, value) => sum + value, 0) / 1e3);
+    const benchmarkNative = jobs.flatMap((job) => job.nativeMetrics ? [job.nativeMetrics] : []);
+    const benchmarkNativeTracks = benchmarkNative.reduce((sum, metrics) => sum + (metrics.tracks ?? 0), 0);
+    const benchmarkCrcFast = benchmarkNative.reduce((sum, metrics) => sum + (metrics.crcFastSuccesses ?? 0), 0);
+    const benchmarkNativeMisses = benchmarkNative.reduce((sum, metrics) => sum + (metrics.misses ?? 0), 0);
+    const benchmarkRsFallbacks = benchmarkNative.reduce((sum, metrics) => sum + (metrics.rsFallbacks ?? 0), 0);
+    const benchmarkFallbackAttempts = jobs.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0);
+    const benchmarkFallbackSuccesses = jobs.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0);
+    const hotPath = {
+      strict: replayMode.value === "correctness",
+      nativeTracks: benchmarkNativeTracks,
+      crcFastSuccesses: benchmarkCrcFast,
+      crcFastPercent: benchmarkNativeTracks ? benchmarkCrcFast / benchmarkNativeTracks * 100 : 0,
+      nativeMisses: benchmarkNativeMisses,
+      qrRsFallbacks: benchmarkRsFallbacks,
+      localRecoveryAttempts: benchmarkFallbackAttempts,
+      localRecoverySuccesses: benchmarkFallbackSuccesses,
+      readFullAttempts: jobs.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0),
+      fullScanJobs: jobs.reduce((sum, job) => sum + Number(Boolean(job.full)), 0)
+    };
     const processedPixels = jobs.reduce((sum, job) => {
       var _a2;
       return sum + job.pixels + ((_a2 = job.targetedPixels) != null ? _a2 : 0);
@@ -4406,6 +4487,7 @@ async function runReceiverBenchmark() {
       recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss].sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery].sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery].sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered].sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored].sequence },
       throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
       performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(1e-3, processedPixels / 1e6), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(1e-3, processedPixels / 1e6), decodeP50Ms: percentile(decodeLatencies, 0.5), decodeP95Ms: percentile(decodeLatencies, 0.95), oracleP50Ms: percentile(oracleLatencies, 0.5), workerBusyDrops: capturesDropped, byKind },
+      hotPath,
       transitions,
       failures,
       frames: benchmarkTraces
@@ -4414,6 +4496,8 @@ async function runReceiverBenchmark() {
 QR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}
 useful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}
 verified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}
+hot CRC       ${hotPath.crcFastSuccesses}/${hotPath.nativeTracks} (${hotPath.crcFastPercent.toFixed(1)}%)
+QR-RS/local   ${hotPath.qrRsFallbacks} / ${hotPath.localRecoverySuccesses}/${hotPath.localRecoveryAttempts}
 decode p50/95 ${percentile(decodeLatencies, 0.5).toFixed(1)} / ${percentile(decodeLatencies, 0.95).toFixed(1)} ms
 busy drops    ${capturesDropped}
 pixels/s      ${(jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds).toFixed(0)}
@@ -4473,10 +4557,23 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   const transportRate = uniqueRate + duplicateRate;
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
+  const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
+  const samplerLine = lastSamplerDiagnostics.length
+    ? lastSamplerDiagnostics.map((item) => item.error
+      ? `s${item.slot ?? "?"} error ${item.error}`
+      : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} · lattice ${item.current.mismatches}/${item.current.total} · fresh ${item.fresh.mismatches}/${item.fresh.total}`
+    ).join(" | ")
+    : "no matrix-oracle recovery event";
   transportDiagnostics.textContent = `Transport
 Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
 Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
-${totals}`;
+${totals}
+
+Hot path ${strictHotPathActive() ? "STRICT" : "LIVE"}
+Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
+QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
+Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
+Sampler ${samplerLine}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;

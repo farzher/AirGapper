@@ -20,7 +20,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.50</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.51</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -103,6 +103,7 @@
             <div class="receiver-dev-actions" hidden>
               <div id="optics-auto-actions" hidden><button class="secondary-button" id="optics-optimize" type="button" aria-pressed="false">Optimize</button><button class="secondary-button" id="optics-keep" type="button" hidden>Keep</button><span id="optics-optimize-status" role="status">Off</span></div>
               <label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
+              <label class="setting-toggle" id="strict-hot-path-control"><input id="strict-hot-path" type="checkbox" /><span>Strict hot path</span></label>
               <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="copy-diagnostics" type="button">Copy diagnostics</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
               <pre id="transport-diagnostics" class="transport-diagnostics"></pre>
               <div class="focus-dev" id="focus-dev" hidden>
@@ -134,7 +135,7 @@
 <dialog class="benchmark-dialog" id="benchmark-dialog" aria-label="Receiver benchmark">
   <div class="benchmark-card">
     <div class="scan-dialog-header"><strong>Receiver benchmark</strong><button class="ghost" id="close-benchmark" type="button">Close</button></div>
-    <div class="benchmark-controls"><label>Mode<select id="replay-mode"><option value="correctness">Correctness</option><option value="performance" selected>Device performance</option><option value="maximum">Maximum speed</option></select></label><button class="secondary-button" id="run-benchmark" type="button">Run</button><button class="secondary-button" id="save-benchmark" type="button" disabled>Save results</button></div>
+    <div class="benchmark-controls"><label>Mode<select id="replay-mode"><option value="correctness">Correctness · strict hot path</option><option value="performance" selected>Device performance</option><option value="maximum">Maximum speed</option></select></label><button class="secondary-button" id="run-benchmark" type="button">Run</button><button class="secondary-button" id="save-benchmark" type="button" disabled>Save results</button></div>
     <p class="scan-dialog-status" id="benchmark-status"></p>
     <div id="benchmark-summary"></div>
     <canvas class="scan-capture" id="benchmark-frame"></canvas>
