@@ -139,11 +139,11 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true),
     anchorSuccesses: view.getUint32(nativeMetricsPtr + 72, true),
     anchorMisses: view.getUint32(nativeMetricsPtr + 76, true),
-    thresholdFallbacks: view.getUint32(nativeMetricsPtr + 80, true),
+    alignmentFitAttempts: view.getUint32(nativeMetricsPtr + 80, true),
     outOfFrameMisses: view.getUint32(nativeMetricsPtr + 84, true),
     bitstreamFailures: view.getUint32(nativeMetricsPtr + 88, true),
     crcFailures: view.getUint32(nativeMetricsPtr + 92, true),
-    multiSampleRetries: view.getUint32(nativeMetricsPtr + 96, true),
+    alignmentFitSuccesses: view.getUint32(nativeMetricsPtr + 96, true),
     anchorBypassAttempts: view.getUint32(nativeMetricsPtr + 100, true),
     anchorBypassSuccesses: view.getUint32(nativeMetricsPtr + 104, true)
   };

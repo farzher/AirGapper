@@ -705,6 +705,46 @@ static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageB
 			return fastPacket;
 		};
 
+		// A four-corner homography is not enough for a large QR viewed through a
+		// real camera lens: the corners can be exact while the interior is bowed
+		// across alignment-pattern cells. ZXing already has the right primitive
+		// for this: SampleQR traces/fits the alignment grid from known finder
+		// positions. We synthesize those finders from the tracked transform, so
+		// this is still a detector-free tracked operation. Strict mode remains
+		// no-RS: the fitted matrix must parse and pass our packet CRC exactly.
+		auto alignmentFit = [&](float dx, float dy) {
+			++measured.alignmentFitAttempts;
+			auto mod2Pix = trackedTransform(track, dx, dy);
+			auto fpCenter = [&](double mx, double my) { return mod2Pix(PointF{mx, my}); };
+			auto fpSize = [&](double mx, double my) {
+				auto a = mod2Pix(PointF{mx - 3.5, my});
+				auto b = mod2Pix(PointF{mx + 3.5, my});
+				return std::hypot(b.x - a.x, b.y - a.y);
+			};
+			auto makeFp = [&](double mx, double my) {
+				ConcentricPattern cp;
+				static_cast<PointF&>(cp) = fpCenter(mx, my);
+				cp.size = fpSize(mx, my);
+				return cp;
+			};
+			QRCode::FinderPatternSet fp{
+				makeFp(3.5, dim - 3.5),
+				makeFp(3.5, 3.5),
+				makeFp(dim - 3.5, 3.5)
+			};
+			for (auto&& detected : QRCode::SampleQR(imageBits, fp)) {
+				if (!detected.isValid() || detected.bits().width() != dim)
+					continue;
+				track.sampled = std::move(detected).bits();
+				auto fittedPacket = fastDecode();
+				if (!fittedPacket.empty()) {
+					++measured.alignmentFitSuccesses;
+					return fittedPacket;
+				}
+			}
+			return ByteArray{};
+		};
+
 		// First attempt is always the last CRC-confirmed geometry. This is the
 		// actual hot path: no finder scan, no detector and no Reed-Solomon.
 		++measured.anchorBypassAttempts;
@@ -717,10 +757,13 @@ static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageB
 		}
 
 		ByteArray packet;
-		if (track.crc32Payload)
+		if (track.crc32Payload) {
 			packet = fastDecode();
-		if (!packet.empty())
-			++measured.anchorBypassSuccesses;
+			if (!packet.empty())
+				++measured.anchorBypassSuccesses;
+			else
+				packet = alignmentFit(track.dx, track.dy);
+		}
 
 		// Only after a cached-grid CRC miss do we spend work refining motion.
 		// Crucially, an anchor candidate is not committed unless the resulting
@@ -739,8 +782,12 @@ static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageB
 			if (anchored) {
 				++measured.anchorSuccesses;
 				const bool moved = std::abs(track.dx - trustedDx) > 0.01f || std::abs(track.dy - trustedDy) > 0.01f;
-				if (moved && sampleGrid(track.dx, track.dy))
-					packet = fastDecode();
+				if (moved) {
+					if (sampleGrid(track.dx, track.dy))
+						packet = fastDecode();
+					if (packet.empty())
+						packet = alignmentFit(track.dx, track.dy);
+				}
 			} else {
 				++measured.anchorMisses;
 			}

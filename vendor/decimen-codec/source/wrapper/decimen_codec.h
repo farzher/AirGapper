@@ -39,11 +39,11 @@ struct DecimenBatchMetrics {
 	uint32_t rsFallbacks;
 	uint32_t anchorSuccesses;
 	uint32_t anchorMisses;
-	uint32_t thresholdFallbacks;
+	uint32_t alignmentFitAttempts;
 	uint32_t outOfFrameMisses;
 	uint32_t bitstreamFailures;
 	uint32_t crcFailures;
-	uint32_t multiSampleRetries;
+	uint32_t alignmentFitSuccesses;
 	uint32_t anchorBypassAttempts;
 	uint32_t anchorBypassSuccesses;
 };
