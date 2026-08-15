@@ -1,0 +1,44 @@
+from pathlib import Path
+
+
+def replace(path, old, new, count=1):
+    p = Path(path)
+    text = p.read_text()
+    n = text.count(old)
+    if n != count:
+        raise SystemExit(f"{path}: expected {count} matches, got {n}: {old[:100]!r}")
+    p.write_text(text.replace(old, new, count))
+
+replace("index.html", "v0.5.54", "v0.5.55")
+replace("sw.js", "airgapper-static-js-v17", "airgapper-static-js-v18")
+replace("vendor/decimen-codec/source/VERSION", "0.1.2", "0.1.3")
+replace("vendor/decimen-codec/source/wrapper/decimen_codec.h", "\tuint32_t multiSampleRetries;\n};", "\tuint32_t multiSampleRetries;\n\tuint32_t anchorBypassAttempts;\n\tuint32_t anchorBypassSuccesses;\n};")
+
+cpp = Path("vendor/decimen-codec/source/wrapper/decimen_codec.cpp")
+text = cpp.read_text()
+old = '''\t\tAnchorReading anchor;\n\t\tdouble started = emscripten_get_now();\n\t\tbool anchored = refineAnchor(track, lumAt, anchor);\n\t\tmeasured.anchorMs += emscripten_get_now() - started;\n\t\tif (!anchored) {\n\t\t\t++track.consecutiveMisses;\n\t\t\t++measured.misses;\n\t\t\t++measured.anchorMisses;\n\t\t\tresult.consecutiveMisses = track.consecutiveMisses;\n\t\t\tresult.framesSinceReacquire = track.framesSinceReacquire;\n\t\t\tcontinue;\n\t\t}\n\n\t\t++measured.anchorSuccesses;\n'''
+new = '''\t\tAnchorReading anchor;\n\t\tconst float trustedDx = track.dx, trustedDy = track.dy;\n\t\tdouble started = emscripten_get_now();\n\t\tconst bool anchored = refineAnchor(track, lumAt, anchor);\n\t\tmeasured.anchorMs += emscripten_get_now() - started;\n\t\tif (anchored) {\n\t\t\t++measured.anchorSuccesses;\n\t\t} else {\n\t\t\t++measured.anchorMisses;\n\t\t\t++measured.anchorBypassAttempts;\n\t\t\ttrack.dx = trustedDx;\n\t\t\ttrack.dy = trustedDy;\n\t\t}\n'''
+if text.count(old) != 1: raise SystemExit("anchor rejection block not found")
+text = text.replace(old, new)
+old2 = '''\t\tif (packet.empty()) {\n\t\t\t++track.consecutiveMisses;'''
+new2 = '''\t\tif (!packet.empty() && !anchored)\n\t\t\t++measured.anchorBypassSuccesses;\n\n\t\tif (packet.empty()) {\n\t\t\t++track.consecutiveMisses;'''
+if text.count(old2) != 1: raise SystemExit("packet miss block not found")
+cpp.write_text(text.replace(old2, new2))
+
+replace("receive/worker.js", "const NATIVE_BATCH_METRICS_BYTES = 104;", "const NATIVE_BATCH_METRICS_BYTES = 112;")
+replace("receive/worker.js", '''    crcFailures: view.getUint32(nativeMetricsPtr + 92, true),\n    multiSampleRetries: view.getUint32(nativeMetricsPtr + 96, true)\n''', '''    crcFailures: view.getUint32(nativeMetricsPtr + 92, true),\n    multiSampleRetries: view.getUint32(nativeMetricsPtr + 96, true),\n    anchorBypassAttempts: view.getUint32(nativeMetricsPtr + 100, true),\n    anchorBypassSuccesses: view.getUint32(nativeMetricsPtr + 104, true)\n''')
+
+main = Path("receive/main.js")
+text = main.read_text()
+text = text.replace('''let strictHotPathEnabled = false;\nlet strictHotPathLockSeen = false;\nstrictHotPathToggle.addEventListener("change", () => {\n  strictHotPathEnabled = strictHotPathToggle.checked;\n  strictHotPathLockSeen = false;\n  resetHotPathAudit();\n});''', '''let strictHotPathEnabled = false;\nlet strictHotPathLockSeen = false;\nlet hotPathAuditGeneration = 0;\nconst hotPathJobMode = new Map();\nstrictHotPathToggle.addEventListener("change", () => {\n  strictHotPathEnabled = strictHotPathToggle.checked;\n  strictHotPathLockSeen = false;\n  hotPathAuditGeneration++;\n  resetHotPathAudit();\n});''', 1)
+text = text.replace('''function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {\n  const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);\n  if (accepted) {''', '''function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {\n  const auditMode = { generation: hotPathAuditGeneration, strict: Boolean(message.strictHotPath) };\n  const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);\n  if (accepted) {\n    hotPathJobMode.set(message.id, auditMode);''', 1)
+text = text.replace('''function noteDecodeCompleted(id, completion) {\n  var _a;\n  const benchmarkTrace = benchmarkJobFrames.get(id);''', '''function noteDecodeCompleted(id, completion) {\n  var _a;\n  const auditMode = hotPathJobMode.get(id);\n  hotPathJobMode.delete(id);\n  const auditThisCompletion = Boolean(auditMode && auditMode.generation === hotPathAuditGeneration && auditMode.strict === strictHotPathEnabled);\n  const benchmarkTrace = benchmarkJobFrames.get(id);''', 1)
+text = text.replace('''  if (completion.nativeMetrics) {\n    lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };\n    hotPathAudit.trackedJobs++;''', '''  if (completion.nativeMetrics) {\n    lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };\n  }\n  if (auditThisCompletion && completion.nativeMetrics) {\n    hotPathAudit.trackedJobs++;''', 1)
+text = text.replace('''  if (completion.pixelAudit) {\n    hotPathAudit.pixelAuditTracks''', '''  if (auditThisCompletion && completion.pixelAudit) {\n    hotPathAudit.pixelAuditTracks''', 1)
+text = text.replace('''  if (completion.fallbackAttempted) {\n    hotPathAudit.localRecoveryAttempts++;''', '''  if (auditThisCompletion && completion.fallbackAttempted) {\n    hotPathAudit.localRecoveryAttempts++;''', 1)
+text = text.replace('''  if (completion.full) {\n    hotPathAudit.fullScanJobs++;''', '''  if (auditThisCompletion && completion.full) {\n    hotPathAudit.fullScanJobs++;''', 1)
+text = text.replace('''  hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;''', '''  if (auditThisCompletion) hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;''', 1)
+text = text.replace('''  multiSampleRetries: 0,\n  pixelAuditTracks:''', '''  multiSampleRetries: 0,\n  anchorBypassAttempts: 0,\n  anchorBypassSuccesses: 0,\n  pixelAuditTracks:''', 1)
+text = text.replace('''    hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;''', '''    hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;\n    hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;\n    hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;''', 1)
+text = text.replace('''Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}''', '''Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}\nAnchor bypass CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}''', 1)
+main.write_text(text)
