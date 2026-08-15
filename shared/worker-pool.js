@@ -38,15 +38,14 @@ class DecodeWorkerPool {
       this.jobTimers[slot] = void 0;
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
-              this.activeFull[slot] = false;
-        this.onAvailable?.(slot);
-        const completion = {
+      this.activeFull[slot] = false;
+      this.onAvailable?.(slot);
+      const completion = {
         full: Boolean(message.full),
         symbolCount: symbols.length,
         sightingCount: sightings.length,
         trackedAttempted: Boolean(message.trackedAttempted),
         trackedHit: Boolean(message.trackedHit),
-        yPlaneFailed: Boolean(message.yPlaneFailed),
         fallbackAttempted: Boolean(message.fallbackAttempted),
         fallbackSucceeded: Boolean(message.fallbackSucceeded),
         readFullAttempts: (_c = message.readFullAttempts) != null ? _c : 0,
@@ -90,7 +89,7 @@ class DecodeWorkerPool {
       const full = (_a = this.activeFull[slot]) != null ? _a : false;
       clearTimeout(this.jobTimers[slot]);
       this.jobTimers[slot] = void 0;
-      this.busy[slot] = id === void 0;
+      this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       if (id !== void 0) this.jobOptics.delete(id);
@@ -113,11 +112,9 @@ class DecodeWorkerPool {
         error: event.message || "Decode worker failed to start"
       });
       worker.terminate();
-      if (id !== void 0) {
-        const replacement = this.create();
-        this.workers[slot] = replacement;
-        this.configureWorker(slot, replacement);
-      }
+      const replacement = this.create();
+      this.workers[slot] = replacement;
+      this.configureWorker(slot, replacement);
     };
   }
   /** Grow or shrink in place. Terminating a busy worker drops its disposable

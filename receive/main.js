@@ -132,7 +132,7 @@ function createDecodeWorker() {
 }
 document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-const autoWorkerCount = usesScalarCodec ? Math.max(1, Math.min(3, hardwareThreadCount - 1)) : Math.max(1, Math.min(6, hardwareThreadCount - 1));
+const autoWorkerCount = Math.max(1, Math.min(6, hardwareThreadCount - 1));
 const autoWorkerOption = decodeWorkers.querySelector('option[value="auto"]');
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
 for (let count = 1; count <= hardwareThreadCount; count++) {
@@ -1625,7 +1625,10 @@ function layoutOrder(a, b) {
   if (Math.abs(dy) > Math.max(a.h, b.h) / 2) return dy;
   return a.x + a.w / 2 - (b.x + b.w / 2);
 }
+let lastOverlayDrawAt = -Infinity;
 function drawOverlay(now) {
+  if (now - lastOverlayDrawAt < 50) return;
+  lastOverlayDrawAt = now;
   var _a, _b;
   const cw = overlay.clientWidth;
   const ch = overlay.clientHeight;
