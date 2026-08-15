@@ -3079,7 +3079,7 @@ async function captureFrame(source) {
     crc32: Boolean(region.crc32)
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
-const laneCount = lockedLayout ? Math.min(3, lockedLayout.cols, lockedLayout.rows) : 0;
+const laneCount = lockedLayout ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1 ? Math.max(lockedLayout.cols, lockedLayout.rows) : Math.min(lockedLayout.cols, lockedLayout.rows)) : 0;
 const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
 if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 1 && pool.size >= laneCount) {
   const groups = Array.from(
@@ -3091,7 +3091,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 
     const track = batchTracks[index];
     const region = batchRegions[index];
     if (track.slot === void 0) continue;
-    const groupIndex = splitByColumns ? track.slot % lockedLayout.cols : Math.floor(track.slot / lockedLayout.cols);
+    const groupIndex = lockedLayout.cols === 1 ? Math.floor(track.slot / lockedLayout.cols) % laneCount : lockedLayout.rows === 1 ? track.slot % laneCount : splitByColumns ? track.slot % lockedLayout.cols : Math.floor(track.slot / lockedLayout.cols);
     if (groupIndex < 0 || groupIndex >= groups.length) continue;
     groups[groupIndex].tracks.push(track);
     groups[groupIndex].regions.push(region);

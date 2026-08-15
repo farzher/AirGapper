@@ -102,7 +102,7 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4), strictTracked = false) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4, strictTracked = false) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
