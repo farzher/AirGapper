@@ -184,13 +184,31 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset = 0, yStride = 0, payloadBytes = 0 } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0 } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
+  let ownedVideoFrame = videoFrame;
   try {
-    const yRowStride = yStride || w;
-    const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || yOffset + Math.max(0, h - 1) * yRowStride + w) : buf.byteLength;
-    const pixels = new Uint8Array(buf, 0, byteLength);
+    let yOffset = messageYOffset;
+    let yRowStride = messageYStride || w;
+    let pixels;
+    if (ownedVideoFrame) {
+      const rect = { x: cropX, y: cropY, width: w, height: h };
+      const frameBuffer = new ArrayBuffer(ownedVideoFrame.allocationSize({ rect }));
+      const planes = await ownedVideoFrame.copyTo(frameBuffer, { rect });
+      const yPlane = planes[0];
+      if (!yPlane || yPlane.stride < w) throw new Error("Camera frame has no usable Y plane");
+      yOffset = yPlane.offset;
+      yRowStride = yPlane.stride;
+      const byteLength = yOffset + Math.max(0, h - 1) * yRowStride + w;
+      if (byteLength > frameBuffer.byteLength) throw new Error("Camera Y plane is truncated");
+      pixels = new Uint8Array(frameBuffer, 0, byteLength);
+      ownedVideoFrame.close();
+      ownedVideoFrame = null;
+    } else {
+      const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || yOffset + Math.max(0, h - 1) * yRowStride + w) : buf.byteLength;
+      pixels = new Uint8Array(buf, 0, byteLength);
+    }
     const zx = await ready;
     const ptr = inputBuffer(zx, pixels.byteLength);
     zx.HEAPU8.set(pixels, ptr);
@@ -467,6 +485,8 @@ ctx.onmessage = async (e) => {
       latencyMs: performance.now() - startedAt
     });
   } catch (error) {
+    ownedVideoFrame?.close();
+    ownedVideoFrame = null;
     ctx.postMessage({
       id,
       symbols: [],

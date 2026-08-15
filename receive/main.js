@@ -2725,21 +2725,11 @@ function opticalSampleDue(source) {
   const interval = focusController.opticalIntervalMs;
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
-function openDirectLumaFrame(source) {
+function cloneDirectLumaFrame(source) {
   const frame = source.videoFrame;
   if (source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;
-  return frame;
-}
-async function copyDirectLumaCrop(frame, x, y, w, h) {
   try {
-    const rect = { x, y, width: w, height: h };
-    const buffer = new ArrayBuffer(frame.allocationSize({ rect }));
-    const planes = await frame.copyTo(buffer, { rect });
-    const yPlane = planes[0];
-    if (!yPlane || yPlane.stride < w) return null;
-    const payloadBytes = yPlane.offset + (h - 1) * yPlane.stride + w;
-    if (payloadBytes > buffer.byteLength) return null;
-    return { buffer, yOffset: yPlane.offset, yStride: yPlane.stride, payloadBytes };
+    return frame.clone();
   } catch {
     return null;
   }
@@ -3117,23 +3107,21 @@ async function captureFrame(source) {
         const h = bottom - y;
         if (w < 32 || h < 32) continue;
         let laneImage;
-        let laneLuma;
-        const laneFrame = openDirectLumaFrame(source);
-        if (laneFrame) laneLuma = await copyDirectLumaCrop(laneFrame, x, y, w, h);
-        if (!laneLuma) {
+        const laneFrame = cloneDirectLumaFrame(source);
+        if (!laneFrame) {
           laneImage = readBoundedVideoCrop(source, x, y, w, h);
           if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
         }
         const id = frameId++;
-        const laneBuffer = laneLuma ? laneLuma.buffer : laneImage.data.buffer;
-        const laneMessage = laneLuma
-          ? { id, buf: laneBuffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: "y8", yOffset: laneLuma.yOffset, yStride: laneLuma.yStride, payloadBytes: laneLuma.payloadBytes }
-          : { id, buf: laneBuffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
+        const laneMessage = laneFrame
+          ? { id, videoFrame: laneFrame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: "y8", payloadBytes: w * h }
+          : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
+        const laneTransfer = laneFrame ? [laneFrame] : [laneImage.data.buffer];
         cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
         const accepted = submitReceiverJob(
           laneMessage,
-          [laneBuffer],
-          laneLuma ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
+          laneTransfer,
+          laneFrame ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
           trace,
           source.sequence,
           group.regions,
@@ -3142,6 +3130,7 @@ async function captureFrame(source) {
           workerSlot
         );
         if (!accepted) {
+          laneFrame?.close();
           cropAttempts.delete(id);
           continue;
         }
@@ -3187,12 +3176,8 @@ async function captureFrame(source) {
         return;
       }
       let shared;
-      let sharedLuma;
-      if (healthyGrid) {
-        const sharedFrame = openDirectLumaFrame(source);
-        if (sharedFrame) sharedLuma = await copyDirectLumaCrop(sharedFrame, x, y, w, h);
-      }
-      if (!sharedLuma) {
+      const sharedFrame = healthyGrid ? cloneDirectLumaFrame(source) : null;
+      if (!sharedFrame) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
         inspectStaticQrOptics(source, shared, x, y);
         captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
@@ -3200,19 +3185,20 @@ async function captureFrame(source) {
       if (healthyGrid) {
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
-        const sharedBuffer = sharedLuma ? sharedLuma.buffer : shared.data.buffer;
-        const sharedMessage = sharedLuma
-          ? { id: id2, buf: sharedBuffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: "y8", yOffset: sharedLuma.yOffset, yStride: sharedLuma.yStride, payloadBytes: sharedLuma.payloadBytes }
-          : { id: id2, buf: sharedBuffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
+        const sharedMessage = sharedFrame
+          ? { id: id2, videoFrame: sharedFrame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: "y8", payloadBytes: w * h }
+          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
+        const sharedTransfer = sharedFrame ? [sharedFrame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(
           sharedMessage,
-          [sharedBuffer],
-          sharedLuma ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
+          sharedTransfer,
+          sharedFrame ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
           trace,
           source.sequence,
           batchRegions
         )) {
+          sharedFrame?.close();
           cropAttempts.delete(id2);
           poolBusyTimes.push(now);
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
