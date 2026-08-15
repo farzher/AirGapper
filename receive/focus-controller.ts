@@ -549,12 +549,12 @@ export class FocusController {
       ...hardwareExposureRange,
       max: Math.max(hardwareExposureRange.min, Math.min(hardwareExposureRange.max, frameSafeMax)),
     };
-    const autoExposure = this.baselineExposure !== undefined && Number.isFinite(this.baselineExposure)
-      ? this.quantize(this.baselineExposure, exposureRange)
-      : this.quantize(origin.exposureTime, exposureRange);
-    const autoIso = this.baselineIso !== undefined && Number.isFinite(this.baselineIso)
-      ? this.quantize(this.baselineIso, isoRange)
-      : this.quantize(origin.iso, isoRange);
+    // Optimize is an ongoing mode. Every pass begins from the ACTUAL currently
+    // committed winner, not the camera's original hardware-Auto baseline. That
+    // lets successive passes learn: each winner becomes the next pass's starting
+    // point and we progressively approach the fastest clean exposure boundary.
+    const autoExposure = this.quantize(origin.exposureTime, exposureRange);
+    const autoIso = this.quantize(origin.iso, isoRange);
 
     this.commitSettings(origin);
     this.optimizeState = "exposure";
@@ -999,7 +999,7 @@ export class FocusController {
       let seedIso = baseline.iso;
       // Deliberately narrow: Auto is the bright ceiling; we only search a modest
       // darker/faster band instead of plunging into an unreadable dark tail.
-      const ratios = [0.78, 0.62, 0.50];
+      const ratios = [0.85, 0.72, 0.60];
       for (let index = 0; index < ratios.length && performance.now() < deadline - 1500; index++) {
         const exposure = this.quantize(Math.max(exposureRange.min, autoExposure * ratios[index]!), exposureRange);
         if (exposure >= autoExposure || (lastGood && exposure >= lastGood.exposure)) continue;
@@ -1064,7 +1064,7 @@ export class FocusController {
       if (!passing.length) {
         await this.restoreOptimizationBest("exposure");
         this.optimizeState = "paused";
-        this.optimizeReason = "no QR-validated exposure improvement; restored pre-optimize exposure";
+        this.optimizeReason = "current QR-validated setting remains best";
         refresh();
         return;
       }

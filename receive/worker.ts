@@ -287,7 +287,7 @@ ctx.onmessage = async (e: MessageEvent) => {
       const missingTracks = [...tracks]
         .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
         .sort((a, b) => b.misses - a.misses);
-      const retryBudget = tracks.length <= 2 ? 1 : tracks.length <= 6 ? 4 : 3;
+      const retryBudget = tracks.length <= 4 ? tracks.length : tracks.length <= 6 ? 4 : 3;
       const targetedTracks = missingTracks.slice(0, retryBudget);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);
