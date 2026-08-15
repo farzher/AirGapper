@@ -58,7 +58,7 @@ export const CAMERA_TUNING = {
   convincingFocusScore: 0.62,
   severeBlurConfirmMs: 480,
   optimizeMovementConfirmMs: 650,
-  optimizeBudgetMs: 9000,
+  optimizeBudgetMs: 7000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
   acquisitionBracketDelayMs: 900,
@@ -112,6 +112,13 @@ export interface PerformanceSample {
   result: Promise<ReceivePerformance>;
 }
 
+export interface OptimizerOpticalMeasurement {
+  metrics: QrOpticalMetrics;
+  sourceFrames: number;
+  /** True when metrics came from known QR function modules rather than the global bootstrap fallback. */
+  targeted: boolean;
+}
+
 export interface OptimizerEpochRequest {
   candidateId: string;
   requestedExposure: number;
@@ -142,6 +149,14 @@ export interface OptimizerCandidateDiagnostic {
   temporalContamination: number;
   state: string;
   coarseGrid: boolean;
+  opticalTargeted: boolean;
+  opticalGood: boolean;
+  opticalMargin: number;
+  opticalSeparation: number;
+  opticalNoise: number;
+  opticalClipping: number;
+  opticalBanding: number;
+  opticalConfidence: number;
 }
 
 export interface FocusDiagnostics {
@@ -198,7 +213,7 @@ export interface FocusDiagnostics {
   exposureRefinementCount: number;
 
   optimizeState: "idle" | "baseline" | "exposure" | "verification" | "paused" | "cancelled" | "complete";
-  optimizeRound?: "coarse" | "revisit" | "finalist" | "refine";
+  optimizeRound?: "baseline" | "shutter" | "iso" | "refine" | "verify";
   optimizeVisit?: string;
   optimizeSurvivors?: string;
   optimizeDecision?: string;
@@ -466,7 +481,8 @@ export class FocusController {
   }
 
   async optimize(
-    measure: (label: string, epoch: number) => Promise<PerformanceSample>,
+    measureOptics: (label: string, epoch: number) => Promise<OptimizerOpticalMeasurement>,
+    measureDecode: (label: string, epoch: number) => Promise<PerformanceSample>,
     epochs: OptimizerEpochHooks,
   ): Promise<void> {
     if (!this.optimizeEligible()) return;
@@ -474,11 +490,11 @@ export class FocusController {
     const startedAt = performance.now();
     const deadline = startedAt + CAMERA_TUNING.optimizeBudgetMs;
     this.optimizeState = "baseline";
-    this.optimizeRound = "coarse";
+    this.optimizeRound = "baseline";
     this.optimizeCandidates = [];
     this.optimizeExposureVisited = undefined;
     this.optimizeIsoVisited = undefined;
-    this.optimizeDecision = "starting";
+    this.optimizeDecision = "measuring Auto baseline";
     this.optimizeComparison = undefined;
     this.optimizePairedSamples = 0;
 
@@ -488,30 +504,11 @@ export class FocusController {
       this.stableSince = performance.now();
     }
 
-    // Focus is not an optimization dimension. Most importantly, do NOT
-    // retrigger continuous AF merely because Optimize has no fresh payload
-    // decode yet. Some OnePlus HALs visibly hunt whenever the focus constraint
-    // is reasserted. Only take focus ownership when it is currently manual, or
-    // when static optics show convincing severe blur. Then give AF real time to
-    // settle before manual exposure probing can ever request a focus hold.
-    const focusSettings = this.settings();
-    const severeStaticBlur = Boolean(initialObservation && initialObservation.metrics.confidence >= 0.72 &&
-      initialObservation.metrics.focusScore > 0 && initialObservation.metrics.focusScore < 0.20);
-    const needsHardwareFocus = focusSettings.focusMode === "manual" || severeStaticBlur;
-    if (needsHardwareFocus) {
-      const patch: CameraPatch = {};
-      const mode = this.hardwareFocusMode();
-      if (mode && focusSettings.focusMode !== mode) patch.focusMode = mode;
-      if (this.caps.pointsOfInterest && initialObservation) {
-        patch.pointsOfInterest = [{ x: initialObservation.geometry.x, y: initialObservation.geometry.y }];
-      }
-      this.transition("OPTIMIZE_EXPOSURE", "one hardware autofocus settle before exposure tuning");
-      if (Object.keys(patch).length) await this.applyProbe(generation, patch, false);
-      if (initialObservation) await this.waitForObservations(generation, initialObservation.id, 260, 0, 2, 1000);
-      else await new Promise((resolve) => setTimeout(resolve, 360));
-      if (!this.current(generation)) return;
-    }
-
+    // Optimize never operates the lens. Focus is deliberately read-only for the
+    // whole search. applyCameraConstraint() may perform its already-learned
+    // one-time AF-hold workaround on a HAL that *requires* manual focus before it
+    // will honor manual sensor controls, but this optimizer itself never asks for
+    // autofocus, POI changes, focus-mode reassertion or focus recovery.
     const origin = this.settings();
     const hardwareExposureRange = this.caps.exposureTime;
     const isoRange = this.caps.iso;
@@ -523,20 +520,22 @@ export class FocusController {
       return;
     }
 
-    // ExposureTime is in 100 µs units. Searching exposures much longer than a
-    // camera frame is both slow and generally useless for a changing QR screen.
-    // Keep the current setting as a candidate even when hardware AE started
-    // outside this range, but do not spend the search on multi-frame shutters.
     const observedFps = Math.max(12, Math.min(120, this.latest?.captureFps || 30));
-    const frameSafeMax = 8000 / observedFps; // ~80% of one frame interval.
+    const frameSafeMax = 8000 / observedFps; // exposure units are 100 µs
     const exposureRange: NumericRange = {
       ...hardwareExposureRange,
       max: Math.max(hardwareExposureRange.min, Math.min(hardwareExposureRange.max, frameSafeMax)),
     };
+    const autoExposure = this.baselineExposure !== undefined && Number.isFinite(this.baselineExposure)
+      ? this.quantize(this.baselineExposure, exposureRange)
+      : this.quantize(origin.exposureTime, exposureRange);
+    const autoIso = this.baselineIso !== undefined && Number.isFinite(this.baselineIso)
+      ? this.quantize(this.baselineIso, isoRange)
+      : this.quantize(origin.iso, isoRange);
 
     this.commitSettings(origin);
     this.optimizeState = "exposure";
-    this.transition("OPTIMIZE_EXPOSURE", "hardware focus held; fast exposure/ISO search");
+    this.transition("OPTIMIZE_EXPOSURE", "pixel-quality exposure search; focus untouched");
 
     const median = (values: number[]): number => {
       if (!values.length) return 0;
@@ -544,7 +543,26 @@ export class FocusController {
       const middle = sorted.length >> 1;
       return sorted.length & 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
     };
-    const aggregate = (windows: ReceivePerformance[]): ReceivePerformance => {
+    const medianMetric = (samples: OptimizerOpticalMeasurement[]): QrOpticalMetrics => {
+      const metrics = samples.map((sample) => sample.metrics);
+      const value = (read: (metric: QrOpticalMetrics) => number) => median(metrics.map(read));
+      return {
+        confidence: value((m) => m.confidence),
+        focusScore: value((m) => m.focusScore),
+        exposureScore: value((m) => m.exposureScore),
+        transitionWidthModules: value((m) => m.transitionWidthModules),
+        blackLevel: value((m) => m.blackLevel),
+        whiteLevel: value((m) => m.whiteLevel),
+        separation: value((m) => m.separation),
+        noise: value((m) => m.noise),
+        clipping: value((m) => m.clipping),
+        banding: value((m) => m.banding),
+        temporalContamination: value((m) => m.temporalContamination),
+        tiles: Math.round(value((m) => m.tiles)),
+        sampledModules: Math.round(value((m) => m.sampledModules)),
+      };
+    };
+    const aggregateDecode = (windows: ReceivePerformance[]): ReceivePerformance => {
       const measurementMs = windows.reduce((sum, window) => sum + window.measurementMs, 0);
       const submittedJobs = windows.reduce((sum, window) => sum + window.submittedJobs, 0);
       const completedJobs = windows.reduce((sum, window) => sum + window.completedJobs, 0);
@@ -579,11 +597,11 @@ export class FocusController {
       exposure: number;
       iso: number;
       key: string;
-      windows: ReceivePerformance[];
+      optics: OptimizerOpticalMeasurement[];
+      decode: ReceivePerformance[];
       state: string;
       coarseGrid: boolean;
     };
-
     const candidates = new Map<string, Candidate>();
     let nextId = 1;
     const make = (exposure: number, iso: number): Candidate => {
@@ -599,105 +617,100 @@ export class FocusController {
         exposure,
         iso,
         key,
-        windows: [],
+        optics: [],
+        decode: [],
         state: "queued",
         coarseGrid: false,
       };
       candidates.set(key, candidate);
       return candidate;
     };
+    const opticsOf = (candidate: Candidate): QrOpticalMetrics | undefined =>
+      candidate.optics.length ? medianMetric(candidate.optics) : undefined;
+    const decodeOf = (candidate: Candidate): ReceivePerformance => aggregateDecode(candidate.decode);
+    const targetedOf = (candidate: Candidate): boolean =>
+      candidate.optics.filter((sample) => sample.targeted).length >= Math.max(1, Math.ceil(candidate.optics.length / 2));
 
-    // Remember the hardware-Auto baseline independently of the current manual
-    // state. Re-running Optimize must not progressively redefine an already
-    // dark optimized setting as the new brightness ceiling.
-    const autoExposure = this.baselineExposure !== undefined && Number.isFinite(this.baselineExposure)
-      ? this.quantize(this.baselineExposure, exposureRange) : origin.exposureTime;
-    const autoIso = this.baselineIso !== undefined && Number.isFinite(this.baselineIso)
-      ? this.quantize(this.baselineIso, isoRange) : origin.iso;
-    const incumbent = make(autoExposure, autoIso);
-    const performanceOf = (candidate: Candidate): ReceivePerformance => aggregate(candidate.windows);
-    const visitQrRates = (candidate: Candidate): number[] =>
-      candidate.windows.map((window) => window.validDecodesPerSecond);
-    const robustQrRate = (candidate: Candidate): number => {
-      const rates = visitQrRates(candidate);
-      if (!rates.length) return 0;
-      return rates.length === 1 ? rates[0]! : median(rates);
+    type QualityThresholds = {
+      separation: number;
+      confidence: number;
+      noiseRatio: number;
+      clipping: number;
+      banding: number;
     };
-    const successRate = (candidate: Candidate): number => performanceOf(candidate).perQrAttemptSuccessRate;
-
-    // Wilson interval keeps a candidate with only a few unlucky observations
-    // from being discarded as confidently as a well-sampled bad candidate.
-    const wilson = (candidate: Candidate, upper: boolean): number => {
-      const p = performanceOf(candidate);
-      const n = p.qrAttempts;
-      if (!n) return upper ? 1 : 0;
-      const phat = Math.max(0, Math.min(1, p.validDecodes / n));
-      const z = 1.64; // ~90%; enough for racing, not scientific reporting.
-      const z2 = z * z;
-      const center = (phat + z2 / (2 * n)) / (1 + z2 / n);
-      const margin = z * Math.sqrt((phat * (1 - phat) + z2 / (4 * n)) / n) / (1 + z2 / n);
-      return Math.max(0, Math.min(1, center + (upper ? margin : -margin)));
+    let targetedThresholds: QualityThresholds | undefined;
+    let globalThresholds: QualityThresholds | undefined;
+    const thresholdsFrom = (baseline: QrOpticalMetrics, targeted: boolean): QualityThresholds => {
+      const noiseRatio = baseline.noise / Math.max(1, baseline.separation);
+      return targeted ? {
+        separation: Math.max(40, Math.min(64, baseline.separation * 0.58)),
+        confidence: Math.max(0.76, Math.min(0.90, baseline.confidence * 0.90)),
+        noiseRatio: Math.max(0.26, Math.min(0.48, noiseRatio * 1.65 + 0.03)),
+        clipping: Math.max(0.42, Math.min(0.70, baseline.clipping + 0.22)),
+        banding: Math.max(0.34, Math.min(0.52, baseline.banding + 0.16)),
+      } : {
+        separation: Math.max(30, Math.min(54, baseline.separation * 0.50)),
+        confidence: Math.max(0.52, Math.min(0.78, baseline.confidence * 0.82)),
+        noiseRatio: Math.max(0.38, Math.min(0.68, noiseRatio * 1.8 + 0.08)),
+        clipping: 0.82,
+        banding: 0.75,
+      };
     };
-
-    const finalCompare = (a: Candidate, b: Candidate): number => {
-      const ap = performanceOf(a), bp = performanceOf(b);
-      // Optimize the thing the user actually cares about: valid QR/s. Every
-      // candidate in a run uses the same probe geometry/mode and comparable
-      // settled-frame bursts, so QR/s is the clearest primary signal.
-      const qrGap = robustQrRate(a) - robustQrRate(b);
-      if (Math.abs(qrGap) >= Math.max(0.3, Math.max(robustQrRate(a), robustQrRate(b)) * 0.05)) {
-        return qrGap > 0 ? -1 : 1;
-      }
-      const sourceA = ap.sourceFrames ? ap.successfulSourceFrames / ap.sourceFrames : 0;
-      const sourceB = bp.sourceFrames ? bp.successfulSourceFrames / bp.sourceFrames : 0;
-      if (Math.abs(sourceA - sourceB) >= 0.04) return sourceA > sourceB ? -1 : 1;
-      const successGap = successRate(a) - successRate(b);
-      if (Math.abs(successGap) >= 0.035) return successGap > 0 ? -1 : 1;
-      if (Math.abs(ap.completionCoverage - bp.completionCoverage) >= 0.08) {
-        return ap.completionCoverage > bp.completionCoverage ? -1 : 1;
-      }
-      // Only true ties prefer less temporal integration, then less gain.
-      if (a.exposure !== b.exposure) return a.exposure - b.exposure;
-      return a.iso - b.iso;
-    };
-    const survivalCompare = (a: Candidate, b: Candidate): number => {
-      const confidenceGap = wilson(a, true) - wilson(b, true);
-      if (Math.abs(confidenceGap) > 0.02) return confidenceGap > 0 ? -1 : 1;
-      return finalCompare(a, b);
+    const thresholdFor = (candidate: Candidate): QualityThresholds | undefined =>
+      targetedOf(candidate) ? targetedThresholds : globalThresholds;
+    const quality = (candidate: Candidate): { good: boolean; comfortable: boolean; margin: number; needsGain: boolean } => {
+      const metric = opticsOf(candidate);
+      const threshold = thresholdFor(candidate);
+      if (!metric || !threshold) return { good: false, comfortable: false, margin: -Infinity, needsGain: true };
+      const noiseLimit = Math.max(14, metric.separation * threshold.noiseRatio);
+      const margins = [
+        (metric.separation - threshold.separation) / Math.max(1, threshold.separation),
+        (metric.confidence - threshold.confidence) / Math.max(0.1, 1 - threshold.confidence),
+        (noiseLimit - metric.noise) / Math.max(1, noiseLimit),
+        (threshold.clipping - metric.clipping) / Math.max(0.1, threshold.clipping),
+        (threshold.banding - metric.banding) / Math.max(0.1, threshold.banding),
+      ];
+      const margin = Math.min(...margins);
+      const needsGain = metric.separation < threshold.separation || metric.confidence < threshold.confidence;
+      return { good: margin >= 0, comfortable: margin >= 0.07, margin, needsGain };
     };
 
     const refresh = (): void => {
-      const evaluated = [...candidates.values()].filter((candidate) => candidate.windows.length).sort(finalCompare);
+      const evaluated = [...candidates.values()].filter((candidate) => candidate.optics.length || candidate.decode.length);
       this.optimizeCandidates = evaluated.map((candidate) => {
-        const p = performanceOf(candidate);
+        const metric = opticsOf(candidate);
+        const p = decodeOf(candidate);
+        const q = quality(candidate);
         return {
           candidateId: candidate.id,
           exposure: candidate.exposure,
           iso: candidate.iso,
-          visits: candidate.windows.length,
-          sourceFrames: p.sourceFrames,
+          visits: candidate.optics.length,
+          sourceFrames: candidate.optics.reduce((sum, sample) => sum + sample.sourceFrames, 0),
           successfulSourceFrames: p.successfulSourceFrames,
           qrAttempts: p.qrAttempts,
           validDecodes: p.validDecodes,
           successRate: p.perQrAttemptSuccessRate,
-          normalizedQrRate: robustQrRate(candidate),
+          normalizedQrRate: p.validDecodesPerSecond,
           completionCoverage: p.completionCoverage,
-          temporalContamination: p.temporalContamination ?? 0,
+          temporalContamination: metric?.temporalContamination ?? 0,
           state: candidate.state,
           coarseGrid: candidate.coarseGrid,
+          opticalTargeted: targetedOf(candidate),
+          opticalGood: q.good,
+          opticalMargin: Number.isFinite(q.margin) ? q.margin : -1,
+          opticalSeparation: metric?.separation ?? 0,
+          opticalNoise: metric?.noise ?? 0,
+          opticalClipping: metric?.clipping ?? 0,
+          opticalBanding: metric?.banding ?? 0,
+          opticalConfidence: metric?.confidence ?? 0,
         };
-      });
+      }).sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
       if (evaluated.length) {
         const exposures = evaluated.map((candidate) => candidate.exposure);
         const isos = evaluated.map((candidate) => candidate.iso);
-        const coarseMeasured = evaluated.filter((candidate) => candidate.coarseGrid).length;
-        const coarseTotal = Math.max(1, [...candidates.values()].filter((candidate) => candidate.coarseGrid).length);
-        this.optimizeExposureVisited = {
-          min: Math.min(...exposures), max: Math.max(...exposures), coverage: coarseMeasured / coarseTotal,
-        };
-        this.optimizeIsoVisited = {
-          min: Math.min(...isos), max: Math.max(...isos), coverage: coarseMeasured / coarseTotal,
-        };
+        this.optimizeExposureVisited = { min: Math.min(...exposures), max: Math.max(...exposures), coverage: 1 };
+        this.optimizeIsoVisited = { min: Math.min(...isos), max: Math.max(...isos), coverage: 1 };
       }
       this.changed();
     };
@@ -722,14 +735,6 @@ export class FocusController {
         exposureTime: requested.requestedExposure,
         iso: requested.requestedIso,
       };
-
-      // Android camera providers are not transactional here. Some return false
-      // from applyConstraints even though one or both values are accepted, some
-      // expose the previous values through getSettings for several frames, and
-      // some only accept exposure/ISO reliably when the axes are nudged in two
-      // calls. Never make optimizer measurement availability depend on the
-      // boolean return from a single constraint call. The ACTUAL settings after
-      // a short staged apply are the candidate identity.
       await this.applyProbe(generation, patch, false);
 
       const requestedChange = before.exposureTime !== requested.requestedExposure || before.iso !== requested.requestedIso;
@@ -744,27 +749,15 @@ export class FocusController {
         }
         return observed;
       };
-
-      let actual = await readApplied(260);
+      let actual = await readApplied(240);
       if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso && this.current(generation)) {
-        // Camera-axis staging and device quirk detection live in
-        // applyCameraConstraint(). Retry the complete candidate rather than
-        // generating three extra mutations that can themselves perturb 3A.
         await this.applyProbe(generation, patch, false);
-        actual = await readApplied(560);
-      }
-      if (actual.exposureTime === undefined || actual.iso === undefined) {
-        // Last-resort baseline measurement: if the camera exposes usable manual
-        // values at all, measure what it actually produced instead of creating a
-        // run with zero samples. This also makes rejected requests collapse to a
-        // duplicate candidate rather than aborting the round.
-        actual = this.settings();
+        actual = await readApplied(520);
       }
       if (actual.exposureTime === undefined || actual.iso === undefined) {
         this.optimizeReason = "camera never reported usable manual exposure/ISO settings";
         return undefined;
       }
-
       const key = `${actual.exposureTime}|${actual.iso}`;
       let candidate = candidates.get(key);
       if (!candidate) {
@@ -776,7 +769,6 @@ export class FocusController {
         candidates.set(key, candidate);
       }
       candidate.coarseGrid ||= requested.coarseGrid;
-
       const epoch = await epochs.open({
         candidateId: candidate.id,
         requestedExposure: requested.requestedExposure,
@@ -791,245 +783,259 @@ export class FocusController {
       return !this.current(generation) ? undefined : { candidate, epoch };
     };
 
-    const captureRound = async (
-      requested: Candidate[],
+    const measureCandidate = async (
+      requested: Candidate,
+      label: string,
       round: FocusDiagnostics["optimizeRound"],
-    ): Promise<Candidate[]> => {
+      allowPastDeadline = false,
+    ): Promise<Candidate | undefined> => {
       this.optimizeRound = round;
-      const pending: Promise<void>[] = [];
-      const captured: Candidate[] = [];
-      const visited = new Set<string>();
-      for (let index = 0; index < requested.length && performance.now() < deadline; index++) {
-        const active = await activateExposureCandidate(requested[index]!);
-        if (!active || visited.has(active.candidate.key)) {
-          if (active) epochs.close(active.epoch);
-          continue;
-        }
-        const { candidate, epoch } = active;
-        visited.add(candidate.key);
-        candidate.state = "measuring";
-        this.optimizeVisit = String(candidate.windows.length + 1);
-        this.optimizeSurvivors = `${index + 1}/${requested.length}`;
-        const sample = await measure(`${round} · ${index + 1}/${requested.length}`, epoch);
+      const active = await activateExposureCandidate(requested, allowPastDeadline);
+      if (!active) return undefined;
+      const { candidate, epoch } = active;
+      candidate.state = "measuring optics";
+      this.optimizeVisit = String(candidate.optics.length + 1);
+      let sample: OptimizerOpticalMeasurement | undefined;
+      try {
+        sample = await measureOptics(label, epoch);
+      } catch (error) {
+        this.optimizeReason = error instanceof Error ? error.message : "optical optimizer measurement failed";
+      } finally {
         epochs.close(epoch);
-        captured.push(candidate);
-        pending.push(sample.result.then((result) => {
-          candidate.windows.push(result);
-          candidate.state = result.completionCoverage >= 0.8 ? "evaluated" : "incomplete";
-          refresh();
-        }));
       }
-      await Promise.all(pending);
-      return captured;
+      if (!sample || !this.current(generation)) return undefined;
+      candidate.optics.push(sample);
+      candidate.state = "measured";
+      if (sample.targeted && !targetedThresholds) targetedThresholds = thresholdsFrom(sample.metrics, true);
+      if (!sample.targeted && !globalThresholds) globalThresholds = thresholdsFrom(sample.metrics, false);
+      refresh();
+      return candidate;
     };
 
-    const logLevels = (range: NumericRange, count: number): number[] => {
-      const values = Array.from({ length: count }, (_, index) => this.quantize(
-        2 ** (Math.log2(range.min) +
-          Math.log2(range.max / range.min) * (count === 1 ? 0 : index / (count - 1))),
-        range,
-      ));
-      return values.filter((value, index) => values.indexOf(value) === index);
-    };
-
-    try {
-      const exposureLevels = logLevels(exposureRange, 4);
-      const isoLevels = logLevels(isoRange, 4);
-
-      // Field testing says the useful region is normally reached by shortening
-      // the hardware-AE shutter, often while increasing ISO. Do NOT model image
-      // brightness as exposureTime*ISO: Android camera gain curves are not
-      // photometrically comparable that way, and it incorrectly excludes known
-      // good short-shutter/high-ISO states. Instead search a compact wedge:
-      // never use a longer shutter than Auto, never go into the extremely-dark
-      // shutter tail, and only pair very high ISO with substantially shorter
-      // shutter times. This removes the obviously silly long-shutter/high-ISO
-      // corner without imposing a fake brightness equation.
-      const minimumExposure = this.quantize(Math.max(exposureRange.min, autoExposure * 0.22), exposureRange);
-      const allowed = (candidate: Candidate): boolean => {
-        if (candidate.exposure > autoExposure * 1.01 || candidate.exposure < minimumExposure * 0.99) return false;
-        const shutterRatio = candidate.exposure / Math.max(exposureRange.min, autoExposure);
-        const isoRatio = candidate.iso / Math.max(isoRange.min, autoIso);
-        if (shutterRatio > 0.82 && isoRatio > 1.35) return false;
-        if (shutterRatio > 0.58 && isoRatio > 2.5) return false;
-        return true;
+    const tuneIsoForExposure = async (
+      exposure: number,
+      seedIso: number,
+      label: string,
+    ): Promise<{ good?: Candidate; best?: Candidate }> => {
+      const tested = new Set<string>();
+      let best: Candidate | undefined;
+      const remember = (candidate: Candidate): void => {
+        const qb = best ? quality(best) : undefined;
+        const qc = quality(candidate);
+        if (!best || qc.margin > (qb?.margin ?? -Infinity)) best = candidate;
+      };
+      const test = async (iso: number, suffix: string): Promise<Candidate | undefined> => {
+        if (performance.now() >= deadline - 900) return undefined;
+        const candidate = make(exposure, this.quantize(iso, isoRange));
+        if (tested.has(candidate.key)) return candidate.optics.length ? candidate : undefined;
+        tested.add(candidate.key);
+        this.exposureProbes++;
+        const measured = await measureCandidate(candidate, `${label} ${suffix}`, "iso");
+        if (measured) remember(measured);
+        return measured;
       };
 
-      const exposureRatios = [1, 0.62, 0.4, 0.26];
-      const midIso = this.quantize(Math.sqrt(Math.max(isoRange.min, autoIso) * isoRange.max), isoRange);
-      const isoAnchors = [
-        this.quantize(isoRange.min, isoRange),
-        this.quantize(autoIso, isoRange),
-        midIso,
-        this.quantize(isoRange.max, isoRange),
-      ].filter((value, index, all) => all.indexOf(value) === index);
-
-      let coarse: Candidate[] = [incumbent];
-      for (const ratio of exposureRatios) {
-        const exposure = this.quantize(Math.max(minimumExposure, autoExposure * ratio), exposureRange);
-        for (const iso of isoAnchors) {
-          const candidate = make(exposure, iso);
-          if (allowed(candidate)) coarse.push(candidate);
+      const seed = await test(seedIso, "seed");
+      if (!seed) return { best };
+      let q = quality(seed);
+      if (q.good) {
+        // Once a shutter is clean, search downward in gain, never upward. One or
+        // two geometric half-steps find the lowest ISO that keeps the QR clean.
+        let highGood = seed;
+        let lowBadIso = isoRange.min;
+        for (let refine = 0; refine < 2 && highGood.iso > isoRange.min * 1.04; refine++) {
+          const probeIso = this.quantize(Math.sqrt(Math.max(isoRange.min, lowBadIso) * highGood.iso), isoRange);
+          if (probeIso === highGood.iso || tested.has(`${exposure}|${probeIso}`)) break;
+          const lower = await test(probeIso, "lower gain");
+          if (!lower) break;
+          const lowerQ = quality(lower);
+          if (lowerQ.good) highGood = lower;
+          else {
+            lowBadIso = lower.iso;
+            break;
+          }
         }
+        return { good: highGood, best };
       }
-      coarse = coarse.filter((candidate, index, all) => all.indexOf(candidate) === index);
-      for (const candidate of coarse) candidate.coarseGrid = true;
 
-      this.exposureProbes += Math.max(0, coarse.length - 1);
-      this.optimizeDecision = "fast short-shutter exposure/ISO sweep";
-      await captureRound(coarse, "coarse");
-      if (!this.current(generation)) return;
-
-      const measured = [...new Set(coarse)].filter((candidate) => candidate.windows.length);
-      if (!measured.length) {
-        this.optimizeState = "paused";
-        if (!this.optimizeReason || this.optimizeReason === "idle") {
-          this.optimizeReason = "camera produced no optimizer measurements";
+      // Only increase ISO when the pixels say we are short of contrast. A noisy,
+      // clipped or banded failure is not "fixed" by blasting more gain into it.
+      if (!q.needsGain) return { best };
+      const maxIso = this.quantize(isoRange.max, isoRange);
+      const midIso = this.quantize(Math.sqrt(Math.max(seed.iso, isoRange.min) * maxIso), isoRange);
+      const upward = [midIso, maxIso].filter((iso, index, all) => iso > seed.iso && all.indexOf(iso) === index);
+      let lastBad = seed;
+      for (const iso of upward) {
+        const higher = await test(iso, iso === maxIso ? "max gain" : "more gain");
+        if (!higher) continue;
+        const higherQ = quality(higher);
+        if (higherQ.good) {
+          // One geometric midpoint is enough to avoid automatically pinning ISO
+          // to max when a substantially lower value is already clean.
+          const refineIso = this.quantize(Math.sqrt(lastBad.iso * higher.iso), isoRange);
+          if (refineIso > lastBad.iso && refineIso < higher.iso) {
+            const middle = await test(refineIso, "gain refine");
+            if (middle && quality(middle).good) return { good: middle, best };
+          }
+          return { good: higher, best };
         }
+        if (!higherQ.needsGain) break;
+        lastBad = higher;
+      }
+      return { best };
+    };
+
+    let winnerDecode: ReceivePerformance | undefined;
+    try {
+      const baselineRequested = make(autoExposure, autoIso);
+      baselineRequested.coarseGrid = true;
+      const baseline = await measureCandidate(baselineRequested, "Baseline", "baseline");
+      if (!baseline) {
+        this.optimizeState = "paused";
+        this.optimizeReason = this.optimizeReason || "camera produced no optical optimizer measurements";
         return;
       }
+      // The first sample establishes thresholds in whichever mode is currently
+      // available: exact QR-function-module optics when geometry exists, or the
+      // global black/white fallback before the first successful decode.
+      const baselineMetric = opticsOf(baseline)!;
+      if (targetedOf(baseline)) targetedThresholds ??= thresholdsFrom(baselineMetric, true);
+      else globalThresholds ??= thresholdsFrom(baselineMetric, false);
+      baseline.state = quality(baseline).good ? "Auto baseline good" : "Auto baseline";
+      refresh();
 
-      // Do NOT rescue by spraying the full camera range. If this deliberately
-      // useful band produces no decode, restore/retain the Auto baseline and let
-      // acquisition/focus logic recover rather than wasting seconds on obviously
-      // brighter or much darker settings.
-
-      // Preserve uncertainty, but only carry four candidates into the expensive
-      // revisit stage. The first pass is intentionally broad and fast.
-      let survivors = [...measured].sort(survivalCompare).slice(0, Math.min(4, measured.length));
-      for (const candidate of measured) if (!survivors.includes(candidate)) candidate.state = "screened out";
-      this.optimizeDecision = "revisiting plausible settings";
-      const revisitOrder = [...survivors.slice(2), ...survivors.slice(0, 2)].reverse();
-      await captureRound(revisitOrder, "revisit");
-
-      survivors = [...candidates.values()]
-        .filter((candidate) => candidate.windows.length)
-        .sort(finalCompare)
-        .slice(0, 2);
-      for (const candidate of candidates.values()) {
-        if (candidate.windows.length && !survivors.includes(candidate) && candidate.state !== "screened out") {
-          candidate.state = "eliminated";
+      let lastGood: Candidate | undefined = quality(baseline).good ? baseline : undefined;
+      let firstBadExposure: number | undefined;
+      let seedIso = baseline.iso;
+      const ratios = [0.62, 0.42, 0.28];
+      for (let index = 0; index < ratios.length && performance.now() < deadline - 1500; index++) {
+        const exposure = this.quantize(Math.max(exposureRange.min, autoExposure * ratios[index]!), exposureRange);
+        if (exposure >= autoExposure || (lastGood && exposure >= lastGood.exposure)) continue;
+        this.optimizeRound = "shutter";
+        this.optimizeDecision = `shorter shutter ${index + 1}/${ratios.length}`;
+        const tuned = await tuneIsoForExposure(exposure, seedIso, `Shutter ${index + 1}`);
+        if (tuned.good) {
+          tuned.good.state = "clean";
+          lastGood = tuned.good;
+          seedIso = tuned.good.iso;
+          refresh();
+          continue;
         }
+        firstBadExposure = exposure;
+        if (tuned.best) tuned.best.state = "below quality floor";
+        refresh();
+        // If max/raised gain could not make this shutter clean, shorter shutters
+        // are even less useful. Stop instead of testing the dark tail.
+        break;
       }
-      this.optimizeDecision = "two finalists";
-      await captureRound([survivors[1], survivors[0]].filter(Boolean) as Candidate[], "finalist");
 
-      let winner = [...survivors].sort(finalCompare)[0]!;
-      winner.state = "coarse winner";
-
-      // Refine only around the winning cell. Geometric midpoints are natural
-      // half-steps in multiplicative camera controls and include boundary cases.
-      if (performance.now() < deadline - 1800) {
-        const nearestIndex = (levels: number[], value: number): number => levels.reduce((best, level, index) =>
-          Math.abs(Math.log(level / value)) < Math.abs(Math.log(levels[best]! / value)) ? index : best, 0);
-        const neighborValues = (levels: number[], value: number, range: NumericRange): number[] => {
-          const index = nearestIndex(levels, value);
-          const values = [value];
-          if (index > 0) values.push(this.quantize(Math.sqrt(levels[index - 1]! * value), range));
-          if (index + 1 < levels.length) values.push(this.quantize(Math.sqrt(value * levels[index + 1]!), range));
-          return values.filter((candidate, candidateIndex) => values.indexOf(candidate) === candidateIndex);
-        };
-        const localExposure = neighborValues(exposureLevels, winner.exposure, exposureRange);
-        const localIso = neighborValues(isoLevels, winner.iso, isoRange);
-        const refinements = localIso.flatMap((iso) => localExposure.map((exposure) => make(exposure, iso)))
-          .filter((candidate, index, all) =>
-            candidate !== winner && !candidate.windows.length && allowed(candidate) && all.indexOf(candidate) === index)
-          .sort((a, b) => {
-            const da = Math.hypot(Math.log2(a.exposure / winner.exposure), Math.log2(a.iso / winner.iso));
-            const db = Math.hypot(Math.log2(b.exposure / winner.exposure), Math.log2(b.iso / winner.iso));
-            return da - db;
-          })
-          .slice(0, 3);
-        for (const candidate of refinements) candidate.state = "refinement";
-        this.exposureProbes += refinements.length;
-        if (refinements.length) {
-          this.optimizeDecision = "local refinement";
-          const refined = await captureRound(refinements, "refine");
-          const localTop = [winner, ...refined].sort(survivalCompare).slice(0, 3);
-          await captureRound([...localTop].reverse(), "refine");
-          winner = localTop.sort(finalCompare)[0]!;
+      // One boundary refinement is enough. This is deliberately not an endless
+      // hill climb: we want a fast, stable answer just inside the clean region.
+      if (lastGood && firstBadExposure && firstBadExposure < lastGood.exposure && performance.now() < deadline - 1700) {
+        const exposure = this.quantize(Math.sqrt(lastGood.exposure * firstBadExposure), exposureRange);
+        if (exposure < lastGood.exposure && exposure > firstBadExposure) {
+          this.optimizeDecision = "quality-boundary refinement";
+          const refined = await tuneIsoForExposure(exposure, lastGood.iso, "Boundary");
+          if (refined.good) {
+            refined.good.state = "clean boundary";
+            lastGood = refined.good;
+            seedIso = refined.good.iso;
+          } else if (refined.best) refined.best.state = "boundary failed";
+          refresh();
         }
       }
 
-      // Final A/B race gets substantially more frames than exploration. This is
-      // the only place we spend real confidence budget.
-      const finalTwo = [...candidates.values()]
-        .filter((candidate) => candidate.windows.length)
-        .sort(finalCompare)
-        .slice(0, 2);
-      if (finalTwo.length > 1 && performance.now() < deadline - 1200) {
-        this.optimizeDecision = "final A/B";
-        await captureRound([finalTwo[1]!, finalTwo[0]!], "finalist");
-        winner = finalTwo.sort(finalCompare)[0]!;
+      const measured = [...candidates.values()].filter((candidate) => candidate.optics.length);
+      if (!measured.length) {
+        this.optimizeState = "paused";
+        this.optimizeReason = "camera produced no optical optimizer measurements";
+        return;
+      }
+      const targetedPassingExists = measured.some((candidate) => targetedOf(candidate) && quality(candidate).good);
+      const selectionPool = targetedPassingExists ? measured.filter((candidate) => targetedOf(candidate)) : measured;
+      const comfortable = selectionPool.filter((candidate) => quality(candidate).comfortable)
+        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
+      const passing = selectionPool.filter((candidate) => quality(candidate).good)
+        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
+      let opticalWinner = comfortable[0] ?? passing[0] ?? selectionPool.sort((a, b) => quality(b).margin - quality(a).margin)[0]!;
+      opticalWinner.state = quality(opticalWinner).good ? "optical winner" : "best available optics";
+      const safer = [...passing]
+        .filter((candidate) => candidate !== opticalWinner && candidate.exposure >= opticalWinner.exposure)
+        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso)[0]
+        ?? (baseline !== opticalWinner ? baseline : undefined);
+      this.optimizeDecision = safer ? "brief QR/s sanity A/B" : "brief QR/s sanity";
+      refresh();
+
+      // Decoder throughput is now only a final veto/sanity check. It does not
+      // steer the exposure search. Compare at most two settings, once each.
+      const finalists = [opticalWinner, safer].filter((candidate, index, all): candidate is Candidate =>
+        Boolean(candidate) && all.indexOf(candidate) === index);
+      for (let index = finalists.length - 1; index >= 0 && performance.now() < deadline + 1000; index--) {
+        const candidate = finalists[index]!;
+        this.optimizeRound = "verify";
+        const active = await activateExposureCandidate(candidate, true);
+        if (!active) continue;
+        const sample = await measureDecode(`verify · ${finalists.length - index}/${finalists.length}`, active.epoch);
+        epochs.close(active.epoch);
+        const result = await sample.result;
+        active.candidate.decode.push(result);
+        active.candidate.state = active.candidate === opticalWinner ? "optical winner verified" : "safer verified";
+        refresh();
       }
 
-      this.optimizeState = "verification";
-      this.optimizeRound = undefined;
-      const final = await activateExposureCandidate(winner, true);
-      if (!final) {
+      if (safer) {
+        const winnerP = decodeOf(opticalWinner);
+        const saferP = decodeOf(safer);
+        const saferClearlyWins = saferP.validDecodes >= 2 &&
+          (winnerP.validDecodes === 0 || saferP.validDecodesPerSecond > winnerP.validDecodesPerSecond * 1.18);
+        if (saferClearlyWins) {
+          opticalWinner.state = "QR/s vetoed";
+          safer.state = "winner";
+          opticalWinner = safer;
+        }
+      }
+
+      const restored = await activateExposureCandidate(opticalWinner, true);
+      if (!restored) {
         this.optimizeState = "paused";
         this.optimizeReason = "winning settings could not be restored";
         return;
       }
-      const verification = await measure("verify", final.epoch);
-      epochs.close(final.epoch);
-      const verificationResult = await verification.result;
-      winner.windows.push(verificationResult);
-      winner.state = "winner";
-      refresh();
-
-      if (verificationResult.completionCoverage < 0.75 || verificationResult.qrAttempts < 2 ||
-          verificationResult.validDecodes === 0) {
-        await this.restoreOptimizationBest("exposure");
-        this.optimizeState = "paused";
-        this.optimizeReason = "winner did not survive final verification; original exposure restored";
-        if (initialObservation && this.current(generation)) this.lock(initialObservation, this.optimizeReason);
-        return;
-      }
-
-      const restored = await activateExposureCandidate(winner, true);
-      if (!restored) {
-        this.optimizeState = "paused";
-        this.optimizeReason = "winner could not be re-applied";
-        return;
-      }
       epochs.close(restored.epoch);
       this.commitSettings(this.settings());
-
+      winnerDecode = decodeOf(opticalWinner);
+      this.optimizeBestPerformance = winnerDecode;
+      this.optimizeCandidatePerformance = winnerDecode;
+      const winnerOptics = opticsOf(opticalWinner)!;
       const finalObservation = this.latest?.at && this.latest.at >= startedAt ? this.latest : initialObservation;
-      if (!this.current(generation)) return;
 
       this.optimizeState = "complete";
+      this.optimizeRound = undefined;
       this.optimizeVisit = undefined;
       this.optimizeSurvivors = undefined;
       this.optimizeDecision = "winner committed";
-      this.optimizeBestPerformance = verificationResult;
-      const originPerformance = performanceOf(incumbent);
-      const baselineRate = originPerformance.validDecodesPerSecond;
-      const gain = baselineRate > 0
-        ? (verificationResult.validDecodesPerSecond / baselineRate - 1) * 100
-        : 0;
-      this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${verificationResult.validDecodesPerSecond.toFixed(1)} QR/s`;
-      this.optimizeReason = `${candidates.size} actual exposure/ISO settings tested; repeated visits + final A/B`;
+      const qrRate = winnerDecode.validDecodesPerSecond;
+      this.optimizeSummary = `${qrRate.toFixed(1)} QR/s · separation ${winnerOptics.separation.toFixed(0)} · noise ${winnerOptics.noise.toFixed(1)}`;
+      this.optimizeReason = `${measured.length} optical settings measured; decoder used only for final sanity check`;
+      refresh();
       if (finalObservation) {
-        this.lock(finalObservation, "exposure/ISO optimizer converged; hardware-selected focus retained");
+        this.lock(finalObservation, "pixel-quality exposure optimizer converged; focus untouched");
       } else {
-        // Optimize can bootstrap from zero prior decodes. The winning manual
-        // exposure is already committed; return to acquisition without resetting
-        // it to AE and let the first production QR establish geometry normally.
         this.lockedAt = performance.now();
-        this.transition("STABILIZING", "optimizer converged from decode-only bootstrap; winning exposure retained");
+        this.transition("STABILIZING", "pixel-quality optimizer converged from global contrast bootstrap");
         this.changed();
       }
     } finally {
       epochs.finish();
     }
   }
+
   startOptimizer(
-    measure: (label: string, epoch: number) => Promise<PerformanceSample>,
+    measureOptics: (label: string, epoch: number) => Promise<OptimizerOpticalMeasurement>,
+    measureDecode: (label: string, epoch: number) => Promise<PerformanceSample>,
     epochs: OptimizerEpochHooks,
   ): Promise<void> {
-    return this.optimize(measure, epochs);
+    return this.optimize(measureOptics, measureDecode, epochs);
   }
 
   pauseOptimizer(reason = "optimizer paused"): void {
@@ -1469,7 +1475,7 @@ export class FocusController {
     this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
   }
   private retryStabilizingAf(geometry: FocusGeometry): void {
-    const mode = this.hardwareFocusMode();
+    const mode = this.acquisitionFocusMode();
     if (mode === "continuous" && this.settings().focusMode === "continuous") {
       // Continuous AF is already an active control loop. Re-sending the mode or
       // repeatedly moving its POI can restart lens scans on some OnePlus HALs.
@@ -1511,12 +1517,20 @@ export class FocusController {
   ): Promise<void> {
     const track = this.track;
     if (!track || track.readyState !== "live" || !this.current(generation)) return;
-    const mode = this.hardwareFocusMode();
+    const mode = this.acquisitionFocusMode();
     const patch: CameraPatch = {};
     if (mode) {
       this.requestedMode = mode;
-      if (this.settings().focusMode !== mode) patch.focusMode = mode;
-      if (geometry && this.caps.pointsOfInterest) patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
+      const changingMode = this.settings().focusMode !== mode;
+      // single-shot is an explicit refocus command, so re-applying it is
+      // intentional. Continuous AF, by contrast, is never reasserted once live.
+      if (changingMode || mode === "single-shot") patch.focusMode = mode;
+      // On several OnePlus HALs, updating the AF point while continuous AF is
+      // already active restarts a full lens scan. Aim it only when establishing
+      // the mode; after that continuous AF owns focus and AirGapper leaves it alone.
+      if (geometry && this.caps.pointsOfInterest && (mode !== "continuous" || changingMode)) {
+        patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
+      }
     }
     if (resetExposure && this.exposureModes().includes("continuous")) {
       // Force a real AE reset even when getSettings() already says continuous:
@@ -1856,6 +1870,15 @@ export class FocusController {
     if (modes.includes("continuous") || actual === "continuous") return "continuous";
     if (modes.includes("single-shot") || actual === "single-shot") return "single-shot";
     return modes.length > 0 || actual !== undefined || Boolean(this.caps.pointsOfInterest) ? "continuous" : undefined;
+  }
+  private acquisitionFocusMode(): string | undefined {
+    const modes = this.focusModes();
+    const actual = this.settings().focusMode;
+    // A QR sender is static relative to the lens while acquiring. Prefer one
+    // hardware AF sweep and then leave the lens alone; continuous AF hunting on
+    // older OnePlus devices made half the frames blurry.
+    if (modes.includes("single-shot") || actual === "single-shot") return "single-shot";
+    return this.hardwareFocusMode();
   }
   private manualFocus(): boolean { return this.focusModes().includes("manual") && Boolean(this.caps.focusDistance); }
   private manualExposure(): boolean { return this.exposureModes().includes("manual") && Boolean(this.caps.exposureTime); }

@@ -107,6 +107,94 @@ export class StaticQrOpticsAnalyzer {
     };
   }
 
+  /**
+   * Fallback used only while Optimize has not decoded a QR yet. The sender is a
+   * high-contrast black/white display, so percentile contrast over the central
+   * image gives us a useful exposure signal without pretending arbitrary scene
+   * brightness is a QR metric. As soon as one QR is decoded, Optimize switches
+   * to analyze(), which is much more precise because it samples known function
+   * modules.
+   */
+  analyzeGlobal(image: ImageData): QrOpticalMetrics | undefined {
+    const width = image.width, height = image.height;
+    if (width < 32 || height < 32) return undefined;
+    const x0 = Math.floor(width * 0.08), x1 = Math.ceil(width * 0.92);
+    const y0 = Math.floor(height * 0.08), y1 = Math.ceil(height * 0.92);
+    const area = Math.max(1, (x1 - x0) * (y1 - y0));
+    const stride = Math.max(1, Math.floor(Math.sqrt(area / 14000)));
+    const histogram = new Uint32Array(256);
+    const gradientHistogram = new Uint32Array(256);
+    const data = image.data;
+    const lumaAt = (x: number, y: number): number => {
+      const i = (y * width + x) * 4;
+      return (data[i]! * 54 + data[i + 1]! * 183 + data[i + 2]! * 19) >> 8;
+    };
+    let count = 0, clipped = 0, gradientCount = 0;
+    for (let y = y0; y < y1; y += stride) for (let x = x0; x < x1; x += stride) {
+      const value = lumaAt(x, y);
+      histogram[value] = histogram[value]! + 1;
+      if (value <= 3 || value >= 252) clipped++;
+      count++;
+      if (x + stride < x1) {
+        const gradient = Math.min(255, Math.abs(value - lumaAt(x + stride, y)));
+        gradientHistogram[gradient] = gradientHistogram[gradient]! + 1;
+        gradientCount++;
+      }
+      if (y + stride < y1) {
+        const gradient = Math.min(255, Math.abs(value - lumaAt(x, y + stride)));
+        gradientHistogram[gradient] = gradientHistogram[gradient]! + 1;
+        gradientCount++;
+      }
+    }
+    if (count < 64) return undefined;
+    const percentile = (hist: Uint32Array, total: number, fraction: number): number => {
+      const target = total * fraction;
+      let sum = 0;
+      for (let i = 0; i < hist.length; i++) {
+        sum += hist[i]!;
+        if (sum >= target) return i;
+      }
+      return hist.length - 1;
+    };
+    const black = percentile(histogram, count, 0.12);
+    const white = percentile(histogram, count, 0.88);
+    const separation = white - black;
+    if (separation < 2) return undefined;
+    const near = separation * 0.23;
+    let binaryLike = 0, noiseSquared = 0;
+    for (let value = 0; value < 256; value++) {
+      const n = histogram[value]!;
+      if (!n) continue;
+      const residual = Math.min(Math.abs(value - black), Math.abs(value - white));
+      noiseSquared += residual * residual * n;
+      if (value <= black + near || value >= white - near) binaryLike += n;
+    }
+    const noise = Math.sqrt(noiseSquared / count);
+    const confidence = clamp01(binaryLike / count * clamp01((separation - 12) / 42));
+    const edge90 = gradientCount ? percentile(gradientHistogram, gradientCount, 0.90) : 0;
+    const edgeStrength = edge90 / Math.max(1, separation);
+    const focusScore = clamp01((edgeStrength - 0.10) / 0.52) * clamp01((separation - 18) / 30);
+    const clipping = clipped / count;
+    const signal = clamp01((separation - 28) / 90);
+    const exposureScore = signal * clamp01((confidence - 0.45) / 0.5) *
+      clamp01(1 - noise / Math.max(24, separation * 0.38)) * (1 - clipping * 0.2);
+    return {
+      confidence,
+      focusScore,
+      exposureScore,
+      transitionWidthModules: 1 - focusScore,
+      blackLevel: black,
+      whiteLevel: white,
+      separation,
+      noise,
+      clipping,
+      banding: 0,
+      temporalContamination: 0,
+      tiles: 0,
+      sampledModules: count,
+    };
+  }
+
   private analyzeTarget(image: ImageData, modules: number): QrOpticalMetrics | undefined {
     this.blackCount = 0;
     this.whiteCount = 0;

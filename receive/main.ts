@@ -49,8 +49,9 @@ import {
   type FocusStrategy,
   type PerformanceSample,
   type ReceivePerformance,
+  type OptimizerOpticalMeasurement,
 } from "./focus-controller";
-import { StaticQrOpticsAnalyzer, type QrOpticalTarget } from "./qr-optics";
+import { StaticQrOpticsAnalyzer, type QrOpticalMetrics, type QrOpticalTarget } from "./qr-optics";
 import {
   copyTextOnAndroid,
   isAndroidApp,
@@ -334,6 +335,13 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
       };
 
       await applyManualSensor();
+      // Once this track has proven that AF and manual sensor controls coexist,
+      // do not pay the original device-classification delay on every optimizer
+      // candidate. Source-frame settling happens separately in optimizerEpochHooks.
+      if (manualExposureFocusPolicy === "independent") {
+        await new Promise((resolve) => setTimeout(resolve, 45));
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, manualExposureFocusPolicy === "requires-hold" ? 90 : 170));
 
       if (manualExposureMatches()) {
@@ -354,11 +362,6 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
         }
         return;
       }
-
-      // A camera previously proven independent should never have AF disabled
-      // merely because one later candidate was slow or clamped. Higher layers
-      // will identify the actual accepted exposure/ISO and continue.
-      if (manualExposureFocusPolicy === "independent") return;
 
       // Only now test the OnePlus-12R-style coupled behavior: hold the
       // hardware-selected lens WITHOUT writing a focus distance, then retry the
@@ -674,7 +677,7 @@ type OptimizerTraceEvent = {
   time: number;
   event: "APPLY" | "ACTUAL_SETTINGS" | "TRANSITION_FRAME" | "CANDIDATE_OPEN" | "CAPTURE" |
     "JOB_SUBMIT" | "JOB_COMPLETE" | "VALID_DECODE" | "USEFUL_SYMBOL" | "ATTRIBUTION_BUG" |
-    "CANDIDATE_CLOSE" | "CANDIDATE_SCORE";
+    "OPTICS_QR" | "OPTICS_GLOBAL" | "CANDIDATE_CLOSE" | "CANDIDATE_SCORE";
   candidateId?: string;
   candidateEpoch?: number;
   sourceSequence?: number;
@@ -698,6 +701,10 @@ type CandidateEvidence = {
   validDecodes: number;
   usefulSymbols: number;
   temporalSamples: number[];
+  /** Optical measurements are independent of worker availability. */
+  opticalSourceFrames: Set<number>;
+  opticalSamples: QrOpticalMetrics[];
+  opticalTargetedSamples: number;
   performance?: ReceivePerformance;
 };
 type OptimizerEpoch = {
@@ -774,6 +781,50 @@ function refreshCandidateEvidence(evidence: CandidateEvidence): ReceivePerforman
   else evidence.performance = next;
   return evidence.performance;
 }
+function aggregateOptimizerOptics(samples: readonly QrOpticalMetrics[]): QrOpticalMetrics | undefined {
+  if (!samples.length) return undefined;
+  const median = (values: number[]): number => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = sorted.length >> 1;
+    return sorted.length & 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+  };
+  const value = (read: (sample: QrOpticalMetrics) => number) => median(samples.map(read));
+  return {
+    confidence: value((m) => m.confidence),
+    focusScore: value((m) => m.focusScore),
+    exposureScore: value((m) => m.exposureScore),
+    transitionWidthModules: value((m) => m.transitionWidthModules),
+    blackLevel: value((m) => m.blackLevel),
+    whiteLevel: value((m) => m.whiteLevel),
+    separation: value((m) => m.separation),
+    noise: value((m) => m.noise),
+    clipping: value((m) => m.clipping),
+    banding: value((m) => m.banding),
+    temporalContamination: value((m) => m.temporalContamination),
+    tiles: Math.round(value((m) => m.tiles)),
+    sampledModules: Math.round(value((m) => m.sampledModules)),
+  };
+}
+
+function newCandidateEvidence(epochId: number): CandidateEvidence {
+  return {
+    epoch: epochId,
+    startedAt: receiverNow(),
+    closedAt: 0,
+    submittedJobs: 0,
+    completedJobs: 0,
+    sourceFrames: new Set(),
+    successfulSourceFrames: new Set(),
+    qrAttempts: 0,
+    validDecodes: 0,
+    usefulSymbols: 0,
+    temporalSamples: [],
+    opticalSourceFrames: new Set(),
+    opticalSamples: [],
+    opticalTargetedSamples: 0,
+  };
+}
+
 function optimizerAttributionComplete(scanId: number): void {
   const attribution = scanCandidateEpoch.get(scanId);
   if (!attribution) return;
@@ -852,6 +903,30 @@ const optimizerEpochHooks = {
   },
 };
 
+async function measureOptimizerOptics(label: string, epochId: number): Promise<OptimizerOpticalMeasurement> {
+  const token = optimizeMeasureToken;
+  const epoch = activeOptimizerEpoch;
+  if (!epoch || epoch.id !== epochId) throw new Error("Optimizer candidate epoch is not active");
+  const evidence = newCandidateEvidence(epochId);
+  candidateEvidenceWindows.set(epochId, evidence);
+  const lower = label.toLowerCase();
+  const targetFrames = lower.startsWith("baseline") ? 3 : lower.startsWith("boundary") ? 3 : 2;
+  const maxBurstMs = targetFrames >= 3 ? 520 : 380;
+  epoch.collecting = true;
+  while (token === optimizeMeasureToken && activeOptimizerEpoch?.id === epochId) {
+    opticsOptimizeStatus.textContent = `${label} · optics ${evidence.opticalSamples.length}/${targetFrames}`;
+    if (evidence.opticalSamples.length >= targetFrames || receiverNow() - evidence.startedAt >= maxBurstMs) break;
+    await new Promise((resolve) => setTimeout(resolve, 8));
+  }
+  epoch.collecting = false;
+  evidence.closedAt = receiverNow();
+  const metrics = aggregateOptimizerOptics(evidence.opticalSamples);
+  if (!metrics) throw new Error("camera produced no optical optimizer measurements");
+  const targeted = evidence.opticalTargetedSamples >= Math.max(1, Math.ceil(evidence.opticalSamples.length / 2));
+  opticsOptimizeStatus.textContent = `${label} · sep ${metrics.separation.toFixed(0)} · noise ${metrics.noise.toFixed(1)}`;
+  return { metrics, sourceFrames: evidence.opticalSourceFrames.size, targeted };
+}
+
 async function measureReceivePerformance(label: string, epochId: number): Promise<PerformanceSample> {
   const token = optimizeMeasureToken;
   const epoch = activeOptimizerEpoch;
@@ -864,21 +939,18 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   // Exploration should feel fast. Slow decoder completions may arrive later;
   // camera dwell is based on settled source-frame opportunities, not worker latency.
   const targetFrames = discovery
-    ? phase === "verify" ? 7 : phase === "finalist" ? 5 : phase === "revisit" ? 3 : 2
-    : phase === "verify" ? (singleQr ? 8 : 7)
-      : phase === "finalist" ? (singleQr ? 6 : 5)
+    ? phase === "verify" ? 4 : phase === "finalist" ? 4 : phase === "revisit" ? 3 : 2
+    : phase === "verify" ? (singleQr ? 5 : 4)
+      : phase === "finalist" ? (singleQr ? 5 : 4)
       : phase === "revisit" ? (singleQr ? 5 : 3)
       : phase === "refine" ? (singleQr ? 4 : 3)
       : (singleQr ? 4 : usesSimpleDecodeWorker ? 4 : 3);
   const maxBurstMs = discovery
-    ? phase === "verify" ? 1200 : phase === "finalist" ? 900 : 650
-    : phase === "verify" ? 1200 : phase === "finalist" ? 900 : singleQr ? 750 : 550;
-  const evidence: CandidateEvidence = {
-    epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
-    sourceFrames: new Set(), successfulSourceFrames: new Set(),
-    qrAttempts: 0, validDecodes: 0, usefulSymbols: 0,
-    temporalSamples: [focusController.diagnostics().optical?.temporalContamination ?? 0],
-  };
+    ? phase === "verify" ? 800 : phase === "finalist" ? 800 : 650
+    : phase === "verify" ? 800 : phase === "finalist" ? 800 : singleQr ? 750 : 550;
+  const evidence = newCandidateEvidence(epochId);
+  evidence.startedAt = startedAt;
+  evidence.temporalSamples.push(focusController.diagnostics().optical?.temporalContamination ?? 0);
   candidateEvidenceWindows.set(epochId, evidence);
   epoch.collecting = true;
   while (token === optimizeMeasureToken && activeOptimizerEpoch?.id === epochId) {
@@ -962,7 +1034,7 @@ function beginOptimizeWhenReady(): void {
   candidateEvidenceWindows.clear();
   opticsKeep.hidden = true;
   opticsOptimizeStatus.textContent = optimizerDiscoveryMode ? "Exploring from camera…" : "Exploring…";
-  void focusController.startOptimizer(measureReceivePerformance, optimizerEpochHooks).then(() => {
+  void focusController.startOptimizer(measureOptimizerOptics, measureReceivePerformance, optimizerEpochHooks).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
@@ -970,7 +1042,7 @@ function beginOptimizeWhenReady(): void {
       // A no-baseline optimization used full-frame probes that intentionally did
       // not mutate production tracking. Promote one proven decode only after the
       // tournament ends so normal tracking/overlay can take over immediately.
-      if (optimizerDiscoveryMode && optimizerBootstrapDecode) {
+      if (optimizerBootstrapDecode) {
         noteRegion(optimizerBootstrapDecode.box, receiverNow(), true, optimizerBootstrapDecode.info);
       }
       const performance = finished.optimizeBestPerformance;
@@ -979,7 +1051,7 @@ function beginOptimizeWhenReady(): void {
         : "Optimal";
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
-    } else opticsOptimizeStatus.textContent = "Waiting…";
+    } else opticsOptimizeStatus.textContent = finished.optimizeReason ?? "Optimize stopped";
   }).finally(() => {
     optimizeRunning = false;
     optimizerDiscoveryMode = false;
@@ -2036,19 +2108,13 @@ function renderFocusDiagnostics(): void {
   opticsKeep.hidden = diagnostic.optimizeState !== "complete";
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
-  const candidateTable = diagnostic.optimizeCandidates.map((candidate, index) =>
-    `${index === 0 ? "*" : " "} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.qrAttempts} opp · ${candidate.validDecodes} valid · ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)} QR/s · source ${(candidate.successfulSourceFrames / Math.max(1, candidate.sourceFrames) * 100).toFixed(0)}% · complete ${(candidate.completionCoverage * 100).toFixed(0)}% · ${candidate.state}`,
-  ).join("\n");
-  const coarseCandidates = diagnostic.optimizeCandidates.filter((candidate) => candidate.coarseGrid);
-  const matrixExposures = [...new Set(coarseCandidates.map((candidate) => candidate.exposure))].sort((a, b) => a - b);
-  const matrixIsos = [...new Set(coarseCandidates.map((candidate) => candidate.iso))].sort((a, b) => a - b);
-  const coverageMatrix = coarseCandidates.length ? [
-    `Exposure(ms) \\ ISO  ${matrixIsos.join("  ")}`,
-    ...matrixExposures.map((exposure) => `${formatExposureMs(exposure).replace(" ms", "").padStart(8)}  ${matrixIsos.map((iso) => {
-      const candidate = coarseCandidates.find((entry) => entry.exposure === exposure && entry.iso === iso);
-      return candidate ? `${(candidate.successRate * 100).toFixed(0)}%` : "—";
-    }).join("  ")}`),
-  ].join("\n") : "";
+  const candidateTable = diagnostic.optimizeCandidates.map((candidate) => {
+    const marker = candidate.state.includes("winner") ? "*" : " ";
+    const opticalMode = candidate.opticalTargeted ? "QR" : "global";
+    const opticalState = candidate.opticalGood ? "GOOD" : "bad";
+    const qr = candidate.qrAttempts > 0 ? ` · ${candidate.normalizedQrRate.toFixed(1)} QR/s` : "";
+    return `${marker} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · ${opticalMode} ${opticalState} · margin ${candidate.opticalMargin.toFixed(2)} · sep ${candidate.opticalSeparation.toFixed(0)} · noise ${candidate.opticalNoise.toFixed(1)} · clip ${candidate.opticalClipping.toFixed(2)} · band ${candidate.opticalBanding.toFixed(2)} · ${candidate.sourceFrames} optical frames${qr} · ${candidate.state}`;
+  }).join("\n");
   const manualCandidate = !automaticOptics && diagnostic.actualExposure && diagnostic.actualIso && diagnostic.optimizeCandidates.length
     ? diagnostic.optimizeCandidates.reduce((closest, candidate) => {
       const distance = Math.hypot(
@@ -2087,15 +2153,13 @@ function renderFocusDiagnostics(): void {
     `Useful   ${diagnostic.lastUsefulDecodeAt === undefined ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1000).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
-    `Race     survivors ${diagnostic.optimizeSurvivors ?? "—"} · decision ${diagnostic.optimizeDecision ?? "—"}${diagnostic.optimizeComparison ? ` · ${diagnostic.optimizeComparison} · ${diagnostic.optimizePairedSamples} paired` : ""}`,
-    `Steps    signal Δ ${diagnostic.optimizeExposureStepEV?.toFixed(2) ?? "—"} EV · shutter Δ ${diagnostic.optimizeShutterStepEV?.toFixed(2) ?? "—"} EV`,
+    `Search   ${diagnostic.optimizeDecision ?? "—"}`,
     diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity` : "",
     diagnostic.optimizeBestPerformance ? `Winner   ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${(diagnostic.optimizeBestPerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
-    diagnostic.optimizeReason ? `Search   ${diagnostic.optimizeReason}` : "",
-    diagnostic.optimizeExposureVisited ? `Cartesian coverage ${coarseCandidates.length}/25 actual cells · exposure ${formatExposureMs(diagnostic.optimizeExposureVisited.min)}–${formatExposureMs(diagnostic.optimizeExposureVisited.max)} · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max}` : "",
+    diagnostic.optimizeReason ? `Result   ${diagnostic.optimizeReason}` : "",
+    diagnostic.optimizeExposureVisited ? `Visited  ${diagnostic.optimizeCandidates.length} settings · exposure ${formatExposureMs(diagnostic.optimizeExposureVisited.min)}–${formatExposureMs(diagnostic.optimizeExposureVisited.max)} · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max}` : "",
     `Attribution submitted ${optimizerJobsSubmittedTotal} · mapped ${optimizerJobsMappedTotal} · completions mapped ${optimizerCompletionsMappedTotal} · unattributed ${optimizerUnattributedResults} · epoch mismatches ${optimizerEpochMismatches} · duplicate valid events ${optimizerDuplicateValidEvents} · transition frames ${optimizerTransitionFramesDiscarded}`,
-    candidateTable ? `Candidates\nExposure ISO visits frames opportunities valid success score\n${candidateTable}` : "",
-    coverageMatrix ? `2D coarse coverage\n${coverageMatrix}` : "",
+    candidateTable ? `Candidates\n${candidateTable}` : "",
     optimizerTrace.length ? `Optimizer trace\n${optimizerTrace.slice(-20).map((event) =>
       `${event.time.toFixed(0)} ${event.event} ${event.candidateId ?? "—"} ep${event.candidateEpoch ?? "—"} src${event.sourceSequence ?? "—"} scan${event.scanId ?? "—"} E${event.actualExposure ?? event.requestedExposure ?? "—"} ISO${event.actualIso ?? event.requestedIso ?? "—"} valid:${event.validDecode === undefined ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === undefined ? "—" : event.usefulSymbol ? "yes" : "no"}`,
     ).join("\n")}` : "",
@@ -3096,9 +3160,50 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
   focusController.observe(source.sequence, geometry, metrics, Math.max(1, expectedRegions), now, captureFps);
 }
 
+function captureOptimizerOpticalSample(source: ReceiverFrame): void {
+  const epoch = activeOptimizerEpoch;
+  if (!epoch?.collecting || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
+  const evidence = candidateEvidenceWindows.get(epoch.id);
+  if (!evidence || evidence.opticalSourceFrames.has(source.sequence)) return;
+
+  // Optical optimization must not depend on WASM worker availability. Read this
+  // settled source frame directly and score pixels before deciding whether a
+  // decode worker is free enough to receive the same frame.
+  const image = readBoundedVideoCrop(source, 0, 0, source.width, source.height);
+  const analyzeStarted = performance.now();
+  let metrics: QrOpticalMetrics | undefined;
+  let targeted = false;
+  if (optimizerFixedTargets.length) {
+    const targets: QrOpticalTarget[] = optimizerFixedTargets
+      .filter((target) => target.dim >= 21 && target.dim <= 177)
+      .map((target) => ({ quad: target.quad, modules: target.dim }));
+    metrics = targets.length ? opticsAnalyzer.analyze(image, targets) : undefined;
+    targeted = Boolean(metrics);
+  }
+  if (!metrics) {
+    metrics = opticsAnalyzer.analyzeGlobal(image);
+    targeted = false;
+  }
+  const analyzeMs = performance.now() - analyzeStarted;
+  opticalAnalyzeCount++;
+  opticalAnalyzeTotalMs += analyzeMs;
+  opticalAnalyzeMaxMs = Math.max(opticalAnalyzeMaxMs, analyzeMs);
+  if (!metrics) return;
+  evidence.opticalSourceFrames.add(source.sequence);
+  evidence.opticalSamples.push(metrics);
+  if (targeted) evidence.opticalTargetedSamples++;
+  evidence.temporalSamples.push(metrics.temporalContamination);
+  traceOptimizer({
+    time: receiverNow(), event: targeted ? "OPTICS_QR" : "OPTICS_GLOBAL",
+    candidateId: epoch.candidateId, candidateEpoch: epoch.id, sourceSequence: source.sequence,
+    requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+    actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+  });
+}
+
 function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace | undefined): void {
   const epoch = activeOptimizerEpoch;
-  if (!epoch?.collecting) return;
+  if (!epoch?.collecting || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
   const evidence = candidateEvidenceWindows.get(epoch.id);
   if (!evidence) return;
 
@@ -3195,15 +3300,23 @@ function captureFrame(source: ReceiverFrame) {
   if (trace) { benchmarkTraces.push(trace); activeBenchmarkFrame = trace; }
   captureTimes.push(now);
   totalCaptures++;
+  if (optimizerPipelineActive) {
+    captureOptimizerOpticalSample(source);
+    if (pool.busyCount === pool.size) {
+      capturesDropped++;
+      poolBusyTimes.push(now);
+      if (trace) { trace.decision = "optimizer optics only · worker busy"; trace.stateAfter = gridLattice.state; }
+      activeBenchmarkFrame = undefined;
+      return;
+    }
+    captureOptimizerProbe(source, trace);
+    activeBenchmarkFrame = undefined;
+    return;
+  }
   if (pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
     if (trace) { trace.decision = "worker busy"; trace.stateAfter = gridLattice.state; }
-    activeBenchmarkFrame = undefined;
-    return;
-  }
-  if (optimizerPipelineActive) {
-    captureOptimizerProbe(source, trace);
     activeBenchmarkFrame = undefined;
     return;
   }
@@ -3551,7 +3664,23 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
   if (optimizerAttribution && box) {
     optimizerOverlayHits.push({ box: { ...box }, at: decodedAt });
     if (optimizerOverlayHits.length > 80) optimizerOverlayHits.splice(0, optimizerOverlayHits.length - 80);
-    if (optimizerDiscoveryMode) optimizerBootstrapDecode = { box: { ...box }, info };
+    if (optimizerDiscoveryMode) {
+      optimizerBootstrapDecode = { box: { ...box }, info };
+      // The first real QR immediately upgrades the optimizer from global image
+      // contrast to exact known QR-function-module sampling. This geometry is
+      // optimizer-local and does not mutate production tracking mid-experiment.
+      if (info?.quad && info.modules) {
+        optimizerFixedTargets = [{
+          id: -1, slot: header.slotIndex, misses: 0,
+          quad: {
+            topLeft: { ...info.quad.topLeft }, topRight: { ...info.quad.topRight },
+            bottomRight: { ...info.quad.bottomRight }, bottomLeft: { ...info.quad.bottomLeft },
+          },
+          dim: info.modules, crc32: true,
+        }];
+        optimizerDiscoveryMode = false;
+      }
+    }
   }
   if (optimizerAttribution) {
     const epoch = optimizerAttribution.epoch;
