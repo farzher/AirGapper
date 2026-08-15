@@ -382,14 +382,14 @@ function standardBrowserModes() {
     label: formatCameraMode(width, height, fps)
   }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
 }
+function browserModeSuffix(key) {
+  return browserModeResults[key] === true ? "" : browserModeResults[key] === false ? " · Retry" : " · Try";
+}
 function populateCameraOptions() {
-  browserModes = standardBrowserModes().filter((mode) => browserModeResults[mode.key] !== false);
+  browserModes = standardBrowserModes();
   cameraResolution.replaceChildren(
     new Option("Auto", "auto"),
-    ...browserModes.map((mode) => new Option(
-      `${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`,
-      mode.key
-    ))
+    ...browserModes.map((mode) => new Option(`${mode.label}${browserModeSuffix(mode.key)}`, mode.key))
   );
   cameraResolution.value = "auto";
 }
@@ -496,6 +496,7 @@ let benchmarkCompletionChecked = false;
 let replayRunning = false;
 let receiverFrameWidth = 0;
 let receiverFrameHeight = 0;
+let lastVideoFrameInfo;
 function noteGridTransition(from, to, reason, at) {
   const trace = activeBenchmarkFrame != null ? activeBenchmarkFrame : benchmarkTraces.at(-1);
   trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
@@ -1563,30 +1564,34 @@ function populateBrowserCapabilities(track) {
   const fpsMin = (_j = (_i = caps.frameRate) == null ? void 0 : _i.min) != null ? _j : 0;
   const fpsMax = (_l = (_k = caps.frameRate) == null ? void 0 : _k.max) != null ? _l : Infinity;
   const active = track.getSettings();
+  const activeFps = Math.round((_m = active.frameRate) != null ? _m : 30);
+  if (active.width && active.height) {
+    const activeStandard = standardBrowserModes().find((mode) => sameModeSize(mode, active) && Math.abs(mode.fps - activeFps) < 1);
+    if (activeStandard) saveBrowserModeResult(activeStandard.key, true);
+  }
   if (cameraResolution.value === "auto" && active.width && active.height) {
-    const fps = Math.round((_m = active.frameRate) != null ? _m : 30);
     automaticBrowserMode = {
       key: "auto",
       width: active.width,
       height: active.height,
-      fps,
-      label: formatCameraMode(active.width, active.height, fps)
+      fps: activeFps,
+      label: formatCameraMode(active.width, active.height, activeFps)
     };
   }
-  browserModes = standardBrowserModes().filter((mode) => mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax && mode.fps >= fpsMin && mode.fps <= fpsMax && browserModeResults[mode.key] !== false && !(automaticBrowserMode && sameModeSize(mode, automaticBrowserMode) && Math.abs(mode.fps - automaticBrowserMode.fps) < 1));
+  browserModes = standardBrowserModes().filter((mode) => mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax && mode.fps >= fpsMin && mode.fps <= fpsMax);
   const prior = cameraResolution.value;
   const options = browserModes.map((mode) => ({
     width: mode.width,
     height: mode.height,
     fps: mode.fps,
-    option: new Option(`${mode.label}${browserModeResults[mode.key] === true ? "" : " · Try"}`, mode.key)
+    option: new Option(`${mode.label}${browserModeSuffix(mode.key)}`, mode.key)
   }));
   if (automaticBrowserMode) {
     options.push({
       width: automaticBrowserMode.width,
       height: automaticBrowserMode.height,
       fps: automaticBrowserMode.fps,
-      option: new Option(`${automaticBrowserMode.label} · Auto`, "auto")
+      option: new Option(`Auto · ${automaticBrowserMode.label}`, "auto")
     });
     options.sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
   } else {
@@ -1813,6 +1818,10 @@ function renderFocusDiagnostics() {
   const manualQrRate = qrReadTimes.reduce((count, time) => count + Number(time > receiverNow() - STATS_WINDOW_MS), 0);
   const manualMeasured = manualOptimizerValidation && diagnostic.actualExposure && diagnostic.actualIso && Math.abs(Math.log2(manualOptimizerValidation.exposure / diagnostic.actualExposure)) < 0.1 && Math.abs(Math.log2(manualOptimizerValidation.iso / diagnostic.actualIso)) < 0.1 ? manualOptimizerValidation : void 0;
   const manualVerdict = manualCandidate ? manualCandidate.distance > 0.35 ? "manual configuration coarse-search result: NOT TESTED" : manualMeasured && manualMeasured.performance.perQrAttemptSuccessRate > manualCandidate.candidate.successRate + 0.15 ? `TESTED AS ${manualCandidate.candidate.candidateId} · Optimize ${(manualCandidate.candidate.successRate * 100).toFixed(0)}% vs live manual ${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}% → MEASUREMENT BUG` : `TESTED AS ${manualCandidate.candidate.candidateId}` : "";
+  const sourceTrack = stream?.getVideoTracks()[0];
+  const sourceSettings = sourceTrack?.getSettings();
+  const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > receiverNow() - STATS_WINDOW_MS), 0) / (STATS_WINDOW_MS / 1e3);
+  const sourceLine = sourceSettings ? `track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
     return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
@@ -1823,6 +1832,7 @@ function renderFocusDiagnostics() {
     `Owner    ${diagnostic.focusOwner}`,
     `3A       manual exposure ${manualExposureFocusPolicy === "requires-hold" ? "requires AF hold on this camera" : manualExposureFocusPolicy}`,
     `Camera   focus writes ${cameraFocusWritesTotal} · exposure writes ${cameraExposureWritesTotal}`,
+    `Source   ${sourceLine}`,
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
@@ -1899,6 +1909,19 @@ const changeCameraSettings = async () => {
   }
   const attempted = browserModes.find((mode) => mode.key === cameraResolution.value);
   if (!attempted) return;
+  const current = track.getSettings();
+  const currentExactSize = sameModeSize(current, attempted);
+  const currentExact = currentExactSize && Math.abs((current.frameRate ?? attempted.fps) - attempted.fps) < 1;
+  if (currentExact) {
+    saveBrowserModeResult(attempted.key, true);
+    populateBrowserCapabilities(track);
+    cameraResolution.value = attempted.key;
+    readRequestedCameraSettings();
+    showNegotiatedWebMode(track);
+    saveCameraSettings();
+    attachCameraController(track);
+    return;
+  }
   try {
     await mutateCamera(track, () => track.applyConstraints({
       width: { exact: attempted.width },
@@ -1917,7 +1940,8 @@ const changeCameraSettings = async () => {
     attachCameraController(track);
   } catch {
     saveBrowserModeResult(attempted.key, false);
-    (_b = cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`)) == null ? void 0 : _b.remove();
+    const failedOption = cameraResolution.querySelector(`option[value="${CSS.escape(attempted.key)}"]`);
+    if (failedOption) failedOption.textContent = `${attempted.label} · Retry`;
     cameraResolution.value = "auto";
     populateBrowserCapabilities(track);
     showNegotiatedWebMode(track, `${attempted.label} unavailable; kept current mode`);
@@ -2744,8 +2768,7 @@ function opticalSampleDue(source) {
   const interval = focusController.opticalIntervalMs;
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
-function cloneDirectDecodeFrame(source) {
-  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+function cloneVideoFrame(source, forceRgba = false) {
   let frame = source.videoFrame;
   if (!frame) {
     try {
@@ -2754,11 +2777,20 @@ function cloneDirectDecodeFrame(source) {
       return null;
     }
   }
+  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"}`;
   try {
-    return { frame: frame.clone(), pixelFormat: DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" };
+    return { frame: frame.clone(), pixelFormat: forceRgba ? "video-rgba" : DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" };
   } catch {
     return null;
   }
+}
+function cloneDirectDecodeFrame(source) {
+  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  return cloneVideoFrame(source, false);
+}
+function cloneDirectFullScanFrame(source) {
+  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
+  return cloneVideoFrame(source, true);
 }
 
 function captureOptimizerOpticalSample(source) {
@@ -3055,6 +3087,22 @@ async function captureFrame(source) {
       scanW = Math.max(32, scanRight - scanX);
       scanH = Math.max(32, scanBottom - scanY);
     }
+    const directFull = scanX === 0 && scanY === 0 && scanW === vw && scanH === vh && !lockedGeometryTrusted
+      ? cloneDirectFullScanFrame(source)
+      : null;
+    if (directFull) {
+      const id = frameId++;
+      if (!submitReceiverJob(
+        { id, videoFrame: directFull.frame, cropX: 0, cropY: 0, w: vw, h: vh, ox: 0, oy: 0, full: true, pixelFormat: "video-rgba" },
+        [directFull.frame],
+        "DIRECT FULL FRAME",
+        trace,
+        source.sequence
+      )) directFull.frame.close();
+      if (trace) trace.stateAfter = gridLattice.state;
+      activeBenchmarkFrame = void 0;
+      return;
+    }
     const img = scanX || scanY || scanW !== vw || scanH !== vh
       ? readBoundedVideoCrop(source, scanX, scanY, scanW, scanH)
       : source.image
@@ -3093,7 +3141,7 @@ async function captureFrame(source) {
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
 const laneCount = lockedLayout ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1 ? Math.max(lockedLayout.cols, lockedLayout.rows) : Math.min(lockedLayout.cols, lockedLayout.rows)) : 0;
 const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
-if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 1 && pool.size >= laneCount) {
+if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >= 1 && pool.size >= laneCount) {
   const groups = Array.from(
     { length: laneCount },
     () => ({ tracks: [], regions: [] })
