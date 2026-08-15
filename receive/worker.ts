@@ -255,7 +255,10 @@ ctx.onmessage = async (e: MessageEvent) => {
       const decodedSlots = new Set<number>();
       const expectedSlots = new Set(tracks.flatMap((track) => track.slot === undefined ? [] : [track.slot]));
       readFullAttempts++;
-      const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(4, tracks.length + 2)), false);
+      // Ask for exactly the number of symbols this strip can contain. Larger
+      // result budgets do not create useful work here and can make the native
+      // detector retain extra candidates/finders that cannot belong to us.
+      const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
       try {
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
@@ -277,17 +280,24 @@ ctx.onmessage = async (e: MessageEvent) => {
         decoded.delete();
       }
 
-      // A broad pass can still miss a clean cell when neighboring finder
-      // patterns win. Recover a few missing cells with isolated one-QR crops.
-      // This spends CPU directly on symbols/frame instead of on empty tracked
-      // attempts. The common 4/6-code layouts get the largest retry budget.
+      // Throughput beats completeness of one camera frame. v15 could spend up
+      // to FOUR extra generic detector passes after a successful bulk decode,
+      // keeping a worker occupied for hundreds of milliseconds to rescue cells
+      // that the next source frame can supply much more cheaply. Normally return
+      // immediately after a productive bulk pass. Only rescue when that pass was
+      // nearly empty, and keep the rescue budget tiny.
       let targetedAttempts = 0;
       let targetedPixels = 0;
       let targetedSuccesses = 0;
       const missingTracks = [...tracks]
         .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
         .sort((a, b) => b.misses - a.misses);
-      const retryBudget = tracks.length <= 4 ? tracks.length : tracks.length <= 6 ? 4 : 3;
+      const decodedCount = decodedSlots.size;
+      const retryBudget = decodedCount === 0
+        ? Math.min(2, missingTracks.length)
+        : decodedCount === 1 && tracks.length >= 5
+          ? Math.min(1, missingTracks.length)
+          : 0;
       const targetedTracks = missingTracks.slice(0, retryBudget);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);

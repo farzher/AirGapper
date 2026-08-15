@@ -147,9 +147,9 @@ const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 // kill the process on older phones; modern 64-bit devices keep the fast pool.
 const autoWorkerCount = legacyAndroidApp
   ? 1
-  // Dense grids benefit directly from one worker per visible QR. Leave two
-  // logical CPUs for camera/UI work, but don't artificially cap modern 8-core
-  // phones at four decoders when a common layout contains six cells.
+  // Dense grids use a few bulk strip jobs and pipeline consecutive source
+  // frames across the pool. Leave two logical CPUs for camera/UI work while
+  // retaining enough workers for two 3-strip generations on an 8-core phone.
   : Math.max(1, Math.min(6, hardwareThreadCount - 2));
 const autoWorkerOption = decodeWorkers.querySelector<HTMLOptionElement>('option[value="auto"]')!;
 autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
@@ -3628,21 +3628,31 @@ function captureFrame(source: ReceiverFrame) {
         let submittedJobsThisFrame = 0;
         const layout = lastGridSnapshot?.layout;
 
-        // For large regular grids, parallelize SMALL MULTI-QR strips instead of
-        // one QR per worker. 3x5 becomes five 3-QR jobs; 5x3 also becomes five
-        // 3-QR jobs. One accepted source frame can therefore decode all 15 cells.
+        // Large grids are scheduled as a few LONG strips, not many short ones.
+        // A 3x5 grid becomes three 5-QR columns (and 5x3 becomes three 5-QR
+        // rows). That cuts generic detector invocations from five per source
+        // frame to three and leaves enough workers to pipeline a second source
+        // frame concurrently on a six-worker phone.
         if (layout && batchRegions.length > 6) {
-          const groupByRow = layout.cols <= layout.rows;
+          const groupByRow = layout.cols > layout.rows;
           const groups = new Map<number, Region[]>();
           for (const region of batchRegions) {
-            if (region.gridSlot === undefined || regionInflightCount(region) > 0) continue;
+            if (region.gridSlot === undefined) continue;
             const key = groupByRow ? Math.floor(region.gridSlot / layout.cols) : region.gridSlot % layout.cols;
             const group = groups.get(key) ?? [];
             group.push(region);
             groups.set(key, group);
           }
+          const groupCount = Math.max(1, groups.size);
+          // Keep up to two generations of the same slot in flight when the pool
+          // has room. v15's depth=1 made worker latency a hard decode-FPS cap:
+          // a ~250 ms strip job meant ~4 accepted source frames/sec regardless
+          // of camera FPS. With 3 strips and 6 workers, depth=2 pipelines two
+          // complete 15-QR source frames at once.
+          const pipelineDepth = Math.max(1, Math.min(2, Math.floor(pool.size / groupCount)));
           const orderedGroups = [...groups.values()]
-            .filter((group) => group.length > 0)
+            .filter((group) => group.length > 0 && group.every((region) => regionInflightCount(region) < pipelineDepth))
+            .map((group) => group.sort((a, b) => (a.gridSlot ?? 0) - (b.gridSlot ?? 0)))
             .sort((a, b) => Math.min(...a.map((r) => r.lastAttemptAt ?? -Infinity)) - Math.min(...b.map((r) => r.lastAttemptAt ?? -Infinity)));
           const rotatedGroups = orderedGroups.length
             ? orderedGroups.map((_, index) => orderedGroups[(index + cropRotate) % orderedGroups.length]!)
