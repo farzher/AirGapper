@@ -1,0 +1,36 @@
+name: Agent pixel path audit
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/agent-pixel-path-audit.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 .github/patch-pixel-path-audit.py
+      - name: Verify
+        run: |
+          node --check receive/worker.js
+          node --check receive/main.js
+          grep -q 'copyAsRgba = pixelFormat !== "y8"' receive/worker.js
+          grep -q 'decodeNativeAuditRGBA' receive/worker.js
+          grep -q 'Pixel A/B Y8-miss' receive/main.js
+          grep -q 'v0.5.54' index.html
+          grep -q 'airgapper-static-js-v17' sw.js
+          grep -q '_setTrackedDecoderFallbackBudget(nativeBatchHandle, 0)' receive/worker.js
+      - name: Commit
+        run: |
+          rm -f .github/patch-pixel-path-audit.py .github/workflows/agent-pixel-path-audit.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'separate Y8 hot path from RGBA recovery'
+          git push origin master
