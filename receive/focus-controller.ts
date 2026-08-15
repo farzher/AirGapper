@@ -3,7 +3,7 @@ import type { QrOpticalMetrics } from "./qr-optics";
 export type FocusStrategy = "auto" | "camera-auto" | "single-shot" | "manual";
 export type CalibrationMode = "auto" | "off" | "force";
 export type FocusState =
-  | "UNAVAILABLE" | "SEEKING" | "STABILIZING" | "AUTO_AF_SETTLE"
+  | "UNAVAILABLE" | "SEEKING" | "STABILIZING"
   | "LOCKED" | "TARGET_LOST_GRACE" | "EXPOSURE_RECOVERY"
   | "OPTIMIZE_EXPOSURE" | "OPTIMIZE_VERIFY" | "OVERRIDE";
 export type FocusOwner = "HARDWARE" | "MANUAL" | "DEVELOPER" | "NONE";
@@ -275,7 +275,6 @@ export class FocusController {
   private exposureRefinementCount = 0;
   private lockedFocusFailures = 0;
   private lockedExposureFailures = 0;
-  private stabilizingAfRetries = 0;
 
   private optimizeState: FocusDiagnostics["optimizeState"] = "idle";
   private optimizeRound?: FocusDiagnostics["optimizeRound"];
@@ -304,10 +303,8 @@ export class FocusController {
   private decoderCompletionsInGeneration = 0;
   private readonly validDecodeTimes: number[] = [];
   private readonly completionTimes: number[] = [];
-  private poorFocusSince = 0;
   private optimizeMovementSince = 0;
   private readonly transitions: string[] = [];
-  private poiAimed = false;
   /** Automatic focus is configured at most once per camera track. After that,
    *  AirGapper treats focus as read-only: exposure optimization, acquisition,
    *  target loss, and decoder recovery are forbidden from touching the lens. */
@@ -338,7 +335,7 @@ export class FocusController {
   get capabilities(): CameraCapabilities { return this.caps; }
   get selectedStrategy(): FocusStrategy { return this.strategy; }
   get expectsProbeFrame(): boolean {
-    return this.state === "AUTO_AF_SETTLE" || this.state === "EXPOSURE_RECOVERY" ||
+    return this.state === "EXPOSURE_RECOVERY" ||
       this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
   }
   get opticalIntervalMs(): number {
@@ -363,10 +360,8 @@ export class FocusController {
     this.stableGeometry = undefined;
     this.stableSince = 0;
     this.targetMissingSince = 0;
-    this.poiAimed = false;
     this.automaticFocusConfigured = false;
     this.optimizeMovementSince = 0;
-    this.stabilizingAfRetries = 0;
     this.initialLockMs = undefined;
     this.optimizeState = "idle";
     this.optimizeRound = undefined;
@@ -396,8 +391,12 @@ export class FocusController {
     this.committedIso = undefined;
     this.committedExposureCompensation = undefined;
     if (this.strategy === "auto") {
-      this.transition("SEEKING", "camera track changed; hardware AF owns focus");
-      void this.enterAutoFocusAcquisition("camera opened", this.generation, true);
+      this.transition("SEEKING", "camera track changed; one hardware AF sweep, then focus held by camera");
+      // Static QR scanning does not benefit from continuous AF hunting. Ask the
+      // hardware for ONE single-shot sweep when supported, then never touch
+      // focus automatically again for this track.
+      void this.configureInitialHardwareFocusOnce().then(() =>
+        this.enterAutomaticExposureState("camera opened", this.generation, true));
     } else {
       this.transition("OVERRIDE", "camera track changed; developer owns focus");
       void this.applyDeveloperFocus();
@@ -427,8 +426,10 @@ export class FocusController {
       this.optimizeCandidates = [];
       this.candidateExposureTime = undefined;
       this.candidateIso = undefined;
-      this.transition("SEEKING", "automatic optics selected; hardware AF + AE reset");
-      void this.enterAutoFocusAcquisition("automatic optics selected", this.generation, true);
+      this.transition("SEEKING", "automatic focus selected; one hardware AF sweep + hardware AE");
+      this.automaticFocusConfigured = false;
+      void this.configureInitialHardwareFocusOnce().then(() =>
+        this.enterAutomaticExposureState("automatic focus selected", this.generation, true));
     } else {
       // Once the user takes manual ownership, old Optimize state must not be
       // silently restored the next time Auto is selected.
@@ -446,8 +447,8 @@ export class FocusController {
     this.cancel("calibration mode changed");
     this.calibrationMode = mode;
     if (this.strategy === "auto") {
-      this.transition("SEEKING", "calibration mode changed; hardware AF owns focus");
-      void this.enterAutoFocusAcquisition("calibration mode changed", this.generation, true);
+      this.transition("SEEKING", "calibration mode changed; focus retained");
+      void this.enterAutomaticExposureState("calibration mode changed", this.generation, true);
     } else this.transition("OVERRIDE", "calibration mode changed");
   }
 
@@ -632,11 +633,14 @@ export class FocusController {
       candidates.set(key, candidate);
       return candidate;
     };
-    const opticsOf = (candidate: Candidate): QrOpticalMetrics | undefined =>
-      candidate.optics.length ? medianMetric(candidate.optics) : undefined;
+    const opticsOf = (candidate: Candidate): QrOpticalMetrics | undefined => {
+      if (!candidate.optics.length) return undefined;
+      const targeted = candidate.optics.filter((sample) => sample.targeted);
+      // Never average global bootstrap histograms with real QR-module metrics.
+      return medianMetric(targeted.length ? targeted : candidate.optics.filter((sample) => !sample.targeted));
+    };
     const decodeOf = (candidate: Candidate): ReceivePerformance => aggregateDecode(candidate.decode);
-    const targetedOf = (candidate: Candidate): boolean =>
-      candidate.optics.filter((sample) => sample.targeted).length >= Math.max(1, Math.ceil(candidate.optics.length / 2));
+    const targetedOf = (candidate: Candidate): boolean => candidate.optics.some((sample) => sample.targeted);
 
     type QualityThresholds = {
       separation: number;
@@ -669,13 +673,19 @@ export class FocusController {
       const metric = opticsOf(candidate);
       const threshold = thresholdFor(candidate);
       if (!metric || !threshold) return { good: false, comfortable: false, margin: -Infinity, needsGain: true };
-      const noiseLimit = Math.max(14, metric.separation * threshold.noiseRatio);
+      const targeted = targetedOf(candidate);
+      const separationFloor = targeted ? Math.max(48, threshold.separation) : threshold.separation;
+      const confidenceFloor = targeted ? Math.max(0.82, threshold.confidence) : threshold.confidence;
+      const noiseRatio = targeted ? Math.min(0.36, threshold.noiseRatio) : threshold.noiseRatio;
+      const clippingCeiling = targeted ? Math.min(0.58, threshold.clipping) : threshold.clipping;
+      const bandingCeiling = targeted ? Math.min(0.38, threshold.banding) : threshold.banding;
+      const noiseLimit = Math.max(14, metric.separation * noiseRatio);
       const margins = [
-        (metric.separation - threshold.separation) / Math.max(1, threshold.separation),
-        (metric.confidence - threshold.confidence) / Math.max(0.1, 1 - threshold.confidence),
+        (metric.separation - separationFloor) / Math.max(1, separationFloor),
+        (metric.confidence - confidenceFloor) / Math.max(0.1, 1 - confidenceFloor),
         (noiseLimit - metric.noise) / Math.max(1, noiseLimit),
-        (threshold.clipping - metric.clipping) / Math.max(0.1, threshold.clipping),
-        (threshold.banding - metric.banding) / Math.max(0.1, threshold.banding),
+        (clippingCeiling - metric.clipping) / Math.max(0.1, clippingCeiling),
+        (bandingCeiling - metric.banding) / Math.max(0.1, bandingCeiling),
       ];
       const margin = Math.min(...margins);
       const needsGain = metric.separation < threshold.separation || metric.confidence < threshold.confidence;
@@ -704,7 +714,7 @@ export class FocusController {
           state: candidate.state,
           coarseGrid: candidate.coarseGrid,
           opticalTargeted: targetedOf(candidate),
-          opticalGood: q.good,
+          opticalGood: targetedOf(candidate) && q.good,
           opticalMargin: Number.isFinite(q.margin) ? q.margin : -1,
           opticalSeparation: metric?.separation ?? 0,
           opticalNoise: metric?.noise ?? 0,
@@ -846,8 +856,11 @@ export class FocusController {
       if (!seed) return { best };
       let q = quality(seed);
       if (q.good) {
-        // Once a shutter is clean, search downward in gain, never upward. One or
-        // two geometric half-steps find the lowest ISO that keeps the QR clean.
+        // Whole-image contrast is bootstrap guidance only. Never use it to lower
+        // ISO: that is exactly how a globally contrasted but unreadably dark QR
+        // became the old winner. Only real QR-module optics may trim gain.
+        if (!targetedOf(seed)) return { good: seed, best };
+        // Once a QR-targeted shutter is clean, search downward in gain.
         let highGood = seed;
         let lowBadIso = isoRange.min;
         for (let refine = 0; refine < 2 && highGood.iso > isoRange.min * 1.04; refine++) {
@@ -877,6 +890,7 @@ export class FocusController {
         if (!higher) continue;
         const higherQ = quality(higher);
         if (higherQ.good) {
+          if (!targetedOf(higher)) return { good: higher, best };
           // One geometric midpoint is enough to avoid automatically pinning ISO
           // to max when a substantially lower value is already clean.
           const refineIso = this.quantize(Math.sqrt(lastBad.iso * higher.iso), isoRange);
@@ -914,7 +928,9 @@ export class FocusController {
       let lastGood: Candidate | undefined = quality(baseline).good ? baseline : undefined;
       let firstBadExposure: number | undefined;
       let seedIso = baseline.iso;
-      const ratios = [0.62, 0.42, 0.28];
+      // Deliberately narrow: Auto is the bright ceiling; we only search a modest
+      // darker/faster band instead of plunging into an unreadable dark tail.
+      const ratios = [0.78, 0.62, 0.50];
       for (let index = 0; index < ratios.length && performance.now() < deadline - 1500; index++) {
         const exposure = this.quantize(Math.max(exposureRange.min, autoExposure * ratios[index]!), exposureRange);
         if (exposure >= autoExposure || (lastGood && exposure >= lastGood.exposure)) continue;
@@ -958,18 +974,35 @@ export class FocusController {
         this.optimizeReason = "camera produced no optical optimizer measurements";
         return;
       }
-      const targetedPassingExists = measured.some((candidate) => targetedOf(candidate) && quality(candidate).good);
-      const selectionPool = targetedPassingExists ? measured.filter((candidate) => targetedOf(candidate)) : measured;
-      const comfortable = selectionPool.filter((candidate) => quality(candidate).comfortable)
+      // GLOBAL metrics are never allowed to certify a winner. If discovery
+      // acquired a QR during the sweep, re-measure the strongest bootstrap
+      // candidates so they receive exact QR-function-module metrics.
+      let passing = measured.filter((candidate) => targetedOf(candidate) && quality(candidate).good)
         .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
-      const passing = selectionPool.filter((candidate) => quality(candidate).good)
-        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
-      let opticalWinner = comfortable[0] ?? passing[0] ?? selectionPool.sort((a, b) => quality(b).margin - quality(a).margin)[0]!;
-      opticalWinner.state = quality(opticalWinner).good ? "optical winner" : "best available optics";
+      if (!passing.length && performance.now() < deadline + 400) {
+        const bootstrap = [...measured]
+          .sort((a, b) => quality(b).margin - quality(a).margin || b.exposure - a.exposure)
+          .slice(0, 3);
+        for (const candidate of bootstrap) {
+          const certified = await measureCandidate(candidate, "QR certify", "verify", true);
+          if (certified && targetedOf(certified) && quality(certified).good) break;
+        }
+        passing = [...candidates.values()].filter((candidate) => targetedOf(candidate) && quality(candidate).good)
+          .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso);
+      }
+      if (!passing.length) {
+        await this.restoreOptimizationBest("exposure");
+        this.optimizeState = "paused";
+        this.optimizeReason = "no QR-validated exposure improvement; restored pre-optimize exposure";
+        refresh();
+        return;
+      }
+      const comfortable = passing.filter((candidate) => quality(candidate).comfortable);
+      let opticalWinner = comfortable[0] ?? passing[0]!;
+      opticalWinner.state = "QR optical winner";
       const safer = [...passing]
         .filter((candidate) => candidate !== opticalWinner && candidate.exposure >= opticalWinner.exposure)
-        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso)[0]
-        ?? (baseline !== opticalWinner ? baseline : undefined);
+        .sort((a, b) => a.exposure - b.exposure || a.iso - b.iso)[0];
       this.optimizeDecision = safer ? "brief QR/s sanity A/B" : "brief QR/s sanity";
       refresh();
 
@@ -1002,15 +1035,64 @@ export class FocusController {
         }
       }
 
-      const restored = await activateExposureCandidate(opticalWinner, true);
+      let restored = await activateExposureCandidate(opticalWinner, true);
       if (!restored) {
         this.optimizeState = "paused";
         this.optimizeReason = "winning settings could not be restored";
         return;
       }
-      epochs.close(restored.epoch);
+      // Validate the ACTUAL committed frames, not an earlier visit. A final
+      // winner must still show real QR-module quality and at least one live QR
+      // decode during a longer hold. Otherwise fall back to the safer passing
+      // candidate (or the pre-optimize exposure).
+      let finalOptics: OptimizerOpticalMeasurement | undefined;
+      let finalDecode: ReceivePerformance | undefined;
+      try {
+        finalOptics = await measureOptics("Commit optics", restored.epoch);
+        if (finalOptics) opticalWinner.optics.push(finalOptics);
+        const sample = await measureDecode("commit · hold", restored.epoch);
+        finalDecode = await sample.result;
+      } catch {
+        finalOptics = undefined;
+        finalDecode = undefined;
+      } finally {
+        epochs.close(restored.epoch);
+      }
+      const commitGood = Boolean(finalOptics?.targeted && quality(opticalWinner).good &&
+        finalDecode && finalDecode.validDecodes > 0);
+      if (!commitGood) {
+        opticalWinner.state = "commit validation failed";
+        if (safer) {
+          restored = await activateExposureCandidate(safer, true);
+          if (restored) {
+            try {
+              const saferOptics = await measureOptics("Safer commit optics", restored.epoch);
+              safer.optics.push(saferOptics);
+              const saferSample = await measureDecode("commit · safer", restored.epoch);
+              const saferDecode = await saferSample.result;
+              if (saferOptics.targeted && quality(safer).good && saferDecode.validDecodes > 0) {
+                opticalWinner = safer;
+                opticalWinner.state = "safe winner";
+                finalDecode = saferDecode;
+              } else {
+                await this.restoreOptimizationBest("exposure");
+                this.optimizeState = "paused";
+                this.optimizeReason = "final QR validation failed; restored pre-optimize exposure";
+                refresh();
+                return;
+              }
+            } finally { epochs.close(restored.epoch); }
+          }
+        } else {
+          await this.restoreOptimizationBest("exposure");
+          this.optimizeState = "paused";
+          this.optimizeReason = "final QR validation failed; restored pre-optimize exposure";
+          refresh();
+          return;
+        }
+      }
       this.commitSettings(this.settings());
-      winnerDecode = decodeOf(opticalWinner);
+      winnerDecode = finalDecode ?? decodeOf(opticalWinner);
       this.optimizeBestPerformance = winnerDecode;
       this.optimizeCandidatePerformance = winnerDecode;
       const winnerOptics = opticsOf(opticalWinner)!;
@@ -1092,7 +1174,6 @@ export class FocusController {
       this.changed();
       return;
     }
-    this.repairAcquisitionInvariant();
 
     if (this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY") {
       if (this.geometryChanged(geometry, this.stableGeometry)) {
@@ -1102,29 +1183,15 @@ export class FocusController {
           this.optimizeState = "cancelled";
           this.stableGeometry = geometry;
           this.stableSince = now;
-          this.poiAimed = false;
-          this.optimizeMovementSince = 0;
-          this.transition("STABILIZING", "target moved during optimization; exposure best retained and hardware AF restored");
-          void this.enterAutoFocusAcquisition("optimization cancelled by movement", this.generation, false, true, geometry);
+                this.optimizeMovementSince = 0;
+          this.transition("STABILIZING", "target moved during optimization; exposure best retained; focus untouched");
           return;
         }
       } else this.optimizeMovementSince = 0;
     }
-    if (this.state === "AUTO_AF_SETTLE" &&
-        this.geometryChanged(geometry, this.stableGeometry)) {
-      this.cancel("target moved during automatic calibration");
-      this.stableGeometry = geometry;
-      this.stableSince = now;
-      this.poiAimed = false;
-      this.transition("STABILIZING", "target moved; hardware AF restored and exposure retained");
-      void this.enterAutoFocusAcquisition("target moved during calibration", this.generation, false, true);
-      return;
-    }
 
-    if (!this.poiAimed && this.caps.pointsOfInterest && this.isAcquiring()) {
-      this.poiAimed = true;
-      void this.enterAutoFocusAcquisition("QR point-of-interest sent to hardware AF", this.generation, false, true, geometry);
-    }
+
+
 
     if (this.state === "TARGET_LOST_GRACE") {
       this.transition("LOCKED", "static target returned during loss grace; camera state retained");
@@ -1186,29 +1253,24 @@ export class FocusController {
     if (!this.stableGeometry || this.geometryChanged(geometry, this.stableGeometry)) {
       this.stableGeometry = geometry;
       this.stableSince = now;
-      this.stabilizingAfRetries = 0;
-      this.acquisitionBracketTried = false;
-      this.transition("STABILIZING", "QR geometry found; hardware AF remains active");
-      void this.enterAutoFocusAcquisition("geometry changed; hardware AF owns focus", this.generation, false, true, geometry);
+        this.acquisitionBracketTried = false;
+      this.transition("STABILIZING", "QR geometry found; camera focus left untouched");
     } else {
       this.stableGeometry = this.blendGeometry(this.stableGeometry, geometry);
       const stable = now - this.stableSince >= CAMERA_TUNING.geometryStabilityMs;
-      const focusProven = this.validDecodesInGeneration > 0 && this.decodeIsFresh(now) && metrics.focusScore > 0;
-      if (stable && focusProven) this.beginAutoAfSettle();
-      else if (stable && !focusProven && !this.acquisitionBracketTried && !this.acquisitionBracketRunning &&
-          now - this.stableSince >= CAMERA_TUNING.acquisitionBracketDelayMs && metrics.focusScore >= 0.38 &&
-          (metrics.exposureScore < 0.55 || metrics.separation < 48 || metrics.clipping > 0.45 ||
-            (now - this.stableSince >= 1800 && !(metrics.focusScore >= CAMERA_TUNING.focusExcellent &&
-              metrics.exposureScore >= CAMERA_TUNING.exposureExcellent && metrics.temporalContamination > 0.35)))) {
+      const decodeProven = this.validDecodesInGeneration > 0 && this.decodeIsFresh(now);
+      if (stable && decodeProven) {
+        this.lock(observation, "QR decoding stable; hardware focus left untouched");
+      } else if (stable && !decodeProven && !this.acquisitionBracketTried && !this.acquisitionBracketRunning &&
+          now - this.stableSince >= CAMERA_TUNING.acquisitionBracketDelayMs &&
+          (metrics.exposureScore < 0.55 || metrics.separation < 48 || metrics.clipping > 0.45)) {
+        // Acquisition is allowed to adjust BRIGHTNESS only. Focus metrics never
+        // trigger a camera mutation.
         void this.beginAcquisitionBrightnessBracket(observation);
-      } else if (!focusProven && metrics.focusScore < 0.38) {
-        if (!this.poorFocusSince) this.poorFocusSince = now;
-        if (now - this.poorFocusSince >= CAMERA_TUNING.poorFocusRetryMs) this.retryStabilizingAf(geometry);
       } else {
-        this.poorFocusSince = 0;
-        if (this.state === "STABILIZING" && now - this.stateSince >= CAMERA_TUNING.stabilizingRetryMs && metrics.focusScore < 0.55) {
-          this.retryStabilizingAf(geometry);
-        }
+        this.lastReason = metrics.focusScore < 0.38
+          ? "image appears soft; hardware focus left untouched"
+          : "waiting for a decodable exposure; focus untouched";
       }
     }
     this.changed();
@@ -1216,27 +1278,18 @@ export class FocusController {
 
   noteTargetAbsent(now = performance.now()): void {
     if (this.strategy !== "auto" || this.state === "UNAVAILABLE" || this.state === "OVERRIDE") return;
-    this.repairAcquisitionInvariant();
     if (!this.targetMissingSince) this.targetMissingSince = now;
     if (this.isOptimizing()) {
       this.lastReason = "QR absent; explicit exposure tournament continues";
       this.changed();
       return;
-    } else if (this.state === "AUTO_AF_SETTLE") {
-      this.cancel("static QR target disappeared during calibration");
-      this.stableGeometry = undefined;
-      this.stableSince = 0;
-      this.poiAimed = false;
-      this.transition("STABILIZING", "target disappeared; hardware AF restored and exposure retained");
-      void this.enterAutoFocusAcquisition("target disappeared during calibration", this.generation, false, true);
     } else if (this.state === "LOCKED") {
       this.transition("TARGET_LOST_GRACE", "static target missing; continuous AF and exposure retained");
     } else if ((this.state === "STABILIZING" || this.state === "TARGET_LOST_GRACE") &&
         now - this.targetMissingSince >= CAMERA_TUNING.targetLostGraceMs) {
       this.stableGeometry = undefined;
       this.stableSince = 0;
-      this.poiAimed = false;
-      this.transition("SEEKING", "target absent; camera state retained while decoding continues");
+        this.transition("SEEKING", "target absent; camera state retained while decoding continues");
     }
     this.changed();
   }
@@ -1325,44 +1378,6 @@ export class FocusController {
     };
   }
 
-  private beginAutoAfSettle(): void {
-    if (this.state === "AUTO_AF_SETTLE") return;
-    const generation = ++this.generation;
-    void this.settleAndLockHardwareFocus(generation);
-  }
-
-  private async settleAndLockHardwareFocus(generation: number): Promise<void> {
-    const initial = this.latest;
-    if (!initial || !this.current(generation)) return;
-    this.transition("AUTO_AF_SETTLE", "payload decoded; verifying continuous hardware AF");
-    this.focusProbes = 0;
-    this.exposureProbes = 0;
-    const baseline = await this.waitForFocusSettled(generation, initial.id);
-    if (!baseline || !this.current(generation) || !this.decodeIsFresh() || baseline.metrics.focusScore <= 0) {
-      this.transition("STABILIZING", "hardware AF not yet proven useful; autofocus remains active");
-      this.stateSince = performance.now();
-      void this.enterAutoFocusAcquisition("AF settle lacked decode evidence", generation, false, true, initial.geometry);
-      return;
-    }
-    const settings = this.settings();
-    this.baselineFocus = settings.focusDistance;
-    this.baselineExposure = settings.exposureTime;
-    this.baselineIso = settings.iso;
-    this.committedFocusMode = settings.focusMode;
-    this.committedFocusDistance = settings.focusDistance;
-    this.committedExposureTime = settings.exposureTime;
-    this.committedIso = settings.iso;
-    const focused = baseline;
-    if (!this.current(generation)) return;
-    const focusStillProven = this.decodeIsFresh() && focused.metrics.focusScore > 0;
-    if (!focusStillProven) {
-      this.transition("STABILIZING", "focus lost decode evidence; hardware AF restored");
-      void this.enterAutoFocusAcquisition("focus not proven after settle", generation, false, true, focused.geometry);
-      return;
-    }
-    if (this.current(generation)) this.lock(focused, "continuous hardware autofocus is decoding; acquisition complete");
-  }
-
   private exposureAcceptable(metrics: QrOpticalMetrics, floor: number): boolean {
     return metrics.confidence >= 0.86 && metrics.exposureScore >= floor &&
       metrics.separation >= 48 && metrics.noise <= Math.max(20, metrics.separation * 0.25) &&
@@ -1389,7 +1404,6 @@ export class FocusController {
     this.transition("LOCKED", reason);
     this.stableGeometry = observation.geometry;
     this.stableSince = observation.at;
-    this.stabilizingAfRetries = 0;
     if (this.initialLockMs === undefined) this.initialLockMs = performance.now() - this.attachedAt;
     this.changed();
   }
@@ -1467,37 +1481,19 @@ export class FocusController {
     this.acquisitionBracketRunning = false;
     this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
   }
-  private retryStabilizingAf(_geometry: FocusGeometry): void {
-    // Do not turn a noisy focus metric into a lens command. Re-applying
-    // continuous/single-shot AF was the source of the OnePlus 5 hunting loop.
-    this.stabilizingAfRetries++;
-    this.poorFocusSince = 0;
-    this.lastReason = "focus appears soft; automatic AF retrigger suppressed";
-    this.changed();
-  }
-
-  private async enterAutoFocusAcquisition(
+  private async enterAutomaticExposureState(
     reason: string,
     generation = this.generation,
     resetExposure = false,
     restoreExposure = false,
-    geometry?: FocusGeometry,
   ): Promise<void> {
     const track = this.track;
     if (!track || track.readyState !== "live" || !this.current(generation)) return;
 
     const patch: CameraPatch = {};
 
-    // Automatic receiver focus is completely hardware-owned. Do not select a
-    // focus mode, send POIs, or retrigger AF here. getUserMedia starts the
-    // camera in the browser/HAL's native video AF behavior; repeated focus-mode
-    // constraints were the source of OnePlus 5 hunting. Only the explicit
-    // developer Focus control is allowed to call applyDeveloperFocus().
-    if (!this.automaticFocusConfigured) {
-      this.automaticFocusConfigured = true;
-      this.poiAimed = true;
-    }
-
+    // Focus is intentionally absent from this helper. It manages automatic
+    // EXPOSURE state only.
     if (resetExposure && this.exposureModes().includes("continuous")) {
       patch.exposureMode = "continuous";
       if (this.caps.exposureCompensation &&
@@ -1565,11 +1561,6 @@ export class FocusController {
     }
   }
 
-  private repairAcquisitionInvariant(): void {
-    // Deliberately disabled. Automatic focus belongs to the browser/HAL; a
-    // focus-mode observation is never grounds for AirGapper to move the lens.
-  }
-
   private focusOwner(settings: CameraSettings): FocusOwner {
     if (this.state === "UNAVAILABLE") return "NONE";
     if (this.state === "OVERRIDE" || this.strategy !== "auto") return "DEVELOPER";
@@ -1583,7 +1574,30 @@ export class FocusController {
       this.state = next;
       this.stateSince = performance.now();
     }
-    this.lastReason = reason;
+    this.lastReason = this.state === "SEEKING"
+      ? "target absent; camera focus and exposure retained"
+      : this.lastReason;
+    this.changed();
+  }
+
+  private async configureInitialHardwareFocusOnce(): Promise<void> {
+    if (this.automaticFocusConfigured || this.strategy !== "auto") return;
+    this.automaticFocusConfigured = true;
+    const track = this.track;
+    if (!track || track.readyState !== "live") return;
+    const modes = this.focusModes();
+    if (!modes.includes("single-shot")) {
+      // If the browser does not expose a one-shot mode, leave its native focus
+      // behavior completely alone rather than reasserting continuous AF.
+      this.lastReason = "hardware focus mode left unchanged";
+      this.changed();
+      return;
+    }
+    this.requestedMode = "single-shot";
+    await this.apply(track, { focusMode: "single-shot" });
+    this.committedFocusMode = this.settings().focusMode;
+    this.committedFocusDistance = this.settings().focusDistance;
+    this.lastReason = "single hardware autofocus sweep requested; no automatic refocuses will follow";
     this.changed();
   }
 
@@ -1616,21 +1630,6 @@ export class FocusController {
     const accepted = await this.apply(track, patch);
     if (accepted && fenceImmediately && this.current(generation)) this.beginDecodeGeneration();
     return accepted && this.current(generation);
-  }
-
-  private waitForFocusSettled(
-    generation: number,
-    afterId: number,
-    settleMs = CAMERA_TUNING.focusSettleMs,
-  ): Promise<OpticalObservation | undefined> {
-    return this.waitForObservations(
-      generation,
-      afterId,
-      settleMs,
-      CAMERA_TUNING.focusDiscardFrames,
-      CAMERA_TUNING.focusProbeSamples,
-      1600,
-    );
   }
 
   private waitForExposureSettled(generation: number, afterId: number): Promise<OpticalObservation | undefined> {

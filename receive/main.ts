@@ -200,6 +200,7 @@ function seedDesiredCamera(track: MediaStreamTrack): void {
   if (cameraQuirkTrackId !== track.id) {
     cameraQuirkTrackId = track.id;
     manualExposureFocusPolicy = "unknown";
+    manualSensorSessionActive = false;
     heldFocusRestoreMode = undefined;
     cameraFocusWritesTotal = 0;
     cameraExposureWritesTotal = 0;
@@ -216,6 +217,10 @@ function seedDesiredCamera(track: MediaStreamTrack): void {
 }
 type ManualExposureFocusPolicy = "unknown" | "independent" | "requires-hold";
 let manualExposureFocusPolicy: ManualExposureFocusPolicy = "unknown";
+// Some Android providers report exposureMode="none" even while numeric manual
+// shutter/ISO controls work. Track the session ourselves after the first proven
+// numeric write instead of re-sending the 3A mode on every candidate.
+let manualSensorSessionActive = false;
 let cameraQuirkTrackId = "";
 let heldFocusRestoreMode: string | undefined;
 let cameraFocusWritesTotal = 0;
@@ -259,6 +264,7 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
       exposureTime?: { min: number; max: number; step?: number };
       iso?: { min: number; max: number; step?: number };
     };
+
     const applyStage = async (stage: CameraPatch): Promise<boolean> => {
       if (!Object.keys(stage).length) return true;
       if (stage.focusMode !== undefined || stage.focusDistance !== undefined || stage.pointsOfInterest !== undefined) cameraFocusWritesTotal++;
@@ -275,11 +281,20 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
     };
     const requestedExposureMatches = (): boolean => {
       const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
-      return (actual.exposureMode === undefined || actual.exposureMode === "manual") &&
-        numericClose(actual.exposureTime, desiredCamera.exposureTime, caps.exposureTime?.step) &&
+      // Do NOT require exposureMode === "manual". Several Android/OnePlus HALs
+      // report "none" while manual exposureTime/ISO are nevertheless active.
+      return numericClose(actual.exposureTime, desiredCamera.exposureTime, caps.exposureTime?.step) &&
         numericClose(actual.iso, desiredCamera.iso, caps.iso?.step);
     };
-    const shortSettle = () => new Promise((resolve) => setTimeout(resolve, 100));
+    const numericExposureChangedFrom = (prior: MediaTrackSettings & CameraPatch): boolean => {
+      const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+      const exposureChanged = desiredCamera.exposureTime === undefined ||
+        (actual.exposureTime !== undefined && prior.exposureTime !== actual.exposureTime);
+      const isoChanged = desiredCamera.iso === undefined ||
+        (actual.iso !== undefined && prior.iso !== actual.iso);
+      return exposureChanged || isoChanged;
+    };
+    const shortSettle = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 
     // Focus is an explicit, independent control. The automatic receiver never
     // arrives here with a focus patch. This path exists only for the developer
@@ -298,61 +313,77 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
     if (touchesExposure) {
       const requestedMode = patch.exposureMode ?? desiredCamera.exposureMode;
       if (requestedMode === "continuous") {
+        manualSensorSessionActive = false;
         const stage: CameraPatch = { exposureMode: "continuous" };
         if (patch.exposureCompensation !== undefined) stage.exposureCompensation = patch.exposureCompensation;
         await applyStage(stage);
       } else if (requestedMode === "manual") {
-        // A coupled phone is classified ONCE. After classification, optimizer
-        // candidates and manual slider changes are only numeric writes.
+        // Manual exposure is a SENSOR session, not a repeated 3A transition.
+        // Enter manual mode at most once per track/session; after numeric control
+        // is proven, every slider/optimizer mutation is shutter+ISO only.
         let current = track.getSettings() as MediaTrackSettings & CameraPatch;
         if (manualExposureFocusPolicy === "requires-hold" && current.focusMode !== "manual") {
           heldFocusRestoreMode = current.focusMode && current.focusMode !== "manual" ? current.focusMode : heldFocusRestoreMode;
           await applyStage({ focusMode: "manual" });
-          await shortSettle();
+          await shortSettle(80);
           current = track.getSettings() as MediaTrackSettings & CameraPatch;
         }
 
-        if (current.exposureMode !== "manual") await applyStage({ exposureMode: "manual" });
+        if (!manualSensorSessionActive) await applyStage({ exposureMode: "manual" });
         const sensor: CameraPatch = {};
         if (desiredCamera.exposureTime !== undefined) sensor.exposureTime = desiredCamera.exposureTime;
         if (desiredCamera.iso !== undefined) sensor.iso = desiredCamera.iso;
+        const beforeSensor = track.getSettings() as MediaTrackSettings & CameraPatch;
         await applyStage(sensor);
 
         if (manualExposureFocusPolicy === "unknown") {
-          // Do not make every camera pay a long verification tax. Give Android
-          // two short sensor-update opportunities. Only then try the AF-hold
-          // workaround, once, and remember the result for the track.
-          await shortSettle();
-          if (!requestedExposureMatches()) {
-            await applyStage(sensor);
-            await shortSettle();
-          }
-          if (requestedExposureMatches()) {
+          // Fast path: many Android HALs update getSettings synchronously. If the
+          // numeric controls took, classification is finished immediately.
+          if (requestedExposureMatches() || numericExposureChangedFrom(beforeSensor)) {
             manualExposureFocusPolicy = "independent";
+            manualSensorSessionActive = true;
           } else {
-            const beforeHold = track.getSettings() as MediaTrackSettings & CameraPatch;
-            const canHold = beforeHold.focusMode !== "manual" &&
-              (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : false);
-            if (canHold) {
-              heldFocusRestoreMode = beforeHold.focusMode && beforeHold.focusMode !== "manual" ? beforeHold.focusMode : undefined;
-              await applyStage({ focusMode: "manual" });
-              await shortSettle();
+            // Only consider the 12R-style AF-hold quirk if BOTH numeric controls
+            // remain stuck after two patient sensor-only attempts. A slow or
+            // quantized write must never cause a focus-mode experiment.
+            await shortSettle(180);
+            if (!requestedExposureMatches() && !numericExposureChangedFrom(beforeSensor)) {
               await applyStage(sensor);
-              await shortSettle();
-              if (requestedExposureMatches()) {
-                manualExposureFocusPolicy = "requires-hold";
-              } else {
-                // The hold did not help: restore the exact prior focus mode once
-                // and permanently stop trying this workaround on the track.
-                if (heldFocusRestoreMode) await applyStage({ focusMode: heldFocusRestoreMode });
-                heldFocusRestoreMode = undefined;
-                manualExposureFocusPolicy = "independent";
-              }
-            } else {
-              // No supported hold path. Keep focus untouched from now on.
+              await shortSettle(180);
+            }
+            if (requestedExposureMatches() || numericExposureChangedFrom(beforeSensor)) {
               manualExposureFocusPolicy = "independent";
+              manualSensorSessionActive = true;
+            } else {
+              const beforeHold = track.getSettings() as MediaTrackSettings & CameraPatch;
+              const canHold = beforeHold.focusMode !== "manual" &&
+                (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : false);
+              if (canHold) {
+                heldFocusRestoreMode = beforeHold.focusMode && beforeHold.focusMode !== "manual" ? beforeHold.focusMode : undefined;
+                await applyStage({ focusMode: "manual" });
+                await shortSettle(100);
+                const holdSensorBefore = track.getSettings() as MediaTrackSettings & CameraPatch;
+                await applyStage(sensor);
+                await shortSettle(160);
+                if (requestedExposureMatches() || numericExposureChangedFrom(holdSensorBefore)) {
+                  manualExposureFocusPolicy = "requires-hold";
+                  manualSensorSessionActive = true;
+                } else {
+                  if (heldFocusRestoreMode) await applyStage({ focusMode: heldFocusRestoreMode });
+                  heldFocusRestoreMode = undefined;
+                  // Stop experimenting with focus for this track forever.
+                  manualExposureFocusPolicy = "independent";
+                  manualSensorSessionActive = true;
+                }
+              } else {
+                manualExposureFocusPolicy = "independent";
+                manualSensorSessionActive = true;
+              }
             }
           }
+        } else {
+          // Known track: the numeric write above is the whole operation.
+          manualSensorSessionActive = true;
         }
       } else {
         const stage: CameraPatch = {};
@@ -903,15 +934,16 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   // Exploration should feel fast. Slow decoder completions may arrive later;
   // camera dwell is based on settled source-frame opportunities, not worker latency.
   const targetFrames = discovery
-    ? phase === "verify" ? 4 : phase === "finalist" ? 4 : phase === "revisit" ? 3 : 2
-    : phase === "verify" ? (singleQr ? 5 : 4)
+    ? phase === "commit" ? 6 : phase === "verify" ? 4 : phase === "finalist" ? 4 : phase === "revisit" ? 3 : 2
+    : phase === "commit" ? (singleQr ? 7 : 6)
+      : phase === "verify" ? (singleQr ? 5 : 4)
       : phase === "finalist" ? (singleQr ? 5 : 4)
       : phase === "revisit" ? (singleQr ? 5 : 3)
       : phase === "refine" ? (singleQr ? 4 : 3)
       : (singleQr ? 4 : usesSimpleDecodeWorker ? 4 : 3);
   const maxBurstMs = discovery
-    ? phase === "verify" ? 800 : phase === "finalist" ? 800 : 650
-    : phase === "verify" ? 800 : phase === "finalist" ? 800 : singleQr ? 750 : 550;
+    ? phase === "commit" ? 1100 : phase === "verify" ? 800 : phase === "finalist" ? 800 : 650
+    : phase === "commit" ? 1100 : phase === "verify" ? 800 : phase === "finalist" ? 800 : singleQr ? 750 : 550;
   const evidence = newCandidateEvidence(epochId);
   evidence.startedAt = startedAt;
   evidence.temporalSamples.push(focusController.diagnostics().optical?.temporalContamination ?? 0);
@@ -2052,7 +2084,9 @@ function renderFocusDiagnostics(): void {
   const candidateTable = diagnostic.optimizeCandidates.map((candidate) => {
     const marker = candidate.state.includes("winner") ? "*" : " ";
     const opticalMode = candidate.opticalTargeted ? "QR" : "global";
-    const opticalState = candidate.opticalGood ? "GOOD" : "bad";
+    const opticalState = candidate.opticalTargeted
+      ? (candidate.opticalGood ? "GOOD" : "bad")
+      : "bootstrap";
     const qr = candidate.qrAttempts > 0 ? ` · ${candidate.normalizedQrRate.toFixed(1)} QR/s` : "";
     return `${marker} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · ${opticalMode} ${opticalState} · margin ${candidate.opticalMargin.toFixed(2)} · sep ${candidate.opticalSeparation.toFixed(0)} · noise ${candidate.opticalNoise.toFixed(1)} · clip ${candidate.opticalClipping.toFixed(2)} · band ${candidate.opticalBanding.toFixed(2)} · ${candidate.sourceFrames} optical frames${qr} · ${candidate.state}`;
   }).join("\n");
@@ -3104,8 +3138,17 @@ function captureOptimizerOpticalSample(source: ReceiverFrame): void {
       .map((target) => ({ quad: target.quad, modules: target.dim }));
     metrics = targets.length ? opticsAnalyzer.analyze(image, targets) : undefined;
     targeted = Boolean(metrics);
-  }
-  if (!metrics) {
+    // Once a real QR has been discovered, global histogram contrast is no
+    // longer admissible evidence. If the known QR cannot be measured under this
+    // setting, that candidate should NOT be rescued by unrelated screen pixels.
+    if (!metrics) return;
+    // A target may appear halfway through a bootstrap visit. Throw away the
+    // earlier global samples so QR and whole-image metrics are never averaged.
+    if (evidence.opticalTargetedSamples === 0 && evidence.opticalSamples.length) {
+      evidence.opticalSamples.length = 0;
+      evidence.opticalSourceFrames.clear();
+    }
+  } else {
     metrics = opticsAnalyzer.analyzeGlobal(image);
     targeted = false;
   }
