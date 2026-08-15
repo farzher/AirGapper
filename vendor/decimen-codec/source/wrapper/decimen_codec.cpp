@@ -464,6 +464,10 @@ struct PersistentTrack
 	int framesSinceReacquire = 0;
 	bool multiSample = false;
 	bool crc32Payload = false;
+	PointF topLeft{};
+	PointF topRight{};
+	PointF bottomRight{};
+	PointF bottomLeft{};
 	std::vector<CachedSamplePoint> samples;
 	BitMatrix sampled;
 };
@@ -581,52 +585,6 @@ static bool refineAnchor(PersistentTrack& track, const LumAt& lumAt, AnchorReadi
 	return reading.score >= 125 && reading.contrast >= 24;
 }
 
-constexpr int TRACK_THRESH_TILES = 8;
-constexpr int TRACK_TILE_SAMPLES = 4;
-
-struct TrackThresholdGrid
-{
-	int t[TRACK_THRESH_TILES][TRACK_THRESH_TILES]{};
-	bool ok = false;
-};
-
-template <class LumAt>
-static TrackThresholdGrid buildTrackThresholds(const PersistentTrack& track, const LumAt& lumAt)
-{
-	TrackThresholdGrid grid;
-	int lo[TRACK_THRESH_TILES][TRACK_THRESH_TILES];
-	int hi[TRACK_THRESH_TILES][TRACK_THRESH_TILES];
-	int gmin = 255, gmax = 0;
-	const int dim = track.dimension;
-	for (int ty = 0; ty < TRACK_THRESH_TILES; ++ty)
-		for (int tx = 0; tx < TRACK_THRESH_TILES; ++tx) {
-			lo[ty][tx] = 255;
-			hi[ty][tx] = 0;
-			for (int sy = 0; sy < TRACK_TILE_SAMPLES; ++sy)
-				for (int sx = 0; sx < TRACK_TILE_SAMPLES; ++sx) {
-					const double fx = (tx + (sx + 0.5) / TRACK_TILE_SAMPLES) / TRACK_THRESH_TILES;
-					const double fy = (ty + (sy + 0.5) / TRACK_TILE_SAMPLES) / TRACK_THRESH_TILES;
-					const int mx = std::clamp(int(fx * dim), 0, dim - 1);
-					const int my = std::clamp(int(fy * dim), 0, dim - 1);
-					const auto& p = track.samples[my * dim + mx];
-					const int lum = lumAt(p.x + track.dx, p.y + track.dy);
-					if (lum < 0) continue;
-					lo[ty][tx] = std::min(lo[ty][tx], lum);
-					hi[ty][tx] = std::max(hi[ty][tx], lum);
-				}
-			gmin = std::min(gmin, lo[ty][tx]);
-			gmax = std::max(gmax, hi[ty][tx]);
-		}
-	if (gmax - gmin < 24)
-		return grid;
-	const int global = (gmin + gmax) / 2;
-	for (int ty = 0; ty < TRACK_THRESH_TILES; ++ty)
-		for (int tx = 0; tx < TRACK_THRESH_TILES; ++tx)
-			grid.t[ty][tx] = hi[ty][tx] - lo[ty][tx] >= 24 ? (lo[ty][tx] + hi[ty][tx]) / 2 : global;
-	grid.ok = true;
-	return grid;
-}
-
 static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits)
 {
 	auto format = QRCode::ReadFormatInformation(bits);
@@ -680,109 +638,77 @@ static bool hasValidCRC32(const ByteArray& bytes)
 	return crc32(bytes.data(), n) == expected;
 }
 
-template <class LumAt>
-static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrackedResult* results,
-					   int resultCapacity, uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+static PerspectiveTransform trackedTransform(const PersistentTrack& track, float dx, float dy)
+{
+	const double dim = track.dimension;
+	const PointF off{dx, dy};
+	return PerspectiveTransform(
+		QuadrilateralF{PointF{0, 0}, PointF{dim, 0}, PointF{dim, dim}, PointF{0, dim}},
+		QuadrilateralF{track.topLeft + off, track.topRight + off, track.bottomRight + off, track.bottomLeft + off});
+}
+
+// The persistent hot path intentionally uses the same two pixel operations as
+// the known-good matrix oracle: HybridBinarizer + SampleGrid. Detection is
+// still skipped entirely. The old sparse tile-threshold sampler was faster in
+// synthetic frames but produced invalid format/bitstream data on real camera
+// input, so optimizing it only hid a correctness bug.
+static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageBits, DecimenTrackedResult* results,
+							 int resultCapacity, uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
 {
 	DecimenBatchMetrics measured{};
 	const double totalStart = emscripten_get_now();
 	int resultCount = 0, outputUsed = 0, budgetedFallbacks = 0;
 	const size_t trackSlots = decoder.tracks.size();
+
 	for (size_t step = 0; step < trackSlots; ++step) {
 		auto& track = decoder.tracks[(decoder.fallbackCursor + step) % trackSlots];
 		if (!track.active || resultCount >= resultCapacity)
 			continue;
+
 		auto& result = results[resultCount++];
 		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 				  track.framesSinceReacquire, track.dx, track.dy};
 		++measured.tracks;
 		++track.framesSinceReacquire;
-
-		AnchorReading anchor;
-		const float trustedDx = track.dx, trustedDy = track.dy;
-		double started = emscripten_get_now();
-		const bool anchored = refineAnchor(track, lumAt, anchor);
-		measured.anchorMs += emscripten_get_now() - started;
-		if (anchored) {
-			++measured.anchorSuccesses;
-		} else {
-			++measured.anchorMisses;
-			++measured.anchorBypassAttempts;
-			track.dx = trustedDx;
-			track.dy = trustedDy;
-		}
 		const int dim = track.dimension;
-		const auto thresholds = buildTrackThresholds(track, lumAt);
-		if (!thresholds.ok) ++measured.thresholdFallbacks;
-		const bool canMultiSample = track.multiSample && anchor.contrast < 180;
-		auto sampleGrid = [&](bool multiSample) {
-			double sampleStarted = emscripten_get_now();
-			bool inFrame = true;
-			for (int y = 0; y < dim; ++y)
-				for (int x = 0; x < dim; ++x) {
-					const auto& p = track.samples[y * dim + x];
-					int lum = 0;
-					if (multiSample) {
-						const auto& left = track.samples[y * dim + (x > 0 ? x - 1 : x)];
-						const auto& right = track.samples[y * dim + (x + 1 < dim ? x + 1 : x)];
-						const auto& up = track.samples[(y > 0 ? y - 1 : y) * dim + x];
-						const auto& down = track.samples[(y + 1 < dim ? y + 1 : y) * dim + x];
-						const float vxX = x + 1 < dim ? right.x - p.x : p.x - left.x;
-						const float vxY = x + 1 < dim ? right.y - p.y : p.y - left.y;
-						const float vyX = y + 1 < dim ? down.x - p.x : p.x - up.x;
-						const float vyY = y + 1 < dim ? down.y - p.y : p.y - up.y;
-						constexpr float offsets[4][2] = {{-0.25f, -0.25f}, {0.25f, -0.25f}, {-0.25f, 0.25f}, {0.25f, 0.25f}};
-						for (const auto& offset : offsets) {
-							int sample = lumAt(p.x + track.dx + offset[0] * vxX + offset[1] * vyX,
-											   p.y + track.dy + offset[0] * vxY + offset[1] * vyY);
-							if (sample < 0) {
-								inFrame = false;
-								sample = 255;
-							}
-							lum += sample;
-						}
-						lum /= 4;
-					} else {
-						lum = lumAt(p.x + track.dx, p.y + track.dy);
-						if (lum < 0) {
-							inFrame = false;
-							lum = 255;
-						}
-					}
-					const int threshold = thresholds.ok
-						? thresholds.t[std::clamp(y * TRACK_THRESH_TILES / dim, 0, TRACK_THRESH_TILES - 1)]
-						              [std::clamp(x * TRACK_THRESH_TILES / dim, 0, TRACK_THRESH_TILES - 1)]
-						: anchor.threshold;
-					track.sampled.set(x, y, lum <= threshold);
-				}
-			measured.samples += dim * dim * (multiSample ? 4 : 1);
+
+		auto sampleGrid = [&](float dx, float dy) {
+			const double sampleStarted = emscripten_get_now();
+			auto detected = SampleGrid(imageBits, dim, dim, trackedTransform(track, dx, dy));
+			measured.samples += dim * dim;
 			measured.samplingMs += emscripten_get_now() - sampleStarted;
-			return inFrame;
+			if (!detected.isValid())
+				return false;
+			track.sampled = std::move(detected).bits();
+			return true;
 		};
+
 		auto fastDecode = [&]() {
 			ByteArray fastPacket;
 			double fastStarted = emscripten_get_now();
 			auto fast = decodeWithoutErrorCorrection(track.sampled);
 			measured.bitExtractionMs += emscripten_get_now() - fastStarted;
-			if (!fast.isValid())
+			if (!fast.isValid()) {
 				++measured.bitstreamFailures;
-			if (fast.isValid()) {
-				const auto& bytes = fast.content().bytes;
-				fastStarted = emscripten_get_now();
-				const bool crcOK = hasValidCRC32(bytes);
-				measured.crcMs += emscripten_get_now() - fastStarted;
-				if (crcOK) {
-					fastPacket.assign(bytes.begin(), bytes.end() - 4);
-					++measured.crcFastSuccesses;
-				} else {
-					++measured.crcFailures;
-				}
+				return fastPacket;
 			}
+			const auto& bytes = fast.content().bytes;
+			fastStarted = emscripten_get_now();
+			const bool crcOK = hasValidCRC32(bytes);
+			measured.crcMs += emscripten_get_now() - fastStarted;
+			if (!crcOK) {
+				++measured.crcFailures;
+				return fastPacket;
+			}
+			fastPacket.assign(bytes.begin(), bytes.end() - 4);
+			++measured.crcFastSuccesses;
 			return fastPacket;
 		};
 
-		bool sampledMulti = !track.crc32Payload && canMultiSample;
-		if (!sampleGrid(sampledMulti)) {
+		// First attempt is always the last CRC-confirmed geometry. This is the
+		// actual hot path: no finder scan, no detector and no Reed-Solomon.
+		++measured.anchorBypassAttempts;
+		if (!sampleGrid(track.dx, track.dy)) {
 			++track.consecutiveMisses;
 			++measured.misses;
 			++measured.outOfFrameMisses;
@@ -791,18 +717,36 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		}
 
 		ByteArray packet;
-		if (track.crc32Payload) {
+		if (track.crc32Payload)
 			packet = fastDecode();
-			if (packet.empty() && canMultiSample && !sampledMulti) {
-				++measured.multiSampleRetries;
-				if (sampleGrid(true)) {
-					sampledMulti = true;
+		if (!packet.empty())
+			++measured.anchorBypassSuccesses;
+
+		// Only after a cached-grid CRC miss do we spend work refining motion.
+		// Crucially, an anchor candidate is not committed unless the resulting
+		// matrix also passes the packet CRC. Finder confidence can therefore
+		// never poison future tracked geometry.
+		const float trustedDx = track.dx, trustedDy = track.dy;
+		if (track.crc32Payload && packet.empty()) {
+			AnchorReading anchor;
+			auto binaryLumAt = [&](float fx, float fy) {
+				const PointF p{fx, fy};
+				return imageBits.isIn(p) ? (imageBits.get(p) ? 0 : 255) : -1;
+			};
+			const double anchorStarted = emscripten_get_now();
+			const bool anchored = refineAnchor(track, binaryLumAt, anchor);
+			measured.anchorMs += emscripten_get_now() - anchorStarted;
+			if (anchored) {
+				++measured.anchorSuccesses;
+				const bool moved = std::abs(track.dx - trustedDx) > 0.01f || std::abs(track.dy - trustedDy) > 0.01f;
+				if (moved && sampleGrid(track.dx, track.dy))
 					packet = fastDecode();
-				} else {
-					// Keep the valid center sample as the RS input when only an edge
-					// quarter-sample falls outside the crop.
-					sampleGrid(false);
-				}
+			} else {
+				++measured.anchorMisses;
+			}
+			if (packet.empty()) {
+				track.dx = trustedDx;
+				track.dy = trustedDy;
 			}
 		}
 
@@ -810,25 +754,27 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		if (packet.empty() && allowRS) {
 			if (track.crc32Payload)
 				++budgetedFallbacks;
-			started = emscripten_get_now();
+			// If a failed refinement changed the sampled matrix, restore the
+			// trusted geometry before any non-AirGapper compatibility RS decode.
+			if (!track.crc32Payload)
+				sampleGrid(track.dx, track.dy);
+			const double rsStarted = emscripten_get_now();
 			auto decoded = QRCode::Decode(track.sampled);
-			measured.rsFallbackMs += emscripten_get_now() - started;
+			measured.rsFallbackMs += emscripten_get_now() - rsStarted;
 			++measured.rsFallbacks;
 			if (decoded.isValid()) {
 				const auto& bytes = decoded.content().bytes;
 				if (!track.crc32Payload) {
 					packet.assign(bytes.begin(), bytes.end());
 				} else {
-					started = emscripten_get_now();
-					bool crcOK = hasValidCRC32(bytes);
-					measured.crcMs += emscripten_get_now() - started;
+					const double crcStarted = emscripten_get_now();
+					const bool crcOK = hasValidCRC32(bytes);
+					measured.crcMs += emscripten_get_now() - crcStarted;
 					if (crcOK)
 						packet.assign(bytes.begin(), bytes.end() - 4);
 				}
 			}
 		}
-		if (!packet.empty() && !anchored)
-			++measured.anchorBypassSuccesses;
 
 		if (packet.empty()) {
 			++track.consecutiveMisses;
@@ -856,6 +802,7 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		result.dx = track.dx;
 		result.dy = track.dy;
 	}
+
 	if (trackSlots)
 		decoder.fallbackCursor = (decoder.fallbackCursor + std::max(1, decoder.maxRSFallbacks)) % trackSlots;
 	measured.totalMs = emscripten_get_now() - totalStart;
@@ -903,6 +850,10 @@ EMSCRIPTEN_KEEPALIVE int setTrackedDecoderTrack(int handle, int slot, int id, in
 		if (!transform.isValid())
 			return 0;
 		auto& track = decoder->tracks[slot];
+		track.topLeft = PointF{x0, y0};
+		track.topRight = PointF{x1, y1};
+		track.bottomRight = PointF{x2, y2};
+		track.bottomLeft = PointF{x3, y3};
 		track.samples.resize(dimension * dimension);
 		for (int y = 0; y < dimension; ++y)
 			for (int x = 0; x < dimension; ++x) {
@@ -973,12 +924,20 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 	if (!decoder || !yPlane || width <= 0 || height <= 0 || stride < width || !results || resultCapacity < 0 ||
 		!output || outputCapacity < 0)
 		return -1;
-	auto lumAtY = [&](float fx, float fy) {
-		int x = int(fx), y = int(fy);
-		return x < 0 || y < 0 || x >= width || y >= height ? -1 : int(yPlane[size_t(y) * stride + x]);
-	};
 	try {
-		return decodeBatch(*decoder, lumAtY, results, resultCapacity, output, outputCapacity, metrics);
+		const double binStarted = emscripten_get_now();
+		ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
+		HybridBinarizer binarized(lumView);
+		auto bits = binarized.getBitMatrix();
+		const double binMs = emscripten_get_now() - binStarted;
+		if (!bits)
+			return -1;
+		const int count = decodeBatchBinarized(*decoder, *bits, results, resultCapacity, output, outputCapacity, metrics);
+		if (metrics) {
+			metrics->samplingMs += binMs;
+			metrics->totalMs += binMs;
+		}
+		return count;
 	} catch (...) {
 		return -1;
 	}
@@ -992,15 +951,27 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchRGBA(int handle, const uint8_t* rgba,
 	if (!decoder || !rgba || width <= 0 || height <= 0 || stride < width * 4 || !results || resultCapacity < 0 ||
 		!output || outputCapacity < 0)
 		return -1;
-	auto lumAtRGBA = [&](float fx, float fy) {
-		int x = int(fx), y = int(fy);
-		if (x < 0 || y < 0 || x >= width || y >= height)
-			return -1;
-		const uint8_t* px = rgba + size_t(y) * stride + x * 4;
-		return int(RGBToLum(px[0], px[1], px[2]));
-	};
 	try {
-		return decodeBatch(*decoder, lumAtRGBA, results, resultCapacity, output, outputCapacity, metrics);
+		const double binStarted = emscripten_get_now();
+		std::vector<uint8_t> lum(size_t(width) * height);
+		for (int y = 0; y < height; ++y) {
+			const uint8_t* src = rgba + size_t(y) * stride;
+			uint8_t* dst = lum.data() + size_t(y) * width;
+			for (int x = 0; x < width; ++x, src += 4)
+				dst[x] = RGBToLum(src[0], src[1], src[2]);
+		}
+		ImageView lumView(lum.data(), width, height, ImageFormat::Lum);
+		HybridBinarizer binarized(lumView);
+		auto bits = binarized.getBitMatrix();
+		const double binMs = emscripten_get_now() - binStarted;
+		if (!bits)
+			return -1;
+		const int count = decodeBatchBinarized(*decoder, *bits, results, resultCapacity, output, outputCapacity, metrics);
+		if (metrics) {
+			metrics->samplingMs += binMs;
+			metrics->totalMs += binMs;
+		}
+		return count;
 	} catch (...) {
 		return -1;
 	}

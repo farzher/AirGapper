@@ -4635,8 +4635,8 @@ Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "es
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
-Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}
-Anchor bypass CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Sampler HybridBinarizer + SampleGrid · cached-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Cached-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Pixel A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;
