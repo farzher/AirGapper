@@ -609,7 +609,6 @@ const captureTimes = [];
 const qrReadTimes = [];
 const uniqueQrTimes = [];
 const duplicateQrTimes = [];
-const unchangedSkipEvents = [];
 const poolBusyTimes = [];
 const scanCompletionTimes = [];
 const decodeFrameTimes = [];
@@ -1195,10 +1194,6 @@ function noteDecodeCompleted(id, completion) {
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
-  if (completion.unchangedTracked) {
-    unchangedSkipEvents.push({ at: receiverNow(), tracks: completion.unchangedTrackCount || attempts?.length || 0 });
-    return;
-  }
   if (!attempts) return;
   for (const attempt of attempts) {
     const region = attempt.region;
@@ -2096,7 +2091,6 @@ function stopReceiver() {
   qrReadTimes.length = 0;
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
-  unchangedSkipEvents.length = 0;
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
   decodeFrameTimes.length = 0;
@@ -3341,7 +3335,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     if (!submitReceiverJob(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim, strictTracked: Boolean(source.image), skipUnchanged: gridLattice.locked && r.gridSlot !== void 0, visualTrackId: r.gridSlot ?? r.id },
       [img.data.buffer],
       "INDIVIDUAL TRACKED CROP",
       trace,
@@ -3387,7 +3380,6 @@ function resetActiveTransfer() {
   qrReadTimes.length = 0;
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
-  unchangedSkipEvents.length = 0;
   usefulFrameTimes.length = 0;
   lastDistinctArrivalAt = 0;
   bar.style.width = "0";
@@ -3545,7 +3537,6 @@ function onDecoded(bytes, box, info) {
     usefulFrameTimes.length = 0;
     uniqueQrTimes.length = 0;
     duplicateQrTimes.length = 0;
-    unchangedSkipEvents.length = 0;
     streamKey = identity;
     startTs = receiverNow();
     progressEl.style.display = "block";
@@ -4463,7 +4454,6 @@ function updateStats() {
   prune(uniqueQrTimes);
   prune(duplicateQrTimes);
   prune(usefulFrameTimes);
-  while (unchangedSkipEvents.length > 0 && unchangedSkipEvents[0].at < now - STATS_WINDOW_MS) unchangedSkipEvents.shift();
   const perSecond = (a) => a.length / (STATS_WINDOW_MS / 1e3);
   const cameraRate = perSecond(captureTimes);
   const completionRate = perSecond(scanCompletionTimes);
@@ -4472,8 +4462,6 @@ function updateStats() {
   const uniqueRate = perSecond(uniqueQrTimes);
 const duplicateRate = perSecond(duplicateQrTimes);
 const usefulRate = perSecond(usefulFrameTimes);
-const skippedJobRate = unchangedSkipEvents.length / (STATS_WINDOW_MS / 1e3);
-const skippedTrackRate = unchangedSkipEvents.reduce((sum, event) => sum + event.tracks, 0) / (STATS_WINDOW_MS / 1e3);
 if (!receiverDevActions.hidden && transportDiagnostics) {
   const transportRate = uniqueRate + duplicateRate;
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
@@ -4481,7 +4469,6 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   transportDiagnostics.textContent = `Transport
 Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
 Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
-Unchanged visual skips ${skippedJobRate.toFixed(1)} jobs/s · ${skippedTrackRate.toFixed(1)} QR attempts/s avoided
 ${totals}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;

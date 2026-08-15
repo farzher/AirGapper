@@ -42,57 +42,6 @@ let nativeConfigured = [];
 let nativeCropOrigin = "";
 let nativeFallbackBudget = 1;
 const nativeRefresh = /* @__PURE__ */ new Set();
-const TRACKED_VISUAL_GRID = 5;
-const TRACKED_VISUAL_LARGE_DELTA = 48;
-const TRACKED_VISUAL_MEAN_DELTA = 10;
-const TRACKED_VISUAL_MAX_AGE_MS = 800;
-const TRACKED_VISUAL_MAX_SKIP_STREAK = 12;
-let previousTrackedVisual;
-function trackedVisualKey(tracks, pixelFormat) {
-  return `${pixelFormat}|${tracks.map((track) => `${track.slot ?? track.id}:${track.dim}`).join(",")}`;
-}
-function sampleTrackedVisual(zx, ptr, width, height, ox, oy, tracks, pixelFormat, stride) {
-  const values = new Uint8Array(tracks.length * TRACKED_VISUAL_GRID * TRACKED_VISUAL_GRID);
-  let at = 0;
-  for (const track of tracks) {
-    const q = track.quad;
-    for (let gy = 0; gy < TRACKED_VISUAL_GRID; gy++) {
-      const v = (gy + 0.5) / TRACKED_VISUAL_GRID;
-      for (let gx = 0; gx < TRACKED_VISUAL_GRID; gx++) {
-        const u = (gx + 0.5) / TRACKED_VISUAL_GRID;
-        const topX = q.topLeft.x * (1 - u) + q.topRight.x * u;
-        const topY = q.topLeft.y * (1 - u) + q.topRight.y * u;
-        const bottomX = q.bottomLeft.x * (1 - u) + q.bottomRight.x * u;
-        const bottomY = q.bottomLeft.y * (1 - u) + q.bottomRight.y * u;
-        const x = Math.max(0, Math.min(width - 1, Math.round(topX * (1 - v) + bottomX * v - ox)));
-        const y = Math.max(0, Math.min(height - 1, Math.round(topY * (1 - v) + bottomY * v - oy)));
-        const offset = ptr + y * stride + (pixelFormat === "y8" ? x : x * 4);
-        values[at++] = zx.HEAPU8[offset];
-      }
-    }
-  }
-  return { key: trackedVisualKey(tracks, pixelFormat), values };
-}
-function trackedVisualUnchanged(previous, current) {
-  if (!previous || previous.key !== current.key || previous.values.length !== current.values.length) return false;
-  let largeChanges = 0;
-  let totalDelta = 0;
-  for (let i = 0; i < current.values.length; i++) {
-    const delta = Math.abs(current.values[i] - previous.values[i]);
-    totalDelta += delta;
-    if (delta >= TRACKED_VISUAL_LARGE_DELTA) largeChanges++;
-  }
-  const allowedLargeChanges = Math.max(1, Math.floor(current.values.length * 0.02));
-  return largeChanges <= allowedLargeChanges && totalDelta <= current.values.length * TRACKED_VISUAL_MEAN_DELTA;
-}
-function shouldSkipTrackedVisual(current, now) {
-  if (!previousTrackedVisual || now - previousTrackedVisual.at > TRACKED_VISUAL_MAX_AGE_MS || previousTrackedVisual.skipStreak >= TRACKED_VISUAL_MAX_SKIP_STREAK || !trackedVisualUnchanged(previousTrackedVisual, current)) return false;
-  previousTrackedVisual.skipStreak++;
-  return true;
-}
-function rememberTrackedVisual(current, now) {
-  previousTrackedVisual = { key: current.key, values: current.values, at: now, skipStreak: 0 };
-}
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -257,7 +206,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictTracked = false, skipUnchanged = false, visualTrackId = -1 } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictTracked = false } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -423,30 +372,6 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && (tracks == null ? void 0 : tracks.length)) {
-      // Never let the unchanged-frame gate suppress a requested recovery.
-      const trackedVisual = strictTracked || robustTrackedRecovery ? null : sampleTrackedVisual(zx, ptr + inputOffset, pw, ph, ox, oy, tracks, decodePixelFormat, inputStride);
-if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) {
-  ctx.postMessage({
-    id,
-    symbols: [],
-    sightings,
-    full: false,
-    trackedAttempted: false,
-    trackedHit: false,
-    unchangedTracked: true,
-    unchangedTrackCount: tracks.length,
-    fallbackAttempted: false,
-    fallbackSucceeded: false,
-    readFullAttempts: 0,
-    workerWaitMs,
-    targetedAttempts: 0,
-    targetedPixels: 0,
-    targetedSuccesses: 0,
-    frameCopyMs,
-    latencyMs: performance.now() - startedAt
-  });
-  return;
-}
       const native = decodeNativeBatch(
         zx,
         ptr + inputOffset,
@@ -460,7 +385,6 @@ if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) 
         strictTracked
       );
       const nativeSymbols = native?.symbols ?? [];
-      if (nativeSymbols.length > 0 && trackedVisual) rememberTrackedVisual(trackedVisual, performance.now());
       const robustFallback = robustTrackedRecovery && decodePixelFormat === "rgba" && nativeSymbols.length === 0;
       if (!robustFallback && (native || usedDirectFrame)) {
         const directFrameFailed = usedDirectFrame && !native;
@@ -532,26 +456,6 @@ if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) 
     let trackedAttempted = false;
     let fallbackAttempted = false;
     if (!full && quad && dim) {
-      const trackedVisual = skipUnchanged && !strictTracked ? sampleTrackedVisual(zx, ptr + inputOffset, pw, ph, ox, oy, [{ id: visualTrackId, quad, dim }], decodePixelFormat, inputStride) : null;
-if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) {
-  ctx.postMessage({
-    id,
-    symbols: [],
-    sightings,
-    full: false,
-    trackedAttempted: false,
-    trackedHit: false,
-    unchangedTracked: true,
-    unchangedTrackCount: 1,
-    fallbackAttempted: false,
-    fallbackSucceeded: false,
-    readFullAttempts: 0,
-    workerWaitMs,
-    frameCopyMs,
-    latencyMs: performance.now() - startedAt
-  });
-  return;
-}
       trackedAttempted = true;
       const r = zx.readTracked(
         ptr,
@@ -576,7 +480,6 @@ if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) 
           tracked: true
         });
         trackedHit = true;
-        if (trackedVisual) rememberTrackedVisual(trackedVisual, performance.now());
       }
     }
     if (shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
