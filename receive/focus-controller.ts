@@ -4,7 +4,7 @@ export type FocusStrategy = "auto" | "camera-auto" | "single-shot" | "manual";
 export type CalibrationMode = "auto" | "off" | "force";
 export type FocusState =
   | "UNAVAILABLE" | "SEEKING" | "STABILIZING"
-  | "LOCKED" | "TARGET_LOST_GRACE" | "EXPOSURE_RECOVERY"
+  | "LOCKED" | "TARGET_LOST_GRACE"
   | "OPTIMIZE_EXPOSURE" | "OPTIMIZE_VERIFY" | "OVERRIDE";
 export type FocusOwner = "HARDWARE" | "MANUAL" | "DEVELOPER" | "NONE";
 
@@ -48,7 +48,7 @@ export const CAMERA_TUNING = {
   exposureDiscardFrames: 2,
   exposureExcellent: 0.7,
   seekingOpticalIntervalMs: 110,
-  lockedOpticalIntervalMs: 320,
+  lockedOpticalIntervalMs: 700,
   targetLostGraceMs: 1600,
   stabilizingRetryMs: 2500,
   poorFocusRetryMs: 480,
@@ -61,7 +61,6 @@ export const CAMERA_TUNING = {
   optimizeBudgetMs: 7000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
-  acquisitionBracketDelayMs: 900,
 };
 
 // Phone AE is tuned for photographs, where a bright emissive screen is often
@@ -69,11 +68,11 @@ export const CAMERA_TUNING = {
 // but bias it slightly dark and make small, slow corrections from real QR
 // function-module levels. Never brighten above the camera's neutral 0 EV.
 const AUTO_QR_EV_BIAS = -0.7;
-const AUTO_QR_EV_COOLDOWN_MS = 650;
-const AUTO_QR_WHITE_LOW = 155;
-const AUTO_QR_WHITE_HIGH = 225;
-const AUTO_QR_BLACK_HIGH = 92;
-const AUTO_QR_SEPARATION_LOW = 58;
+const AUTO_QR_EV_COOLDOWN_MS = 3000;
+const AUTO_QR_WHITE_LOW = 145;
+const AUTO_QR_WHITE_HIGH = 238;
+const AUTO_QR_BLACK_HIGH = 105;
+const AUTO_QR_SEPARATION_LOW = 50;
 
 export interface FocusGeometry {
   x: number;
@@ -269,6 +268,8 @@ export class FocusController {
   private autoExposureCompensation?: number;
   private lastAutoExposureTrimAt = -Infinity;
   private autoExposureTrimRunning = false;
+  private autoExposureTrimDirection = 0;
+  private autoExposureTrimConfirmations = 0;
   private requestedExposure?: number;
   private requestedIso?: number;
   private focusProbes = 0;
@@ -306,8 +307,6 @@ export class FocusController {
   private optimizeCandidates: OptimizerCandidateDiagnostic[] = [];
   private optimizeExposureVisited?: { min: number; max: number; coverage: number };
   private optimizeIsoVisited?: { min: number; max: number; coverage: number };
-  private acquisitionBracketRunning = false;
-  private acquisitionBracketTried = false;
   private decodeBoundary = 0;
   private cameraGenerationStartedAt = performance.now();
   private lastValidDecodeAt?: number;
@@ -349,8 +348,7 @@ export class FocusController {
   get capabilities(): CameraCapabilities { return this.caps; }
   get selectedStrategy(): FocusStrategy { return this.strategy; }
   get expectsProbeFrame(): boolean {
-    return this.state === "EXPOSURE_RECOVERY" ||
-      this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
+    return this.state === "OPTIMIZE_EXPOSURE" || this.state === "OPTIMIZE_VERIFY";
   }
   get opticalIntervalMs(): number {
     if (this.calibrationMode === "off") return Infinity;
@@ -393,8 +391,6 @@ export class FocusController {
     this.optimizeComparison = undefined;
     this.optimizePairedSamples = 0;
     this.optimizeReason = "camera changed";
-    this.acquisitionBracketRunning = false;
-    this.acquisitionBracketTried = false;
     this.bestKnownGood = undefined;
     this.lastWorkingState = undefined;
     this.beginDecodeGeneration();
@@ -407,6 +403,8 @@ export class FocusController {
     this.autoExposureCompensation = undefined;
     this.lastAutoExposureTrimAt = -Infinity;
     this.autoExposureTrimRunning = false;
+    this.autoExposureTrimDirection = 0;
+    this.autoExposureTrimConfirmations = 0;
     if (this.strategy === "auto") {
       this.transition("SEEKING", "camera track changed; one hardware AF sweep, then focus held by camera");
       // Static QR scanning does not benefit from continuous AF hunting. Ask the
@@ -1161,7 +1159,6 @@ export class FocusController {
   noteValidDecode(scanId?: number, now = performance.now()): void {
     if (scanId === undefined || scanId < this.decodeBoundary) return;
     this.lastValidDecodeAt = now;
-    this.acquisitionBracketRunning = false;
     if (scanId !== this.lastValidScanId) {
       this.lastValidScanId = scanId;
       this.validDecodesInGeneration++;
@@ -1256,7 +1253,7 @@ export class FocusController {
         this.lastReason = "sustained blur detected; focus left untouched";
       } else if (!optimizedHold && this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
         this.lockedExposureFailures = 0;
-        void this.beginExposureRecovery(observation);
+        this.lastReason = "decoder exposure quality dipped; hardware AE retained";
       } else {
         this.lastReason = decodeFresh ? "real decoder progress; camera held" :
           metrics.focusScore >= CAMERA_TUNING.focusExcellent && metrics.exposureScore >= CAMERA_TUNING.exposureExcellent
@@ -1275,7 +1272,6 @@ export class FocusController {
     if (!this.stableGeometry || this.geometryChanged(geometry, this.stableGeometry)) {
       this.stableGeometry = geometry;
       this.stableSince = now;
-        this.acquisitionBracketTried = false;
       this.transition("STABILIZING", "QR geometry found; camera focus left untouched");
     } else {
       this.stableGeometry = this.blendGeometry(this.stableGeometry, geometry);
@@ -1283,12 +1279,6 @@ export class FocusController {
       const decodeProven = this.validDecodesInGeneration > 0 && this.decodeIsFresh(now);
       if (stable && decodeProven) {
         this.lock(observation, "QR decoding stable; hardware focus left untouched");
-      } else if (stable && !decodeProven && !this.acquisitionBracketTried && !this.acquisitionBracketRunning &&
-          now - this.stableSince >= CAMERA_TUNING.acquisitionBracketDelayMs &&
-          (metrics.exposureScore < 0.55 || metrics.separation < 48 || metrics.clipping > 0.45)) {
-        // Acquisition is allowed to adjust BRIGHTNESS only. Focus metrics never
-        // trigger a camera mutation.
-        void this.beginAcquisitionBrightnessBracket(observation);
       } else {
         this.lastReason = metrics.focusScore < 0.38
           ? "image appears soft; hardware focus left untouched"
@@ -1431,38 +1421,48 @@ export class FocusController {
   }
 
   private async maybeTrimAutomaticExposure(metrics: QrOpticalMetrics, now: number): Promise<void> {
-    if (this.autoExposureTrimRunning || now - this.lastAutoExposureTrimAt < AUTO_QR_EV_COOLDOWN_MS ||
-        this.isOptimizing() || this.strategy !== "auto" || this.state !== "LOCKED" ||
+    if (this.autoExposureTrimRunning || this.isOptimizing() || this.strategy !== "auto" || this.state !== "LOCKED" ||
         !this.track || this.track.readyState !== "live") return;
     const range = this.caps.exposureCompensation;
-    if (!range || range.min > 0 || range.max < 0 || metrics.confidence < 0.78 ||
-        metrics.focusScore < 0.45 || metrics.banding > 0.5) return;
+    if (!range || range.min > 0 || range.max < 0 || metrics.confidence < 0.82 ||
+        metrics.focusScore < 0.42 || metrics.banding > 0.45) return;
 
     const settings = this.settings();
-    // Only tune genuine hardware AE. Chrome/Android sometimes reports no mode
-    // string at all; in that case a defined compensation still proves the axis
-    // exists, so allow it unless the mode explicitly says manual.
     if (settings.exposureMode === "manual") return;
 
-    const current = this.quantize(Math.min(0, settings.exposureCompensation ?? this.autoExposureCompensation ?? AUTO_QR_EV_BIAS), range);
-    const step = Math.max(range.step ?? 0, 0.25);
-    // Do not use the aggregate clipping metric to decide direction: it counts
-    // BOTH clipped black modules (often desirable) and clipped whites. Absolute
-    // white/black levels tell us which way brightness should move.
+    // Auto is intentionally conservative. Start slightly dark, then change only
+    // when two consecutive QR-targeted samples agree that the image is clearly
+    // outside a wide safe band. This avoids brightness oscillation from display
+    // scanout, sensor noise, or one unusual sender frame.
     const tooBright = metrics.whiteLevel > AUTO_QR_WHITE_HIGH ||
       (metrics.blackLevel > AUTO_QR_BLACK_HIGH && metrics.separation >= AUTO_QR_SEPARATION_LOW);
     const tooDark = !tooBright && (metrics.whiteLevel < AUTO_QR_WHITE_LOW || metrics.separation < AUTO_QR_SEPARATION_LOW);
-    let next = current;
-    if (tooBright) next = this.quantize(Math.max(range.min, current - step), range);
-    else if (tooDark) next = this.quantize(Math.min(0, current + step), range);
+    const direction = tooBright ? -1 : tooDark ? 1 : 0;
+    if (direction === 0) {
+      this.autoExposureTrimDirection = 0;
+      this.autoExposureTrimConfirmations = 0;
+      return;
+    }
+    if (direction !== this.autoExposureTrimDirection) {
+      this.autoExposureTrimDirection = direction;
+      this.autoExposureTrimConfirmations = 1;
+      return;
+    }
+    this.autoExposureTrimConfirmations++;
+    if (this.autoExposureTrimConfirmations < 2 || now - this.lastAutoExposureTrimAt < AUTO_QR_EV_COOLDOWN_MS) return;
+
+    const current = this.quantize(Math.min(0, settings.exposureCompensation ?? this.autoExposureCompensation ?? AUTO_QR_EV_BIAS), range);
+    const step = Math.max(range.step ?? 0, 0.25);
+    const next = direction < 0
+      ? this.quantize(Math.max(range.min, current - step), range)
+      : this.quantize(Math.min(0, current + step), range);
     if (Math.abs(next - current) < 1e-6) return;
 
     this.autoExposureTrimRunning = true;
     this.lastAutoExposureTrimAt = now;
+    this.autoExposureTrimConfirmations = 0;
     try {
-      // AE mode was established once when Auto was entered. Do not keep
-      // re-selecting the mode for tiny EV trims; some Android HALs treat mode
-      // writes as a fresh 3A transition.
+      // Only the EV number changes. Never re-select AE mode or touch focus.
       const accepted = await this.apply(this.track, { exposureCompensation: next });
       if (accepted) {
         this.autoExposureCompensation = next;
@@ -1474,79 +1474,6 @@ export class FocusController {
     }
   }
 
-  private async beginExposureRecovery(observation: OpticalObservation): Promise<void> {
-    if (this.state !== "LOCKED" || !this.exposureModes().includes("continuous")) return;
-    const generation = ++this.generation;
-    this.exposureRefinementCount++;
-    this.beginDecodeGeneration();
-    this.transition("EXPOSURE_RECOVERY", "persistent static exposure loss; focus retained; hardware AE enabled");
-    if (!(await this.applyProbe(generation, { exposureMode: "continuous" }))) {
-      this.lock(observation, "exposure recovery rejected; prior camera state retained");
-      return;
-    }
-    const recovered = await this.waitForExposureSettled(generation, observation.id);
-    if (!recovered || !this.current(generation)) {
-      await this.restoreCommittedExposure();
-      return;
-    }
-    const actual = this.settings();
-    this.baselineExposure = actual.exposureTime;
-    this.baselineIso = actual.iso;
-    if (this.current(generation)) this.lock(recovered, "hardware AE recovery complete; focus retained");
-  }
-
-  private async beginAcquisitionBrightnessBracket(observation: OpticalObservation): Promise<void> {
-    if (!this.isAcquiring() || this.acquisitionBracketRunning || this.validDecodesInGeneration > 0 || !this.track) return;
-    const generation = this.generation;
-    this.acquisitionBracketRunning = true;
-    this.acquisitionBracketTried = true;
-    const settings = this.settings();
-    const compensation = this.caps.exposureCompensation;
-    const midpoint = (observation.metrics.blackLevel + observation.metrics.whiteLevel) / 2;
-    const clearlyBright = observation.metrics.clipping > 0.55 || observation.metrics.whiteLevel > 245 || midpoint > 190;
-    const clearlyDark = !clearlyBright && (observation.metrics.whiteLevel < 155 || midpoint < 95);
-    let afterId = observation.id;
-
-    if (compensation && this.exposureModes().some((mode) => mode === "continuous" || mode === "single-shot")) {
-      const origin = settings.exposureCompensation ?? 0;
-      const offsets = clearlyBright ? [-1, -2] : clearlyDark ? [1, 2] : [1, -1];
-      for (const offset of offsets) {
-        if (!this.acquisitionBracketRunning || !this.current(generation) || this.validDecodesInGeneration > 0) return;
-        const candidate = this.quantize(origin + offset, compensation);
-        if (candidate === origin) continue;
-        if (!(await this.applyProbe(generation, { exposureCompensation: candidate }, false))) break;
-        const settled = await this.waitForExposureSettled(generation, afterId);
-        if (!settled) break;
-        afterId = settled.id;
-        if (this.validDecodesInGeneration > 0) return;
-      }
-      if (this.current(generation) && this.validDecodesInGeneration === 0) {
-        await this.applyProbe(generation, { exposureCompensation: origin }, false);
-      }
-    } else if (this.manualExposure() && this.caps.exposureTime && settings.exposureTime !== undefined) {
-      const originExposure = settings.exposureTime;
-      const originIso = settings.iso;
-      const factors = clearlyBright ? [0.5, 0.25] : clearlyDark ? [2, 4] : [2, 0.5];
-      for (const factor of factors) {
-        if (!this.acquisitionBracketRunning || !this.current(generation) || this.validDecodesInGeneration > 0) return;
-        const patch: CameraPatch = {
-          exposureMode: "manual",
-          exposureTime: this.quantize(originExposure * factor, this.caps.exposureTime),
-          ...(originIso !== undefined ? { iso: originIso } : {}),
-        };
-        if (!(await this.applyProbe(generation, patch, false))) break;
-        const settled = await this.waitForExposureSettled(generation, afterId);
-        if (!settled) break;
-        afterId = settled.id;
-        if (this.validDecodesInGeneration > 0) return;
-      }
-      if (this.current(generation) && this.validDecodesInGeneration === 0 && this.exposureModes().includes("continuous")) {
-        await this.applyProbe(generation, { exposureMode: "continuous" }, false);
-      }
-    }
-    this.acquisitionBracketRunning = false;
-    this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
-  }
   private async enterAutomaticExposureState(
     reason: string,
     generation = this.generation,
@@ -1612,20 +1539,6 @@ export class FocusController {
     if (Object.keys(patch).length) {
       await this.apply(track, patch);
       this.beginDecodeGeneration();
-    }
-  }
-
-  private async restoreCommittedExposure(): Promise<void> {
-    const track = this.track;
-    if (!track) return;
-    if (this.committedExposureMode === "continuous" && this.exposureModes().includes("continuous")) {
-      await this.apply(track, { exposureMode: "continuous" });
-    } else if (this.committedExposureMode === "manual" && this.manualExposure() && this.committedExposureTime !== undefined) {
-      await this.apply(track, {
-        exposureMode: "manual",
-        exposureTime: this.committedExposureTime,
-        ...(this.committedIso !== undefined ? { iso: this.committedIso } : {}),
-      });
     }
   }
 
@@ -1698,48 +1611,6 @@ export class FocusController {
     const accepted = await this.apply(track, patch);
     if (accepted && fenceImmediately && this.current(generation)) this.beginDecodeGeneration();
     return accepted && this.current(generation);
-  }
-
-  private waitForExposureSettled(generation: number, afterId: number): Promise<OpticalObservation | undefined> {
-    return this.waitForObservations(
-      generation,
-      afterId,
-      0,
-      CAMERA_TUNING.exposureDiscardFrames,
-      1,
-      900,
-    );
-  }
-
-  private waitForObservations(
-    generation: number,
-    afterId: number,
-    settleMs: number,
-    discard: number,
-    requiredSamples: number,
-    minimumTimeoutMs: number,
-  ): Promise<OpticalObservation | undefined> {
-    if (!this.current(generation)) return Promise.resolve(undefined);
-    return new Promise((resolve) => {
-      this.waiter?.resolve(undefined);
-      this.waiter = {
-        generation,
-        afterId,
-        notBefore: performance.now() + settleMs,
-        discard,
-        samples: [],
-        requiredSamples,
-        resolve,
-      };
-      const frameInterval = this.latest?.captureFps ? 1000 / this.latest.captureFps : 50;
-      const timeoutMs = Math.max(minimumTimeoutMs, settleMs + frameInterval * (discard + requiredSamples + 3) * 2);
-      setTimeout(() => {
-        if (this.waiter?.resolve === resolve) {
-          this.waiter = undefined;
-          resolve(undefined);
-        }
-      }, timeoutMs);
-    });
   }
 
   private resolveWaiter(observation: OpticalObservation): void {

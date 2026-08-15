@@ -245,88 +245,48 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (!full && tracks?.length) {
-      // Locked dense grids already give us exact quads and module counts. Run
-      // the cheap tracked sampler first for every known cell; generic detector
-      // acquisition is now a RECOVERY path, not a tax paid on every frame.
-      // This is the critical dense-grid throughput path.
+      // Dense locked grids are a multi-symbol detection problem. Field testing on
+      // real camera frames showed the persistent per-quad tracked sampler can be
+      // extremely cheap but also miss most cells, producing high job/camera FPS
+      // while actual QR/s falls. Optimize for useful symbols instead: one broad
+      // native QR pass first, then isolate only the cells it missed.
       const decodedSlots = new Set<number>();
-      const seenBytes = new Set<string>();
-      let trackedAttempts = 0;
-      let trackedHits = 0;
-      const addSymbol = (result: ReturnType<DecimenModule["readTracked"]>, track: BatchTrack): boolean => {
-        if (!result.valid || !result.bytes.length) return false;
-        const packet = parseFrame(result.bytes);
-        if (!packet || (track.slot !== undefined && packet.header.slotIndex !== track.slot)) return false;
-        const key = `${packet.header.slotIndex ?? "?"}:${Array.from(result.bytes as Uint8Array).join(",")}`;
-        if (seenBytes.has(key)) return false;
-        seenBytes.add(key);
-        if (packet.header.slotIndex !== undefined) decodedSlots.add(packet.header.slotIndex);
-        symbols.push({
-          bytes: result.bytes,
-          box: boundsOf(result.position, ox, oy),
-          quad: shifted(result.position, ox, oy),
-          modules: result.modules,
-          tracked: true,
-          crc32: track.crc32,
-        });
-        return true;
-      };
-
-      for (const track of tracks) {
-        trackedAttempts++;
-        const r = zx.readTracked(
-          ptr, pw, ph, track.dim,
-          track.quad.topLeft.x - ox, track.quad.topLeft.y - oy,
-          track.quad.topRight.x - ox, track.quad.topRight.y - oy,
-          track.quad.bottomRight.x - ox, track.quad.bottomRight.y - oy,
-          track.quad.bottomLeft.x - ox, track.quad.bottomLeft.y - oy,
-        );
-        if (addSymbol(r, track)) trackedHits++;
-      }
-
-      // If all cached quads failed, geometry probably moved or the display is in
-      // transition: pay once for the broad detector to re-anchor the batch. On
-      // small grids a majority miss also justifies that recovery pass; on large
-      // grids a few successful tracked cells are enough to keep the cheap path.
-      const broadRecovery = trackedHits === 0 || (tracks.length <= 4 && trackedHits * 2 < tracks.length);
-      if (broadRecovery) {
-        readFullAttempts++;
-        const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(4, tracks.length + 2)), false);
-        try {
-          for (let i = 0; i < decoded.size(); i++) {
-            const result = decoded.get(i);
-            if (!result.valid || !result.bytes.length) continue;
-            const packet = parseFrame(result.bytes);
-            const slot = packet?.header.slotIndex;
-            if (!packet || (slot !== undefined && decodedSlots.has(slot))) continue;
-            const key = `${slot ?? "?"}:${Array.from(result.bytes as Uint8Array).join(",")}`;
-            if (seenBytes.has(key)) continue;
-            seenBytes.add(key);
-            if (slot !== undefined) decodedSlots.add(slot);
-            symbols.push({
-              bytes: result.bytes,
-              box: boundsOf(result.position, ox, oy),
-              quad: shifted(result.position, ox, oy),
-              modules: result.modules,
-              tracked: false,
-            });
-          }
-        } finally {
-          decoded.delete();
+      const expectedSlots = new Set(tracks.flatMap((track) => track.slot === undefined ? [] : [track.slot]));
+      readFullAttempts++;
+      const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(4, tracks.length + 2)), false);
+      try {
+        for (let i = 0; i < decoded.size(); i++) {
+          const result = decoded.get(i);
+          if (!result.valid || !result.bytes.length) continue;
+          const packet = parseFrame(result.bytes);
+          const slot = packet?.header.slotIndex;
+          if (!packet || (slot !== undefined && expectedSlots.size && !expectedSlots.has(slot)) ||
+              (slot !== undefined && decodedSlots.has(slot))) continue;
+          if (slot !== undefined) decodedSlots.add(slot);
+          symbols.push({
+            bytes: result.bytes,
+            box: boundsOf(result.position, ox, oy),
+            quad: shifted(result.position, ox, oy),
+            modules: result.modules,
+            tracked: false,
+          });
         }
+      } finally {
+        decoded.delete();
       }
 
-      // Retry at most two missing cells with isolated generic crops. This keeps
-      // recovery bounded while allowing adjacent finder patterns to stop
-      // confusing the broad detector. Optimize intentionally uses the same
-      // production budget so its QR/s verification predicts real throughput.
+      // A broad pass can still miss a clean cell when neighboring finder
+      // patterns win. Recover a few missing cells with isolated one-QR crops.
+      // This spends CPU directly on symbols/frame instead of on empty tracked
+      // attempts. The common 4/6-code layouts get the largest retry budget.
       let targetedAttempts = 0;
       let targetedPixels = 0;
       let targetedSuccesses = 0;
       const missingTracks = [...tracks]
         .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
         .sort((a, b) => b.misses - a.misses);
-      const targetedTracks = missingTracks.slice(0, 2);
+      const retryBudget = tracks.length <= 2 ? 1 : tracks.length <= 6 ? 4 : 3;
+      const targetedTracks = missingTracks.slice(0, retryBudget);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);
         const moduleSize = Math.max(expected.w, expected.h) / track.dim;
@@ -351,7 +311,7 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
         readFullAttempts++;
         targetedAttempts++;
-        const retried = zx.readFull(cropPtr, cw, ch, true, 2, false);
+        const retried = zx.readFull(cropPtr, cw, ch, true, 1, false);
         try {
           for (let i = 0; i < retried.size(); i++) {
             const result = retried.get(i);
@@ -374,9 +334,9 @@ ctx.onmessage = async (e: MessageEvent) => {
         }
       }
       ctx.postMessage({
-        id, symbols, sightings, full: false, trackedAttempted: trackedAttempts > 0,
-        trackedHit: trackedHits > 0, fallbackAttempted: broadRecovery || targetedAttempts > 0,
-        fallbackSucceeded: symbols.some((symbol) => !symbol.tracked),
+        id, symbols, sightings, full: false, trackedAttempted: false,
+        trackedHit: false, fallbackAttempted: targetedAttempts > 0,
+        fallbackSucceeded: targetedSuccesses > 0,
         readFullAttempts, workerWaitMs, targetedAttempts, targetedPixels, targetedSuccesses,
         latencyMs: performance.now() - startedAt,
       });

@@ -986,14 +986,45 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
 let optimizeEnabled = false;
 let optimizeRunning = false;
 let optimizeConverged = false;
+let optimizeRecheckAt = 0;
+let optimizeWatch: { state: string; separation: number; whiteLevel: number; noise: number; banding: number } | undefined;
 let manualValidationToken = 0;
 let manualOptimizerValidation: { exposure: number; iso: number; performance: ReceivePerformance } | undefined;
+
+function snapshotOptimizeWatch(): void {
+  const diagnostic = focusController.diagnostics();
+  const optical = diagnostic.optical;
+  optimizeWatch = optical ? {
+    state: diagnostic.state,
+    separation: optical.separation,
+    whiteLevel: optical.whiteLevel,
+    noise: optical.noise,
+    banding: optical.banding,
+  } : undefined;
+}
+function optimizeSceneChanged(): boolean {
+  if (!optimizeWatch) return false;
+  const diagnostic = focusController.diagnostics();
+  const optical = diagnostic.optical;
+  if (!optical) return false;
+  if (diagnostic.state === "LOCKED" && optimizeWatch.state !== "LOCKED") return true;
+  const separationShift = Math.abs(optical.separation - optimizeWatch.separation) / Math.max(24, optimizeWatch.separation);
+  const noiseShift = Math.abs(optical.noise - optimizeWatch.noise) / Math.max(8, optimizeWatch.noise);
+  return separationShift > 0.22 || Math.abs(optical.whiteLevel - optimizeWatch.whiteLevel) > 28 ||
+    noiseShift > 0.45 || Math.abs(optical.banding - optimizeWatch.banding) > 0.22;
+}
 function setOptimizeEnabled(enabled: boolean): void {
   optimizeEnabled = enabled;
-  if (enabled) optimizeConverged = false;
+  if (enabled) {
+    optimizeConverged = false;
+    optimizeRecheckAt = 0;
+    optimizeWatch = undefined;
+  }
   opticsOptimize.setAttribute("aria-pressed", String(enabled));
   opticsOptimize.textContent = enabled ? "Stop" : "Optimize";
   if (!enabled) {
+    optimizeRecheckAt = 0;
+    optimizeWatch = undefined;
     optimizeMeasureToken++;
     if (optimizeRunning) focusController.cancelOptimize("Optimize stopped");
     if (focusController.diagnostics().optimizeState !== "complete") opticsOptimizeStatus.textContent = "";
@@ -1003,7 +1034,15 @@ function setOptimizeEnabled(enabled: boolean): void {
   }
 }
 function beginOptimizeWhenReady(): void {
-  if (!optimizeEnabled || optimizeRunning || optimizeConverged) return;
+  if (!optimizeEnabled || optimizeRunning) return;
+  const now = performance.now();
+  if (optimizeConverged) {
+    const changed = optimizeSceneChanged();
+    if (!changed && now < optimizeRecheckAt) return;
+    optimizeConverged = false;
+    opticsOptimizeStatus.textContent = changed ? "Scene changed · re-optimizing…" : "Re-checking optimum…";
+  }
+  if (now < optimizeRecheckAt) return;
   if (!focusController.optimizeEligible()) {
     const diagnostic = focusController.diagnostics();
     opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
@@ -1037,8 +1076,11 @@ function beginOptimizeWhenReady(): void {
   void focusController.startOptimizer(measureOptimizerOptics, measureReceivePerformance, optimizerEpochHooks).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
+    const reason = finished.optimizeReason ?? "";
     if (finished.optimizeState === "complete") {
       optimizeConverged = true;
+      optimizeRecheckAt = Number.POSITIVE_INFINITY;
+      snapshotOptimizeWatch();
       // A no-baseline optimization used full-frame probes that intentionally did
       // not mutate production tracking. Promote one proven decode only after the
       // tournament ends so normal tracking/overlay can take over immediately.
@@ -1047,11 +1089,36 @@ function beginOptimizeWhenReady(): void {
       }
       const performance = finished.optimizeBestPerformance;
       opticsOptimizeStatus.textContent = performance
-        ? `${performance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
-        : "Optimal";
+        ? `Optimized · ${performance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
+        : "Optimized · holding";
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
-    } else opticsOptimizeStatus.textContent = finished.optimizeReason ?? "Optimize stopped";
+    } else if (reason.includes("no QR-validated exposure improvement") ||
+               reason.includes("final QR validation failed")) {
+      const hadQrOptics = finished.optimizeCandidates.some((candidate) => candidate.opticalTargeted);
+      if (hadQrOptics) {
+        // Optimize is a mode, not a one-shot failure. Hold the currently validated
+        // exposure, watch live QR optics, then periodically challenge it again.
+        optimizeConverged = true;
+        optimizeRecheckAt = performance.now() + 10_000;
+        snapshotOptimizeWatch();
+        opticsOptimizeStatus.textContent = "Optimizing · current setting best so far";
+      } else {
+        // A global histogram is only bootstrap evidence. Stay in Optimize and
+        // retry soon instead of treating absence of QR-targeted evidence as an
+        // optimization result.
+        optimizeConverged = false;
+        optimizeRecheckAt = performance.now() + 1200;
+        opticsOptimizeStatus.textContent = "Optimizing · waiting for QR lock";
+      }
+      opticsOptimizeStatus.title = reason;
+      opticsKeep.hidden = true;
+    } else {
+      optimizeConverged = false;
+      optimizeRecheckAt = performance.now() + 1500;
+      opticsOptimizeStatus.textContent = reason ? `Optimizing · ${reason}` : "Optimizing · waiting for clean QR lock";
+      opticsKeep.hidden = true;
+    }
   }).finally(() => {
     optimizeRunning = false;
     optimizerDiscoveryMode = false;
@@ -2076,7 +2143,7 @@ function renderFocusDiagnostics(): void {
   const optical = diagnostic.optical;
   const optimizing = ["baseline", "exposure", "verification"].includes(diagnostic.optimizeState);
   opticsOptimize.disabled = !automaticOptics && !optimizing;
-  if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) {
+  if (optimizeEnabled && !optimizeConverged && !optimizing && !focusController.optimizeEligible()) {
     opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
       ? "Camera unavailable"
       : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Ready";
