@@ -1,0 +1,56 @@
+name: Hot path worker integration test
+on:
+  push:
+    branches: [agent/hotpath-worker-test]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/hotpath-worker-test
+      - name: Run strict worker integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .github/hotpath-worker-test.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><body>RUNNING</body><script type="module">
+          import QRCode from "../vendor/qrcode.js";
+          import { rasterizeQr } from "../shared/qr-raster.js";
+          import { packFrame } from "../shared/protocol.js";
+          const DIM=177, MARGIN=1, SCALE=6, BLOCK=2600, LAYOUT=1;
+          const makeBlock=(seed)=>Uint8Array.from({length:BLOCK},(_,i)=>(seed*91+i*131+(i>>2)*17)&255);
+          const packet=(slot)=>packFrame({mode:"mds",k:2,seq:slot,layoutId:LAYOUT,slotIndex:slot,blockLen:BLOCK,totalLen:BLOCK*2,payloadId:0x12345678},makeBlock(slot+1));
+          const qr=(bytes)=>{const q=QRCode.create([{data:bytes,mode:"byte"}],{errorCorrectionLevel:"L",version:40,maskPattern:4});return rasterizeQr(q.modules.size,q.modules.data,MARGIN)};
+          const cells=[qr(packet(0)),qr(packet(1))];
+          const rs=DIM+MARGIN*2, logicalW=DIM+MARGIN*2, logicalH=DIM*2+MARGIN*3, stride=DIM+MARGIN;
+          const logical=new Uint8Array(logicalW*logicalH*4); logical.fill(255);
+          const blit=(src,dx,dy)=>{for(let y=0;y<rs;y++) logical.set(new Uint8Array(src.pixels.buffer,src.pixels.byteOffset+y*rs*4,rs*4),((dy+y)*logicalW+dx)*4)};
+          blit(cells[0],0,0); blit(cells[1],0,stride);
+          const PAD=24, rw=logicalH, rh=logicalW, width=rw*SCALE+PAD*2, height=rh*SCALE+PAD*2;
+          const rgba=new Uint8Array(width*height*4); rgba.fill(255);
+          for(let y=0;y<logicalH;y++)for(let x=0;x<logicalW;x++){const s=(y*logicalW+x)*4,rx=logicalH-1-y,ry=x;for(let yy=0;yy<SCALE;yy++)for(let xx=0;xx<SCALE;xx++){const d=((PAD+ry*SCALE+yy)*width+PAD+rx*SCALE+xx)*4;rgba[d]=logical[s];rgba[d+1]=logical[s+1];rgba[d+2]=logical[s+2];rgba[d+3]=255;}}
+          // Exact outer module-grid quads after the same clockwise landscape rotation.
+          const q0={topLeft:{x:width-PAD,y:PAD},topRight:{x:width-PAD,y:PAD+DIM*SCALE},bottomRight:{x:width-PAD-DIM*SCALE,y:PAD+DIM*SCALE},bottomLeft:{x:width-PAD-DIM*SCALE,y:PAD}};
+          const shift=(DIM+MARGIN)*SCALE;
+          const q1={topLeft:{x:q0.topLeft.x-shift,y:q0.topLeft.y},topRight:{x:q0.topRight.x-shift,y:q0.topRight.y},bottomRight:{x:q0.bottomRight.x-shift,y:q0.bottomRight.y},bottomLeft:{x:q0.bottomLeft.x-shift,y:q0.bottomLeft.y}};
+          const worker=new Worker(new URL("../receive/worker.js",import.meta.url),{type:"module"});
+          const ready=new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(new Error("worker ready timeout")),15000);worker.addEventListener("message",e=>{if(e.data.id===-1){clearTimeout(t);resolve();}},{once:false});worker.addEventListener("error",e=>reject(new Error(e.message||"worker error")),{once:true});});
+          try{
+            await ready;
+            const reply=await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(new Error("decode timeout")),15000);const on=(e)=>{if(e.data.id!==77)return;clearTimeout(t);worker.removeEventListener("message",on);resolve(e.data)};worker.addEventListener("message",on);worker.addEventListener("error",e=>reject(new Error(e.message||"worker error")),{once:true});const buf=rgba.slice();worker.postMessage({id:77,buf:buf.buffer,w:width,h:height,ox:0,oy:0,full:false,strictHotPath:true,tracks:[{id:1,slot:0,misses:0,quad:q0,dim:DIM,crc32:true},{id:2,slot:1,misses:0,quad:q1,dim:DIM,crc32:true}]},[buf.buffer]);});
+            const m=reply.nativeMetrics||{};
+            const pass=reply.symbols?.length===2 && reply.fallbackAttempted===false && reply.readFullAttempts===0 && m.crcFastSuccesses===2 && m.rsFallbacks===0 && m.successful===2;
+            document.body.textContent=`${pass?"PASS":"FAIL"}\n${JSON.stringify({symbols:reply.symbols?.length,fallbackAttempted:reply.fallbackAttempted,readFullAttempts:reply.readFullAttempts,nativeMetrics:m,error:reply.error},null,2)}`;
+          }catch(e){document.body.textContent=`ERROR\n${e?.stack||e}`;}finally{worker.terminate();}
+          </script>
+          HTML
+          python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
+          server=$!
+          trap 'kill $server || true' EXIT
+          sleep 1
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)"
+          "$chrome" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8765/.github/hotpath-worker-test.html | tee /tmp/dom.txt
+          grep -q '<body>PASS' /tmp/dom.txt
