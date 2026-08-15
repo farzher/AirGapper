@@ -557,7 +557,7 @@ const metric = (id: string) => document.getElementById(id)!;
 let replayClock: number | undefined;
 function receiverNow(): number { return replayClock ?? performance.now(); }
 
-type BenchmarkJobKind = "FULL FRAME" | "SHARED TRACKED BATCH CROP" | "INDIVIDUAL TRACKED CROP";
+type BenchmarkJobKind = "FULL FRAME" | "SHARED TRACKED BATCH CROP" | "INDIVIDUAL TRACKED CROP" | "NATIVE TRACKED GRID";
 interface BenchmarkJob {
   id: number; kind: BenchmarkJobKind; pixels: number; bytes: number; width: number; height: number; x: number; y: number;
   tracks: number[]; submittedAt: number; workerWaitMs?: number; decodeMs?: number; symbols?: number;
@@ -3068,87 +3068,6 @@ function readBoundedVideoCrop(source: ReceiverFrame, x: number, y: number, w: nu
   return ctx.getImageData(0, 0, w, h);
 }
 
-/** Build one isolated QR crop from a single shared camera readback.  The live
- * grid has only a one-module gutter, so generic QR detection on the whole grid
- * spends most of its time considering neighboring finder triples.  Copying a
- * known cell into a synthetic white quiet zone is cheap JS memory bandwidth and
- * lets each WASM worker solve exactly one QR in parallel. */
-function isolateTrackedQr(
-  shared: ImageData,
-  sharedX: number,
-  sharedY: number,
-  quad: SymbolQuad,
-  modules: number,
-): { image: ImageData; ox: number; oy: number } | undefined {
-  const bounds = trackedQuadBounds(quad);
-  if (!bounds || modules < 21) return undefined;
-  const edge = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top);
-  const moduleSize = Math.max(1, edge / modules);
-  const sourcePad = Math.max(2, Math.round(moduleSize * 1.25));
-  const quiet = Math.max(8, Math.round(moduleSize * 4.5));
-  const sharedRight = sharedX + shared.width;
-  const sharedBottom = sharedY + shared.height;
-  const sx = Math.max(sharedX, Math.floor(bounds.left - sourcePad));
-  const sy = Math.max(sharedY, Math.floor(bounds.top - sourcePad));
-  const sr = Math.min(sharedRight, Math.ceil(bounds.right + sourcePad));
-  const sb = Math.min(sharedBottom, Math.ceil(bounds.bottom + sourcePad));
-  const sw = sr - sx;
-  const sh = sb - sy;
-  if (sw < 24 || sh < 24) return undefined;
-  const image = new ImageData(sw + quiet * 2, sh + quiet * 2);
-  image.data.fill(255);
-  const localX = sx - sharedX;
-  const localY = sy - sharedY;
-  for (let row = 0; row < sh; row++) {
-    const from = ((localY + row) * shared.width + localX) * 4;
-    image.data.set(
-      shared.data.subarray(from, from + sw * 4),
-      ((row + quiet) * image.width + quiet) * 4,
-    );
-  }
-  return { image, ox: sx - quiet, oy: sy - quiet };
-}
-
-/** Build a small multi-QR strip from one shared readback. Large grids should
- * not spend one worker per QR: on a 3x5 grid that caps one source frame at six
- * attempted cells on a six-worker phone. Grouping along the short grid axis
- * gives five independent 3-QR strips, so one accepted source frame can yield
- * all fifteen symbols while still parallelizing detector work. */
-function isolateTrackedGroup(
-  shared: ImageData,
-  sharedX: number,
-  sharedY: number,
-  regions: readonly Region[],
-): { image: ImageData; ox: number; oy: number } | undefined {
-  const usable = regions.filter((region) => region.quad && region.dim);
-  if (!usable.length) return undefined;
-  const bounds = usable.map((region) => trackedQuadBounds(region.quad!)).filter((value): value is NonNullable<typeof value> => Boolean(value));
-  if (!bounds.length) return undefined;
-  const moduleSizes = usable.map((region) => {
-    const b = trackedQuadBounds(region.quad!);
-    return b && region.dim ? Math.max(b.right - b.left, b.bottom - b.top) / region.dim : 1;
-  });
-  const moduleSize = Math.max(1, moduleSizes.sort((a, b) => a - b)[moduleSizes.length >> 1] ?? 1);
-  const sourcePad = Math.max(2, Math.round(moduleSize * 1.25));
-  const quiet = Math.max(8, Math.round(moduleSize * 4.5));
-  const sharedRight = sharedX + shared.width;
-  const sharedBottom = sharedY + shared.height;
-  const sx = Math.max(sharedX, Math.floor(Math.min(...bounds.map((b) => b.left)) - sourcePad));
-  const sy = Math.max(sharedY, Math.floor(Math.min(...bounds.map((b) => b.top)) - sourcePad));
-  const sr = Math.min(sharedRight, Math.ceil(Math.max(...bounds.map((b) => b.right)) + sourcePad));
-  const sb = Math.min(sharedBottom, Math.ceil(Math.max(...bounds.map((b) => b.bottom)) + sourcePad));
-  const sw = sr - sx, sh = sb - sy;
-  if (sw < 24 || sh < 24) return undefined;
-  const image = new ImageData(sw + quiet * 2, sh + quiet * 2);
-  image.data.fill(255);
-  const localX = sx - sharedX, localY = sy - sharedY;
-  for (let row = 0; row < sh; row++) {
-    const from = ((localY + row) * shared.width + localX) * 4;
-    image.data.set(shared.data.subarray(from, from + sw * 4), ((row + quiet) * image.width + quiet) * 4);
-  }
-  return { image, ox: sx - quiet, oy: sy - quiet };
-}
-
 type ScanningState = "SEARCH" | "PARTIAL_LOCK" | "LOCKED" | "REACQUIRE";
 
 function submitReceiverJob(
@@ -3598,11 +3517,15 @@ function captureFrame(source: ReceiverFrame) {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    const pad = Math.max(8, Math.round(typicalEdge * (0.12 + Math.min(0.28, worstMisses * 0.06))));
-    const x = Math.max(0, Math.floor(minX - pad));
-    const y = Math.max(0, Math.floor(minY - pad));
-    const right = Math.min(vw, Math.ceil(maxX + pad));
-    const bottom = Math.min(vh, Math.ceil(maxY + pad));
+    const pad = Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
+    // Keep the crop origin stable across normal sub-pixel lattice jitter. The
+    // native tracked decoder caches module sample coordinates in crop space; a
+    // quantized window lets each worker reuse that cache across many frames.
+    const cropQuantum = 16;
+    const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
+    const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+    const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
+    const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
     const w = right - x;
     const h = bottom - y;
     if (w >= 32 && h >= 32) {
@@ -3624,92 +3547,23 @@ function captureFrame(source: ReceiverFrame) {
       captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
 
       if (healthyGrid) {
-        activeDecodeBudget = 0;
-        let submittedJobsThisFrame = 0;
-        const layout = lastGridSnapshot?.layout;
-
-        // Large grids are scheduled as a few LONG strips, not many short ones.
-        // A 3x5 grid becomes three 5-QR columns (and 5x3 becomes three 5-QR
-        // rows). That cuts generic detector invocations from five per source
-        // frame to three and leaves enough workers to pipeline a second source
-        // frame concurrently on a six-worker phone.
-        if (layout && batchRegions.length > 6) {
-          const groupByRow = layout.cols > layout.rows;
-          const groups = new Map<number, Region[]>();
-          for (const region of batchRegions) {
-            if (region.gridSlot === undefined) continue;
-            const key = groupByRow ? Math.floor(region.gridSlot / layout.cols) : region.gridSlot % layout.cols;
-            const group = groups.get(key) ?? [];
-            group.push(region);
-            groups.set(key, group);
-          }
-          const groupCount = Math.max(1, groups.size);
-          // Keep up to two generations of the same slot in flight when the pool
-          // has room. v15's depth=1 made worker latency a hard decode-FPS cap:
-          // a ~250 ms strip job meant ~4 accepted source frames/sec regardless
-          // of camera FPS. With 3 strips and 6 workers, depth=2 pipelines two
-          // complete 15-QR source frames at once.
-          const pipelineDepth = Math.max(1, Math.min(2, Math.floor(pool.size / groupCount)));
-          const orderedGroups = [...groups.values()]
-            .filter((group) => group.length > 0 && group.every((region) => regionInflightCount(region) < pipelineDepth))
-            .map((group) => group.sort((a, b) => (a.gridSlot ?? 0) - (b.gridSlot ?? 0)))
-            .sort((a, b) => Math.min(...a.map((r) => r.lastAttemptAt ?? -Infinity)) - Math.min(...b.map((r) => r.lastAttemptAt ?? -Infinity)));
-          const rotatedGroups = orderedGroups.length
-            ? orderedGroups.map((_, index) => orderedGroups[(index + cropRotate) % orderedGroups.length]!)
-            : orderedGroups;
-          for (const group of rotatedGroups) {
-            if (submittedJobsThisFrame >= freeWorkers || pool.busyCount >= pool.size) break;
-            const grouped = isolateTrackedGroup(shared, x, y, group);
-            if (!grouped) continue;
-            const tracks = group.map((region) => ({
-              id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
-              quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
-            }));
-            const id = frameId++;
-            cropAttempts.set(id, group.map((region) => ({ region, quad: region.quad })));
-            if (!submitReceiverJob(
-              { id, buf: grouped.image.data.buffer, w: grouped.image.width, h: grouped.image.height,
-                ox: grouped.ox, oy: grouped.oy, full: false, tracks },
-              [grouped.image.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, group,
-            )) {
-              cropAttempts.delete(id);
-              break;
-            }
-            if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-            cropsSubmitted += group.length;
-            activeDecodeBudget += group.length;
-            submittedJobsThisFrame++;
-          }
-        } else {
-          const ordered = [...batchRegions]
-            .sort((a, b) => (a.lastAttemptAt ?? -Infinity) - (b.lastAttemptAt ?? -Infinity) || slotUsefulness(b) - slotUsefulness(a));
-          const rotated = ordered.length
-            ? ordered.map((_, index) => ordered[(index + cropRotate) % ordered.length]!)
-            : ordered;
-          for (const region of rotated) {
-            if (submittedJobsThisFrame >= freeWorkers || pool.busyCount >= pool.size) break;
-            if (!region.quad || !region.dim || regionInflightCount(region) > 0) continue;
-            const isolated = isolateTrackedQr(shared, x, y, region.quad, region.dim);
-            if (!isolated) continue;
-            const id = frameId++;
-            cropAttempts.set(id, [{ region, quad: region.quad }]);
-            if (!submitReceiverJob(
-              { id, buf: isolated.image.data.buffer, w: isolated.image.width, h: isolated.image.height,
-                ox: isolated.ox, oy: isolated.oy, full: false, quad: region.quad, dim: region.dim, isolated: true },
-              [isolated.image.data.buffer], "INDIVIDUAL TRACKED CROP", trace, source.sequence, [region],
-            )) {
-              cropAttempts.delete(id);
-              break;
-            }
-            if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
-            cropsSubmitted++;
-            activeDecodeBudget++;
-            submittedJobsThisFrame++;
-          }
-        }
-        if (!submittedJobsThisFrame) {
+        // One source frame = one native bulk job containing every visible QR.
+        // Each worker owns a persistent native tracked decoder, so successive
+        // camera frames pipeline across workers while every job samples all 15
+        // known cells without paying global QR detection again.
+        activeDecodeBudget = batchTracks.length;
+        const id = frameId++;
+        cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
+        if (!submitReceiverJob(
+          { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
+          [shared.data.buffer], "NATIVE TRACKED GRID", trace, source.sequence, batchRegions,
+        )) {
+          cropAttempts.delete(id);
           poolBusyTimes.push(now);
-          if (trace && !trace.jobs.length) trace.decision = "not scheduled: tracked slots already in flight";
+          if (pendingScanCapture?.id === undefined) cancelScanCapture();
+        } else {
+          if (pendingScanCapture && pendingScanCapture.id === undefined) pendingScanCapture.id = id;
+          cropsSubmitted += batchTracks.length;
         }
         cropRotate++;
         if (trace) trace.stateAfter = gridLattice.state;

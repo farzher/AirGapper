@@ -4,18 +4,16 @@
 // portable way.) One frame in flight per worker; the main thread drops frames
 // when all workers are busy. Frames are disposable — the transport does not care.
 //
-// Two decode paths (see ../../decimen-codec/wrapper/decimen_codec.cpp):
-//  - readFull: stock acquisition. QR-only, invert/rotate sweeps compiled off,
-//    error results carry positions (the receiver's crop-seeding sightings).
-//  - readTracked: single-code crops with a cached quad + module count skip
-//    detection entirely. Any miss falls back to readFull on the same buffer.
-//    Dense lattice crops run readFull first: field corpora measured zero
-//    batched sampler hits. Missing cells then get a bounded isolated generic
-//    retry, recovering valid QRs hidden by neighboring finder patterns.
+// Decode paths (see ../vendor/decimen-codec/source/wrapper/decimen_codec.cpp):
+//  - readFull: generic QR acquisition. Use it to discover/reacquire geometry.
+//  - readTracked: one cached QR, used for sparse/single-code fallback work.
+//  - decodeTrackedBatchRGBA: the locked-grid hot path. It caches module sample
+//    positions for every known QR, skips global finder detection, samples all
+//    tracks in one native call, and uses CRC-fast decoding before bounded RS.
 
 import wasmUrl from "../vendor/decimen-codec/decimen_codec.wasm?url";
 import { shouldRunFullDecode } from "../shared/decode-policy";
-import { parseFrame } from "../shared/protocol";
+import { crc32, parseFrame } from "../shared/protocol";
 import { gridLayoutById } from "../shared/grid-layout";
 import DecimenCodec, { type DecimenModule, type DecimenQuad } from "../vendor/decimen-codec/decimen_codec.js";
 
@@ -62,16 +60,6 @@ function inputBuffer(zx: DecimenModule, bytes: number): number {
   return inputPtr;
 }
 
-let retryPtr = 0;
-let retryCapacity = 0;
-function retryBuffer(zx: DecimenModule, bytes: number): number {
-  if (bytes <= retryCapacity) return retryPtr;
-  if (retryPtr) zx._free(retryPtr);
-  retryPtr = zx._malloc(bytes);
-  retryCapacity = bytes;
-  return retryPtr;
-}
-
 interface BatchTrack {
   id: number;
   slot?: number;
@@ -79,6 +67,151 @@ interface BatchTrack {
   quad: DecimenQuad;
   dim: number;
   crc32: boolean;
+}
+
+const NATIVE_BATCH_MAX_TRACKS = 16;
+const NATIVE_TRACK_RESULT_BYTES = 32;
+const NATIVE_BATCH_METRICS_BYTES = 72;
+const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
+const NATIVE_TRACK_OK = 1;
+
+interface NativeConfiguredTrack {
+  id: number;
+  dim: number;
+  crc32: boolean;
+  baseQuad: DecimenQuad;
+}
+
+let nativeBatchHandle = 0;
+let nativeResultsPtr = 0;
+let nativeOutputPtr = 0;
+let nativeMetricsPtr = 0;
+let nativeConfigured: NativeConfiguredTrack[] = [];
+let nativeCropOrigin = "";
+let nativeFallbackBudget = 4;
+const nativeRefresh = new Set<number>();
+
+function ensureNativeBatch(zx: DecimenModule): boolean {
+  if (nativeBatchHandle) return true;
+  nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
+  if (!nativeBatchHandle) return false;
+  nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
+  nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
+  nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
+  return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
+}
+
+function translatedQuad(q: DecimenQuad, dx: number, dy: number): DecimenQuad {
+  const move = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  return {
+    topLeft: move(q.topLeft),
+    topRight: move(q.topRight),
+    bottomRight: move(q.bottomRight),
+    bottomLeft: move(q.bottomLeft),
+  };
+}
+
+function frameWithCRC(payload: Uint8Array): Uint8Array {
+  const frame = new Uint8Array(payload.length + 4);
+  frame.set(payload);
+  new DataView(frame.buffer).setUint32(payload.length, crc32(payload), true);
+  return frame;
+}
+
+function configureNativeBatch(
+  zx: DecimenModule, tracks: readonly BatchTrack[], ox: number, oy: number,
+): Map<number, { input: BatchTrack; configured: NativeConfiguredTrack }> | undefined {
+  if (!ensureNativeBatch(zx) || tracks.length > NATIVE_BATCH_MAX_TRACKS) return undefined;
+  const origin = `${ox},${oy}`;
+  const originChanged = origin !== nativeCropOrigin;
+  const byId = new Map<number, { input: BatchTrack; configured: NativeConfiguredTrack }>();
+
+  for (let slot = 0; slot < tracks.length; slot++) {
+    const track = tracks[slot]!;
+    const id = track.slot ?? track.id;
+    const previous = nativeConfigured[slot];
+    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous ||
+      previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
+    if (mustConfigure) {
+      const q = track.quad;
+      const accepted = zx._setTrackedDecoderTrack(
+        nativeBatchHandle, slot, id, track.dim,
+        q.topLeft.x - ox, q.topLeft.y - oy,
+        q.topRight.x - ox, q.topRight.y - oy,
+        q.bottomRight.x - ox, q.bottomRight.y - oy,
+        q.bottomLeft.x - ox, q.bottomLeft.y - oy,
+      );
+      if (!accepted) return undefined;
+      zx._setTrackedDecoderTrackCRC32(nativeBatchHandle, slot, track.crc32 ? 1 : 0);
+      nativeConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad };
+      nativeRefresh.delete(slot);
+    }
+    byId.set(id, { input: track, configured: nativeConfigured[slot]! });
+  }
+  for (let slot = tracks.length; slot < nativeConfigured.length; slot++) {
+    if (nativeConfigured[slot]) zx._clearTrackedDecoderTrack(nativeBatchHandle, slot);
+  }
+  nativeConfigured.length = tracks.length;
+  nativeCropOrigin = origin;
+  return byId;
+}
+
+function decodeNativeBatch(
+  zx: DecimenModule, ptr: number, width: number, height: number, ox: number, oy: number, tracks: readonly BatchTrack[],
+): { symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[]; attempted: boolean } | undefined {
+  const byId = configureNativeBatch(zx, tracks, ox, oy);
+  if (!byId) return undefined;
+  // malloc may grow memory; always create views only after all persistent buffers exist.
+  const count = zx._decodeTrackedBatchRGBA(
+    nativeBatchHandle, ptr, width, height, width * 4,
+    nativeResultsPtr, tracks.length, nativeOutputPtr, NATIVE_BATCH_OUTPUT_BYTES, nativeMetricsPtr,
+  );
+  if (count < 0) return undefined;
+
+  const view = new DataView(zx.HEAPU8.buffer);
+  // Spend RS only where the cheap CRC-fast path was insufficient. The native
+  // decoder rotates this bounded budget across tracks, so weak cells get ECC
+  // without making every clean QR pay Reed-Solomon on every camera frame.
+  const successful = view.getUint32(nativeMetricsPtr + 56, true);
+  const crcFastSuccesses = view.getUint32(nativeMetricsPtr + 64, true);
+  const desiredFallbackBudget = successful < Math.ceil(tracks.length * 0.55)
+    ? Math.min(tracks.length, nativeFallbackBudget + 2)
+    : crcFastSuccesses >= Math.max(1, Math.floor(successful * 0.75))
+      ? Math.max(2, nativeFallbackBudget - 1)
+      : nativeFallbackBudget;
+  if (desiredFallbackBudget !== nativeFallbackBudget) {
+    nativeFallbackBudget = desiredFallbackBudget;
+    zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
+  }
+
+  const symbols: { bytes: Uint8Array; box: object; quad: DecimenQuad; modules: number; tracked: boolean; crc32?: boolean }[] = [];
+  for (let index = 0; index < count; index++) {
+    const at = nativeResultsPtr + index * NATIVE_TRACK_RESULT_BYTES;
+    const id = view.getInt32(at, true);
+    const status = view.getInt32(at + 4, true);
+    const bytesOffset = view.getInt32(at + 8, true);
+    const bytesLength = view.getInt32(at + 12, true);
+    const misses = view.getInt32(at + 16, true);
+    const dx = view.getFloat32(at + 24, true);
+    const dy = view.getFloat32(at + 28, true);
+    const mapped = byId.get(id);
+    if (!mapped) continue;
+    const slot = tracks.indexOf(mapped.input);
+    if (misses >= 3 && slot >= 0) nativeRefresh.add(slot);
+    if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
+
+    const rawBytes = zx.HEAPU8.slice(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
+    const bytes: Uint8Array<ArrayBufferLike> = mapped.input.crc32 ? frameWithCRC(rawBytes) : rawBytes;
+    const packet = parseFrame(bytes);
+    if (!packet || (mapped.input.slot !== undefined && packet.header.slotIndex !== mapped.input.slot)) {
+      if (slot >= 0) nativeRefresh.add(slot);
+      continue;
+    }
+    const quad = translatedQuad(mapped.configured.baseQuad, dx, dy);
+    symbols.push({ bytes, box: boundsOf(quad, 0, 0), quad, modules: mapped.input.dim, tracked: true, crc32: mapped.input.crc32 });
+  }
+  return { symbols, attempted: true };
 }
 
 function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: number): DecimenQuad {
@@ -247,19 +380,29 @@ ctx.onmessage = async (e: MessageEvent) => {
     }
 
     if (!full && tracks?.length) {
-      // Dense locked grids are a multi-symbol detection problem. Field testing on
-      // real camera frames showed the persistent per-quad tracked sampler can be
-      // extremely cheap but also miss most cells, producing high job/camera FPS
-      // while actual QR/s falls. Optimize for useful symbols instead: one broad
-      // native QR pass first, then isolate only the cells it missed.
-      const decodedSlots = new Set<number>();
-      const expectedSlots = new Set(tracks.flatMap((track) => track.slot === undefined ? [] : [track.slot]));
+      // Healthy locked grids already provide exact QR quads. Use the codec's
+      // persistent native batch sampler: one shared input buffer, cached module
+      // maps, no global finder detection, CRC-fast decode, and a bounded RS
+      // fallback budget. Generic readFull is reserved for acquisition/recovery.
+      const native = decodeNativeBatch(zx, ptr, pw, ph, ox, oy, tracks);
+      if (native) {
+        ctx.postMessage({
+          id, symbols: native.symbols, sightings, full: false,
+          trackedAttempted: native.attempted, trackedHit: native.symbols.length > 0,
+          fallbackAttempted: false, fallbackSucceeded: false, readFullAttempts: 0,
+          workerWaitMs, targetedAttempts: 0, targetedPixels: 0, targetedSuccesses: 0,
+          latencyMs: performance.now() - startedAt,
+        });
+        return;
+      }
+      // Extremely defensive compatibility fallback: an old/mismatched codec
+      // should still scan rather than fail the receiver. This path should not
+      // run with the shipped v0.5.37+ WASM, which already exports batch decode.
       readFullAttempts++;
-      // Ask for exactly the number of symbols this strip can contain. Larger
-      // result budgets do not create useful work here and can make the native
-      // detector retain extra candidates/finders that cannot belong to us.
       const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
       try {
+        const expectedSlots = new Set(tracks.flatMap((track) => track.slot === undefined ? [] : [track.slot]));
+        const decodedSlots = new Set<number>();
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
           if (!result.valid || !result.bytes.length) continue;
@@ -268,90 +411,15 @@ ctx.onmessage = async (e: MessageEvent) => {
           if (!packet || (slot !== undefined && expectedSlots.size && !expectedSlots.has(slot)) ||
               (slot !== undefined && decodedSlots.has(slot))) continue;
           if (slot !== undefined) decodedSlots.add(slot);
-          symbols.push({
-            bytes: result.bytes,
-            box: boundsOf(result.position, ox, oy),
-            quad: shifted(result.position, ox, oy),
-            modules: result.modules,
-            tracked: false,
-          });
+          symbols.push({ bytes: result.bytes, box: boundsOf(result.position, ox, oy),
+            quad: shifted(result.position, ox, oy), modules: result.modules, tracked: false });
         }
       } finally {
         decoded.delete();
       }
-
-      // Throughput beats completeness of one camera frame. v15 could spend up
-      // to FOUR extra generic detector passes after a successful bulk decode,
-      // keeping a worker occupied for hundreds of milliseconds to rescue cells
-      // that the next source frame can supply much more cheaply. Normally return
-      // immediately after a productive bulk pass. Only rescue when that pass was
-      // nearly empty, and keep the rescue budget tiny.
-      let targetedAttempts = 0;
-      let targetedPixels = 0;
-      let targetedSuccesses = 0;
-      const missingTracks = [...tracks]
-        .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
-        .sort((a, b) => b.misses - a.misses);
-      const decodedCount = decodedSlots.size;
-      const retryBudget = decodedCount === 0
-        ? Math.min(2, missingTracks.length)
-        : decodedCount === 1 && tracks.length >= 5
-          ? Math.min(1, missingTracks.length)
-          : 0;
-      const targetedTracks = missingTracks.slice(0, retryBudget);
-      for (const track of targetedTracks) {
-        const expected = boundsOf(track.quad, -ox, -oy);
-        const moduleSize = Math.max(expected.w, expected.h) / track.dim;
-        const sourcePad = Math.max(2, Math.round(moduleSize));
-        const quiet = Math.max(8, Math.round(moduleSize * 5));
-        const cx = Math.max(0, Math.floor(expected.x - sourcePad));
-        const cy = Math.max(0, Math.floor(expected.y - sourcePad));
-        const cr = Math.min(pw, Math.ceil(expected.x + expected.w + sourcePad));
-        const cb = Math.min(ph, Math.ceil(expected.y + expected.h + sourcePad));
-        const sw = cr - cx, sh = cb - cy;
-        if (sw < 24 || sh < 24) continue;
-        const cw = sw + quiet * 2, ch = sh + quiet * 2;
-        targetedPixels += cw * ch;
-        const cropBytes = cw * ch * 4;
-        const cropPtr = retryBuffer(zx, cropBytes);
-        zx.HEAPU8.fill(255, cropPtr, cropPtr + cropBytes);
-        for (let row = 0; row < sh; row++) {
-          zx.HEAPU8.set(
-            pixels.subarray(((cy + row) * pw + cx) * 4, ((cy + row) * pw + cr) * 4),
-            cropPtr + ((row + quiet) * cw + quiet) * 4,
-          );
-        }
-        readFullAttempts++;
-        targetedAttempts++;
-        const retried = zx.readFull(cropPtr, cw, ch, true, 1, false);
-        try {
-          for (let i = 0; i < retried.size(); i++) {
-            const result = retried.get(i);
-            if (!result.valid || !result.bytes.length) continue;
-            const packet = parseFrame(result.bytes);
-            if (packet?.header.slotIndex !== track.slot || decodedSlots.has(track.slot!)) continue;
-            decodedSlots.add(track.slot!);
-            targetedSuccesses++;
-            const shiftX = ox + cx - quiet, shiftY = oy + cy - quiet;
-            symbols.push({
-              bytes: result.bytes,
-              box: boundsOf(result.position, shiftX, shiftY),
-              quad: shifted(result.position, shiftX, shiftY),
-              modules: result.modules,
-              tracked: false,
-            });
-          }
-        } finally {
-          retried.delete();
-        }
-      }
-      ctx.postMessage({
-        id, symbols, sightings, full: false, trackedAttempted: false,
-        trackedHit: false, fallbackAttempted: targetedAttempts > 0,
-        fallbackSucceeded: targetedSuccesses > 0,
-        readFullAttempts, workerWaitMs, targetedAttempts, targetedPixels, targetedSuccesses,
-        latencyMs: performance.now() - startedAt,
-      });
+      ctx.postMessage({ id, symbols, sightings, full: false, trackedAttempted: true, trackedHit: false,
+        fallbackAttempted: true, fallbackSucceeded: symbols.length > 0, readFullAttempts, workerWaitMs,
+        latencyMs: performance.now() - startedAt });
       return;
     }
 

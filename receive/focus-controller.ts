@@ -307,6 +307,10 @@ export class FocusController {
   private optimizeCandidates: OptimizerCandidateDiagnostic[] = [];
   private optimizeExposureVisited?: { min: number; max: number; coverage: number };
   private optimizeIsoVisited?: { min: number; max: number; coverage: number };
+  /** Last QR-validated optimizer winner. Recurring Optimize passes refine only
+   * around this anchor; they never silently adopt a brighter HAL/Auto state. */
+  private optimizeLearnedExposure?: number;
+  private optimizeLearnedIso?: number;
   private decodeBoundary = 0;
   private cameraGenerationStartedAt = performance.now();
   private lastValidDecodeAt?: number;
@@ -386,6 +390,8 @@ export class FocusController {
     this.optimizeCandidates = [];
     this.optimizeExposureVisited = undefined;
     this.optimizeIsoVisited = undefined;
+    this.optimizeLearnedExposure = undefined;
+    this.optimizeLearnedIso = undefined;
     this.optimizeExposureStepEV = 1;
     this.optimizeShutterStepEV = 1;
     this.optimizeComparison = undefined;
@@ -549,14 +555,21 @@ export class FocusController {
       ...hardwareExposureRange,
       max: Math.max(hardwareExposureRange.min, Math.min(hardwareExposureRange.max, frameSafeMax)),
     };
-    // Optimize is an ongoing mode. Every pass begins from the ACTUAL currently
-    // committed winner, not the camera's original hardware-Auto baseline. That
-    // lets successive passes learn: each winner becomes the next pass's starting
-    // point and we progressively approach the fastest clean exposure boundary.
-    const autoExposure = this.quantize(origin.exposureTime, exposureRange);
-    const autoIso = this.quantize(origin.iso, isoRange);
+    // The first pass begins from the live camera. After we have a validated
+    // winner, that exact shutter/ISO becomes a persistent optimization anchor.
+    // Never let a later HAL/Auto drift overwrite it and restart a bright search.
+    const refinementPass = this.optimizeLearnedExposure !== undefined && this.optimizeLearnedIso !== undefined;
+    const autoExposure = this.quantize(refinementPass ? this.optimizeLearnedExposure! : origin.exposureTime, exposureRange);
+    const autoIso = this.quantize(refinementPass ? this.optimizeLearnedIso! : origin.iso, isoRange);
+    const searchIsoRange: NumericRange = refinementPass ? {
+      ...isoRange,
+      min: this.quantize(Math.max(isoRange.min, autoIso * 0.88), isoRange),
+      max: this.quantize(Math.min(isoRange.max, autoIso * 1.15), isoRange),
+    } : isoRange;
 
-    this.commitSettings(origin);
+    // Only the initial pass snapshots the live state as the restore point. A
+    // refinement pass must preserve the previous validated winner.
+    if (!refinementPass) this.commitSettings(origin);
     this.optimizeState = "exposure";
     this.transition("OPTIMIZE_EXPOSURE", "pixel-quality exposure search; focus untouched");
 
@@ -891,7 +904,7 @@ export class FocusController {
       };
       const test = async (iso: number, suffix: string): Promise<Candidate | undefined> => {
         if (performance.now() >= deadline - 900) return undefined;
-        const candidate = make(exposure, this.quantize(iso, isoRange));
+        const candidate = make(exposure, this.quantize(iso, searchIsoRange));
         if (tested.has(candidate.key)) return candidate.optics.length ? candidate : undefined;
         tested.add(candidate.key);
         this.exposureProbes++;
@@ -910,9 +923,9 @@ export class FocusController {
         if (!targetedOf(seed)) return { good: seed, best };
         // Once a QR-targeted shutter is clean, search downward in gain.
         let highGood = seed;
-        let lowBadIso = isoRange.min;
-        for (let refine = 0; refine < 2 && highGood.iso > isoRange.min * 1.04; refine++) {
-          const probeIso = this.quantize(Math.sqrt(Math.max(isoRange.min, lowBadIso) * highGood.iso), isoRange);
+        let lowBadIso = searchIsoRange.min;
+        for (let refine = 0; refine < 2 && highGood.iso > searchIsoRange.min * 1.04; refine++) {
+          const probeIso = this.quantize(Math.sqrt(Math.max(searchIsoRange.min, lowBadIso) * highGood.iso), searchIsoRange);
           if (probeIso === highGood.iso || tested.has(`${exposure}|${probeIso}`)) break;
           const lower = await test(probeIso, "lower gain");
           if (!lower) break;
@@ -929,8 +942,8 @@ export class FocusController {
       // Only increase ISO when the pixels say we are short of contrast. A noisy,
       // clipped or banded failure is not "fixed" by blasting more gain into it.
       if (!q.needsGain) return { best };
-      const maxIso = this.quantize(isoRange.max, isoRange);
-      const midIso = this.quantize(Math.sqrt(Math.max(seed.iso, isoRange.min) * maxIso), isoRange);
+      const maxIso = this.quantize(searchIsoRange.max, isoRange);
+      const midIso = this.quantize(Math.sqrt(Math.max(seed.iso, searchIsoRange.min) * maxIso), isoRange);
       const upward = [midIso, maxIso].filter((iso, index, all) => iso > seed.iso && all.indexOf(iso) === index);
       let lastBad = seed;
       for (const iso of upward) {
@@ -999,7 +1012,7 @@ export class FocusController {
       let seedIso = baseline.iso;
       // Deliberately narrow: Auto is the bright ceiling; we only search a modest
       // darker/faster band instead of plunging into an unreadable dark tail.
-      const ratios = [0.85, 0.72, 0.60];
+      const ratios = refinementPass ? [0.96, 0.92] : [0.85, 0.72, 0.60];
       for (let index = 0; index < ratios.length && performance.now() < deadline - 1500; index++) {
         const exposure = this.quantize(Math.max(exposureRange.min, autoExposure * ratios[index]!), exposureRange);
         if (exposure >= autoExposure || (lastGood && exposure >= lastGood.exposure)) continue;
@@ -1163,6 +1176,9 @@ export class FocusController {
         }
       }
       this.commitSettings(this.settings());
+      // From here on, recurring Optimize passes are local refinements only.
+      this.optimizeLearnedExposure = this.committedExposureTime ?? opticalWinner.exposure;
+      this.optimizeLearnedIso = this.committedIso ?? opticalWinner.iso;
       winnerDecode = finalDecode ?? decodeOf(opticalWinner);
       this.optimizeBestPerformance = winnerDecode;
       this.optimizeCandidatePerformance = winnerDecode;
