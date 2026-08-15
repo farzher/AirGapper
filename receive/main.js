@@ -550,9 +550,16 @@ function queuePendingGridLane(groupIndex, source, geometry) {
   return true;
 }
 function drainPendingGridLane(workerSlot) {
-  const groupIndex = workerSlot % pendingGridLanes.length;
+  let groupIndex = -1;
+  for (let index = 0; index < pendingGridLanes.length; index++) {
+    const candidate = pendingGridLanes[index];
+    if (candidate && workerSlot % (candidate.laneCount || pendingGridLanes.length) === index) {
+      groupIndex = index;
+      break;
+    }
+  }
+  if (groupIndex < 0) return;
   const pending = pendingGridLanes[groupIndex];
-  if (!pending) return;
   pendingGridLanes[groupIndex] = null;
   const id = frameId++;
   const message = {
@@ -3072,93 +3079,94 @@ async function captureFrame(source) {
     crc32: Boolean(region.crc32)
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
-  const laneLayout = lockedLayout && (lockedLayout.cols === 3 && lockedLayout.rows === 5 || lockedLayout.cols === 5 && lockedLayout.rows === 3);
-  const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
-  if (healthyTrackedGrid && laneLayout && batchTracks.length === 15 && pool.size >= 3) {
-    const groups = Array.from(
-      { length: 3 },
-      () => ({ tracks: [], regions: [] })
-    );
-    for (let index = 0; index < batchTracks.length; index++) {
-      const track = batchTracks[index];
-      const region = batchRegions[index];
-      if (track.slot === void 0) continue;
-      const groupIndex = lockedLayout.cols === 3 ? track.slot % 3 : Math.floor(track.slot / lockedLayout.cols);
-      if (groupIndex < 0 || groupIndex >= groups.length) continue;
-      groups[groupIndex].tracks.push(track);
-      groups[groupIndex].regions.push(region);
-    }
-    if (groups.every((group) => group.tracks.length === 5)) {
-      const freeSlots = new Set(pool.freeSlots);
-      let laneJobsSubmitted = 0;
-      activeDecodeBudget = 15;
-      for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
-        const group = groups[groupIndex];
-        const workerSlot = [...freeSlots].find((slot) => slot % 3 === groupIndex);
-        const points = group.tracks.flatMap((track) => [
-          track.quad.topLeft,
-          track.quad.topRight,
-          track.quad.bottomRight,
-          track.quad.bottomLeft
-        ]);
-        const minX = Math.min(...points.map((point) => point.x));
-        const minY = Math.min(...points.map((point) => point.y));
-        const maxX = Math.max(...points.map((point) => point.x));
-        const maxY = Math.max(...points.map((point) => point.y));
-        const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
-        const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
-        const pad = Math.max(8, Math.round(typicalEdge * (0.08 + Math.min(0.16, worstMisses * 0.03))));
-        const cropQuantum = 16;
-        const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
-        const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
-        const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
-        const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
-        const w = right - x;
-        const h = bottom - y;
-        if (w < 32 || h < 32) continue;
-        const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence };
-        if (workerSlot === void 0) {
-          queuePendingGridLane(groupIndex, source, geometry);
-          continue;
-        }
-        discardPendingGridLane(groupIndex);
-        let laneImage;
-        const direct = cloneDirectDecodeFrame(source);
-        if (!direct) {
-          laneImage = readBoundedVideoCrop(source, x, y, w, h);
-          if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
-        }
-        const id = frameId++;
-        const laneMessage = direct
-          ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat }
-          : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
-        const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
-        const accepted = submitReceiverJob(
-          laneMessage,
-          laneTransfer,
-          direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
-          trace,
-          source.sequence,
-          group.regions,
-          0,
-          void 0,
-          workerSlot
-        );
-        if (!accepted) {
-          direct?.frame.close();
-          continue;
-        }
-        cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
-        freeSlots.delete(workerSlot);
-        laneJobsSubmitted++;
-      }
-      cropRotate++;
-      if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
-      if (trace) trace.stateAfter = gridLattice.state;
-      activeBenchmarkFrame = void 0;
-      return;
-    }
+const laneCount = lockedLayout ? Math.min(3, lockedLayout.cols, lockedLayout.rows) : 0;
+const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
+if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 1 && pool.size >= laneCount) {
+  const groups = Array.from(
+    { length: laneCount },
+    () => ({ tracks: [], regions: [] })
+  );
+  const splitByColumns = lockedLayout.cols <= lockedLayout.rows;
+  for (let index = 0; index < batchTracks.length; index++) {
+    const track = batchTracks[index];
+    const region = batchRegions[index];
+    if (track.slot === void 0) continue;
+    const groupIndex = splitByColumns ? track.slot % lockedLayout.cols : Math.floor(track.slot / lockedLayout.cols);
+    if (groupIndex < 0 || groupIndex >= groups.length) continue;
+    groups[groupIndex].tracks.push(track);
+    groups[groupIndex].regions.push(region);
   }
+  const activeGroups = groups.map((group, groupIndex) => ({ group, groupIndex })).filter(({ group }) => group.tracks.length > 0);
+  if (activeGroups.length) {
+    const freeSlots = new Set(pool.freeSlots);
+    let laneJobsSubmitted = 0;
+    activeDecodeBudget = batchTracks.length;
+    for (const { group, groupIndex } of activeGroups) {
+      const workerSlot = [...freeSlots].find((slot) => slot % laneCount === groupIndex);
+      const points = group.tracks.flatMap((track) => [
+        track.quad.topLeft,
+        track.quad.topRight,
+        track.quad.bottomRight,
+        track.quad.bottomLeft
+      ]);
+      const minX = Math.min(...points.map((point) => point.x));
+      const minY = Math.min(...points.map((point) => point.y));
+      const maxX = Math.max(...points.map((point) => point.x));
+      const maxY = Math.max(...points.map((point) => point.y));
+      const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
+      const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
+      const pad = Math.max(8, Math.round(typicalEdge * (0.08 + Math.min(0.16, worstMisses * 0.03))));
+      const cropQuantum = 16;
+      const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
+      const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+      const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
+      const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
+      const w = right - x;
+      const h = bottom - y;
+      if (w < 32 || h < 32) continue;
+      const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount };
+      if (workerSlot === void 0) {
+        queuePendingGridLane(groupIndex, source, geometry);
+        continue;
+      }
+      discardPendingGridLane(groupIndex);
+      let laneImage;
+      const direct = cloneDirectDecodeFrame(source);
+      if (!direct) {
+        laneImage = readBoundedVideoCrop(source, x, y, w, h);
+        if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
+      }
+      const id = frameId++;
+      const laneMessage = direct
+        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictTracked: false }
+        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictTracked: Boolean(source.image) };
+      const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
+      const accepted = submitReceiverJob(
+        laneMessage,
+        laneTransfer,
+        direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
+        trace,
+        source.sequence,
+        group.regions,
+        0,
+        void 0,
+        workerSlot
+      );
+      if (!accepted) {
+        direct?.frame.close();
+        continue;
+      }
+      cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
+      freeSlots.delete(workerSlot);
+      laneJobsSubmitted++;
+    }
+    cropRotate++;
+    if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
+    if (trace) trace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = void 0;
+    return;
+  }
+}
   if (batchTracks.length > 1) {
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft,
@@ -3200,8 +3208,8 @@ async function captureFrame(source) {
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat }
-          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictTracked: false }
+          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictTracked: Boolean(source.image) };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(

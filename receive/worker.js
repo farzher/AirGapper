@@ -102,10 +102,12 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4), strictTracked = false) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
+  const appliedFallbackBudget = strictTracked ? tracks.length : nativeFallbackBudget;
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, appliedFallbackBudget);
   const count = decode(
     nativeBatchHandle,
     ptr,
@@ -134,13 +136,11 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     crcFastSuccesses: view.getUint32(nativeMetricsPtr + 64, true),
     rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true)
   };
+  if (!strictTracked) {
   const crcTracks = tracks.reduce((count2, track) => count2 + Number(Boolean(track.crc32)), 0);
   const fastEnough = crcTracks > 0 && metrics.crcFastSuccesses >= Math.ceil(crcTracks * 0.8);
-  const desiredFallbackBudget = fastEnough ? 0 : 1;
-  if (desiredFallbackBudget !== nativeFallbackBudget) {
-    nativeFallbackBudget = desiredFallbackBudget;
-    zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
-  }
+  nativeFallbackBudget = fastEnough ? 0 : 1;
+}
   const pending = [];
   let outputEnd = 0;
   for (let index = 0; index < count; index++) {
@@ -206,7 +206,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0 } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictTracked = false } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -376,7 +376,8 @@ ctx.onmessage = async (e) => {
         oy,
         tracks,
         decodePixelFormat,
-        inputStride
+        inputStride,
+        strictTracked
       );
       if (native || usedDirectFrame) {
         const nativeSymbols = native?.symbols ?? [];
