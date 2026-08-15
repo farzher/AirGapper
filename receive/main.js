@@ -1083,6 +1083,7 @@ function regionInflightCount(region) {
 let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
+let lastSamplerDiagnostics = [];
 let trackingInvalidations = 0;
 let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
@@ -1175,6 +1176,7 @@ function noteDecodeCompleted(id, completion) {
   }
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.nativeMetrics) lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
+  if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
   if (fullJob) {
   }
   if (completion.error) {
@@ -1856,6 +1858,10 @@ ${optimizerTrace.slice(-20).map(
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
+    lastSamplerDiagnostics.length ? `Sampler  ${lastSamplerDiagnostics.map((item) => item.error
+      ? `s${item.slot ?? "?"} error ${item.error}`
+      : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} (${item.cached.percent.toFixed(2)}%) Δ${item.cachedDeltaPx?.toFixed(2) ?? "?"}px · lattice ${item.current.mismatches}/${item.current.total} (${item.current.percent.toFixed(2)}%) Δ${item.currentDeltaPx?.toFixed(2) ?? "?"}px · fresh ${item.fresh.mismatches}/${item.fresh.total} (${item.fresh.percent.toFixed(2)}%)`
+    ).join(" | ")}` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
@@ -2100,6 +2106,7 @@ function stopReceiver() {
   decodeExceptions = 0;
   lastDecodeError = "";
   lastNativeMetrics = void 0;
+  lastSamplerDiagnostics = [];
   trackingInvalidations = 0;
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
@@ -3192,8 +3199,8 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       const id = frameId++;
       const laneMessage = direct
-        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictTracked: false }
-        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictTracked: Boolean(source.image) };
+        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictTracked: false, diagnoseSampler: !receiverDevActions.hidden }
+        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictTracked: Boolean(source.image), diagnoseSampler: !receiverDevActions.hidden };
       const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
       const accepted = submitReceiverJob(
         laneMessage,
@@ -3262,8 +3269,8 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictTracked: false }
-          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictTracked: Boolean(source.image) };
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictTracked: false, diagnoseSampler: !receiverDevActions.hidden }
+          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictTracked: Boolean(source.image), diagnoseSampler: !receiverDevActions.hidden };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(
@@ -3288,7 +3295,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       const id = frameId++;
       if (submitReceiverJob(
-        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
+        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, diagnoseSampler: !receiverDevActions.hidden },
         [shared.data.buffer],
         "SHARED TRACKED BATCH CROP",
         trace,

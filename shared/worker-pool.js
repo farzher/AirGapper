@@ -56,6 +56,7 @@ class DecodeWorkerPool {
                   latencyMs: (_h = message.latencyMs) != null ? _h : 0,
           frameCopyMs: message.frameCopyMs ?? 0,
           nativeMetrics: message.nativeMetrics,
+          samplerDiagnostics: message.samplerDiagnostics ?? [],
           directFrameFailed: Boolean(message.directFrameFailed),
           symbols,
           sightings,
