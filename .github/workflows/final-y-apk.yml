@@ -1,0 +1,123 @@
+name: Final AirGapper clean audit and APK
+on:
+  push:
+    branches: [agent/final-y-apk]
+permissions:
+  contents: write
+jobs:
+  final:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/final-y-apk
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Audit source shape and reachability
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          roots = [Path('main.js'), Path('receive/worker.js'), Path('receive/worker-legacy-android.js')]
+          import_re = re.compile(r'(?:from\s*|import\s*)["\']([^"\']+)["\']')
+          reachable, stack = set(), roots[:]
+          while stack:
+              path = stack.pop().resolve()
+              rel = path.relative_to(Path.cwd().resolve())
+              if rel in reachable or not path.exists(): continue
+              reachable.add(rel)
+              if path.suffix != '.js': continue
+              for spec in import_re.findall(path.read_text(encoding='utf-8')):
+                  if spec.startswith('.'):
+                      target = (path.parent / spec.split('?', 1)[0]).resolve()
+                      if target.exists(): stack.append(target)
+          runtime = set()
+          for root in ('receive','send','shared'):
+              runtime |= set(Path(root).rglob('*.js'))
+          dead = sorted(runtime - reachable)
+          if dead:
+              print('Unreachable runtime modules:', *dead, sep='\n  '); raise SystemExit(1)
+
+          sw = Path('sw.js').read_text()
+          precache = re.findall(r'"(\./[^"\n]+)"', sw.split('self.addEventListener("install"',1)[0])
+          missing = [p for p in precache if not Path(p[2:]).exists()]
+          if missing:
+              print('Missing precache entries:', *missing, sep='\n  '); raise SystemExit(1)
+
+          forbidden = [
+              'app','scripts','assets','public','package.json','package-lock.json',
+              'tsconfig.json','tsconfig.node.json','vite.config.ts','src-env.d.ts',
+              'receive/worker-factory.js','shared/service-worker.js',
+              'vendor/decimen-codec/source/package.json',
+              'vendor/decimen-codec/source/package-lock.json',
+              'vendor/decimen-codec/source/bench'
+          ]
+          bad = [p for p in forbidden if Path(p).exists()]
+          if bad:
+              print('Legacy/build paths remain:', *bad, sep='\n  '); raise SystemExit(1)
+
+          stale=[]
+          for p in Path('.').rglob('*'):
+              if not p.is_file() or '.git' in p.parts or '.github' in p.parts or p.suffix in {'.apk','.png','.wasm','.jar'}: continue
+              text=p.read_text(encoding='utf-8', errors='ignore')
+              if 'import.meta.env' in text or '?worker' in text or '?url' in text or p.suffix=='.ts' or p.name.endswith('.d.ts'):
+                  stale.append(str(p))
+          if stale:
+              print('Stale build syntax:', *sorted(set(stale)), sep='\n  '); raise SystemExit(1)
+
+          print(f'Runtime modules: {len(runtime)}; all reachable.')
+          print('Top-level dirs:', ', '.join(sorted(p.name for p in Path('.').iterdir() if p.is_dir() and p.name not in {'.git','.github'})))
+          PY
+          bash -n vendor/decimen-codec/source/build.sh
+          test "$(cat vendor/decimen-codec/source/VERSION)" = "0.1.0"
+
+      - name: Strict temporary JS lint
+        shell: bash
+        run: |
+          mkdir -p /tmp/jsaudit
+          npm install --prefix /tmp/jsaudit --no-package-lock --no-save eslint globals >/dev/null
+          cat >/tmp/eslint.config.mjs <<'EOF'
+          import globals from "/tmp/jsaudit/node_modules/globals/index.js";
+          export default [{
+            files: ["main.js", "receive/*.js", "send/*.js", "shared/*.js"],
+            languageOptions: { ecmaVersion: "latest", sourceType: "module", globals: { ...globals.browser, ...globals.worker, ...globals.es2021 } },
+            rules: { "no-undef": "error", "no-unused-vars": ["error", { "args": "after-used", "caughtErrors": "none" }] }
+          }];
+          EOF
+          /tmp/jsaudit/node_modules/.bin/eslint --config /tmp/eslint.config.mjs main.js receive/*.js send/*.js shared/*.js
+          for f in main.js receive/*.js send/*.js shared/*.js; do node --check "$f"; done
+
+      - name: Build exact cleaned source into APK
+        shell: bash
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew --no-daemon clean assembleRelease
+          cd ..
+          APK=$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)
+          test -n "$APK"
+          cp "$APK" AirGapper.apk
+          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.38'
+          unzip -p AirGapper.apk assets/index.html | grep -q 'src="./main.js"'
+          unzip -p AirGapper.apk assets/receive/main.js | grep -q 'frame.videoFrame = new VideoFrame(video)'
+          unzip -p AirGapper.apk assets/receive/main.js | grep -q 'directLumaDisabled'
+          unzip -p AirGapper.apk assets/receive/worker.js | grep -q 'ownedVideoFrame.copyTo'
+          unzip -p AirGapper.apk assets/receive/worker.js | grep -q '_decodeTrackedBatchY'
+          ! unzip -l AirGapper.apk | grep -q 'assets/app/'
+          ! unzip -l AirGapper.apk | grep -q 'worker-factory'
+          ls -lh AirGapper.apk
+
+      - name: Commit final result
+        shell: bash
+        run: |
+          rm -rf .github
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "publish clean 0.5.38 direct-Y receiver"
+          git push --force origin HEAD:agent/final-y-result
