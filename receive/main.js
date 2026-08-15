@@ -1107,11 +1107,11 @@ const hotPathAudit = {
   rsFallbacks: 0,
   anchorSuccesses: 0,
   anchorMisses: 0,
-  thresholdFallbacks: 0,
+  alignmentFitAttempts: 0,
   outOfFrameMisses: 0,
   bitstreamFailures: 0,
   crcFailures: 0,
-  multiSampleRetries: 0,
+  alignmentFitSuccesses: 0,
   anchorBypassAttempts: 0,
   anchorBypassSuccesses: 0,
   pixelAuditTracks: 0,
@@ -1240,11 +1240,11 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
     hotPathAudit.anchorSuccesses += completion.nativeMetrics.anchorSuccesses ?? 0;
     hotPathAudit.anchorMisses += completion.nativeMetrics.anchorMisses ?? 0;
-    hotPathAudit.thresholdFallbacks += completion.nativeMetrics.thresholdFallbacks ?? 0;
+    hotPathAudit.alignmentFitAttempts += completion.nativeMetrics.alignmentFitAttempts ?? 0;
     hotPathAudit.outOfFrameMisses += completion.nativeMetrics.outOfFrameMisses ?? 0;
     hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
     hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
-    hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;
+    hotPathAudit.alignmentFitSuccesses += completion.nativeMetrics.alignmentFitSuccesses ?? 0;
     hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;
     hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;
   }
@@ -4635,8 +4635,7 @@ Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "es
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
-Sampler HybridBinarizer + SampleGrid · cached-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
-Cached-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Sampler HybridBinarizer · plain-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts} · alignment-fit CRC ${hotPathAudit.alignmentFitSuccesses}/${hotPathAudit.alignmentFitAttempts}
 Pixel A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;
