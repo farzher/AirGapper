@@ -40,8 +40,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/zxing-cpp/core ${CMAKE_
 # data codewords before paying for Reed-Solomon.
 target_compile_definitions(ZXing PRIVATE ZXING_BUILD_FOR_TEST)
 
-# ES6 module output usable from a web worker, the vite dev server, and Node
-# (the benchmark). No filesystem, no dynamic execution (CSP-safe).
+# ES6 module output usable directly from browser workers. No application bundler is involved. No filesystem, no dynamic execution (CSP-safe).
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --bind \
  -s ENVIRONMENT=web,worker \
  -s DISABLE_EXCEPTION_CATCHING=0 \

@@ -7,7 +7,6 @@ import {
   expectedCodingOverhead,
   formatDuration
 } from "../shared/progress.js";
-import { createDecodeWorker, usesSimpleDecodeWorker } from "./worker-factory.js";
 import { GridLattice } from "./grid-lattice.js";
 import {
   DecodeWorkerPool
@@ -23,7 +22,7 @@ import {
 } from "../shared/protocol.js";
 import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
-import { applyAdvancedConstraint, probeCameraCapabilities } from "../shared/platform.js";
+import { applyAdvancedConstraint } from "../shared/platform.js";
 import {
   FocusController,
   CAMERA_TUNING
@@ -114,8 +113,22 @@ metricsEl.addEventListener("click", (event) => {
 });
 const speedFeedback = document.getElementById("speed-feedback");
 const pipelineMetrics = document.getElementById("pipeline-metrics");
-const diagnosticsEl = null;
 const legacyAndroidApp = isLegacyAndroidApp();
+function supportsWasmSimd() {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
+      3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 15, 11
+    ]));
+  } catch {
+    return false;
+  }
+}
+const usesSimpleDecodeWorker = legacyAndroidApp || !supportsWasmSimd();
+function createDecodeWorker() {
+  const file = usesSimpleDecodeWorker ? "./worker-legacy-android.js" : "./worker.js";
+  return new Worker(new URL(file, import.meta.url), { type: "module" });
+}
 document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
 const autoWorkerCount = legacyAndroidApp ? 1 : Math.max(1, Math.min(6, hardwareThreadCount - 2));
@@ -2099,12 +2112,6 @@ function stopReceiver() {
   metric("m-rate").textContent = "👀";
   speedFeedback.className = "speed-feedback";
   pipelineMetrics.style.display = "";
-  if (diagnosticsEl) {
-    diagnosticsEl.style.display = "none";
-    diagnosticsEl.open = false;
-    const label = diagnosticsEl.querySelector("summary");
-    if (label) label.textContent = "Progress and measured KB/s";
-  }
   startBtn.disabled = false;
   startBtn.hidden = false;
   startBtn.style.display = "";
@@ -2352,9 +2359,14 @@ function scheduleFrame(gen) {
       scheduleFrame(gen);
       return;
     }
-    captureFrame(frame);
-    drawOverlay(receiverNow());
-    scheduleFrame(gen);
+    void captureFrame(frame).catch((error) => {
+      decodeExceptions++;
+      lastDecodeError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (done || gen !== captureGen) return;
+      drawOverlay(receiverNow());
+      scheduleFrame(gen);
+    });
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
   else requestAnimationFrame((now) => next(now));
@@ -2636,7 +2648,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       id: message.id,
       kind,
       pixels: message.w * message.h,
-      bytes: message.w * message.h * 4,
+      bytes: message.payloadBytes ?? message.buf?.byteLength ?? message.w * message.h * 4,
       width: message.w,
       height: message.h,
       x: Number(message.ox) || 0,
@@ -2699,6 +2711,45 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
   const captureFps = captureTimes.reduce((count, at) => count + Number(at > now - STATS_WINDOW_MS), 0);
   focusController.observe(source.sequence, geometry, metrics, Math.max(1, expectedRegions), now, captureFps);
 }
+
+const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);
+let directLumaJobs = 0;
+let directLumaFallbacks = 0;
+let directLumaFormat = "";
+function opticalSampleDue(source) {
+  if (replayRunning || source.sequence === lastOpticalSourceSequence) return false;
+  const interval = focusController.opticalIntervalMs;
+  return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
+}
+function openDirectLumaFrame(source) {
+  if (source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  try {
+    const frame = new VideoFrame(video);
+    if (!DIRECT_LUMA_FORMATS.has(frame.format)) {
+      frame.close();
+      return null;
+    }
+    directLumaFormat = frame.format;
+    return frame;
+  } catch {
+    return null;
+  }
+}
+async function copyDirectLumaCrop(frame, x, y, w, h) {
+  try {
+    const rect = { x, y, width: w, height: h };
+    const buffer = new ArrayBuffer(frame.allocationSize({ rect }));
+    const planes = await frame.copyTo(buffer, { rect });
+    const yPlane = planes[0];
+    if (!yPlane || yPlane.stride < w) return null;
+    const payloadBytes = yPlane.offset + (h - 1) * yPlane.stride + w;
+    if (payloadBytes > buffer.byteLength) return null;
+    return { buffer, yOffset: yPlane.offset, yStride: yPlane.stride, payloadBytes };
+  } catch {
+    return null;
+  }
+}
+
 function captureOptimizerOpticalSample(source) {
   const epoch = activeOptimizerEpoch;
   if (!(epoch == null ? void 0 : epoch.collecting) || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
@@ -2858,7 +2909,7 @@ function captureOptimizerProbe(source, trace) {
     source.opticsEpoch
   );
 }
-function captureFrame(source) {
+async function captureFrame(source) {
   var _a, _b, _c, _d, _e;
   const vw = source.width;
   const vh = source.height;
@@ -3070,14 +3121,31 @@ function captureFrame(source) {
         const w = right - x;
         const h = bottom - y;
         if (w < 32 || h < 32) continue;
-        const laneImage = readBoundedVideoCrop(source, x, y, w, h);
-        if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
+        let laneImage;
+        let laneLuma;
+        const laneFrame = openDirectLumaFrame(source);
+        if (laneFrame) {
+          try {
+            laneLuma = await copyDirectLumaCrop(laneFrame, x, y, w, h);
+          } finally {
+            laneFrame.close();
+          }
+        }
+        if (!laneLuma) {
+          if (laneFrame) directLumaFallbacks++;
+          laneImage = readBoundedVideoCrop(source, x, y, w, h);
+          if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
+        }
         const id = frameId++;
+        const laneBuffer = laneLuma ? laneLuma.buffer : laneImage.data.buffer;
+        const laneMessage = laneLuma
+          ? { id, buf: laneBuffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: "y8", yOffset: laneLuma.yOffset, yStride: laneLuma.yStride, payloadBytes: laneLuma.payloadBytes }
+          : { id, buf: laneBuffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks };
         cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
         const accepted = submitReceiverJob(
-          { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks },
-          [laneImage.data.buffer],
-          "NATIVE TRACKED GRID",
+          laneMessage,
+          [laneBuffer],
+          laneLuma ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
           trace,
           source.sequence,
           group.regions,
@@ -3091,6 +3159,7 @@ function captureFrame(source) {
         }
         freeSlots.delete(workerSlot);
         laneJobsSubmitted++;
+        if (laneLuma) directLumaJobs++;
         cropsSubmitted += group.tracks.length;
       }
       cropRotate++;
@@ -3130,17 +3199,36 @@ function captureFrame(source) {
         activeBenchmarkFrame = void 0;
         return;
       }
-      const shared = readBoundedVideoCrop(source, x, y, w, h);
-      inspectStaticQrOptics(source, shared, x, y);
-      captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
+      let shared;
+      let sharedLuma;
+      if (healthyGrid) {
+        const sharedFrame = openDirectLumaFrame(source);
+        if (sharedFrame) {
+          try {
+            sharedLuma = await copyDirectLumaCrop(sharedFrame, x, y, w, h);
+          } finally {
+            sharedFrame.close();
+          }
+          if (!sharedLuma) directLumaFallbacks++;
+        }
+      }
+      if (!sharedLuma) {
+        shared = readBoundedVideoCrop(source, x, y, w, h);
+        inspectStaticQrOptics(source, shared, x, y);
+        captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
+      }
       if (healthyGrid) {
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
+        const sharedBuffer = sharedLuma ? sharedLuma.buffer : shared.data.buffer;
+        const sharedMessage = sharedLuma
+          ? { id: id2, buf: sharedBuffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: "y8", yOffset: sharedLuma.yOffset, yStride: sharedLuma.yStride, payloadBytes: sharedLuma.payloadBytes }
+          : { id: id2, buf: sharedBuffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks };
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(
-          { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
-          [shared.data.buffer],
-          "NATIVE TRACKED GRID",
+          sharedMessage,
+          [sharedBuffer],
+          sharedLuma ? "Y8 TRACKED GRID" : "NATIVE TRACKED GRID",
           trace,
           source.sequence,
           batchRegions
@@ -3150,6 +3238,7 @@ function captureFrame(source) {
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         } else {
           if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
+          if (sharedLuma) directLumaJobs++;
           cropsSubmitted += batchTracks.length;
         }
         cropRotate++;
@@ -3520,136 +3609,16 @@ function liveGoodputKbs(now) {
 async function finish(container, hashOk, seconds) {
   var _a, _b;
   done = true;
-  const cameraAutomationDiagnostics = focusController.diagnostics();
   focusController.detach();
   cancelScanCapture();
   if (scanDialog.open) scanDialog.close();
   releaseScreenWakeLock();
   const finishGen = ++captureGen;
-  let diagnosticsBase = null;
-  if (false) {
-    const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-    const camera = track == null ? void 0 : track.getSettings();
-    diagnosticsBase = {
-      role: "receiver",
-      when: (/* @__PURE__ */ new Date()).toISOString(),
-      streamId: reportStreamId,
-      acquisitionSeconds: cameraStartedTs ? Number(((startTs - cameraStartedTs) / 1e3).toFixed(2)) : null,
-      payloadSha256: [...container.slice(9, 41)].map((b) => b.toString(16).padStart(2, "0")).join(""),
-      transport: {
-        mode: decoder == null ? void 0 : decoder.mode,
-        k: decoder == null ? void 0 : decoder.k,
-        blockLen: decoder == null ? void 0 : decoder.blockLen,
-        framesNew: decoder == null ? void 0 : decoder.framesNew,
-        framesDup: decoder == null ? void 0 : decoder.framesDup,
-        framesRedundant: decoder == null ? void 0 : decoder.framesRedundant,
-        innovativeSymbols: decoder == null ? void 0 : decoder.usefulSymbols,
-        sourceRank: (decoder == null ? void 0 : decoder.mode) === "mds" ? decoder.solvedCount : null,
-        solvedBlocks: (decoder == null ? void 0 : decoder.mode) === "raptorq" ? decoder.solvedCount : null,
-        overhead: decoder ? Number((decoder.framesNew / decoder.k).toFixed(2)) : null,
-        usefulOverhead: decoder ? Number((decoder.usefulSymbols / decoder.k).toFixed(2)) : null,
-        innovationRate: (decoder == null ? void 0 : decoder.framesNew) ? Number((decoder.usefulSymbols / decoder.framesNew).toFixed(3)) : null
-      },
-      codes: peakRegions,
-      grid: lastGridSnapshot ? {
-        senderLayout: `${lastGridSnapshot.layout.cols}x${lastGridSnapshot.layout.rows}`,
-        state: lastGridSnapshot.state,
-        confidence: Number(lastGridSnapshot.confidence.toFixed(3)),
-        totalSlots: regions.filter((region) => region.gridSlot !== void 0).length,
-        visibleSlots: regions.filter((region) => region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN").length,
-        activeDecodeSlots: activeDecodeBudget,
-        offscreenSlots: regions.filter((region) => region.slotState === "OFFSCREEN").length,
-        partialSlots: regions.filter((region) => region.slotState === "PARTIAL").length,
-        bestVisible: regions.filter((region) => region.slotState === "ACTIVE").sort((a, b) => slotUsefulness(b) - slotUsefulness(a)).slice(0, activeDecodeBudget).map((region) => region.gridSlot),
-        averagePixelsPerModule: (() => {
-          const active = regions.filter((region) => region.slotState === "ACTIVE");
-          return active.length ? Number((active.reduce((sum, region) => sum + region.pixelsPerModule, 0) / active.length).toFixed(2)) : 0;
-        })(),
-        decodeBudget: activeDecodeBudget,
-        verifiedKbs: Number(liveGoodputKbs(receiverNow()).toFixed(2))
-      } : null,
-      pipeline: {
-        captureMode: "bounded-rgba-crops",
-        captures: totalCaptures,
-        capturesDroppedPoolBusy: capturesDropped,
-        cropsSubmitted,
-        submittedJobs,
-        completedJobs,
-        fullScans,
-        cheapFullScans,
-        thoroughFullScans,
-        lastFullScanLatencyMs: Number(lastFullLatencyMs.toFixed(1)),
-        averageFullScanLatencyMs: fullLatencyCount ? Number((fullLatencyTotalMs / fullLatencyCount).toFixed(1)) : 0,
-        localReacquisitions,
-        globalReacquisitions,
-        scanningState: currentScanningState,
-        decodes: totalDecodes,
-        trackedAttempts,
-        trackedDecodes,
-        trackedHitRate: trackedAttempts ? Number((trackedDecodes / trackedAttempts).toFixed(3)) : 0,
-        trackedMissFallbacks,
-        schedulerNoJobs,
-        cropMisses,
-        fullDetectorMisses,
-        fullSightings,
-        decodeExceptions,
-        regionCreations,
-        regionExpiries,
-        trackingInvalidations,
-        zeroRegionMs,
-        degradedMs,
-        maxSequenceGapMs: Number(maxSequenceGapMs.toFixed(1)),
-        workerJobs: completedJobs,
-        workerLatencyMeanMs: completedJobs ? Number((workerLatencyTotalMs / completedJobs).toFixed(1)) : 0,
-        workerLatencyMaxMs: Number(workerLatencyMaxMs.toFixed(1)),
-        events: pipelineEvents
-      },
-      workers: pool.size,
-      requested: {
-        width: requestedWidth,
-        height: requestedHeight,
-        fps: requestedFps != null ? requestedFps : "auto",
-        workers: selectedWorkerCount(),
-        workerSetting: decodeWorkers.value
-      },
-      camera: camera ? { width: camera.width, height: camera.height, fps: camera.frameRate, facingMode: (_a = camera.facingMode) != null ? _a : null } : null,
-      cameraAutomation: cameraAutomationDiagnostics,
-      optimizer: {
-        unattributedResults: optimizerUnattributedResults,
-        pendingMappedScans: scanCandidateEpoch.size,
-        fixedTargets: optimizerFixedTargets.length,
-        trace: [...optimizerTrace]
-      },
-      cameraCapabilities: track ? probeCameraCapabilities(track) : null,
-      device: { cores: (_b = navigator.hardwareConcurrency) != null ? _b : null, ua: navigator.userAgent },
-      timelineKey: "seconds, framesNew, solvedBlocks, decodedRegions, trackedRegions, captureFps, decodeFps, fullScansCumulative",
-      timeline
-    };
-  }
-  let diagnosticsSent = false;
-  const sendDiagnostics = (ok, finalSeconds, uniqueBytes) => {
-    if (!diagnosticsBase || diagnosticsSent) return;
-    diagnosticsSent = true;
-    void fetch("/__diagnostics", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...diagnosticsBase,
-        ok,
-        sha256Verified: ok,
-        seconds: Number(finalSeconds.toFixed(2)),
-        payloadBytes: uniqueBytes,
-        goodputKBs: ok ? Number(completedGoodputKbs(uniqueBytes, finalSeconds).toFixed(1)) : 0
-      })
-    }).catch(() => void 0);
-  };
   stream == null ? void 0 : stream.getTracks().forEach((t) => t.stop());
   clearInterval(statsTimer);
   statsTimer = void 0;
   pool.resize(0);
   preview.style.display = "none";
-  const diagnosticsLabel = diagnosticsEl == null ? void 0 : diagnosticsEl.querySelector("summary");
-  if (diagnosticsLabel) diagnosticsLabel.textContent = "Transfer summary";
   bar.style.width = "100%";
   progressEl.setAttribute("aria-valuenow", "100");
   transferSizeLabel.textContent = "";
@@ -3668,7 +3637,6 @@ async function finish(container, hashOk, seconds) {
     transferSizeLabel.textContent = "";
     etaLabel.textContent = `${formatBytes(file.transmittedSize)} · ${formatDuration(seconds)}`;
     pipelineMetrics.style.display = "none";
-    sendDiagnostics(true, seconds, file.bytes.length);
     const rate = completedGoodputKbs(file.transmittedSize, seconds);
     metric("m-rate").textContent = `${rate.toFixed(1)} KB/s`;
     speedFeedback.className = `speed-feedback ${speedQualityClass(rate)}`;
@@ -3709,7 +3677,6 @@ async function finish(container, hashOk, seconds) {
     }
   } catch (error) {
     if (finishGen !== captureGen) return;
-    sendDiagnostics(false, (receiverNow() - startTs) / 1e3, 0);
     bar.classList.add("error");
     etaLabel.textContent = "Transfer failed";
     speedFeedback.className = "speed-feedback speed-low";
@@ -4460,7 +4427,7 @@ function updateStats() {
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : "";
+  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : directLumaJobs ? `Y ${directLumaFormat}` : "";
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;

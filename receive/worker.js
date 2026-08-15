@@ -108,15 +108,16 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
-  const count = zx._decodeTrackedBatchRGBA(
+  const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
+  const count = decode(
     nativeBatchHandle,
     ptr,
     width,
     height,
-    width * 4,
+    stride,
     nativeResultsPtr,
     tracks.length,
     nativeOutputPtr,
@@ -183,11 +184,13 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt } = e.data;
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset = 0, yStride = 0, payloadBytes = 0 } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   try {
-    const pixels = new Uint8Array(buf);
+    const yRowStride = yStride || w;
+    const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || yOffset + Math.max(0, h - 1) * yRowStride + w) : buf.byteLength;
+    const pixels = new Uint8Array(buf, 0, byteLength);
     const zx = await ready;
     const ptr = inputBuffer(zx, pixels.byteLength);
     zx.HEAPU8.set(pixels, ptr);
@@ -316,15 +319,26 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && (tracks == null ? void 0 : tracks.length)) {
-      const native = decodeNativeBatch(zx, ptr, pw, ph, ox, oy, tracks);
-      if (native) {
+      const native = decodeNativeBatch(
+        zx,
+        ptr + (pixelFormat === "y8" ? yOffset : 0),
+        pw,
+        ph,
+        ox,
+        oy,
+        tracks,
+        pixelFormat,
+        pixelFormat === "y8" ? yRowStride : pw * 4
+      );
+      if (native || pixelFormat === "y8") {
+        const nativeSymbols = native?.symbols ?? [];
         ctx.postMessage({
           id,
-          symbols: native.symbols,
+          symbols: nativeSymbols,
           sightings,
           full: false,
-          trackedAttempted: native.attempted,
-          trackedHit: native.symbols.length > 0,
+          trackedAttempted: native?.attempted ?? true,
+          trackedHit: nativeSymbols.length > 0,
           fallbackAttempted: false,
           fallbackSucceeded: false,
           readFullAttempts: 0,

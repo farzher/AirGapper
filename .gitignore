@@ -1,6 +1,4 @@
 .DS_Store
-scratch/
-benchmarking/corpora/
 android/.gradle/
 android/build/
 android/app/build/

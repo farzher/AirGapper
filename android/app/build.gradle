@@ -10,8 +10,8 @@ android {
         applicationId "com.airgapper.app"
         minSdk 23
         targetSdk 29
-        versionCode 95
-        versionName "0.5.37"
+        versionCode 96
+        versionName "0.5.38"
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
         }
@@ -48,7 +48,7 @@ def syncWebApp = tasks.register("syncWebApp", Copy) {
         include "manifest.webmanifest"
         include "sw.js"
         include "icon-*.png"
-        include "app/**"
+        include "main.js"
         include "send/**"
         include "receive/**"
         include "shared/**"

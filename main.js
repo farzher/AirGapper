@@ -1,9 +1,30 @@
 var _a;
-import "../shared/service-worker.js";
-import "../send/main.js";
-import "../receive/main.js";
-import { closeOnBackdropClick } from "../shared/dialog.js";
-import { isAndroid, isIOS } from "../shared/platform.js";
+
+const serviceWorkers = navigator.serviceWorker;
+if (serviceWorkers) {
+  const hadController = Boolean(serviceWorkers.controller);
+  let reloading = false;
+  let registration;
+  serviceWorkers.addEventListener("controllerchange", () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+  window.addEventListener("load", () => {
+    void serviceWorkers.register("./sw.js", { scope: "./", updateViaCache: "none" }).then((current) => {
+      registration = current;
+      current.waiting?.postMessage({ type: "SKIP_WAITING" });
+      return current.update();
+    }).catch(() => void 0);
+  }, { once: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void registration?.update().catch(() => void 0);
+  });
+}
+import "./send/main.js";
+import "./receive/main.js";
+import { closeOnBackdropClick } from "./shared/dialog.js";
+import { isAndroid, isIOS } from "./shared/platform.js";
 const installShell = document.querySelector(".install-shell");
 const installMenuButton = document.getElementById("install-menu-button");
 const installMenu = document.getElementById("install-menu");
