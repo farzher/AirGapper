@@ -40,7 +40,7 @@ let nativeOutputPtr = 0;
 let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
-let nativeFallbackBudget = 4;
+let nativeFallbackBudget = 1;
 const nativeRefresh = /* @__PURE__ */ new Set();
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
@@ -93,7 +93,7 @@ function configureNativeBatch(zx, tracks, ox, oy) {
       nativeConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad };
       nativeRefresh.delete(slot);
     }
-    byId.set(id, { input: track, configured: nativeConfigured[slot] });
+    byId.set(id, { input: track, configured: nativeConfigured[slot], nativeSlot: slot });
   }
   for (let slot = tracks.length; slot < nativeConfigured.length; slot++) {
     if (nativeConfigured[slot]) zx._clearTrackedDecoderTrack(nativeBatchHandle, slot);
@@ -134,7 +134,9 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     crcFastSuccesses: view.getUint32(nativeMetricsPtr + 64, true),
     rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true)
   };
-  const desiredFallbackBudget = metrics.successful < Math.ceil(tracks.length * 0.55) ? Math.min(tracks.length, nativeFallbackBudget + 2) : metrics.crcFastSuccesses >= Math.max(1, Math.floor(metrics.successful * 0.75)) ? Math.max(2, nativeFallbackBudget - 1) : nativeFallbackBudget;
+  const crcTracks = tracks.reduce((count2, track) => count2 + Number(Boolean(track.crc32)), 0);
+  const fastEnough = crcTracks > 0 && metrics.crcFastSuccesses >= Math.ceil(crcTracks * 0.8);
+  const desiredFallbackBudget = fastEnough ? 0 : 1;
   if (desiredFallbackBudget !== nativeFallbackBudget) {
     nativeFallbackBudget = desiredFallbackBudget;
     zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, nativeFallbackBudget);
@@ -152,7 +154,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const dy = view.getFloat32(at + 28, true);
     const mapped = byId.get(id);
     if (!mapped) continue;
-    const slot = tracks.indexOf(mapped.input);
+    const slot = mapped.nativeSlot;
     if (misses >= 3 && slot >= 0) nativeRefresh.add(slot);
     if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
     const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
