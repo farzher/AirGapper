@@ -58,7 +58,7 @@ export const CAMERA_TUNING = {
   convincingFocusScore: 0.62,
   severeBlurConfirmMs: 480,
   optimizeMovementConfirmMs: 650,
-  optimizeBudgetMs: 16000,
+  optimizeBudgetMs: 11000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
   acquisitionBracketDelayMs: 900,
@@ -628,15 +628,18 @@ export class FocusController {
 
     const finalCompare = (a: Candidate, b: Candidate): number => {
       const ap = performanceOf(a), bp = performanceOf(b);
-      const successGap = successRate(a) - successRate(b);
-      if (Math.abs(successGap) >= 0.035) return successGap > 0 ? -1 : 1;
+      // Optimize the thing the user actually cares about: valid QR/s. Every
+      // candidate in a run uses the same probe geometry/mode and comparable
+      // settled-frame bursts, so QR/s is the clearest primary signal.
       const qrGap = robustQrRate(a) - robustQrRate(b);
-      if (Math.abs(qrGap) >= Math.max(0.35, Math.max(robustQrRate(a), robustQrRate(b)) * 0.06)) {
+      if (Math.abs(qrGap) >= Math.max(0.3, Math.max(robustQrRate(a), robustQrRate(b)) * 0.05)) {
         return qrGap > 0 ? -1 : 1;
       }
       const sourceA = ap.sourceFrames ? ap.successfulSourceFrames / ap.sourceFrames : 0;
       const sourceB = bp.sourceFrames ? bp.successfulSourceFrames / bp.sourceFrames : 0;
-      if (Math.abs(sourceA - sourceB) >= 0.05) return sourceA > sourceB ? -1 : 1;
+      if (Math.abs(sourceA - sourceB) >= 0.04) return sourceA > sourceB ? -1 : 1;
+      const successGap = successRate(a) - successRate(b);
+      if (Math.abs(successGap) >= 0.035) return successGap > 0 ? -1 : 1;
       if (Math.abs(ap.completionCoverage - bp.completionCoverage) >= 0.08) {
         return ap.completionCoverage > bp.completionCoverage ? -1 : 1;
       }
@@ -818,17 +821,9 @@ export class FocusController {
         return;
       }
 
-      // Preserve uncertainty: the first tiny visit is only for ruling out the
-      // obviously bad half. A potentially good setting with one unlucky phase
-      // gets another chance instead of being permanently discarded.
-      let survivors = [...measured].sort(survivalCompare).slice(0, Math.min(8, measured.length));
-      for (const candidate of measured) if (!survivors.includes(candidate)) candidate.state = "screened out";
-      this.optimizeDecision = "revisiting plausible settings";
-      const revisitOrder = [...survivors.slice(2), ...survivors.slice(0, 2)].reverse();
-      await captureRound(revisitOrder, "revisit");
-
-      // If the AE-centered band produced no QR at all, immediately test the
-      // omitted 2D extremes once rather than pretending we converged.
+      // If the first broad band has no decode at all, do not waste a revisit
+      // round comparing zeros. Expand to the omitted range immediately. This is
+      // what makes Optimize useful even when Auto has never decoded a QR yet.
       if (![...candidates.values()].some((candidate) =>
           candidate.windows.some((window) => window.validDecodes > 0))) {
         const rescue = allGrid.filter((candidate) => !candidate.windows.length);
@@ -839,17 +834,26 @@ export class FocusController {
         measured = [...candidates.values()].filter((candidate) => candidate.windows.length);
       }
 
+      // Preserve uncertainty, but only carry five candidates into the expensive
+      // revisit stage. This cuts a large amount of time without trusting a single
+      // lucky phase to pick the final winner.
+      let survivors = [...measured].sort(survivalCompare).slice(0, Math.min(5, measured.length));
+      for (const candidate of measured) if (!survivors.includes(candidate)) candidate.state = "screened out";
+      this.optimizeDecision = "revisiting plausible settings";
+      const revisitOrder = [...survivors.slice(2), ...survivors.slice(0, 2)].reverse();
+      await captureRound(revisitOrder, "revisit");
+
       survivors = [...candidates.values()]
         .filter((candidate) => candidate.windows.length)
         .sort(finalCompare)
-        .slice(0, 4);
+        .slice(0, 3);
       for (const candidate of candidates.values()) {
         if (candidate.windows.length && !survivors.includes(candidate) && candidate.state !== "screened out") {
           candidate.state = "eliminated";
         }
       }
-      this.optimizeDecision = "four finalists";
-      await captureRound([survivors[2], survivors[0], survivors[3], survivors[1]].filter(Boolean) as Candidate[], "finalist");
+      this.optimizeDecision = "three finalists";
+      await captureRound([survivors[2], survivors[0], survivors[1]].filter(Boolean) as Candidate[], "finalist");
 
       let winner = [...survivors].sort(finalCompare)[0]!;
       winner.state = "coarse winner";
@@ -870,7 +874,13 @@ export class FocusController {
         const localIso = neighborValues(isoLevels, winner.iso, isoRange);
         const refinements = localIso.flatMap((iso) => localExposure.map((exposure) => make(exposure, iso)))
           .filter((candidate, index, all) =>
-            candidate !== winner && !candidate.windows.length && all.indexOf(candidate) === index);
+            candidate !== winner && !candidate.windows.length && all.indexOf(candidate) === index)
+          .sort((a, b) => {
+            const da = Math.hypot(Math.log2(a.exposure / winner.exposure), Math.log2(a.iso / winner.iso));
+            const db = Math.hypot(Math.log2(b.exposure / winner.exposure), Math.log2(b.iso / winner.iso));
+            return da - db;
+          })
+          .slice(0, 4);
         for (const candidate of refinements) candidate.state = "refinement";
         this.exposureProbes += refinements.length;
         if (refinements.length) {
@@ -928,11 +938,7 @@ export class FocusController {
       this.commitSettings(this.settings());
 
       const finalObservation = this.latest?.at && this.latest.at >= startedAt ? this.latest : initialObservation;
-      if (!finalObservation || !this.current(generation)) {
-        this.optimizeState = "paused";
-        this.optimizeReason = "no stable QR geometry available";
-        return;
-      }
+      if (!this.current(generation)) return;
 
       this.optimizeState = "complete";
       this.optimizeVisit = undefined;
@@ -946,7 +952,16 @@ export class FocusController {
         : 0;
       this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${verificationResult.validDecodesPerSecond.toFixed(1)} QR/s`;
       this.optimizeReason = `${candidates.size} actual exposure/ISO settings tested; repeated visits + final A/B`;
-      this.lock(finalObservation, "exposure/ISO optimizer converged; hardware autofocus retained");
+      if (finalObservation) {
+        this.lock(finalObservation, "exposure/ISO optimizer converged; hardware autofocus retained");
+      } else {
+        // Optimize can bootstrap from zero prior decodes. The winning manual
+        // exposure is already committed; return to acquisition without resetting
+        // it to AE and let the first production QR establish geometry normally.
+        this.lockedAt = performance.now();
+        this.transition("STABILIZING", "optimizer converged from decode-only bootstrap; winning exposure retained");
+        this.changed();
+      }
     } finally {
       epochs.finish();
     }

@@ -587,6 +587,10 @@ let activeOptimizerEpoch: OptimizerEpoch | undefined;
 let latestSourceFrameSequence = -1;
 let optimizeMeasureToken = 0;
 let optimizerFixedTargets: { id: number; slot?: number; misses: number; quad: SymbolQuad; dim: number; crc32: boolean }[] = [];
+let optimizerDiscoveryMode = false;
+type OptimizerOverlayHit = { box: SymbolBox; at: number };
+const optimizerOverlayHits: OptimizerOverlayHit[] = [];
+let optimizerBootstrapDecode: { box: SymbolBox; info?: SymbolInfo } | undefined;
 
 function traceOptimizer(event: OptimizerTraceEvent): void {
   optimizerTrace.push(event);
@@ -698,21 +702,22 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   const epoch = activeOptimizerEpoch;
   if (!epoch || epoch.id !== epochId) throw new Error("Optimizer candidate epoch is not active");
   const startedAt = receiverNow();
-  const multiQr = optimizerFixedTargets.length > 1;
-  const singleQr = !multiQr;
+  const discovery = optimizerDiscoveryMode || optimizerFixedTargets.length === 0;
+  const multiQr = !discovery && optimizerFixedTargets.length > 1;
+  const singleQr = !discovery && !multiQr;
   const phase = label.split("·", 1)[0]!.trim().toLowerCase();
-  const targetFrames = phase === "verify"
-    ? (singleQr ? 14 : 8)
-    : phase === "finalist"
-      ? (singleQr ? 8 : 5)
-      : phase === "refine"
-        ? (singleQr ? 5 : 3)
-        : phase === "revisit"
-          ? (singleQr ? 5 : 3)
-          : (singleQr ? 4 : usesSimpleDecodeWorker ? 4 : 2);
-  const maxBurstMs = phase === "verify" ? 1600
-    : phase === "finalist" ? 1200
-      : singleQr ? 900 : 700;
+  // Exploration should feel fast. Slow decoder completions may arrive later;
+  // camera dwell is based on settled source-frame opportunities, not worker latency.
+  const targetFrames = discovery
+    ? phase === "verify" ? 6 : phase === "finalist" ? 4 : phase === "revisit" ? 3 : 2
+    : phase === "verify" ? (singleQr ? 8 : 5)
+      : phase === "finalist" ? (singleQr ? 5 : 4)
+      : phase === "revisit" ? (singleQr ? 4 : 2)
+      : phase === "refine" ? (singleQr ? 3 : 2)
+      : (singleQr ? 3 : usesSimpleDecodeWorker ? 3 : 2);
+  const maxBurstMs = discovery
+    ? phase === "verify" ? 1200 : phase === "finalist" ? 900 : 650
+    : phase === "verify" ? 1200 : phase === "finalist" ? 900 : singleQr ? 750 : 550;
   const evidence: CandidateEvidence = {
     epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
     sourceFrames: new Set(), successfulSourceFrames: new Set(),
@@ -734,7 +739,7 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   const result = (async (): Promise<ReceivePerformance> => {
     const waitStartedAt = receiverNow();
     while (token === optimizeMeasureToken && evidence.completedJobs < evidence.submittedJobs &&
-        receiverNow() - waitStartedAt < 12_500) {
+        receiverNow() - waitStartedAt < 6_000) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const performanceSample = refreshCandidateEvidence(evidence)!;
@@ -776,13 +781,13 @@ function beginOptimizeWhenReady(): void {
     const diagnostic = focusController.diagnostics();
     opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
       ? "Camera unavailable"
-      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Waiting for decoded target";
+      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Starting…";
     return;
   }
-  if (!snapshotOptimizerGeometry()) {
-    opticsOptimizeStatus.textContent = "Hold a decoded target steady";
-    return;
-  }
+  // A decoded baseline makes probes faster because we can use frozen QR crops,
+  // but it is not required. With no baseline, Optimize immediately uses full-frame
+  // probe decodes until it finds the best exposure/ISO from scratch.
+  optimizerDiscoveryMode = !snapshotOptimizerGeometry();
   optimizeRunning = true;
   optimizeMeasureToken++;
   optimizerTrace.length = 0;
@@ -796,15 +801,23 @@ function beginOptimizeWhenReady(): void {
   optimizerJobIds.clear();
   optimizerValidEvents.clear();
   optimizerEpochs.clear();
+  optimizerOverlayHits.length = 0;
+  optimizerBootstrapDecode = undefined;
   manualOptimizerValidation = undefined;
   candidateEvidenceWindows.clear();
   opticsKeep.hidden = true;
-  opticsOptimizeStatus.textContent = "Exploring…";
+  opticsOptimizeStatus.textContent = optimizerDiscoveryMode ? "Exploring from camera…" : "Exploring…";
   void focusController.startOptimizer(measureReceivePerformance, optimizerEpochHooks).then(() => {
     const finished = focusController.diagnostics();
     if (!optimizeEnabled) return;
     if (finished.optimizeState === "complete") {
       optimizeConverged = true;
+      // A no-baseline optimization used full-frame probes that intentionally did
+      // not mutate production tracking. Promote one proven decode only after the
+      // tournament ends so normal tracking/overlay can take over immediately.
+      if (optimizerDiscoveryMode && optimizerBootstrapDecode) {
+        noteRegion(optimizerBootstrapDecode.box, receiverNow(), true, optimizerBootstrapDecode.info);
+      }
       const performance = finished.optimizeBestPerformance;
       opticsOptimizeStatus.textContent = performance
         ? `${performance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
@@ -812,7 +825,10 @@ function beginOptimizeWhenReady(): void {
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
     } else opticsOptimizeStatus.textContent = "Waiting…";
-  }).finally(() => { optimizeRunning = false; });
+  }).finally(() => {
+    optimizeRunning = false;
+    optimizerDiscoveryMode = false;
+  });
 }
 async function applyAndValidateManualExposure(track: MediaStreamTrack): Promise<void> {
   const run = ++manualValidationToken;
@@ -1756,6 +1772,37 @@ function drawOverlay(now: number) {
     overlayCtx.stroke();
 
   }
+  // Optimizer probe decodes deliberately do not mutate production tracking,
+  // so render their successful boxes from a separate short-lived overlay list.
+  const optimizerFadeMs = Math.max(INDICATOR_FADE_MS, 650);
+  for (let i = optimizerOverlayHits.length - 1; i >= 0; i--) {
+    const hit = optimizerOverlayHits[i]!;
+    const age = now - hit.at;
+    if (age > optimizerFadeMs) {
+      optimizerOverlayHits.splice(i, 1);
+      continue;
+    }
+    const r = hit.box;
+    const pad = 0.06 * Math.max(r.w, r.h) * scale;
+    const x = offX + r.x * scale - pad;
+    const y = offY + r.y * scale - pad;
+    const w = r.w * scale + 2 * pad;
+    const h = r.h * scale + 2 * pad;
+    const len = 0.24 * Math.min(w, h);
+    overlayCtx.globalAlpha = 1 - 0.65 * age / optimizerFadeMs;
+    overlayCtx.strokeStyle = "#35d66f";
+    overlayCtx.shadowColor = "#35d66f";
+    overlayCtx.shadowBlur = 5 * dpr;
+    overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);
+    overlayCtx.setLineDash([]);
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(x, y + len); overlayCtx.lineTo(x, y); overlayCtx.lineTo(x + len, y);
+    overlayCtx.moveTo(x + w - len, y); overlayCtx.lineTo(x + w, y); overlayCtx.lineTo(x + w, y + len);
+    overlayCtx.moveTo(x + w, y + h - len); overlayCtx.lineTo(x + w, y + h); overlayCtx.lineTo(x + w - len, y + h);
+    overlayCtx.moveTo(x + len, y + h); overlayCtx.lineTo(x, y + h); overlayCtx.lineTo(x, y + h - len);
+    overlayCtx.stroke();
+  }
+
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
@@ -1810,7 +1857,7 @@ function renderFocusDiagnostics(): void {
   if (optimizeEnabled && !optimizing && !focusController.optimizeEligible()) {
     opticsOptimizeStatus.textContent = diagnostic.state === "UNAVAILABLE"
       ? "Camera unavailable"
-      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Waiting for decoded target";
+      : diagnostic.optimizeState === "paused" ? diagnostic.optimizeReason ?? "Optimize paused" : "Ready";
   }
   else if (optimizing && !candidateEvidenceWindows.size) {
     opticsOptimizeStatus.textContent = diagnostic.optimizeRound
@@ -2860,9 +2907,31 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
 
 function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace | undefined): void {
   const epoch = activeOptimizerEpoch;
-  if (!epoch?.collecting || !optimizerFixedTargets.length) return;
+  if (!epoch?.collecting) return;
   const evidence = candidateEvidenceWindows.get(epoch.id);
   if (!evidence) return;
+
+  // Optimize must also work before the first successful decode. Without frozen
+  // QR geometry, use a normal full-frame decoder probe for every candidate.
+  // Keep that measurement mode fixed for the entire run so candidate scores stay comparable.
+  if (optimizerDiscoveryMode || !optimizerFixedTargets.length) {
+    const image = readBoundedVideoCrop(source, 0, 0, source.width, source.height);
+    const id = frameId++;
+    traceOptimizer({
+      time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
+      sourceSequence: source.sequence, requestedExposure: epoch.requestedExposure, requestedIso: epoch.requestedIso,
+      actualExposure: epoch.actualExposure, actualIso: epoch.actualIso,
+    });
+    submitReceiverJob(
+      {
+        id, buf: image.data.buffer, w: source.width, h: source.height, ox: 0, oy: 0, full: true, thorough: true,
+        optimizerProbe: true, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
+      },
+      [image.data.buffer], "FULL FRAME", trace, source.sequence, [], 1, source.opticsEpoch,
+    );
+    return;
+  }
+
   // The compatibility worker can decode one isolated QR reliably, but not a
   // shared dense crop. Rotate the same frozen slots in the same order for
   // every candidate. Modern workers probe all frozen slots per source frame.
@@ -3284,6 +3353,11 @@ function onDecoded(bytes: Uint8Array, box?: SymbolBox, info?: SymbolInfo) {
     return;
   }
   focusController.noteValidDecode(info?.scanId);
+  if (optimizerAttribution && box) {
+    optimizerOverlayHits.push({ box: { ...box }, at: decodedAt });
+    if (optimizerOverlayHits.length > 80) optimizerOverlayHits.splice(0, optimizerOverlayHits.length - 80);
+    if (optimizerDiscoveryMode) optimizerBootstrapDecode = { box: { ...box }, info };
+  }
   if (optimizerAttribution) {
     const epoch = optimizerAttribution.epoch;
     const complete = info?.scanId !== undefined && optimizerAttribution.sourceFrameSequence >= epoch.firstValidSourceSequence &&
