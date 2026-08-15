@@ -122,19 +122,18 @@ class TransportDecoder {
     else this.addMds(esi, block);
   }
   addRaptor(block) {
-    const payload = this.raptor.add(block);
-    if (payload) {
-      this.raptorPayload = payload;
-      this.solvedCount = this.k;
-      return;
-    }
-    if (this.framesNew < this.k) {
-      this.solvedCount = this.framesNew;
-    } else {
-      this.framesRedundant++;
-      this.solvedCount = this.k - 1;
-    }
+  const payload = this.raptor.add(block);
+  if (payload) {
+    this.raptorPayload = payload;
+    this.solvedCount = this.k;
+    return;
   }
+  // The streaming RaptorQ API only reports completion, not whether an
+  // individual fresh repair symbol was algebraically redundant. Fresh
+  // ESIs can be the coding overhead that completes the transfer, so do
+  // not mark every post-k symbol redundant and make live KB/s drop to 0.
+  this.solvedCount = Math.min(this.framesNew, this.k - 1);
+}
   addMds(esi, block) {
     const coefficients = mdsCoefficients(this.k, esi);
     const bytes = new Uint8Array(this.blockLen);
