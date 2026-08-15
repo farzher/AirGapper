@@ -198,7 +198,7 @@ function sanitizedTrackFocusDistance(track: MediaStreamTrack, value?: number): n
 function seedDesiredCamera(track: MediaStreamTrack): void {
   if (cameraQuirkTrackId !== track.id) {
     cameraQuirkTrackId = track.id;
-    manualExposureNeedsFocusHold = false;
+    manualExposureFocusPolicy = "unknown";
   }
   const settings = track.getSettings() as MediaTrackSettings & CameraPatch;
   desiredCamera = {
@@ -210,7 +210,8 @@ function seedDesiredCamera(track: MediaStreamTrack): void {
     exposureCompensation: settings.exposureCompensation,
   };
 }
-let manualExposureNeedsFocusHold = false;
+type ManualExposureFocusPolicy = "unknown" | "independent" | "requires-hold";
+let manualExposureFocusPolicy: ManualExposureFocusPolicy = "unknown";
 let cameraQuirkTrackId = "";
 
 /**
@@ -312,40 +313,68 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
         return;
       }
 
-      // First establish manual AE mode. On coupled HALs, hold the current
-      // hardware-selected lens position before asking for sensor controls.
+      // Some Android HALs couple manual sensor controls to AF, but do NOT
+      // assume that from one slow getSettings() update. A false positive here
+      // freezes the lens while continuous AF is still moving, which is exactly
+      // the blur/hunting failure seen on the OnePlus 5. Learn the quirk only
+      // after two exposure-only attempts have had ample time to settle.
       const actualFocus = (track.getSettings() as MediaTrackSettings & CameraPatch).focusMode;
-      if (manualExposureNeedsFocusHold && actualFocus !== "manual") {
+      if (manualExposureFocusPolicy === "requires-hold" && actualFocus !== "manual") {
         await applyStage({ focusMode: "manual" });
-        await new Promise((resolve) => setTimeout(resolve, 45));
+        await new Promise((resolve) => setTimeout(resolve, 90));
       }
-      await applyStage({ exposureMode: "manual" });
-      await applyStage({
-        exposureMode: "manual",
-        ...(desiredCamera.exposureTime !== undefined ? { exposureTime: desiredCamera.exposureTime } : {}),
-        ...(desiredCamera.iso !== undefined ? { iso: desiredCamera.iso } : {}),
-      });
 
-      // Give the provider a couple of video-frame intervals to expose the new
-      // sensor state. If it ignored manual exposure while AF was active, use
-      // the behavior observed on the OnePlus 12R: disable AF without supplying
-      // a focus distance (hold current lens), then retry shutter/ISO.
-      await new Promise((resolve) => setTimeout(resolve, 75));
-      if (!manualExposureMatches()) {
-        const nowFocus = (track.getSettings() as MediaTrackSettings & CameraPatch).focusMode;
-        const canHoldFocus = nowFocus !== "manual" &&
-          (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : true);
-        if (canHoldFocus) {
-          await applyStage({ focusMode: "manual" });
-          await new Promise((resolve) => setTimeout(resolve, 55));
-          await applyStage({ exposureMode: "manual" });
-          await applyStage({
-            exposureMode: "manual",
-            ...(desiredCamera.exposureTime !== undefined ? { exposureTime: desiredCamera.exposureTime } : {}),
-            ...(desiredCamera.iso !== undefined ? { iso: desiredCamera.iso } : {}),
-          });
-          await new Promise((resolve) => setTimeout(resolve, 75));
-          if (manualExposureMatches()) manualExposureNeedsFocusHold = true;
+      const applyManualSensor = async (): Promise<void> => {
+        await applyStage({ exposureMode: "manual" });
+        await applyStage({
+          exposureMode: "manual",
+          ...(desiredCamera.exposureTime !== undefined ? { exposureTime: desiredCamera.exposureTime } : {}),
+          ...(desiredCamera.iso !== undefined ? { iso: desiredCamera.iso } : {}),
+        });
+      };
+
+      await applyManualSensor();
+      await new Promise((resolve) => setTimeout(resolve, manualExposureFocusPolicy === "requires-hold" ? 90 : 170));
+
+      if (manualExposureMatches()) {
+        if (manualExposureFocusPolicy === "unknown" && actualFocus !== "manual") {
+          manualExposureFocusPolicy = "independent";
+        }
+        return;
+      }
+
+      // One exposure-only retry before touching focus. This intentionally costs
+      // a few frames only the first time a camera is classified; Optimize then
+      // reuses the learned policy for the rest of the track.
+      await applyManualSensor();
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      if (manualExposureMatches()) {
+        if (manualExposureFocusPolicy === "unknown" && actualFocus !== "manual") {
+          manualExposureFocusPolicy = "independent";
+        }
+        return;
+      }
+
+      // A camera previously proven independent should never have AF disabled
+      // merely because one later candidate was slow or clamped. Higher layers
+      // will identify the actual accepted exposure/ISO and continue.
+      if (manualExposureFocusPolicy === "independent") return;
+
+      // Only now test the OnePlus-12R-style coupled behavior: hold the
+      // hardware-selected lens WITHOUT writing a focus distance, then retry the
+      // exact same sensor request. Restore AF if even this does not work.
+      const nowFocus = (track.getSettings() as MediaTrackSettings & CameraPatch).focusMode;
+      const canHoldFocus = nowFocus !== "manual" &&
+        (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : true);
+      if (canHoldFocus) {
+        await applyStage({ focusMode: "manual" });
+        await new Promise((resolve) => setTimeout(resolve, 110));
+        await applyManualSensor();
+        await new Promise((resolve) => setTimeout(resolve, 140));
+        if (manualExposureMatches()) {
+          manualExposureFocusPolicy = "requires-hold";
+        } else if (nowFocus && nowFocus !== "manual") {
+          await applyStage({ focusMode: nowFocus });
         }
       }
     };
@@ -2048,7 +2077,7 @@ function renderFocusDiagnostics(): void {
     diagnostic.invariantWarning ? `!!! ${diagnostic.invariantWarning} — SELF-HEALING TO HARDWARE AF !!!` : "",
     `State    ${diagnostic.state} · ${(diagnostic.stateMs / 1000).toFixed(1)}s${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
     `Owner    ${diagnostic.focusOwner}`,
-    `3A       manual exposure ${manualExposureNeedsFocusHold ? "requires AF hold on this camera" : "independent/unknown"}`,
+    `3A       manual exposure ${manualExposureFocusPolicy === "requires-hold" ? "requires AF hold on this camera" : manualExposureFocusPolicy}`,
     `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
     `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${diagnostic.actualExposureCompensation ?? "—"}`,

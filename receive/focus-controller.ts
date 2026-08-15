@@ -488,21 +488,27 @@ export class FocusController {
       this.stableSince = performance.now();
     }
 
-    // Focus is not an optimization dimension. Let the phone solve focus, then
-    // leave it alone for the entire exposure/ISO experiment.
-    const focusHealthy = Boolean(initialObservation && this.decodeIsFresh() &&
-      initialObservation.metrics.focusScore >= 0.5);
-    if (!focusHealthy) {
+    // Focus is not an optimization dimension. Most importantly, do NOT
+    // retrigger continuous AF merely because Optimize has no fresh payload
+    // decode yet. Some OnePlus HALs visibly hunt whenever the focus constraint
+    // is reasserted. Only take focus ownership when it is currently manual, or
+    // when static optics show convincing severe blur. Then give AF real time to
+    // settle before manual exposure probing can ever request a focus hold.
+    const focusSettings = this.settings();
+    const severeStaticBlur = Boolean(initialObservation && initialObservation.metrics.confidence >= 0.72 &&
+      initialObservation.metrics.focusScore > 0 && initialObservation.metrics.focusScore < 0.20);
+    const needsHardwareFocus = focusSettings.focusMode === "manual" || severeStaticBlur;
+    if (needsHardwareFocus) {
       const patch: CameraPatch = {};
       const mode = this.hardwareFocusMode();
-      if (mode) patch.focusMode = mode;
+      if (mode && focusSettings.focusMode !== mode) patch.focusMode = mode;
       if (this.caps.pointsOfInterest && initialObservation) {
         patch.pointsOfInterest = [{ x: initialObservation.geometry.x, y: initialObservation.geometry.y }];
       }
-      this.transition("OPTIMIZE_EXPOSURE", "hardware autofocus refresh before exposure tuning");
+      this.transition("OPTIMIZE_EXPOSURE", "one hardware autofocus settle before exposure tuning");
       if (Object.keys(patch).length) await this.applyProbe(generation, patch, false);
-      if (initialObservation) await this.waitForObservations(generation, initialObservation.id, 90, 0, 1, 500);
-      else await new Promise((resolve) => setTimeout(resolve, 140));
+      if (initialObservation) await this.waitForObservations(generation, initialObservation.id, 260, 0, 2, 1000);
+      else await new Promise((resolve) => setTimeout(resolve, 360));
       if (!this.current(generation)) return;
     }
 
@@ -741,13 +747,11 @@ export class FocusController {
 
       let actual = await readApplied(260);
       if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso && this.current(generation)) {
-        // Mirror the manual-control path: establish manual mode, then let each
-        // numeric axis take effect. applyCameraConstraint preserves the other
-        // desired axis, so these are safe staged retries rather than resets.
-        await this.applyProbe(generation, { exposureMode: "manual" }, false);
-        await this.applyProbe(generation, { exposureTime: requested.requestedExposure }, false);
-        await this.applyProbe(generation, { iso: requested.requestedIso }, false);
-        actual = await readApplied(520);
+        // Camera-axis staging and device quirk detection live in
+        // applyCameraConstraint(). Retry the complete candidate rather than
+        // generating three extra mutations that can themselves perturb 3A.
+        await this.applyProbe(generation, patch, false);
+        actual = await readApplied(560);
       }
       if (actual.exposureTime === undefined || actual.iso === undefined) {
         // Last-resort baseline measurement: if the camera exposes usable manual
@@ -1465,6 +1469,24 @@ export class FocusController {
     this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
   }
   private retryStabilizingAf(geometry: FocusGeometry): void {
+    const mode = this.hardwareFocusMode();
+    if (mode === "continuous" && this.settings().focusMode === "continuous") {
+      // Continuous AF is already an active control loop. Re-sending the mode or
+      // repeatedly moving its POI can restart lens scans on some OnePlus HALs.
+      // Give the hardware time instead of "helping" it into perpetual hunting.
+      this.stabilizingAfRetries++;
+      this.stateSince = performance.now();
+      this.stableSince = performance.now();
+      this.poorFocusSince = 0;
+      if (this.stabilizingAfRetries >= CAMERA_TUNING.maxStabilizingAfRetries) {
+        this.stableGeometry = geometry;
+        this.transition("SEEKING", "continuous hardware AF left running without retrigger");
+      } else {
+        this.lastReason = `continuous AF settling; no retrigger ${this.stabilizingAfRetries}`;
+      }
+      this.changed();
+      return;
+    }
     if (this.stabilizingAfRetries < CAMERA_TUNING.maxStabilizingAfRetries) {
       this.stabilizingAfRetries++;
       this.stateSince = performance.now();
@@ -1476,8 +1498,7 @@ export class FocusController {
     } else {
       this.stableGeometry = undefined;
       this.stableSince = 0;
-      this.transition("SEEKING", "AF retries exhausted; continuous hardware AF left running");
-      void this.enterAutoFocusAcquisition("continuous hardware AF left running", this.generation, false, true);
+      this.transition("SEEKING", "AF retries exhausted; hardware AF left running");
     }
   }
 
@@ -1494,7 +1515,7 @@ export class FocusController {
     const patch: CameraPatch = {};
     if (mode) {
       this.requestedMode = mode;
-      if (this.settings().focusMode !== mode || geometry) patch.focusMode = mode;
+      if (this.settings().focusMode !== mode) patch.focusMode = mode;
       if (geometry && this.caps.pointsOfInterest) patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
     }
     if (resetExposure && this.exposureModes().includes("continuous")) {
