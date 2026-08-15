@@ -41,6 +41,7 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
+let directPixelAuditDone = false;
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -185,6 +186,51 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
   });
   return { symbols, attempted: true, metrics, outputBuffer: output.buffer };
 }
+function decodeNativeAuditRGBA(zx, ptr, width, height, ox, oy, tracks, stride = width * 4) {
+  const count = Math.min(NATIVE_BATCH_MAX_TRACKS, tracks.length);
+  if (!count) return null;
+  const handle = zx._createTrackedDecoder(count, 177);
+  if (!handle) return null;
+  const resultsPtr = zx._malloc(count * NATIVE_TRACK_RESULT_BYTES);
+  const outputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
+  const metricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
+  try {
+    for (let slot = 0; slot < count; slot++) {
+      const track = tracks[slot];
+      const q = track.quad;
+      const id = track.slot ?? track.id;
+      if (!zx._setTrackedDecoderTrack(handle, slot, id, track.dim,
+        q.topLeft.x - ox, q.topLeft.y - oy,
+        q.topRight.x - ox, q.topRight.y - oy,
+        q.bottomRight.x - ox, q.bottomRight.y - oy,
+        q.bottomLeft.x - ox, q.bottomLeft.y - oy)) return null;
+      zx._setTrackedDecoderTrackCRC32(handle, slot, track.crc32 ? 1 : 0);
+    }
+    zx._setTrackedDecoderFallbackBudget(handle, 0);
+    const resultCount = zx._decodeTrackedBatchRGBA(
+      handle, ptr, width, height, stride,
+      resultsPtr, count, outputPtr, NATIVE_BATCH_OUTPUT_BYTES, metricsPtr
+    );
+    if (resultCount < 0) return null;
+    const view = new DataView(zx.HEAPU8.buffer);
+    return {
+      tracks: view.getUint32(metricsPtr + 48, true),
+      successful: view.getUint32(metricsPtr + 56, true),
+      misses: view.getUint32(metricsPtr + 60, true),
+      crcFastSuccesses: view.getUint32(metricsPtr + 64, true),
+      rsFallbacks: view.getUint32(metricsPtr + 68, true),
+      anchorMisses: view.getUint32(metricsPtr + 76, true),
+      outOfFrameMisses: view.getUint32(metricsPtr + 84, true),
+      bitstreamFailures: view.getUint32(metricsPtr + 88, true),
+      crcFailures: view.getUint32(metricsPtr + 92, true)
+    };
+  } finally {
+    zx._destroyTrackedDecoder(handle);
+    zx._free(metricsPtr);
+    zx._free(outputPtr);
+    zx._free(resultsPtr);
+  }
+}
 let qrGeneratorPromise;
 function localQuad(q, ox, oy) {
   const move = (point) => ({ x: point.x - ox, y: point.y - oy });
@@ -328,7 +374,7 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const copyAsRgba = pixelFormat !== "y8" || robustTrackedRecovery;
+      const copyAsRgba = pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
@@ -342,8 +388,12 @@ ctx.onmessage = async (e) => {
       decodePixelFormat = copyAsRgba ? "rgba" : "y8";
       if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
       if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
-      ownedVideoFrame.close();
-      ownedVideoFrame = null;
+      // Keep a direct Y-plane frame alive until the native attempt finishes.
+      // Recovery/diagnostics may need an RGBA copy of this exact same frame.
+      if (copyAsRgba || full || !(tracks?.length)) {
+        ownedVideoFrame.close();
+        ownedVideoFrame = null;
+      }
     } else {
       const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w) : buf.byteLength;
       pixels = new Uint8Array(buf, 0, byteLength);
@@ -488,8 +538,32 @@ ctx.onmessage = async (e) => {
         inputStride
       );
       const nativeSymbols = native?.symbols ?? [];
-      const robustFallback = robustTrackedRecovery && decodePixelFormat === "rgba" && nativeSymbols.length === 0;
+      let pixelAudit = null;
+      let rgbaRecoveryPtr = 0;
+      let rgbaRecoveryStride = 0;
+
+      // One-shot developer A/B: after a real Y8 miss, feed the exact same
+      // VideoFrame crop to an isolated temporary native decoder as RGBA. Never
+      // accept its symbols or mutate persistent tracking. This tells us whether
+      // the direct Y plane itself is the difference without rescuing Strict mode.
+      if (nativeSymbols.length === 0 && strictHotPath && diagnoseSampler && usedDirectFrame &&
+          pixelFormat === "y8" && ownedVideoFrame && !directPixelAuditDone) {
+        directPixelAuditDone = true;
+        const rect = { x: cropX, y: cropY, width: w, height: h };
+        const options = { rect, format: "RGBA" };
+        const bytes = ownedVideoFrame.allocationSize(options);
+        rgbaRecoveryPtr = inputBuffer(zx, bytes);
+        const copyStarted = performance.now();
+        const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(rgbaRecoveryPtr, rgbaRecoveryPtr + bytes), options);
+        frameCopyMs += performance.now() - copyStarted;
+        rgbaRecoveryStride = planes[0]?.stride ?? w * 4;
+        pixelAudit = decodeNativeAuditRGBA(zx, rgbaRecoveryPtr + (planes[0]?.offset ?? 0), pw, ph, ox, oy, tracks, rgbaRecoveryStride);
+      }
+
+      const robustFallback = robustTrackedRecovery && nativeSymbols.length === 0;
       if (!robustFallback && (native || usedDirectFrame)) {
+        ownedVideoFrame?.close();
+        ownedVideoFrame = null;
         const directFrameFailed = usedDirectFrame && !native;
         const reply = {
           id,
@@ -507,12 +581,33 @@ ctx.onmessage = async (e) => {
           targetedSuccesses: 0,
           frameCopyMs,
           nativeMetrics: native?.metrics,
+          pixelAudit,
           directFrameFailed,
           latencyMs: performance.now() - startedAt
         };
         const transfer = native?.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : [];
         ctx.postMessage(reply, transfer);
         return;
+      }
+
+      // The normal hot path already missed on Y8. Only now copy this exact
+      // bounded crop as RGBA for the explicitly counted robust local recovery.
+      // Do NOT retry native on RGBA as an unlabelled alternate hot path.
+      if (ownedVideoFrame) {
+        const rect = { x: cropX, y: cropY, width: w, height: h };
+        const options = { rect, format: "RGBA" };
+        const bytes = ownedVideoFrame.allocationSize(options);
+        ptr = inputBuffer(zx, bytes);
+        const copyStarted = performance.now();
+        const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(ptr, ptr + bytes), options);
+        frameCopyMs += performance.now() - copyStarted;
+        const plane = planes[0];
+        if (!plane || plane.stride < w * 4) throw new Error("Camera RGBA recovery stride is invalid");
+        ptr += plane.offset;
+        inputStride = plane.stride;
+        decodePixelFormat = "rgba";
+        ownedVideoFrame.close();
+        ownedVideoFrame = null;
       }
       // Native tracking has repeatedly missed this known crop. Run the robust
       // QR detector only inside the bounded lane crop, then feed its fresh quad
@@ -633,6 +728,8 @@ ctx.onmessage = async (e) => {
         appendResults(zx.readFull(ptr, pw, ph, true, isolated ? 1 : 2, false), false);
       }
     }
+    ownedVideoFrame?.close();
+    ownedVideoFrame = null;
     ctx.postMessage({
       id,
       symbols,

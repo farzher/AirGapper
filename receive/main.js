@@ -1109,6 +1109,13 @@ const hotPathAudit = {
   bitstreamFailures: 0,
   crcFailures: 0,
   multiSampleRetries: 0,
+  pixelAuditTracks: 0,
+  pixelAuditCrcFast: 0,
+  pixelAuditMisses: 0,
+  pixelAuditAnchorMisses: 0,
+  pixelAuditFrameMisses: 0,
+  pixelAuditBitstreamFailures: 0,
+  pixelAuditCrcFailures: 0,
   localRecoveryAttempts: 0,
   localRecoverySuccesses: 0,
   fullScanJobs: 0,
@@ -1230,6 +1237,15 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;
   }
   hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
+  if (completion.pixelAudit) {
+    hotPathAudit.pixelAuditTracks += completion.pixelAudit.tracks ?? 0;
+    hotPathAudit.pixelAuditCrcFast += completion.pixelAudit.crcFastSuccesses ?? 0;
+    hotPathAudit.pixelAuditMisses += completion.pixelAudit.misses ?? 0;
+    hotPathAudit.pixelAuditAnchorMisses += completion.pixelAudit.anchorMisses ?? 0;
+    hotPathAudit.pixelAuditFrameMisses += completion.pixelAudit.outOfFrameMisses ?? 0;
+    hotPathAudit.pixelAuditBitstreamFailures += completion.pixelAudit.bitstreamFailures ?? 0;
+    hotPathAudit.pixelAuditCrcFailures += completion.pixelAudit.crcFailures ?? 0;
+  }
   if (completion.fallbackAttempted) {
     hotPathAudit.localRecoveryAttempts++;
     if (completion.fallbackSucceeded) hotPathAudit.localRecoverySuccesses++;
@@ -4606,6 +4622,7 @@ Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fast
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
 Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}
+Pixel A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;
 }
