@@ -1,0 +1,25 @@
+name: Verify locked hot path
+on:
+  push:
+    branches: [agent/locked-hotpath-verify]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/grid-lattice.js
+          node --check receive/worker.js
+          node --check shared/worker-pool.js
+          node --check shared/transport.js
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: APK build
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew --no-daemon clean assembleRelease
