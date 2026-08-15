@@ -691,8 +691,9 @@ export class FocusController {
 
     const activateExposureCandidate = async (
       requested: Candidate,
+      allowPastDeadline = false,
     ): Promise<{ candidate: Candidate; epoch: number } | undefined> => {
-      if (!this.current(generation) || performance.now() >= deadline) return undefined;
+      if (!this.current(generation) || (!allowPastDeadline && performance.now() >= deadline)) return undefined;
       this.candidateExposureTime = requested.requestedExposure;
       this.candidateIso = requested.requestedIso;
       this.requestedExposure = requested.requestedExposure;
@@ -703,21 +704,37 @@ export class FocusController {
         requestedExposure: requested.requestedExposure,
         requestedIso: requested.requestedIso,
       });
-      if (!(await this.applyProbe(generation, {
+      const patch: CameraPatch = {
         exposureMode: "manual",
         exposureTime: requested.requestedExposure,
         iso: requested.requestedIso,
-      }, false))) return undefined;
+      };
+      if (!(await this.applyProbe(generation, patch, false))) return undefined;
 
-      let actual = this.settings();
-      for (let retry = 0; retry < 10 && this.current(generation) &&
-          (actual.exposureTime === undefined || actual.iso === undefined); retry++) {
-        await new Promise((resolve) => setTimeout(resolve, 8));
-        actual = this.settings();
+      // Android camera providers often resolve applyConstraints before the HAL's
+      // getSettings view catches up. Manual controls tolerate this already; the
+      // optimizer must do the same. Wait briefly for an actual change, re-apply
+      // once if necessary, then use whatever ACTUAL setting the camera reports.
+      // If a request clamps back to the current state, it becomes a duplicate
+      // candidate instead of aborting the whole measurement round.
+      const requestedChange = before.exposureTime !== requested.requestedExposure || before.iso !== requested.requestedIso;
+      const readApplied = async (maxMs: number): Promise<CameraSettings> => {
+        const started = performance.now();
+        let observed = this.settings();
+        while (this.current(generation) && performance.now() - started < maxMs) {
+          if (observed.exposureTime !== undefined && observed.iso !== undefined &&
+              (!requestedChange || observed.exposureTime !== before.exposureTime || observed.iso !== before.iso)) return observed;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          observed = this.settings();
+        }
+        return observed;
+      };
+      let actual = await readApplied(220);
+      if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso && this.current(generation)) {
+        await this.applyProbe(generation, patch, false);
+        actual = await readApplied(320);
       }
       if (actual.exposureTime === undefined || actual.iso === undefined) return undefined;
-      const requestedChange = before.exposureTime !== requested.requestedExposure || before.iso !== requested.requestedIso;
-      if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso) return undefined;
 
       const key = `${actual.exposureTime}|${actual.iso}`;
       let candidate = candidates.get(key);
@@ -906,7 +923,7 @@ export class FocusController {
 
       this.optimizeState = "verification";
       this.optimizeRound = undefined;
-      const final = await activateExposureCandidate(winner);
+      const final = await activateExposureCandidate(winner, true);
       if (!final) {
         this.optimizeState = "paused";
         this.optimizeReason = "winning settings could not be restored";
@@ -928,7 +945,7 @@ export class FocusController {
         return;
       }
 
-      const restored = await activateExposureCandidate(winner);
+      const restored = await activateExposureCandidate(winner, true);
       if (!restored) {
         this.optimizeState = "paused";
         this.optimizeReason = "winner could not be re-applied";
@@ -1557,15 +1574,16 @@ export class FocusController {
           (actual.focusDistance !== undefined && Math.abs(actual.focusDistance - requested) > step / 2)) {
         await this.apply(track, { focusMode: "manual", focusDistance: requested });
       }
-    } else if (this.strategy === "camera-auto") {
-      const mode = this.hardwareFocusMode();
-      if (mode) {
+    } else if (this.strategy === "camera-auto" || this.strategy === "single-shot") {
+      const preferred = this.strategy === "single-shot" ? "single-shot" : (this.hardwareFocusMode() ?? "continuous");
+      const attempts = [...new Set([preferred, preferred === "continuous" ? "single-shot" : "continuous"])];
+      for (const mode of attempts) {
         this.requestedMode = mode;
-        await this.apply(track, { focusMode: mode });
+        const accepted = await this.apply(track, { focusMode: mode });
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        const actual = this.settings().focusMode;
+        if (accepted && (actual === mode || actual === undefined)) break;
       }
-    } else if (this.focusModes().includes(this.strategy)) {
-      this.requestedMode = this.strategy;
-      await this.apply(track, { focusMode: this.strategy });
     }
     this.changed();
   }
@@ -1754,16 +1772,23 @@ export class FocusController {
   private focusModes(): string[] { return Array.isArray(this.caps.focusMode) ? this.caps.focusMode : []; }
   private overrideFocusModes(): string[] {
     const modes = this.focusModes();
+    const actual = this.settings().focusMode;
+    // Android capability reporting is advisory in practice. Some OnePlus camera
+    // providers temporarily report only manual even though AF modes still accept
+    // constraints. Keep those developer choices visible and verify by applying.
+    const hasFocusApi = modes.length > 0 || actual !== undefined || Boolean(this.caps.pointsOfInterest);
     return [
-      ...(modes.includes("continuous") || modes.includes("single-shot") ? ["camera-auto"] : []),
-      ...(modes.includes("single-shot") ? ["single-shot"] : []),
+      ...(hasFocusApi ? ["camera-auto", "single-shot"] : []),
       ...(modes.includes("manual") && this.caps.focusDistance ? ["manual"] : []),
     ];
   }
   private exposureModes(): string[] { return Array.isArray(this.caps.exposureMode) ? this.caps.exposureMode : []; }
   private hardwareFocusMode(): string | undefined {
-    return this.focusModes().includes("continuous") ? "continuous" :
-      this.focusModes().includes("single-shot") ? "single-shot" : undefined;
+    const modes = this.focusModes();
+    const actual = this.settings().focusMode;
+    if (modes.includes("continuous") || actual === "continuous") return "continuous";
+    if (modes.includes("single-shot") || actual === "single-shot") return "single-shot";
+    return modes.length > 0 || actual !== undefined || Boolean(this.caps.pointsOfInterest) ? "continuous" : undefined;
   }
   private manualFocus(): boolean { return this.focusModes().includes("manual") && Boolean(this.caps.focusDistance); }
   private manualExposure(): boolean { return this.exposureModes().includes("manual") && Boolean(this.caps.exposureTime); }

@@ -1501,6 +1501,7 @@ function syncExposureControls(): void {
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
+  const before = track.getSettings() as MediaTrackSettings & CameraPatch;
   if (automaticOptics) {
     // A global Manual → Auto transition must clear every manual exposure value
     // from both our desired state and the Android HAL. Merely observing
@@ -1519,10 +1520,23 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
       patch.exposureCompensation = 0;
     }
     await applyCameraConstraint(track, patch);
-    await new Promise((resolve) => setTimeout(resolve, 90));
+    await new Promise((resolve) => setTimeout(resolve, 110));
     if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-    const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
-    if (actual.exposureMode !== "continuous") await applyCameraConstraint(track, patch);
+    let actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+    // Android HALs can acknowledge the mode transition while still exposing the
+    // previous manual gain/shutter for a few frames. Re-assert continuous AE once
+    // deliberately, then verify again. This mirrors the retry discipline used by
+    // reliable manual controls without preserving any stale manual ISO value.
+    await applyCameraConstraint(track, patch);
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
+    actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+    const staleManualValues = before.exposureMode === "manual" && actual.exposureMode === "continuous" &&
+      actual.exposureTime === before.exposureTime && actual.iso === before.iso;
+    if (actual.exposureMode !== "continuous" || staleManualValues) {
+      await applyCameraConstraint(track, patch);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
     return;
   }
   if (automaticExposureAxis && automaticIsoAxis) {
