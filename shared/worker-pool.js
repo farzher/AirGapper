@@ -57,6 +57,8 @@ class DecodeWorkerPool {
           frameCopyMs: message.frameCopyMs ?? 0,
           nativeMetrics: message.nativeMetrics,
           directFrameFailed: Boolean(message.directFrameFailed),
+          unchangedTracked: Boolean(message.unchangedTracked),
+          unchangedTrackCount: message.unchangedTrackCount ?? 0,
           symbols,
           sightings,
           error: message.error

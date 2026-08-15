@@ -77,6 +77,7 @@ const cameraIsoControl = document.getElementById("camera-iso-control");
 const cameraIso = document.getElementById("camera-iso");
 const cameraIsoValue = document.getElementById("camera-iso-value");
 const focusDiagnostics = document.getElementById("focus-diagnostics");
+const transportDiagnostics = document.getElementById("transport-diagnostics");
 const copyDiagnostics = document.getElementById("copy-diagnostics");
 const focusTuningInputs = [...document.querySelectorAll("[data-camera-tuning]")];
 const corpusFile = document.getElementById("corpus-file");
@@ -605,6 +606,9 @@ const pool = new DecodeWorkerPool(
 );
 const captureTimes = [];
 const qrReadTimes = [];
+const uniqueQrTimes = [];
+const duplicateQrTimes = [];
+const unchangedSkipEvents = [];
 const poolBusyTimes = [];
 const scanCompletionTimes = [];
 const decodeFrameTimes = [];
@@ -1036,7 +1040,8 @@ opticsKeep.addEventListener("click", () => {
 });
 copyDiagnostics.addEventListener("click", async () => {
   var _a;
-  const text = (_a = focusDiagnostics.textContent) != null ? _a : "";
+  const focusText = (_a = focusDiagnostics.textContent) != null ? _a : "";
+  const text = [focusText, transportDiagnostics?.textContent ?? ""].filter(Boolean).join("\n\n");
   try {
     if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
     copyDiagnostics.textContent = "Copied";
@@ -1189,6 +1194,10 @@ function noteDecodeCompleted(id, completion) {
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
+  if (completion.unchangedTracked) {
+    unchangedSkipEvents.push({ at: receiverNow(), tracks: completion.unchangedTrackCount || attempts?.length || 0 });
+    return;
+  }
   if (!attempts) return;
   for (const attempt of attempts) {
     const region = attempt.region;
@@ -2061,6 +2070,9 @@ function stopReceiver() {
   scanOutcomes.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
+  uniqueQrTimes.length = 0;
+  duplicateQrTimes.length = 0;
+  unchangedSkipEvents.length = 0;
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
   decodeFrameTimes.length = 0;
@@ -3257,7 +3269,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
-  const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
+  const perRegionCapacity = gridLattice.locked ? 1 : Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
   let submitted = false;
   for (let i = 0; i < scheduledRegions.length; i++) {
     const r = scheduledRegions[(i + cropRotate) % scheduledRegions.length];
@@ -3281,7 +3293,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount > 1 && batchTracks.length > 
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     if (!submitReceiverJob(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim },
+      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, quad: r.quad, dim: r.dim, strictTracked: Boolean(source.image), skipUnchanged: gridLattice.locked && r.gridSlot !== void 0, visualTrackId: r.gridSlot ?? r.id },
       [img.data.buffer],
       "INDIVIDUAL TRACKED CROP",
       trace,
@@ -3325,6 +3337,9 @@ function resetActiveTransfer() {
   lastFullScan = 0;
   minimumAcceptedScanId = frameId;
   qrReadTimes.length = 0;
+  uniqueQrTimes.length = 0;
+  duplicateQrTimes.length = 0;
+  unchangedSkipEvents.length = 0;
   usefulFrameTimes.length = 0;
   lastDistinctArrivalAt = 0;
   bar.style.width = "0";
@@ -3480,6 +3495,9 @@ function onDecoded(bytes, box, info) {
   if (!decoder) {
     decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
     usefulFrameTimes.length = 0;
+    uniqueQrTimes.length = 0;
+    duplicateQrTimes.length = 0;
+    unchangedSkipEvents.length = 0;
     streamKey = identity;
     startTs = receiverNow();
     progressEl.style.display = "block";
@@ -3490,6 +3508,7 @@ function onDecoded(bytes, box, info) {
   const redundantBefore = decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = receiverNow();
+  (decoder.framesNew === framesNewBefore ? duplicateQrTimes : uniqueQrTimes).push(receivedAt);
   noteScanOutcome(
     info == null ? void 0 : info.scanId,
     decoder.framesNew === framesNewBefore ? "duplicate" : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted"
@@ -4393,11 +4412,30 @@ function updateStats() {
   prune(poolBusyTimes);
   prune(scanCompletionTimes);
   prune(decodeFrameTimes);
+  prune(uniqueQrTimes);
+  prune(duplicateQrTimes);
+  prune(usefulFrameTimes);
+  while (unchangedSkipEvents.length > 0 && unchangedSkipEvents[0].at < now - STATS_WINDOW_MS) unchangedSkipEvents.shift();
   const perSecond = (a) => a.length / (STATS_WINDOW_MS / 1e3);
   const cameraRate = perSecond(captureTimes);
   const completionRate = perSecond(scanCompletionTimes);
   const decodeFrameRate = perSecond(decodeFrameTimes);
   const qrRate = perSecond(qrReadTimes);
+  const uniqueRate = perSecond(uniqueQrTimes);
+const duplicateRate = perSecond(duplicateQrTimes);
+const usefulRate = perSecond(usefulFrameTimes);
+const skippedJobRate = unchangedSkipEvents.length / (STATS_WINDOW_MS / 1e3);
+const skippedTrackRate = unchangedSkipEvents.reduce((sum, event) => sum + event.tracks, 0) / (STATS_WINDOW_MS / 1e3);
+if (!receiverDevActions.hidden && transportDiagnostics) {
+  const transportRate = uniqueRate + duplicateRate;
+  const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
+  const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
+  transportDiagnostics.textContent = `Transport
+Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
+Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
+Unchanged visual skips ${skippedJobRate.toFixed(1)} jobs/s · ${skippedTrackRate.toFixed(1)} QR attempts/s avoided
+${totals}`;
+}
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;

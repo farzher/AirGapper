@@ -252,6 +252,7 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .receiver-dev-actions { grid-column: 1 / -1; grid-row: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: end; }
 .receiver-dev-actions[hidden] { display: none; }
 .receiver-dev-actions button { padding: 5px 9px; min-height: 34px; }
+.transport-diagnostics { flex: 1 0 100%; margin: 0; padding: 8px; overflow: auto; color: var(--muted); background: var(--bg); border-radius: 8px; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 #optics-auto-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 #optics-auto-actions[hidden] { display: none; }
 #optics-optimize[aria-pressed="true"] { color: #fff; background: #222; border-color: #222; }
