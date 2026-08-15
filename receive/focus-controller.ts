@@ -1008,7 +1008,7 @@ export class FocusController {
       this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${verificationResult.validDecodesPerSecond.toFixed(1)} QR/s`;
       this.optimizeReason = `${candidates.size} actual exposure/ISO settings tested; repeated visits + final A/B`;
       if (finalObservation) {
-        this.lock(finalObservation, "exposure/ISO optimizer converged; hardware autofocus retained");
+        this.lock(finalObservation, "exposure/ISO optimizer converged; hardware-selected focus retained");
       } else {
         // Optimize can bootstrap from zero prior decodes. The winning manual
         // exposure is already committed; return to acquisition without resetting
@@ -1577,8 +1577,16 @@ export class FocusController {
   }
 
   private acquisitionManualInvariant(settings: CameraSettings): boolean {
-    return this.strategy === "auto" && (this.state === "SEEKING" || this.state === "STABILIZING" ||
-      this.state === "AUTO_AF_SETTLE") && settings.focusMode === "manual";
+    // Some Android HALs only honor manual shutter/ISO while AF is disabled. In
+    // that case focusMode=manual is an intentional HOLD of the lens position
+    // previously chosen by hardware AF, not a manual-focus search. Do not fight
+    // the HAL by immediately forcing continuous AF back on while a committed
+    // manual exposure is active. Recovery can pulse hardware AF and then the
+    // camera layer will re-hold focus before restoring shutter/ISO.
+    const exposureRequiresHold = settings.exposureMode === "manual" && this.committedExposureMode === "manual";
+    return this.strategy === "auto" && !exposureRequiresHold &&
+      (this.state === "SEEKING" || this.state === "STABILIZING" || this.state === "AUTO_AF_SETTLE") &&
+      settings.focusMode === "manual";
   }
 
   private focusOwner(settings: CameraSettings): FocusOwner {
