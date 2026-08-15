@@ -1,0 +1,32 @@
+name: Agent remove visual gate
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/agent-remove-visual-gate.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Remove visual gate
+        run: python3 .github/remove-visual-gate.py
+      - name: Verify syntax
+        shell: bash
+        run: |
+          node --check receive/worker.js
+          node --check receive/main.js
+          node --check shared/worker-pool.js
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/remove-visual-gate.py .github/workflows/agent-remove-visual-gate.yml
+          git add receive/worker.js receive/main.js shared/worker-pool.js index.html sw.js
+          git commit -m "remove visual frame skip gate"
+          git push origin HEAD:master
