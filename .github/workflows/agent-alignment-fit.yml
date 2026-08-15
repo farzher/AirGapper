@@ -1,0 +1,44 @@
+name: Agent alignment fit rebuild
+on:
+  push:
+    branches: [agent/alignment-fit-v57]
+permissions:
+  contents: write
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/alignment-fit-v57
+      - name: Apply patch
+        run: python3 .github/agent-alignment-fit.py
+      - name: Verify JS syntax
+        run: |
+          node --check receive/worker.js
+          node --check receive/main.js
+      - name: Rebuild SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. ./build.sh
+      - name: Rebuild scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Verify invariants
+        run: |
+          grep -q 'alignmentFitAttempts' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'QRCode::SampleQR(imageBits, fp)' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'alignment-fit CRC' receive/main.js
+          grep -q 'v0.5.57' index.html
+          grep -q 'airgapper-static-js-v20' sw.js
+          test -s vendor/decimen-codec/decimen_codec.wasm
+          test -s vendor/decimen-codec-android/decimen_codec.wasm
+      - name: Commit result
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/agent-alignment-fit.py .github/workflows/agent-alignment-fit.yml
+          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/wrapper/decimen_codec.h vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm receive/worker.js receive/main.js index.html sw.js
+          git commit -m "fit tracked QR alignment grid"
+          git push origin HEAD:agent/alignment-fit-v57
