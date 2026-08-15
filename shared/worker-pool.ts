@@ -240,12 +240,17 @@ export class DecodeWorkerPool {
     }
   }
 
-  /** Hand a frame to a free worker. False when every worker is busy — the
-   *  caller drops the frame rather than queueing it, because a stale frame is
-   *  worth less than the next one. */
-  submit(message: unknown, transfer: Transferable[]): boolean {
-    const slot = this.busy.indexOf(false);
-    if (slot === -1) return false;
+  /** Worker slots that can accept a job right now. Exposed so dense-grid
+   * schedulers can preserve per-worker native tracking affinity instead of
+   * randomly moving a persistent QR batch between WASM instances. */
+  get freeSlots(): number[] {
+    const slots: number[] = [];
+    for (let slot = 0; slot < this.workers.length; slot++) if (!this.busy[slot]) slots.push(slot);
+    return slots;
+  }
+
+  private submitAtSlot(slot: number, message: unknown, transfer: Transferable[]): boolean {
+    if (slot < 0 || slot >= this.workers.length || this.busy[slot]) return false;
     const id = (message as { id?: unknown }).id;
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : undefined;
@@ -311,4 +316,20 @@ export class DecodeWorkerPool {
       return false;
     }
   }
+
+  /** Submit to a specific free worker. This is intentionally strict: callers
+   * requesting affinity would rather drop a disposable camera frame than
+   * destroy another worker's warm native geometry cache. */
+  submitTo(slot: number, message: unknown, transfer: Transferable[]): boolean {
+    return Number.isInteger(slot) && this.submitAtSlot(slot, message, transfer);
+  }
+
+  /** Hand a frame to any free worker. False when every worker is busy — the
+   * caller drops the frame rather than queueing it, because a stale frame is
+   * worth less than the next one. */
+  submit(message: unknown, transfer: Transferable[]): boolean {
+    const slot = this.busy.indexOf(false);
+    return slot !== -1 && this.submitAtSlot(slot, message, transfer);
+  }
+
 }

@@ -3079,8 +3079,11 @@ function submitReceiverJob(
   trackedRegions: Region[] = [],
   fixedAttempts = 0,
   sourceOpticsEpoch?: number,
+  preferredWorker?: number,
 ): boolean {
-  const accepted = pool.submit(message, transfer);
+  const accepted = preferredWorker === undefined
+    ? pool.submit(message, transfer)
+    : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
     submittedJobs++;
     const submittedAt = receiverNow();
@@ -3503,6 +3506,90 @@ function captureFrame(source: ReceiverFrame) {
     id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
     quad: region.quad!, dim: region.dim!, crc32: Boolean(region.crc32),
   }));
+  // A 15-code lattice is large enough that serially sampling every QR in one
+  // WASM worker wastes the phone's other cores. Split 3x5/5x3 into three
+  // spatially contiguous five-code lanes. Worker slot modulo 3 is the lane
+  // identity, so each WASM instance keeps a small, fresh persistent sample map
+  // instead of receiving a different whole-grid frame every round. With six
+  // workers there are two warm workers per lane, allowing two source frames to
+  // overlap without making any worker cache all 15 QRs.
+  const lockedLayout = lastGridSnapshot?.layout;
+  const laneLayout = lockedLayout && (
+    (lockedLayout.cols === 3 && lockedLayout.rows === 5) ||
+    (lockedLayout.cols === 5 && lockedLayout.rows === 3)
+  );
+  const healthyTrackedGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
+  if (healthyTrackedGrid && laneLayout && batchTracks.length === 15 && pool.size >= 3) {
+    const groups: { tracks: typeof batchTracks; regions: Region[] }[] = Array.from(
+      { length: 3 },
+      () => ({ tracks: [], regions: [] }),
+    );
+    for (let index = 0; index < batchTracks.length; index++) {
+      const track = batchTracks[index]!;
+      const region = batchRegions[index]!;
+      if (track.slot === undefined) continue;
+      const groupIndex = lockedLayout.cols === 3
+        ? track.slot % 3
+        : Math.floor(track.slot / lockedLayout.cols);
+      if (groupIndex < 0 || groupIndex >= groups.length) continue;
+      groups[groupIndex]!.tracks.push(track);
+      groups[groupIndex]!.regions.push(region);
+    }
+
+    if (groups.every((group) => group.tracks.length === 5)) {
+      const freeSlots = new Set(pool.freeSlots);
+      let laneJobsSubmitted = 0;
+      activeDecodeBudget = 15;
+      for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+        const group = groups[groupIndex]!;
+        const workerSlot = [...freeSlots].find((slot) => slot % 3 === groupIndex);
+        if (workerSlot === undefined) continue;
+
+        const points = group.tracks.flatMap((track) => [
+          track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft,
+        ]);
+        const minX = Math.min(...points.map((point) => point.x));
+        const minY = Math.min(...points.map((point) => point.y));
+        const maxX = Math.max(...points.map((point) => point.x));
+        const maxY = Math.max(...points.map((point) => point.y));
+        const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
+        const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
+        const pad = Math.max(10, Math.round(typicalEdge * (0.14 + Math.min(0.18, worstMisses * 0.04))));
+        const cropQuantum = 16;
+        const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
+        const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+        const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
+        const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
+        const w = right - x;
+        const h = bottom - y;
+        if (w < 32 || h < 32) continue;
+
+        const laneImage = readBoundedVideoCrop(source, x, y, w, h);
+        if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
+        const id = frameId++;
+        cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
+        const accepted = submitReceiverJob(
+          { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks },
+          [laneImage.data.buffer], "NATIVE TRACKED GRID", trace, source.sequence, group.regions,
+          0, undefined, workerSlot,
+        );
+        if (!accepted) {
+          cropAttempts.delete(id);
+          continue;
+        }
+        freeSlots.delete(workerSlot);
+        laneJobsSubmitted++;
+        cropsSubmitted += group.tracks.length;
+      }
+
+      cropRotate++;
+      if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
+      if (trace) trace.stateAfter = gridLattice.state;
+      activeBenchmarkFrame = undefined;
+      return;
+    }
+  }
+
   if (batchTracks.length > 1) {
     // Healthy locked grids are already localized. Do ONE camera readback, then
     // fan isolated QR cells across every free WASM worker. This converts worker
