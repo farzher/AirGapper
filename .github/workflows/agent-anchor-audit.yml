@@ -33,7 +33,7 @@ jobs:
           ! grep -q 'v0.5.54' index.html
       - name: Commit result
         run: |
-          rm -f .github/agent-anchor-audit.py .github/workflows/agent-anchor-audit.yml
+          rm -f .github/agent-anchor-audit.py .github/workflows/agent-anchor-audit.yml .github/placeholder-trigger
           git config user.name 'AirGapper Agent'
           git config user.email 'actions@github.com'
           git add -A
