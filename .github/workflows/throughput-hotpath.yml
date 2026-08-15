@@ -17,7 +17,33 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Rewrite receive hot path
-        run: python3 .github/rewrite-throughput.py
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/rewrite-throughput.py')
+          s = p.read_text()
+          old = '''def replace_one(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 occurrence, found {count}')
+              return text.replace(old, new, 1)
+          '''
+          new = '''def replace_one(text, old, new, label):
+              count = text.count(old)
+              if count == 1:
+                  return text.replace(old, new, 1)
+              pattern = r'\\s+'.join(re.escape(part) for part in old.split())
+              matches = list(re.finditer(pattern, text))
+              if len(matches) != 1:
+                  raise SystemExit(f'{label}: expected 1 occurrence, found exact={count}, flexible={len(matches)}')
+              return text[:matches[0].start()] + new + text[matches[0].end():]
+          '''
+          if old not in s:
+              raise SystemExit('rewrite helper definition mismatch')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 .github/rewrite-throughput.py
       - name: Rebuild SIMD and scalar QR codecs
         shell: bash
         run: |
