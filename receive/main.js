@@ -2359,10 +2359,17 @@ function scheduleFrame(gen) {
       scheduleFrame(gen);
       return;
     }
+    if (!usesSimpleDecodeWorker && typeof VideoFrame === "function") {
+      try {
+        frame.videoFrame = new VideoFrame(video);
+      } catch {
+      }
+    }
     void captureFrame(frame).catch((error) => {
       decodeExceptions++;
       lastDecodeError = error instanceof Error ? error.message : String(error);
     }).finally(() => {
+      frame.videoFrame?.close();
       if (done || gen !== captureGen) return;
       drawOverlay(receiverNow());
       scheduleFrame(gen);
@@ -2713,27 +2720,15 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
 }
 
 const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);
-let directLumaJobs = 0;
-let directLumaFallbacks = 0;
-let directLumaFormat = "";
 function opticalSampleDue(source) {
   if (replayRunning || source.sequence === lastOpticalSourceSequence) return false;
   const interval = focusController.opticalIntervalMs;
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function openDirectLumaFrame(source) {
-  if (source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
-  try {
-    const frame = new VideoFrame(video);
-    if (!DIRECT_LUMA_FORMATS.has(frame.format)) {
-      frame.close();
-      return null;
-    }
-    directLumaFormat = frame.format;
-    return frame;
-  } catch {
-    return null;
-  }
+  const frame = source.videoFrame;
+  if (source.image || captureNextScan || opticalSampleDue(source) || !frame || !DIRECT_LUMA_FORMATS.has(frame.format)) return null;
+  return frame;
 }
 async function copyDirectLumaCrop(frame, x, y, w, h) {
   try {
@@ -3124,15 +3119,8 @@ async function captureFrame(source) {
         let laneImage;
         let laneLuma;
         const laneFrame = openDirectLumaFrame(source);
-        if (laneFrame) {
-          try {
-            laneLuma = await copyDirectLumaCrop(laneFrame, x, y, w, h);
-          } finally {
-            laneFrame.close();
-          }
-        }
+        if (laneFrame) laneLuma = await copyDirectLumaCrop(laneFrame, x, y, w, h);
         if (!laneLuma) {
-          if (laneFrame) directLumaFallbacks++;
           laneImage = readBoundedVideoCrop(source, x, y, w, h);
           if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
         }
@@ -3159,7 +3147,6 @@ async function captureFrame(source) {
         }
         freeSlots.delete(workerSlot);
         laneJobsSubmitted++;
-        if (laneLuma) directLumaJobs++;
         cropsSubmitted += group.tracks.length;
       }
       cropRotate++;
@@ -3203,14 +3190,7 @@ async function captureFrame(source) {
       let sharedLuma;
       if (healthyGrid) {
         const sharedFrame = openDirectLumaFrame(source);
-        if (sharedFrame) {
-          try {
-            sharedLuma = await copyDirectLumaCrop(sharedFrame, x, y, w, h);
-          } finally {
-            sharedFrame.close();
-          }
-          if (!sharedLuma) directLumaFallbacks++;
-        }
+        if (sharedFrame) sharedLuma = await copyDirectLumaCrop(sharedFrame, x, y, w, h);
       }
       if (!sharedLuma) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
@@ -3238,7 +3218,6 @@ async function captureFrame(source) {
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         } else {
           if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
-          if (sharedLuma) directLumaJobs++;
           cropsSubmitted += batchTracks.length;
         }
         cropRotate++;
@@ -4427,7 +4406,7 @@ function updateStats() {
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : directLumaJobs ? `Y ${directLumaFormat}` : "";
+  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : "";
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;
