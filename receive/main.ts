@@ -697,8 +697,8 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   const startedAt = receiverNow();
   const multiQr = optimizerFixedTargets.length > 1;
   const coarse = label.startsWith("coarse");
-  const targetFrames = coarse ? 3 : multiQr ? 3 : 5;
-  const maxBurstMs = coarse ? 650 : multiQr ? 650 : 900;
+  const targetFrames = coarse ? (usesSimpleDecodeWorker && multiQr ? 4 : 3) : multiQr ? 4 : 5;
+  const maxBurstMs = coarse ? (usesSimpleDecodeWorker ? 900 : 650) : multiQr ? 800 : 900;
   const evidence: CandidateEvidence = {
     epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
     sourceFrames: new Set(), successfulSourceFrames: new Set(),
@@ -2824,18 +2824,44 @@ function inspectStaticQrOptics(source: ReceiverFrame, image: ImageData, ox = 0, 
 function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace | undefined): void {
   const epoch = activeOptimizerEpoch;
   if (!epoch?.collecting || !optimizerFixedTargets.length) return;
-  const points = optimizerFixedTargets.flatMap((target) => [
+  const evidence = candidateEvidenceWindows.get(epoch.id);
+  if (!evidence) return;
+  // The compatibility worker can decode one isolated QR reliably, but not a
+  // shared dense crop. Rotate the same frozen slots in the same order for
+  // every candidate. Modern workers probe all frozen slots per source frame.
+  const targets = usesSimpleDecodeWorker
+    ? [optimizerFixedTargets[evidence.sourceFrames.size % optimizerFixedTargets.length]!]
+    : optimizerFixedTargets;
+  const points = targets.flatMap((target) => [
     target.quad.topLeft, target.quad.topRight, target.quad.bottomRight, target.quad.bottomLeft,
   ]);
-  const pad = 12;
-  const x = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - pad));
-  const y = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - pad));
+  const targetEdge = Math.max(...targets.map((target) => {
+    const bounds = trackedQuadBounds(target.quad);
+    return bounds ? Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) : 60;
+  }));
+  const moduleSize = targetEdge / Math.max(21, targets[0]!.dim);
+  const pad = usesSimpleDecodeWorker ? Math.max(2, Math.round(moduleSize)) : Math.max(12, Math.round(targetEdge * 0.2));
+  let x = Math.max(0, Math.floor(Math.min(...points.map((point) => point.x)) - pad));
+  let y = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y)) - pad));
   const right = Math.min(source.width, Math.ceil(Math.max(...points.map((point) => point.x)) + pad));
   const bottom = Math.min(source.height, Math.ceil(Math.max(...points.map((point) => point.y)) + pad));
-  const w = right - x;
-  const h = bottom - y;
+  let w = right - x;
+  let h = bottom - y;
   if (w < 32 || h < 32) return;
-  const image = readBoundedVideoCrop(source, x, y, w, h);
+  let image = readBoundedVideoCrop(source, x, y, w, h);
+  if (usesSimpleDecodeWorker) {
+    const quiet = Math.max(8, Math.round(moduleSize * 5));
+    const isolated = new ImageData(w + quiet * 2, h + quiet * 2);
+    isolated.data.fill(255);
+    for (let row = 0; row < h; row++) {
+      isolated.data.set(image.data.subarray(row * w * 4, (row + 1) * w * 4), ((row + quiet) * isolated.width + quiet) * 4);
+    }
+    image = isolated;
+    x -= quiet;
+    y -= quiet;
+    w = image.width;
+    h = image.height;
+  }
   const id = frameId++;
   traceOptimizer({
     time: receiverNow(), event: "CAPTURE", candidateId: epoch.candidateId, candidateEpoch: epoch.id,
@@ -2844,11 +2870,12 @@ function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace
   });
   submitReceiverJob(
     {
-      id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false, tracks: optimizerFixedTargets,
-      sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
+      id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false,
+      tracks: usesSimpleDecodeWorker ? undefined : targets,
+      optimizerProbe: true, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
     },
-    [image.data.buffer], "SHARED TRACKED BATCH CROP", trace, source.sequence, [], optimizerFixedTargets.length,
-    source.opticsEpoch,
+    [image.data.buffer], usesSimpleDecodeWorker ? "INDIVIDUAL TRACKED CROP" : "SHARED TRACKED BATCH CROP",
+    trace, source.sequence, [], targets.length, source.opticsEpoch,
   );
 }
 

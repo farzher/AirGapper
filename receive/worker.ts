@@ -106,7 +106,7 @@ function projectedNeighbor(q: DecimenQuad, dx: number, dy: number, stride: numbe
 
 ctx.onmessage = async (e: MessageEvent) => {
   const startedAt = performance.now();
-  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, oracle = false, oracleSeeds = [], sentAt } = e.data as {
+  const { id, buf, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, optimizerProbe = false, oracle = false, oracleSeeds = [], sentAt } = e.data as {
     id: number;
     buf: ArrayBuffer;
     w?: number;
@@ -117,6 +117,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     quad?: DecimenQuad;
     dim?: number;
     tracks?: BatchTrack[];
+    optimizerProbe?: boolean;
     oracle?: boolean;
     oracleSeeds?: { quad: DecimenQuad; modules: number; layoutId: number; slot: number }[];
     sentAt?: number;
@@ -276,10 +277,15 @@ ctx.onmessage = async (e: MessageEvent) => {
       let targetedAttempts = 0;
       let targetedPixels = 0;
       let targetedSuccesses = 0;
-      const targetedTracks = tracks.length < 3 || tracks.length > 6 ? [] : [...tracks]
+      const missingTracks = [...tracks]
         .filter((candidate) => candidate.slot !== undefined && !decodedSlots.has(candidate.slot))
-        .sort((a, b) => b.misses - a.misses)
-        .slice(0, 2);
+        .sort((a, b) => b.misses - a.misses);
+      // Optimize is a controlled experiment: every frozen slot is an
+      // opportunity, including the common two-slot layout. Production keeps
+      // its bounded retries, but probes must attempt every missing target.
+      const targetedTracks = optimizerProbe
+        ? missingTracks
+        : tracks.length < 3 || tracks.length > 6 ? [] : missingTracks.slice(0, 2);
       for (const track of targetedTracks) {
         const expected = boundsOf(track.quad, -ox, -oy);
         const moduleSize = Math.max(expected.w, expected.h) / track.dim;

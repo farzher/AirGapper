@@ -509,7 +509,12 @@ export class FocusController {
       this.optimizeReason = "manual exposure and ISO controls unavailable";
       return;
     }
-    const exposureRange: NumericRange = { ...hardwareExposureRange };
+    // Android reports theoretical HAL limits that can be tens of seconds.
+    // AirGapper scans a moving display; never let Optimize request over 100 ms.
+    const exposureRange: NumericRange = {
+      ...hardwareExposureRange,
+      max: Math.min(hardwareExposureRange.max, 1000),
+    };
     if (exposureRange.max <= exposureRange.min) {
       this.optimizeState = "paused";
       this.optimizeReason = "camera has no safe exposure range";
@@ -517,7 +522,7 @@ export class FocusController {
     }
     this.commitSettings(origin);
     this.optimizeState = "exposure";
-    this.transition("OPTIMIZE_EXPOSURE", "focus unchanged; full-range exposure tournament");
+    this.transition("OPTIMIZE_EXPOSURE", "focus unchanged; safe-range Cartesian exposure search");
 
     const median = (values: number[]): number => {
       if (!values.length) return 0;
@@ -683,6 +688,13 @@ export class FocusController {
       await captureRound(uniqueCoarse, "coarse", true);
       if (!this.current(generation) || !this.optimizeCandidates.length) return;
       const baselineRate = incumbent.windows.length ? rate(performanceOf(incumbent)) : 0;
+      if (![...candidates.values()].some((candidate) => candidate.windows.some((window) => window.validDecodes > 0))) {
+        await this.restoreOptimizationBest("exposure");
+        this.optimizeState = "paused";
+        this.optimizeReason = "optimizer probe bench decoded nothing; original exposure restored";
+        if (initialObservation && this.current(generation)) this.lock(initialObservation, this.optimizeReason);
+        return;
+      }
 
       let survivors = [...candidates.values()].filter((candidate) => candidate.windows.length).sort(compare).slice(0, 6);
       for (const candidate of candidates.values()) if (candidate.windows.length && !survivors.includes(candidate)) candidate.state = "eliminated";
@@ -740,6 +752,7 @@ export class FocusController {
         await this.restoreOptimizationBest("exposure");
         this.optimizeState = "paused";
         this.optimizeReason = "no repeatable QR winner; original settings restored";
+        if (initialObservation && this.current(generation)) this.lock(initialObservation, this.optimizeReason);
         return;
       }
       winner.state = "winner";
@@ -760,8 +773,8 @@ export class FocusController {
       this.optimizeBestPerformance = finalPerformance;
       const gain = baselineRate ? (finalRate / baselineRate - 1) * 100 : 0;
       this.optimizeSummary = `${gain >= 0 ? "+" : ""}${gain.toFixed(0)}% · ${finalRate.toFixed(1)} estimated valid symbols/s`;
-      this.optimizeReason = `${uniqueCoarse.filter((candidate) => candidate.coarseGrid).length} Cartesian cells · full hardware exposure × ISO range`;
-      this.lock(finalObservation, "full-range exposure tournament converged; hardware focus retained");
+      this.optimizeReason = `${uniqueCoarse.filter((candidate) => candidate.coarseGrid).length} Cartesian cells · exposure capped at 100 ms × full ISO range`;
+      this.lock(finalObservation, "safe-range Cartesian exposure search converged; hardware focus retained");
     } finally {
       epochs.finish();
     }
@@ -1277,7 +1290,7 @@ export class FocusController {
       } else if (mode && this.focusModes().includes(mode)) patch.focusMode = mode;
     }
     if (axis === "exposure" || axis === "all") {
-      if (this.committedExposureMode === "manual" && this.manualExposure() && this.committedExposureTime !== undefined) {
+      if (this.committedExposureMode !== "continuous" && this.manualExposure() && this.committedExposureTime !== undefined) {
         patch.exposureMode = "manual";
         patch.exposureTime = this.committedExposureTime;
         if (this.committedIso !== undefined) patch.iso = this.committedIso;
