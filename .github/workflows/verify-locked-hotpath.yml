@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Syntax
         run: |
           node --check receive/main.js
@@ -14,6 +16,17 @@ jobs:
           node --check receive/worker.js
           node --check shared/worker-pool.js
           node --check shared/transport.js
+      - name: Normalized source diff
+        run: |
+          git show origin/master:receive/main.js > /tmp/main-master.js
+          cp receive/main.js /tmp/main-patched.js
+          npx --yes prettier@3.6.2 /tmp/main-master.js > /tmp/main-master.pretty.js
+          npx --yes prettier@3.6.2 /tmp/main-patched.js > /tmp/main-patched.pretty.js
+          diff -u /tmp/main-master.pretty.js /tmp/main-patched.pretty.js > /tmp/main.semantic.diff || true
+          echo "=== normalized main.js diff ==="
+          cat /tmp/main.semantic.diff
+          echo "=== diff lines ==="
+          wc -l /tmp/main.semantic.diff
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
