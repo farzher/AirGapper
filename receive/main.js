@@ -144,8 +144,10 @@ function selectedWorkerCount() {
   return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
 }
 let strictHotPathEnabled = false;
+let strictHotPathLockSeen = false;
 strictHotPathToggle.addEventListener("change", () => {
   strictHotPathEnabled = strictHotPathToggle.checked;
+  strictHotPathLockSeen = false;
   resetHotPathAudit();
 });
 function strictHotPathActive() {
@@ -2153,6 +2155,7 @@ function stopReceiver() {
   lastDecodeError = "";
   lastNativeMetrics = void 0;
   resetHotPathAudit();
+  strictHotPathLockSeen = false;
   trackingInvalidations = 0;
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
@@ -3090,8 +3093,13 @@ async function captureFrame(source) {
     ? allLockedCandidatesCold
     : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
-  gridLattice.noteMissing(gridNeedsDiscovery, now);
-  const needsRecoveryScan = lockedGeometryTrusted
+  if (gridLattice.locked) strictHotPathLockSeen = true;
+  const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen;
+  // Correctness/strict mode is allowed to use the generic detector to acquire
+  // the grid once. After lock, it may not hide tracked failures by falling
+  // back to local robust decode or by abandoning the grid and reacquiring it.
+  gridLattice.noteMissing(strictLockedAudit ? false : gridNeedsDiscovery, now);
+  const needsRecoveryScan = strictLockedAudit ? false : lockedGeometryTrusted
     ? allLockedCandidatesCold || trackingUnhealthy
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
@@ -3450,6 +3458,7 @@ function resetActiveTransfer() {
   duplicateQrTimes.length = 0;
   usefulFrameTimes.length = 0;
   resetHotPathAudit();
+  strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
   bar.style.width = "0";
   progressEl.setAttribute("aria-valuenow", "0");
@@ -4227,10 +4236,10 @@ function missedReason(trace, slot) {
   const predicted = trace.predicted.find((item) => item.slot === slot);
   if ((predicted == null ? void 0 : predicted.state) === "OFFSCREEN") return "offscreen threshold";
   if (!trace.jobs.length) return trace.decision;
-  if (trace.jobs.some((job) => job.kind === "FULL FRAME")) return "full-frame decoder miss";
+  if (trace.jobs.some((job) => job.full)) return "full-frame decoder miss";
   if (predicted && !predicted.submitted) return predicted.state === "PARTIAL" ? "partial/offscreen threshold" : "skipped predicted track";
   const submitted = trace.jobs.some((job) => slot !== void 0 && job.tracks.includes(slot));
-  if (!submitted && trace.jobs.some((job) => job.kind !== "FULL FRAME")) return "crop excluded slot";
+  if (!submitted && trace.jobs.some((job) => !job.full)) return "crop excluded slot";
   if (trace.jobs.some((job) => job.trackedMisses)) {
     return trace.jobs.some((job) => job.fallbackAttempts && !job.fallbackSuccesses) ? "tracked sampler failed; fallback failed" : "tracked sampler failed";
   }
@@ -4401,6 +4410,7 @@ async function runReceiverBenchmark() {
     const benchmarkFallbackSuccesses = jobs.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0);
     const hotPath = {
       strict: replayMode.value === "correctness",
+      postLockRecoverySuppressed: replayMode.value === "correctness",
       nativeTracks: benchmarkNativeTracks,
       crcFastSuccesses: benchmarkCrcFast,
       crcFastPercent: benchmarkNativeTracks ? benchmarkCrcFast / benchmarkNativeTracks * 100 : 0,
@@ -4415,7 +4425,7 @@ async function runReceiverBenchmark() {
       var _a2;
       return sum + job.pixels + ((_a2 = job.targetedPixels) != null ? _a2 : 0);
     }, 0);
-    const byKind = Object.fromEntries(["FULL FRAME", "SHARED TRACKED BATCH CROP", "INDIVIDUAL TRACKED CROP"].map((kind) => {
+    const byKind = Object.fromEntries([...new Set(jobs.map((job) => job.kind))].map((kind) => {
       const selected = jobs.filter((job) => job.kind === kind);
       return [kind, {
         jobs: selected.length,
@@ -4569,7 +4579,7 @@ Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR
 Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
 ${totals}
 
-Hot path ${strictHotPathActive() ? "STRICT" : "LIVE"}
+Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "established" : "acquiring"}` : "LIVE"}
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
