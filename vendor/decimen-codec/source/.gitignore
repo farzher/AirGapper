@@ -1,6 +1,4 @@
 build/
 dist/
 emsdk/
-node_modules/
 third_party/
-.tools/
