@@ -58,7 +58,7 @@ export const CAMERA_TUNING = {
   convincingFocusScore: 0.62,
   severeBlurConfirmMs: 480,
   optimizeMovementConfirmMs: 650,
-  optimizeBudgetMs: 11000,
+  optimizeBudgetMs: 9000,
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88,
   acquisitionBracketDelayMs: 900,
@@ -601,7 +601,14 @@ export class FocusController {
       return candidate;
     };
 
-    const incumbent = make(origin.exposureTime, origin.iso);
+    // Remember the hardware-Auto baseline independently of the current manual
+    // state. Re-running Optimize must not progressively redefine an already
+    // dark optimized setting as the new brightness ceiling.
+    const autoExposure = this.baselineExposure !== undefined && Number.isFinite(this.baselineExposure)
+      ? this.quantize(this.baselineExposure, exposureRange) : origin.exposureTime;
+    const autoIso = this.baselineIso !== undefined && Number.isFinite(this.baselineIso)
+      ? this.quantize(this.baselineIso, isoRange) : origin.iso;
+    const incumbent = make(autoExposure, autoIso);
     const performanceOf = (candidate: Candidate): ReceivePerformance => aggregate(candidate.windows);
     const visitQrRates = (candidate: Candidate): number[] =>
       candidate.windows.map((window) => window.validDecodesPerSecond);
@@ -802,59 +809,65 @@ export class FocusController {
     try {
       const exposureLevels = logLevels(exposureRange, 4);
       const isoLevels = logLevels(isoRange, 4);
-      const originSignal = Math.max(Number.MIN_VALUE, origin.exposureTime * origin.iso);
-      const allGrid: Candidate[] = [];
-      for (let isoIndex = 0; isoIndex < isoLevels.length; isoIndex++) {
-        const row = exposureLevels.map((exposure) => make(exposure, isoLevels[isoIndex]!));
-        if (isoIndex & 1) row.reverse();
-        allGrid.push(...row);
-      }
 
-      // Search a broad diagonal band around hardware AE instead of wasting time
-      // on combinations that are many stops brighter/darker than a state that
-      // was already capable of seeing the target. If this band fails entirely,
-      // the omitted extremes are used as a rescue pass below.
-      const signalEv = (candidate: Candidate) =>
-        Math.log2(Math.max(Number.MIN_VALUE, candidate.exposure * candidate.iso) / originSignal);
-      let coarse = allGrid.filter((candidate) => Math.abs(signalEv(candidate)) <= 4.5);
-      if (!coarse.includes(incumbent)) coarse.unshift(incumbent);
-      coarse = coarse.filter((candidate, index, all) => all.indexOf(candidate) === index);
-      if (coarse.length < Math.min(10, allGrid.length)) {
-        const omitted = allGrid.filter((candidate) => !coarse.includes(candidate))
-          .sort((a, b) => Math.abs(signalEv(a)) - Math.abs(signalEv(b)));
-        coarse.push(...omitted.slice(0, Math.min(10, allGrid.length) - coarse.length));
+      // Hardware AE is the BRIGHTNESS CEILING, not the center of the search.
+      // Field testing on multiple phones consistently finds the QR optimum
+      // darker than default AE. Keep high ISO available, but only when paired
+      // with a proportionally shorter shutter so total exposure stays at or
+      // below the Auto baseline.
+      const autoSignal = Math.max(Number.MIN_VALUE, autoExposure * autoIso);
+      const darkestEv = -1.8; // Stay in the empirically useful darker-than-Auto band.
+      const brightnessEv = (candidate: Candidate): number =>
+        Math.log2(Math.max(Number.MIN_VALUE, candidate.exposure * candidate.iso) / autoSignal);
+      const inBrightnessBand = (candidate: Candidate): boolean => {
+        const ev = brightnessEv(candidate);
+        // Tiny tolerance is only for camera quantization. No deliberate setting
+        // may be brighter than hardware Auto.
+        return ev <= 0.01 && ev >= darkestEv - 0.08;
+      };
+
+      // Search constant-brightness bands instead of a rectangular E×ISO grid.
+      // This eliminates dumb long-shutter + high-gain combinations while still
+      // testing the useful shutter/gain trade-off across each brightness level.
+      const targetBrightnessEvs = [-0.35, -0.95, -1.65];
+      const isoAnchors = [
+        this.quantize(isoRange.min, isoRange),
+        this.quantize(autoIso, isoRange),
+        this.quantize(isoRange.max, isoRange),
+      ].filter((value, index, all) => all.indexOf(value) === index);
+
+      let coarse: Candidate[] = [incumbent];
+      for (const ev of targetBrightnessEvs) {
+        const targetSignal = autoSignal * 2 ** ev;
+        for (const iso of isoAnchors) {
+          const exposure = this.quantize(targetSignal / iso, exposureRange);
+          const candidate = make(exposure, iso);
+          if (inBrightnessBand(candidate)) coarse.push(candidate);
+        }
       }
+      coarse = coarse.filter((candidate, index, all) => all.indexOf(candidate) === index);
       for (const candidate of coarse) candidate.coarseGrid = true;
 
-      this.exposureProbes += coarse.length;
-      this.optimizeDecision = "coarse sweep";
+      this.exposureProbes += Math.max(0, coarse.length - 1);
+      this.optimizeDecision = "fast darker-than-Auto sweep";
       await captureRound(coarse, "coarse");
       if (!this.current(generation)) return;
 
-      let measured = [...new Set(coarse)].filter((candidate) => candidate.windows.length);
+      const measured = [...new Set(coarse)].filter((candidate) => candidate.windows.length);
       if (!measured.length) {
         this.optimizeState = "paused";
         this.optimizeReason = "camera produced no optimizer measurements";
         return;
       }
 
-      // If the first broad band has no decode at all, do not waste a revisit
-      // round comparing zeros. Expand to the omitted range immediately. This is
-      // what makes Optimize useful even when Auto has never decoded a QR yet.
-      if (![...candidates.values()].some((candidate) =>
-          candidate.windows.some((window) => window.validDecodes > 0))) {
-        const rescue = allGrid.filter((candidate) => !candidate.windows.length);
-        for (const candidate of rescue) candidate.coarseGrid = true;
-        this.optimizeDecision = "expanding full range";
-        this.exposureProbes += rescue.length;
-        await captureRound(rescue, "coarse");
-        measured = [...candidates.values()].filter((candidate) => candidate.windows.length);
-      }
+      // Do NOT rescue by spraying the full camera range. If this deliberately
+      // useful band produces no decode, restore/retain the Auto baseline and let
+      // acquisition/focus logic recover rather than wasting seconds on obviously
+      // brighter or much darker settings.
 
-      // Preserve uncertainty, but only carry five candidates into the expensive
-      // revisit stage. This cuts a large amount of time without trusting a single
-      // lucky phase to pick the final winner.
-      let survivors = [...measured].sort(survivalCompare).slice(0, Math.min(5, measured.length));
+      // Preserve uncertainty, but only carry four candidates into the expensive
+      // revisit stage. The first pass is intentionally broad and fast.
+      let survivors = [...measured].sort(survivalCompare).slice(0, Math.min(4, measured.length));
       for (const candidate of measured) if (!survivors.includes(candidate)) candidate.state = "screened out";
       this.optimizeDecision = "revisiting plausible settings";
       const revisitOrder = [...survivors.slice(2), ...survivors.slice(0, 2)].reverse();
@@ -863,14 +876,14 @@ export class FocusController {
       survivors = [...candidates.values()]
         .filter((candidate) => candidate.windows.length)
         .sort(finalCompare)
-        .slice(0, 3);
+        .slice(0, 2);
       for (const candidate of candidates.values()) {
         if (candidate.windows.length && !survivors.includes(candidate) && candidate.state !== "screened out") {
           candidate.state = "eliminated";
         }
       }
-      this.optimizeDecision = "three finalists";
-      await captureRound([survivors[2], survivors[0], survivors[1]].filter(Boolean) as Candidate[], "finalist");
+      this.optimizeDecision = "two finalists";
+      await captureRound([survivors[1], survivors[0]].filter(Boolean) as Candidate[], "finalist");
 
       let winner = [...survivors].sort(finalCompare)[0]!;
       winner.state = "coarse winner";
@@ -891,13 +904,13 @@ export class FocusController {
         const localIso = neighborValues(isoLevels, winner.iso, isoRange);
         const refinements = localIso.flatMap((iso) => localExposure.map((exposure) => make(exposure, iso)))
           .filter((candidate, index, all) =>
-            candidate !== winner && !candidate.windows.length && all.indexOf(candidate) === index)
+            candidate !== winner && !candidate.windows.length && inBrightnessBand(candidate) && all.indexOf(candidate) === index)
           .sort((a, b) => {
             const da = Math.hypot(Math.log2(a.exposure / winner.exposure), Math.log2(a.iso / winner.iso));
             const db = Math.hypot(Math.log2(b.exposure / winner.exposure), Math.log2(b.iso / winner.iso));
             return da - db;
           })
-          .slice(0, 4);
+          .slice(0, 3);
         for (const candidate of refinements) candidate.state = "refinement";
         this.exposureProbes += refinements.length;
         if (refinements.length) {
