@@ -2969,12 +2969,29 @@ async function captureFrame(source) {
     quad: region.quad,
     submitted: false
   }));
-  const gridNeedsDiscovery = visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
+  // Once a framed packet declares the layout, the lattice is authoritative.
+  // A single QR miss is a local decode problem, not a reason to wake the
+  // expensive generic finder. Only abandon the hot tracked path when every
+  // geometrically possible cell has gone cold together.
+  const lockedGeometryCandidates = gridLattice.locked && lastGridSnapshot ? visibleGridSlots.filter((region) =>
+    region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
+  ) : [];
+  const lockedGeometryTrusted = lockedGeometryCandidates.length > 0;
+  const recentLockedHits = lockedGeometryCandidates.reduce((count, region) =>
+    count + Number(now - (region.decodedSeen ?? -Infinity) < 900), 0
+  );
+  const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
+    lockedGeometryCandidates.every((region) => region.consecutiveMisses >= 5);
+  const gridNeedsDiscovery = lockedGeometryTrusted
+    ? allLockedCandidatesCold
+    : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
   gridLattice.noteMissing(gridNeedsDiscovery, now);
-  const needsRecoveryScan = live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
+  const needsRecoveryScan = lockedGeometryTrusted
+    ? allLockedCandidatesCold || trackingUnhealthy
+    : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
-  const captureHasTrackedWork = gridLattice.active ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const fullScanDue = captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     if (trace) {
@@ -2998,12 +3015,37 @@ async function captureFrame(source) {
   if (fullScanDue) {
     lastFullScan = now;
     fullScans++;
-    const img = source.image ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh) : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
-    inspectStaticQrOptics(source, img);
-    captureSubmittedScan(img, 0, 0, true);
+    let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
+    // During a still-trusted lock, even recovery is bounded to the only place
+    // the declared grid can exist. Give it generous motion headroom, but never
+    // pay a generic finder to inspect unrelated camera pixels.
+    if (!captureNextScan && lockedGeometryTrusted) {
+      const points = lockedGeometryCandidates.flatMap((region) => [
+        region.quad.topLeft,
+        region.quad.topRight,
+        region.quad.bottomRight,
+        region.quad.bottomLeft
+      ]);
+      const typicalEdge = Math.max(...lockedGeometryCandidates.map((region) => Math.max(region.w, region.h)));
+      const pad = Math.max(24, Math.round(typicalEdge * 0.7));
+      const quantum = 16;
+      scanX = Math.max(0, Math.floor((Math.min(...points.map((point) => point.x)) - pad) / quantum) * quantum);
+      scanY = Math.max(0, Math.floor((Math.min(...points.map((point) => point.y)) - pad) / quantum) * quantum);
+      const scanRight = Math.min(vw, Math.ceil((Math.max(...points.map((point) => point.x)) + pad) / quantum) * quantum);
+      const scanBottom = Math.min(vh, Math.ceil((Math.max(...points.map((point) => point.y)) + pad) / quantum) * quantum);
+      scanW = Math.max(32, scanRight - scanX);
+      scanH = Math.max(32, scanBottom - scanY);
+    }
+    const img = scanX || scanY || scanW !== vw || scanH !== vh
+      ? readBoundedVideoCrop(source, scanX, scanY, scanW, scanH)
+      : source.image
+        ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh)
+        : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
+    inspectStaticQrOptics(source, img, scanX, scanY);
+    captureSubmittedScan(img, scanX, scanY, true);
     const id = frameId++;
     if (submitReceiverJob(
-      { id, buf: img.data.buffer, w: vw, h: vh, ox: 0, oy: 0, full: true },
+      { id, buf: img.data.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true },
       [img.data.buffer],
       "FULL FRAME",
       trace,
@@ -3031,7 +3073,7 @@ async function captureFrame(source) {
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
   const laneLayout = lockedLayout && (lockedLayout.cols === 3 && lockedLayout.rows === 5 || lockedLayout.cols === 5 && lockedLayout.rows === 3);
-  const healthyTrackedGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
+  const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
   if (healthyTrackedGrid && laneLayout && batchTracks.length === 15 && pool.size >= 3) {
     const groups = Array.from(
       { length: 3 },
@@ -3065,7 +3107,7 @@ async function captureFrame(source) {
         const maxY = Math.max(...points.map((point) => point.y));
         const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
         const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
-        const pad = Math.max(10, Math.round(typicalEdge * (0.14 + Math.min(0.18, worstMisses * 0.04))));
+        const pad = Math.max(8, Math.round(typicalEdge * (0.08 + Math.min(0.16, worstMisses * 0.03))));
         const cropQuantum = 16;
         const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
         const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
@@ -3130,7 +3172,7 @@ async function captureFrame(source) {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    const pad = Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
+    const pad = Math.max(10, Math.round(typicalEdge * (0.1 + Math.min(0.22, worstMisses * 0.04))));
     const cropQuantum = 16;
     const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
     const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
@@ -3139,7 +3181,7 @@ async function captureFrame(source) {
     const w = right - x;
     const h = bottom - y;
     if (w >= 32 && h >= 32) {
-      const healthyGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
+      const healthyGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
       const freeWorkers = Math.max(0, pool.size - pool.busyCount);
       if (healthyGrid && freeWorkers === 0) {
         poolBusyTimes.push(now);
