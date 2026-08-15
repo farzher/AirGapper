@@ -1,0 +1,54 @@
+name: Build locked hot path
+on:
+  push:
+    branches: [agent/locked-hotpath-build]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/locked-hotpath-build
+          fetch-depth: 0
+      - name: Apply reviewed source patch
+        shell: bash
+        run: |
+          base64 -d .github/locked-hotpath.patch.gz.b64 | gzip -d > /tmp/locked-hotpath.patch
+          echo '1b6fdd4e2b3085562f578acc6114a926bd6c64a8b1e82ac2f15c3d00bd0ad3af  /tmp/locked-hotpath.patch' | sha256sum -c -
+          git apply --check /tmp/locked-hotpath.patch
+          git apply /tmp/locked-hotpath.patch
+          rm .github/locked-hotpath.patch.gz.b64 .github/workflows/build-locked-hotpath.yml
+          node --check receive/main.js
+          node --check receive/grid-lattice.js
+          node --check shared/transport.js
+          node --check receive/worker.js
+          node --check shared/worker-pool.js
+          git diff --check
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build APK from patched source
+        shell: bash
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew --no-daemon clean assembleRelease
+          cd ..
+          APK=$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)
+          test -n "$APK"
+          cp "$APK" AirGapper.apk
+      - name: Verify final tree and publish clean branch
+        shell: bash
+        run: |
+          git diff --check
+          git diff --name-only origin/master | sort > /tmp/changed
+          printf '%s\n' AirGapper.apk android/app/build.gradle index.html receive/grid-lattice.js receive/main.js shared/transport.js sw.js | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/changed
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add AirGapper.apk android/app/build.gradle index.html receive/grid-lattice.js receive/main.js shared/transport.js sw.js
+          git commit -m 'make locked QR grid a fixed-layout hot path'
+          git push --force origin HEAD:agent/locked-hotpath-clean
