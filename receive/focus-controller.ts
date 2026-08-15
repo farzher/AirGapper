@@ -308,6 +308,10 @@ export class FocusController {
   private optimizeMovementSince = 0;
   private readonly transitions: string[] = [];
   private poiAimed = false;
+  /** Automatic focus is configured at most once per camera track. After that,
+   *  AirGapper treats focus as read-only: exposure optimization, acquisition,
+   *  target loss, and decoder recovery are forbidden from touching the lens. */
+  private automaticFocusConfigured = false;
   private invariantRepairPending = false;
   private waiter?: {
     generation: number;
@@ -361,6 +365,7 @@ export class FocusController {
     this.stableSince = 0;
     this.targetMissingSince = 0;
     this.poiAimed = false;
+    this.automaticFocusConfigured = false;
     this.optimizeMovementSince = 0;
     this.stabilizingAfRetries = 0;
     this.initialLockMs = undefined;
@@ -433,7 +438,7 @@ export class FocusController {
       this.optimizeSummary = undefined;
       this.transition("OVERRIDE", "developer owns focus");
       const start = () => this.applyDeveloperFocus();
-      if (optimizing) void this.restoreOptimizationBest().then(start);
+      if (optimizing) void this.restoreOptimizationBest("exposure").then(start);
       else void start();
     }
   }
@@ -470,12 +475,15 @@ export class FocusController {
     this.cancel(reason);
     this.optimizeState = "paused";
     this.optimizeReason = `${reason}; original settings restored`;
-    void this.restoreOptimizationBest().then(() => this.transition("LOCKED", this.optimizeReason));
+    void this.restoreOptimizationBest("exposure").then(() => this.transition("LOCKED", this.optimizeReason));
   }
 
   optimizeEligible(): boolean {
     const retryHasTarget = this.optimizeState !== "paused" || Boolean(this.latest && !this.targetMissingSince);
-    return this.strategy === "auto" && !this.isOptimizing() && retryHasTarget && Boolean(
+    // Exposure optimization is independent of focus ownership. The user may
+    // choose Camera Auto, Single, or Manual focus and still optimize shutter/ISO;
+    // Optimize is forbidden from changing that focus choice.
+    return !this.isOptimizing() && retryHasTarget && Boolean(
       this.track && this.track.readyState === "live" && this.manualExposure() && this.caps.iso,
     );
   }
@@ -1160,7 +1168,9 @@ export class FocusController {
       const requiredFocusSamples = severeConfirmed ? 2 : CAMERA_TUNING.recoverySamples;
       if (this.lockedFocusFailures >= requiredFocusSamples) {
         this.lockedFocusFailures = 0;
-        void this.beginFocusRecovery(observation);
+        // Focus is hardware/user-owned. A soft frame is diagnostic information,
+        // not permission for AirGapper to restart AF and blur subsequent frames.
+        this.lastReason = "sustained blur detected; focus left untouched";
       } else if (!optimizedHold && this.lockedExposureFailures >= CAMERA_TUNING.recoverySamples) {
         this.lockedExposureFailures = 0;
         void this.beginExposureRecovery(observation);
@@ -1388,19 +1398,6 @@ export class FocusController {
     this.changed();
   }
 
-  private async beginFocusRecovery(observation: OpticalObservation): Promise<void> {
-    if (this.state !== "LOCKED") return;
-    const generation = ++this.generation;
-    this.beginDecodeGeneration();
-    this.focusRefinementCount++;
-    this.lastReason = "sustained blur; hardware AF taking focus ownership";
-    this.stableGeometry = observation.geometry;
-    this.stableSince = performance.now();
-    this.poiAimed = false;
-    await this.enterAutoFocusAcquisition("focus-only recovery; exposure untouched", generation, false, false, observation.geometry);
-    if (this.current(generation)) this.transition("STABILIZING", "hardware AF active for focus-only recovery");
-  }
-
   private async beginExposureRecovery(observation: OpticalObservation): Promise<void> {
     if (this.state !== "LOCKED" || !this.exposureModes().includes("continuous")) return;
     const generation = ++this.generation;
@@ -1474,38 +1471,13 @@ export class FocusController {
     this.acquisitionBracketRunning = false;
     this.lastReason = "assertive acquisition brightness bracket exhausted; hardware AF retained";
   }
-  private retryStabilizingAf(geometry: FocusGeometry): void {
-    const mode = this.acquisitionFocusMode();
-    if (mode === "continuous" && this.settings().focusMode === "continuous") {
-      // Continuous AF is already an active control loop. Re-sending the mode or
-      // repeatedly moving its POI can restart lens scans on some OnePlus HALs.
-      // Give the hardware time instead of "helping" it into perpetual hunting.
-      this.stabilizingAfRetries++;
-      this.stateSince = performance.now();
-      this.stableSince = performance.now();
-      this.poorFocusSince = 0;
-      if (this.stabilizingAfRetries >= CAMERA_TUNING.maxStabilizingAfRetries) {
-        this.stableGeometry = geometry;
-        this.transition("SEEKING", "continuous hardware AF left running without retrigger");
-      } else {
-        this.lastReason = `continuous AF settling; no retrigger ${this.stabilizingAfRetries}`;
-      }
-      this.changed();
-      return;
-    }
-    if (this.stabilizingAfRetries < CAMERA_TUNING.maxStabilizingAfRetries) {
-      this.stabilizingAfRetries++;
-      this.stateSince = performance.now();
-      this.stableSince = performance.now();
-      this.poiAimed = false;
-      this.poorFocusSince = 0;
-      this.lastReason = `STABILIZING timeout; hardware AF retrigger ${this.stabilizingAfRetries}`;
-      void this.enterAutoFocusAcquisition(this.lastReason, this.generation, false, true, geometry);
-    } else {
-      this.stableGeometry = undefined;
-      this.stableSince = 0;
-      this.transition("SEEKING", "AF retries exhausted; hardware AF left running");
-    }
+  private retryStabilizingAf(_geometry: FocusGeometry): void {
+    // Do not turn a noisy focus metric into a lens command. Re-applying
+    // continuous/single-shot AF was the source of the OnePlus 5 hunting loop.
+    this.stabilizingAfRetries++;
+    this.poorFocusSince = 0;
+    this.lastReason = "focus appears soft; automatic AF retrigger suppressed";
+    this.changed();
   }
 
   private async enterAutoFocusAcquisition(
@@ -1517,35 +1489,40 @@ export class FocusController {
   ): Promise<void> {
     const track = this.track;
     if (!track || track.readyState !== "live" || !this.current(generation)) return;
-    const mode = this.acquisitionFocusMode();
+
     const patch: CameraPatch = {};
-    if (mode) {
-      this.requestedMode = mode;
-      const changingMode = this.settings().focusMode !== mode;
-      // single-shot is an explicit refocus command, so re-applying it is
-      // intentional. Continuous AF, by contrast, is never reasserted once live.
-      if (changingMode || mode === "single-shot") patch.focusMode = mode;
-      // On several OnePlus HALs, updating the AF point while continuous AF is
-      // already active restarts a full lens scan. Aim it only when establishing
-      // the mode; after that continuous AF owns focus and AirGapper leaves it alone.
-      if (geometry && this.caps.pointsOfInterest && (mode !== "continuous" || changingMode)) {
-        patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
+
+    // Configure hardware focus ONCE per track. All later acquisition/recovery
+    // calls may manage exposure, but are forbidden from mutating focus. Prefer
+    // one single-shot sweep on static QR scenes; fall back to continuous only
+    // when single-shot is unavailable. Even a rejected first attempt is not
+    // automatically retried: repeated AF commands are worse than a missed one.
+    if (!this.automaticFocusConfigured) {
+      const mode = this.acquisitionFocusMode();
+      this.automaticFocusConfigured = true;
+      this.poiAimed = true;
+      if (mode) {
+        this.requestedMode = mode;
+        patch.focusMode = mode;
+        if (geometry && this.caps.pointsOfInterest) {
+          patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
+        }
       }
     }
+
     if (resetExposure && this.exposureModes().includes("continuous")) {
-      // Force a real AE reset even when getSettings() already says continuous:
-      // some Android HALs keep the previous manual gain for several frames.
       patch.exposureMode = "continuous";
       if (this.caps.exposureCompensation &&
           this.caps.exposureCompensation.min <= 0 && this.caps.exposureCompensation.max >= 0) {
         patch.exposureCompensation = 0;
       }
-    }
-    else if (restoreExposure && this.settings().exposureMode === "manual" && this.manualExposure() && this.committedExposureTime !== undefined) {
+    } else if (restoreExposure && this.settings().exposureMode === "manual" &&
+        this.manualExposure() && this.committedExposureTime !== undefined) {
       patch.exposureMode = "manual";
       patch.exposureTime = this.committedExposureTime;
       if (this.committedIso !== undefined) patch.iso = this.committedIso;
     }
+
     let accepted = true;
     if (Object.keys(patch).length) {
       if (patch.focusMode && patch.exposureMode) this.fullResetCount++;
@@ -1553,11 +1530,7 @@ export class FocusController {
       this.beginDecodeGeneration();
     }
     if (!this.current(generation)) return;
-    const actual = this.settings();
-    if (mode && actual.focusMode === "manual") {
-      accepted = await this.apply(track, { focusMode: mode }) && accepted;
-    }
-    this.lastReason = accepted ? reason : `${reason}; camera rejected AF/AE constraints`;
+    this.lastReason = accepted ? reason : `${reason}; camera rejected requested controls`;
     this.changed();
   }
 
@@ -1656,15 +1629,9 @@ export class FocusController {
         await this.apply(track, { focusMode: "manual", focusDistance: requested });
       }
     } else if (this.strategy === "camera-auto" || this.strategy === "single-shot") {
-      const preferred = this.strategy === "single-shot" ? "single-shot" : (this.hardwareFocusMode() ?? "continuous");
-      const attempts = [...new Set([preferred, preferred === "continuous" ? "single-shot" : "continuous"])];
-      for (const mode of attempts) {
-        this.requestedMode = mode;
-        const accepted = await this.apply(track, { focusMode: mode });
-        await new Promise((resolve) => setTimeout(resolve, 70));
-        const actual = this.settings().focusMode;
-        if (accepted && (actual === mode || actual === undefined)) break;
-      }
+      const mode = this.strategy === "single-shot" ? "single-shot" : (this.hardwareFocusMode() ?? "continuous");
+      this.requestedMode = mode;
+      await this.apply(track, { focusMode: mode });
     }
     this.changed();
   }
