@@ -263,6 +263,10 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
+    // A persistent native miss is a local decoder problem, not a reason to
+    // wait for a whole-grid recovery scan. After two misses, copy this same
+    // bounded crop as RGBA so the robust stock decoder can rescue/re-anchor it.
+    const robustTrackedRecovery = !full && Array.isArray(tracks) && tracks.some((track) => (track.misses ?? 0) >= 2);
     let frameCopyMs = 0;
     let inputOffset = pixelFormat === "y8" ? messageYOffset : 0;
     let inputStride = pixelFormat === "y8" ? messageYStride || w : w * 4;
@@ -272,7 +276,8 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const copyOptions = pixelFormat === "y8" ? { rect } : { rect, format: "RGBA" };
+      const copyAsRgba = pixelFormat !== "y8" || robustTrackedRecovery;
+      const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
       const copyStarted = performance.now();
@@ -282,7 +287,7 @@ ctx.onmessage = async (e) => {
       if (!plane) throw new Error("Camera frame has no usable pixel plane");
       inputOffset = plane.offset;
       inputStride = plane.stride;
-      decodePixelFormat = pixelFormat === "y8" ? "y8" : "rgba";
+      decodePixelFormat = copyAsRgba ? "rgba" : "y8";
       if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
       if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
       ownedVideoFrame.close();
@@ -418,7 +423,8 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && (tracks == null ? void 0 : tracks.length)) {
-      const trackedVisual = strictTracked ? null : sampleTrackedVisual(zx, ptr + inputOffset, pw, ph, ox, oy, tracks, decodePixelFormat, inputStride);
+      // Never let the unchanged-frame gate suppress a requested recovery.
+      const trackedVisual = strictTracked || robustTrackedRecovery ? null : sampleTrackedVisual(zx, ptr + inputOffset, pw, ph, ox, oy, tracks, decodePixelFormat, inputStride);
 if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) {
   ctx.postMessage({
     id,
@@ -453,9 +459,10 @@ if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) 
         inputStride,
         strictTracked
       );
-      if (native || usedDirectFrame) {
-        const nativeSymbols = native?.symbols ?? [];
-        if (nativeSymbols.length > 0 && trackedVisual) rememberTrackedVisual(trackedVisual, performance.now());
+      const nativeSymbols = native?.symbols ?? [];
+      if (nativeSymbols.length > 0 && trackedVisual) rememberTrackedVisual(trackedVisual, performance.now());
+      const robustFallback = robustTrackedRecovery && decodePixelFormat === "rgba" && nativeSymbols.length === 0;
+      if (!robustFallback && (native || usedDirectFrame)) {
         const directFrameFailed = usedDirectFrame && !native;
         const reply = {
           id,
@@ -480,6 +487,9 @@ if (trackedVisual && shouldSkipTrackedVisual(trackedVisual, performance.now())) 
         ctx.postMessage(reply, transfer);
         return;
       }
+      // Native tracking has repeatedly missed this known crop. Run the robust
+      // QR detector only inside the bounded lane crop, then feed its fresh quad
+      // back through the normal lattice update. This is deliberately local.
       readFullAttempts++;
       const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
       try {
