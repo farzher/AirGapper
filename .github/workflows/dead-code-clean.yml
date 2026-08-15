@@ -22,7 +22,6 @@ jobs:
           p = Path('receive/main.js')
           s = p.read_text()
 
-          # Stale references left behind by the deleted build-server diagnostics UI.
           for line in (
               '  if (diagnosticsEl) diagnosticsEl.style.display = "none";\n',
               '  if (diagnosticsEl) diagnosticsEl.style.display = "block";\n',
@@ -41,23 +40,16 @@ jobs:
           lines = []
           for line in s.splitlines(True):
               stripped = line.strip()
-              # Delete dead global declarations.
               m = re.fullmatch(r'let\s+([A-Za-z_$][\w$]*)\s*=.*;', stripped)
               if m and m.group(1) in dead:
                   continue
-              # Delete standalone assignments/increments of those dead globals,
-              # including one-line guarded increments. Object properties such as
-              # evidence.submittedJobs are deliberately not matched here.
               if any(re.search(rf'(?<![.\w$]){re.escape(name)}\s*(?:\+\+|--|[+\-*/]?=)', stripped) for name in dead):
                   continue
               lines.append(line)
           s = ''.join(lines)
-
-          # A local declaration became empty when the old finish diagnostics were deleted.
+          s = s.replace('  const expectedNow = gridLattice.active ? activeGrid.length : expectedRegions;\n', '')
           s = s.replace('async function finish(container, hashOk, seconds) {\n  var _a, _b;\n', 'async function finish(container, hashOk, seconds) {\n')
 
-          # Direct Y is a best-effort speed path. Keep it out of optimizer/replay/
-          # explicit capture work and disable it for the session on first failure.
           marker = 'const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);\n'
           if s.count(marker) != 1: raise SystemExit('direct luma marker missing')
           s = s.replace(marker, marker + 'let directLumaDisabled = false;\n', 1)
@@ -70,8 +62,6 @@ jobs:
           if s.count(old) != 1: raise SystemExit('start marker missing')
           s = s.replace(old, new, 1)
 
-          # A transferable-frame postMessage failure also means this browser path
-          # is unusable. Fall back for subsequent frames instead of retrying it.
           old = '''        if (!accepted) {\n          laneFrame?.close();\n          cropAttempts.delete(id);\n          continue;\n        }'''
           new = '''        if (!accepted) {\n          if (laneFrame) directLumaDisabled = true;\n          laneFrame?.close();\n          cropAttempts.delete(id);\n          continue;\n        }'''
           if s.count(old) != 1: raise SystemExit('lane rejection marker missing')
@@ -81,16 +71,12 @@ jobs:
           if s.count(old) != 1: raise SystemExit('shared rejection marker missing')
           s = s.replace(old, new, 1)
 
-          # Worker-reported Y-plane failure is not a decode failure and must not
-          # poison tracking confidence. Disable the fast path and drop this
-          # disposable frame; the next camera frame uses RGBA.
           marker = '  focusController.noteDecoderCompletion(id);\n'
           insert = '''  focusController.noteDecoderCompletion(id);\n  if (completion.yPlaneFailed) {\n    directLumaDisabled = true;\n    finishScanCapture(id, completion);\n    scanOutcomes.delete(id);\n    cropAttempts.delete(id);\n    optimizerAttributionComplete(id);\n    return;\n  }\n'''
           if s.count(marker) != 1: raise SystemExit('decoder completion marker missing')
           s = s.replace(marker, insert, 1)
           p.write_text(s)
 
-          # Remove compatibility-only parameters that no caller/runtime uses.
           p = Path('shared/progress.js'); s = p.read_text()
           s = s.replace('function expectedCodingOverhead(_mode) {', 'function expectedCodingOverhead() {')
           s = s.replace('function estimateTransferProgress(sourceBlocks, usefulSymbols, elapsedSeconds, sourceRank = usefulSymbols, _mode = "raptorq") {', 'function estimateTransferProgress(sourceBlocks, usefulSymbols, elapsedSeconds, sourceRank = usefulSymbols) {')
@@ -100,14 +86,12 @@ jobs:
           s = s.replace('function scheduledEsi(k, ordinal, _slotIndex, _gridCodes) {', 'function scheduledEsi(k, ordinal) {')
           p.write_text(s)
 
-          # Make Y-copy/native-Y errors a nonfatal capability miss.
           p = Path('receive/worker.js'); s = p.read_text()
           old = '''  } catch (error) {\n    ownedVideoFrame?.close();\n    ownedVideoFrame = null;\n    ctx.postMessage({\n      id,\n      symbols: [],\n      sightings: [],\n      full,\n      workerWaitMs,\n      readFullAttempts,\n      latencyMs: performance.now() - startedAt,\n      error: error instanceof Error ? error.message : String(error)\n    });\n  }'''
           new = '''  } catch (error) {\n    ownedVideoFrame?.close();\n    ownedVideoFrame = null;\n    const yPlaneFailed = pixelFormat === "y8";\n    ctx.postMessage({\n      id,\n      symbols: [],\n      sightings: [],\n      full,\n      trackedAttempted: yPlaneFailed,\n      trackedHit: false,\n      workerWaitMs,\n      readFullAttempts,\n      yPlaneFailed,\n      latencyMs: performance.now() - startedAt,\n      error: yPlaneFailed ? void 0 : error instanceof Error ? error.message : String(error)\n    });\n  }'''
           if s.count(old) != 1: raise SystemExit('worker catch marker missing')
           p.write_text(s.replace(old, new, 1))
 
-          # Carry the nonfatal capability result through the worker pool.
           p = Path('shared/worker-pool.js'); s = p.read_text()
           marker = '        trackedHit: Boolean(message.trackedHit),\n'
           if s.count(marker) != 1: raise SystemExit('pool completion marker missing')
