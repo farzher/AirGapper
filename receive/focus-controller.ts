@@ -312,7 +312,6 @@ export class FocusController {
    *  AirGapper treats focus as read-only: exposure optimization, acquisition,
    *  target loss, and decoder recovery are forbidden from touching the lens. */
   private automaticFocusConfigured = false;
-  private invariantRepairPending = false;
   private waiter?: {
     generation: number;
     afterId: number;
@@ -757,10 +756,10 @@ export class FocusController {
         }
         return observed;
       };
-      let actual = await readApplied(240);
+      let actual = await readApplied(140);
       if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso && this.current(generation)) {
         await this.applyProbe(generation, patch, false);
-        actual = await readApplied(520);
+        actual = await readApplied(220);
       }
       if (actual.exposureTime === undefined || actual.iso === undefined) {
         this.optimizeReason = "camera never reported usable manual exposure/ISO settings";
@@ -1245,10 +1244,7 @@ export class FocusController {
   diagnostics(): FocusDiagnostics {
     const settings = this.settings();
     const optical = this.latest?.metrics;
-    const invariantWarning = this.acquisitionManualInvariant(settings)
-      ? "BUG: manual focus active during automatic acquisition"
-      : undefined;
-    if (invariantWarning) this.repairAcquisitionInvariant();
+    const invariantWarning = undefined;
     return {
       state: this.state,
       stateMs: performance.now() - this.stateSince,
@@ -1492,22 +1488,14 @@ export class FocusController {
 
     const patch: CameraPatch = {};
 
-    // Configure hardware focus ONCE per track. All later acquisition/recovery
-    // calls may manage exposure, but are forbidden from mutating focus. Prefer
-    // one single-shot sweep on static QR scenes; fall back to continuous only
-    // when single-shot is unavailable. Even a rejected first attempt is not
-    // automatically retried: repeated AF commands are worse than a missed one.
+    // Automatic receiver focus is completely hardware-owned. Do not select a
+    // focus mode, send POIs, or retrigger AF here. getUserMedia starts the
+    // camera in the browser/HAL's native video AF behavior; repeated focus-mode
+    // constraints were the source of OnePlus 5 hunting. Only the explicit
+    // developer Focus control is allowed to call applyDeveloperFocus().
     if (!this.automaticFocusConfigured) {
-      const mode = this.acquisitionFocusMode();
       this.automaticFocusConfigured = true;
       this.poiAimed = true;
-      if (mode) {
-        this.requestedMode = mode;
-        patch.focusMode = mode;
-        if (geometry && this.caps.pointsOfInterest) {
-          patch.pointsOfInterest = [{ x: geometry.x, y: geometry.y }];
-        }
-      }
     }
 
     if (resetExposure && this.exposureModes().includes("continuous")) {
@@ -1578,23 +1566,8 @@ export class FocusController {
   }
 
   private repairAcquisitionInvariant(): void {
-    if (!this.acquisitionManualInvariant(this.settings()) || this.invariantRepairPending) return;
-    this.invariantRepairPending = true;
-    void this.enterAutoFocusAcquisition("BUG repaired: manual focus was active during automatic acquisition", this.generation, false, true)
-      .finally(() => { this.invariantRepairPending = false; });
-  }
-
-  private acquisitionManualInvariant(settings: CameraSettings): boolean {
-    // Some Android HALs only honor manual shutter/ISO while AF is disabled. In
-    // that case focusMode=manual is an intentional HOLD of the lens position
-    // previously chosen by hardware AF, not a manual-focus search. Do not fight
-    // the HAL by immediately forcing continuous AF back on while a committed
-    // manual exposure is active. Recovery can pulse hardware AF and then the
-    // camera layer will re-hold focus before restoring shutter/ISO.
-    const exposureRequiresHold = settings.exposureMode === "manual" && this.committedExposureMode === "manual";
-    return this.strategy === "auto" && !exposureRequiresHold &&
-      (this.state === "SEEKING" || this.state === "STABILIZING" || this.state === "AUTO_AF_SETTLE") &&
-      settings.focusMode === "manual";
+    // Deliberately disabled. Automatic focus belongs to the browser/HAL; a
+    // focus-mode observation is never grounds for AirGapper to move the lens.
   }
 
   private focusOwner(settings: CameraSettings): FocusOwner {
@@ -1837,15 +1810,6 @@ export class FocusController {
     if (modes.includes("continuous") || actual === "continuous") return "continuous";
     if (modes.includes("single-shot") || actual === "single-shot") return "single-shot";
     return modes.length > 0 || actual !== undefined || Boolean(this.caps.pointsOfInterest) ? "continuous" : undefined;
-  }
-  private acquisitionFocusMode(): string | undefined {
-    const modes = this.focusModes();
-    const actual = this.settings().focusMode;
-    // A QR sender is static relative to the lens while acquiring. Prefer one
-    // hardware AF sweep and then leave the lens alone; continuous AF hunting on
-    // older OnePlus devices made half the frames blurry.
-    if (modes.includes("single-shot") || actual === "single-shot") return "single-shot";
-    return this.hardwareFocusMode();
   }
   private manualFocus(): boolean { return this.focusModes().includes("manual") && Boolean(this.caps.focusDistance); }
   private manualExposure(): boolean { return this.exposureModes().includes("manual") && Boolean(this.caps.exposureTime); }

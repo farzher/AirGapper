@@ -200,6 +200,9 @@ function seedDesiredCamera(track: MediaStreamTrack): void {
   if (cameraQuirkTrackId !== track.id) {
     cameraQuirkTrackId = track.id;
     manualExposureFocusPolicy = "unknown";
+    heldFocusRestoreMode = undefined;
+    cameraFocusWritesTotal = 0;
+    cameraExposureWritesTotal = 0;
   }
   const settings = track.getSettings() as MediaTrackSettings & CameraPatch;
   desiredCamera = {
@@ -214,6 +217,9 @@ function seedDesiredCamera(track: MediaStreamTrack): void {
 type ManualExposureFocusPolicy = "unknown" | "independent" | "requires-hold";
 let manualExposureFocusPolicy: ManualExposureFocusPolicy = "unknown";
 let cameraQuirkTrackId = "";
+let heldFocusRestoreMode: string | undefined;
+let cameraFocusWritesTotal = 0;
+let cameraExposureWritesTotal = 0;
 
 /**
  * Apply camera controls one 3A axis at a time.
@@ -231,7 +237,7 @@ let cameraQuirkTrackId = "";
  * shutter/ISO are applied.
  */
 function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Promise<boolean> {
-  let accepted = false;
+  let accepted = true;
   const touchesFocus = patch.focusMode !== undefined || patch.focusDistance !== undefined || patch.pointsOfInterest !== undefined;
   const touchesExposure = patch.exposureMode !== undefined || patch.exposureTime !== undefined ||
     patch.iso !== undefined || patch.exposureCompensation !== undefined;
@@ -253,156 +259,120 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
       exposureTime?: { min: number; max: number; step?: number };
       iso?: { min: number; max: number; step?: number };
     };
-    let anyAccepted = false;
-
     const applyStage = async (stage: CameraPatch): Promise<boolean> => {
       if (!Object.keys(stage).length) return true;
+      if (stage.focusMode !== undefined || stage.focusDistance !== undefined || stage.pointsOfInterest !== undefined) cameraFocusWritesTotal++;
+      if (stage.exposureMode !== undefined || stage.exposureTime !== undefined || stage.iso !== undefined || stage.exposureCompensation !== undefined) cameraExposureWritesTotal++;
       const ok = await applyAdvancedConstraint(track, stage);
-      anyAccepted ||= ok;
+      accepted &&= ok;
       return ok;
     };
     const numericClose = (actual: number | undefined, requested: number | undefined, step: number | undefined): boolean => {
       if (requested === undefined) return true;
       if (actual === undefined || !Number.isFinite(actual)) return false;
-      const tolerance = Math.max((step ?? 0) * 0.75, Math.abs(requested) * 0.015, 1e-6);
+      const tolerance = Math.max((step ?? 0) * 0.75, Math.abs(requested) * 0.02, 1e-6);
       return Math.abs(actual - requested) <= tolerance;
     };
-    const manualExposureMatches = (): boolean => {
+    const requestedExposureMatches = (): boolean => {
       const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
       return (actual.exposureMode === undefined || actual.exposureMode === "manual") &&
         numericClose(actual.exposureTime, desiredCamera.exposureTime, caps.exposureTime?.step) &&
         numericClose(actual.iso, desiredCamera.iso, caps.iso?.step);
     };
+    const shortSettle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
-    const applyFocusAxis = async (): Promise<void> => {
-      if (!touchesFocus) return;
-      const mode = patch.focusMode;
-      if (mode === "manual") {
+    // Focus is an explicit, independent control. The automatic receiver never
+    // arrives here with a focus patch. This path exists only for the developer
+    // Focus control and for the one learned 12R-style manual-exposure hold.
+    if (touchesFocus && !touchesExposure) {
+      if (patch.focusMode === "manual") {
         await applyStage({ focusMode: "manual" });
-        if (patch.focusDistance !== undefined) {
-          await applyStage({ focusMode: "manual", focusDistance: patch.focusDistance });
-        }
-        return;
-      }
-      if (mode !== undefined) {
-        await applyStage({
-          focusMode: mode,
-          ...(patch.pointsOfInterest !== undefined ? { pointsOfInterest: patch.pointsOfInterest } : {}),
-        });
+        if (patch.focusDistance !== undefined) await applyStage({ focusDistance: patch.focusDistance });
+      } else if (patch.focusMode !== undefined) {
+        await applyStage({ focusMode: patch.focusMode });
       } else if (patch.pointsOfInterest !== undefined) {
         await applyStage({ pointsOfInterest: patch.pointsOfInterest });
       }
-    };
+    }
 
-    const applyExposureAxis = async (): Promise<void> => {
-      if (!touchesExposure) return;
-      const mode = patch.exposureMode ?? desiredCamera.exposureMode;
-      if (mode === "continuous") {
-        await applyStage({
-          exposureMode: "continuous",
-          ...(patch.exposureCompensation !== undefined ? { exposureCompensation: patch.exposureCompensation } : {}),
-        });
-        return;
-      }
-
-      if (mode !== "manual") {
-        const stage: CameraPatch = {};
+    if (touchesExposure) {
+      const requestedMode = patch.exposureMode ?? desiredCamera.exposureMode;
+      if (requestedMode === "continuous") {
+        const stage: CameraPatch = { exposureMode: "continuous" };
         if (patch.exposureCompensation !== undefined) stage.exposureCompensation = patch.exposureCompensation;
-        if (patch.exposureTime !== undefined) stage.exposureTime = patch.exposureTime;
-        if (patch.iso !== undefined) stage.iso = patch.iso;
         await applyStage(stage);
-        return;
-      }
+      } else if (requestedMode === "manual") {
+        // A coupled phone is classified ONCE. After classification, optimizer
+        // candidates and manual slider changes are only numeric writes.
+        let current = track.getSettings() as MediaTrackSettings & CameraPatch;
+        if (manualExposureFocusPolicy === "requires-hold" && current.focusMode !== "manual") {
+          heldFocusRestoreMode = current.focusMode && current.focusMode !== "manual" ? current.focusMode : heldFocusRestoreMode;
+          await applyStage({ focusMode: "manual" });
+          await shortSettle();
+          current = track.getSettings() as MediaTrackSettings & CameraPatch;
+        }
 
-      // Some Android HALs couple manual sensor controls to AF, but do NOT
-      // assume that from one slow getSettings() update. A false positive here
-      // freezes the lens while continuous AF is still moving, which is exactly
-      // the blur/hunting failure seen on the OnePlus 5. Learn the quirk only
-      // after two exposure-only attempts have had ample time to settle.
-      const actualFocus = (track.getSettings() as MediaTrackSettings & CameraPatch).focusMode;
-      if (manualExposureFocusPolicy === "requires-hold" && actualFocus !== "manual") {
-        await applyStage({ focusMode: "manual" });
-        await new Promise((resolve) => setTimeout(resolve, 90));
-      }
-
-      const applyManualSensor = async (): Promise<void> => {
-        // Enter manual AE only once. Re-sending exposureMode for every slider or
-        // optimizer candidate can restart the camera's 3A convergence on some
-        // Android HALs and looks exactly like autofocus hunting. Once manual is
-        // active, mutate only the numeric sensor controls.
-        const current = track.getSettings() as MediaTrackSettings & CameraPatch;
         if (current.exposureMode !== "manual") await applyStage({ exposureMode: "manual" });
         const sensor: CameraPatch = {};
         if (desiredCamera.exposureTime !== undefined) sensor.exposureTime = desiredCamera.exposureTime;
         if (desiredCamera.iso !== undefined) sensor.iso = desiredCamera.iso;
         await applyStage(sensor);
-      };
 
-      await applyManualSensor();
-      // Once this track has proven that AF and manual sensor controls coexist,
-      // do not pay the original device-classification delay on every optimizer
-      // candidate. Source-frame settling happens separately in optimizerEpochHooks.
-      if (manualExposureFocusPolicy === "independent") {
-        await new Promise((resolve) => setTimeout(resolve, 45));
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, manualExposureFocusPolicy === "requires-hold" ? 90 : 170));
-
-      if (manualExposureMatches()) {
-        if (manualExposureFocusPolicy === "unknown" && actualFocus !== "manual") {
-          manualExposureFocusPolicy = "independent";
+        if (manualExposureFocusPolicy === "unknown") {
+          // Do not make every camera pay a long verification tax. Give Android
+          // two short sensor-update opportunities. Only then try the AF-hold
+          // workaround, once, and remember the result for the track.
+          await shortSettle();
+          if (!requestedExposureMatches()) {
+            await applyStage(sensor);
+            await shortSettle();
+          }
+          if (requestedExposureMatches()) {
+            manualExposureFocusPolicy = "independent";
+          } else {
+            const beforeHold = track.getSettings() as MediaTrackSettings & CameraPatch;
+            const canHold = beforeHold.focusMode !== "manual" &&
+              (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : false);
+            if (canHold) {
+              heldFocusRestoreMode = beforeHold.focusMode && beforeHold.focusMode !== "manual" ? beforeHold.focusMode : undefined;
+              await applyStage({ focusMode: "manual" });
+              await shortSettle();
+              await applyStage(sensor);
+              await shortSettle();
+              if (requestedExposureMatches()) {
+                manualExposureFocusPolicy = "requires-hold";
+              } else {
+                // The hold did not help: restore the exact prior focus mode once
+                // and permanently stop trying this workaround on the track.
+                if (heldFocusRestoreMode) await applyStage({ focusMode: heldFocusRestoreMode });
+                heldFocusRestoreMode = undefined;
+                manualExposureFocusPolicy = "independent";
+              }
+            } else {
+              // No supported hold path. Keep focus untouched from now on.
+              manualExposureFocusPolicy = "independent";
+            }
+          }
         }
-        return;
+      } else {
+        const stage: CameraPatch = {};
+        if (patch.exposureCompensation !== undefined) stage.exposureCompensation = patch.exposureCompensation;
+        if (patch.exposureTime !== undefined) stage.exposureTime = patch.exposureTime;
+        if (patch.iso !== undefined) stage.iso = patch.iso;
+        await applyStage(stage);
       }
+    }
 
-      // One exposure-only retry before touching focus. This intentionally costs
-      // a few frames only the first time a camera is classified; Optimize then
-      // reuses the learned policy for the rest of the track.
-      await applyManualSensor();
-      await new Promise((resolve) => setTimeout(resolve, 220));
-      if (manualExposureMatches()) {
-        if (manualExposureFocusPolicy === "unknown" && actualFocus !== "manual") {
-          manualExposureFocusPolicy = "independent";
-        }
-        return;
-      }
-
-      // Only now test the OnePlus-12R-style coupled behavior: hold the
-      // hardware-selected lens WITHOUT writing a focus distance, then retry the
-      // exact same sensor request. Restore AF if even this does not work.
-      const nowFocus = (track.getSettings() as MediaTrackSettings & CameraPatch).focusMode;
-      const canHoldFocus = nowFocus !== "manual" &&
-        (Array.isArray(caps.focusMode) ? caps.focusMode.includes("manual") : true);
-      if (canHoldFocus) {
+    // Combined focus+exposure requests are intentionally unsupported for normal
+    // operation. If one slips through, apply the explicit focus portion once,
+    // after exposure, rather than repeatedly coupling both 3A axes.
+    if (touchesFocus && touchesExposure && patch.focusMode !== undefined) {
+      if (patch.focusMode === "manual") {
         await applyStage({ focusMode: "manual" });
-        await new Promise((resolve) => setTimeout(resolve, 110));
-        await applyManualSensor();
-        await new Promise((resolve) => setTimeout(resolve, 140));
-        if (manualExposureMatches()) {
-          manualExposureFocusPolicy = "requires-hold";
-        } else if (nowFocus && nowFocus !== "manual") {
-          await applyStage({ focusMode: nowFocus });
-        }
+        if (patch.focusDistance !== undefined) await applyStage({ focusDistance: patch.focusDistance });
+      } else {
+        await applyStage({ focusMode: patch.focusMode });
       }
-    };
-
-    // When returning to full hardware Auto, release manual AE before enabling
-    // AF. When entering fully-manual optics, establish focus hold before sensor
-    // controls. Otherwise the axes are independent and only the touched axis is
-    // sent to Chrome/the HAL.
-    const enteringHardwareAuto = touchesFocus && touchesExposure &&
-      patch.exposureMode === "continuous" && patch.focusMode !== undefined && patch.focusMode !== "manual";
-    const enteringManualBoth = touchesFocus && touchesExposure &&
-      patch.exposureMode === "manual" && patch.focusMode === "manual";
-    if (enteringHardwareAuto) {
-      await applyExposureAxis();
-      await applyFocusAxis();
-    } else if (enteringManualBoth) {
-      await applyFocusAxis();
-      await applyExposureAxis();
-    } else {
-      await applyFocusAxis();
-      await applyExposureAxis();
     }
 
     const after = track.getSettings() as MediaTrackSettings & CameraPatch;
@@ -413,15 +383,6 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
       exposureCompensation: value.exposureCompensation,
     });
     lastCameraMutation = { kind, before: optics(before), requested: { ...patch }, after: optics(after) };
-    const focusMatches = !touchesFocus || patch.focusMode === undefined || after.focusMode === undefined ||
-      after.focusMode === patch.focusMode || (patch.focusMode === "continuous" && after.focusMode === "single-shot");
-    const exposureMatches = !touchesExposure ||
-      (patch.exposureMode === "continuous" ? after.exposureMode === undefined || after.exposureMode === "continuous" :
-        (patch.exposureMode === "manual" || desiredCamera.exposureMode === "manual") ? manualExposureMatches() : true);
-    // Some Chromium/Android combinations report applyConstraints=false while
-    // getSettings proves the requested state took effect. Actual camera state is
-    // the source of truth for our controller.
-    accepted = anyAccepted || (focusMatches && exposureMatches);
   }).then(() => accepted);
 }
 let exposureApplyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1722,18 +1683,14 @@ function syncExposureControls(): void {
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
-  const before = track.getSettings() as MediaTrackSettings & CameraPatch;
-  if (automaticOptics) {
-    // A global Manual → Auto transition must clear every manual exposure value
-    // from both our desired state and the Android HAL. Merely observing
-    // exposureMode="continuous" is not enough: some providers retain the old
-    // manual gain for several frames.
+  if (automaticOptics || (automaticExposureAxis && automaticIsoAxis)) {
+    // Returning exposure to hardware Auto is one mode write, not a retry loop.
+    // Clear every remembered manual sensor value before the request.
     delete desiredCamera.exposureTime;
     delete desiredCamera.iso;
     delete desiredCamera.exposureCompensation;
     desiredCamera.exposureMode = "continuous";
     const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
-      exposureMode?: string[];
       exposureCompensation?: { min: number; max: number };
     };
     const patch: CameraPatch = { exposureMode: "continuous" };
@@ -1741,75 +1698,52 @@ async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
       patch.exposureCompensation = 0;
     }
     await applyCameraConstraint(track, patch);
-    await new Promise((resolve) => setTimeout(resolve, 110));
     if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-    let actual = track.getSettings() as MediaTrackSettings & CameraPatch;
-    // Android HALs can acknowledge the mode transition while still exposing the
-    // previous manual gain/shutter for a few frames. Re-assert continuous AE once
-    // deliberately, then verify again. This mirrors the retry discipline used by
-    // reliable manual controls without preserving any stale manual ISO value.
-    await applyCameraConstraint(track, patch);
-    await new Promise((resolve) => setTimeout(resolve, 140));
-    if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-    actual = track.getSettings() as MediaTrackSettings & CameraPatch;
-    const staleManualValues = before.exposureMode === "manual" && actual.exposureMode === "continuous" &&
-      actual.exposureTime === before.exposureTime && actual.iso === before.iso;
-    if (actual.exposureMode !== "continuous" || staleManualValues) {
-      await applyCameraConstraint(track, patch);
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-    // A coupled HAL such as the 12R may have required focusMode=manual solely
-    // to unlock manual shutter/ISO. Once AE owns exposure again, release that
-    // temporary hold exactly once. Independent cameras (e.g. the OnePlus 5)
-    // never enter this branch, so changing brightness cannot trigger AF.
-    if (manualExposureFocusPolicy === "requires-hold") {
-      const settings = track.getSettings() as MediaTrackSettings & CameraPatch;
-      if (settings.focusMode === "manual") {
-        const caps = track.getCapabilities?.() as MediaTrackCapabilities & { focusMode?: string[] };
-        const mode = caps.focusMode?.includes("single-shot") ? "single-shot" :
-          caps.focusMode?.includes("continuous") ? "continuous" : undefined;
-        if (mode) await applyCameraConstraint(track, { focusMode: mode });
-      }
-    }
-    return;
-  }
-  if (automaticExposureAxis && automaticIsoAxis) {
-    await applyCameraConstraint(track, { exposureMode: "continuous" });
-    return;
-  }
-  const activeSettings = track.getSettings() as MediaTrackSettings & CameraPatch;
-  // ISO is only honored by Android camera HALs in manual exposure mode. When
-  // ISO alone is overridden, freeze the current AE-selected shutter time.
-  const requested = automaticExposureAxis ? activeSettings.exposureTime : preferredExposureTime;
-  if (requested === undefined) return;
-  if (automaticIsoAxis) delete desiredCamera.iso;
-  const requestedIso = automaticIsoAxis ? undefined : preferredIso;
 
-  // Several Android camera providers silently ignore a time bundled with the
-  // mode switch. Put the camera in manual first, then send the value by itself.
-  await applyCameraConstraint(track, { exposureMode: "manual" });
-  await applyCameraConstraint(track, { exposureTime: requested, ...(requestedIso !== undefined ? { iso: requestedIso } : {}) });
-  await new Promise((resolve) => setTimeout(resolve, 80));
+    // A 12R-style camera may have put focus into manual solely to unlock sensor
+    // controls. Release that temporary hold once when hardware AE resumes. No
+    // other Auto/Manual exposure transition is allowed to touch focus.
+    if (manualExposureFocusPolicy === "requires-hold" && heldFocusRestoreMode) {
+      const current = track.getSettings() as MediaTrackSettings & CameraPatch;
+      if (current.focusMode === "manual") await applyCameraConstraint(track, { focusMode: heldFocusRestoreMode });
+      heldFocusRestoreMode = undefined;
+    }
+
+    // Non-blocking safety retry only if the mode itself failed to switch. This
+    // never touches focus and never delays the UI.
+    setTimeout(() => {
+      if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
+      const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+      if (actual.exposureMode && actual.exposureMode !== "continuous") void applyCameraConstraint(track, patch);
+    }, 120);
+    return;
+  }
+
+  const active = track.getSettings() as MediaTrackSettings & CameraPatch;
+  const requestedExposure = automaticExposureAxis ? active.exposureTime : preferredExposureTime;
+  const requestedIso = automaticIsoAxis ? active.iso : preferredIso;
+  if (requestedExposure === undefined) return;
+
+  preferredExposureTime = requestedExposure;
+  if (requestedIso !== undefined) preferredIso = requestedIso;
+  if (automaticIsoAxis) delete desiredCamera.iso;
+
+  // One call owns the whole manual-sensor transition. The low-level camera
+  // layer enters manual AE only if necessary; after that this is just a fast
+  // exposureTime/ISO write. No focus mutation occurs on ordinary cameras.
+  await applyCameraConstraint(track, {
+    exposureMode: "manual",
+    exposureTime: requestedExposure,
+    ...(requestedIso !== undefined ? { iso: requestedIso } : {}),
+  });
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
 
-  type ExposureSettings = MediaTrackSettings & { exposureMode?: string; exposureTime?: number; iso?: number };
-  const active = track.getSettings() as ExposureSettings;
-  const step = Number(cameraExposure.step) || 0.1;
-  const isoStep = Number(cameraIso.step) || 1;
-  if ((active.exposureMode && active.exposureMode !== "manual") ||
-      (active.exposureTime !== undefined && Math.abs(active.exposureTime - requested) > step / 2) ||
-      (requestedIso !== undefined && active.iso !== undefined && Math.abs(active.iso - requestedIso) > isoStep / 2)) {
-    await applyCameraConstraint(track, {
-      exposureMode: "manual", exposureTime: requested,
-      ...(requestedIso !== undefined ? { iso: requestedIso } : {}),
-    });
-    if (generation !== exposureApplyGeneration) return;
+  cameraExposure.value = String(requestedExposure);
+  showExposureTime(requestedExposure);
+  if (requestedIso !== undefined) {
+    cameraIso.value = String(requestedIso);
+    cameraIsoValue.value = String(Number(requestedIso.toPrecision(4)));
   }
-  // Android camera providers can report a stale exposureTime after accepting
-  // the constraint. Keep the user's requested value as the UI and saved source
-  // of truth instead of letting that delayed camera report move the slider.
-  cameraExposure.value = String(requested);
-  showExposureTime(requested);
 }
 function populateBrowserCapabilities(track: MediaStreamTrack): void {
   seedDesiredCamera(track);
@@ -2151,6 +2085,7 @@ function renderFocusDiagnostics(): void {
     `State    ${diagnostic.state} · ${(diagnostic.stateMs / 1000).toFixed(1)}s${diagnostic.lockedMs === undefined ? "" : ` · locked ${(diagnostic.lockedMs / 1000).toFixed(1)}s`}`,
     `Owner    ${diagnostic.focusOwner}`,
     `3A       manual exposure ${manualExposureFocusPolicy === "requires-hold" ? "requires AF hold on this camera" : manualExposureFocusPolicy}`,
+    `Camera   focus writes ${cameraFocusWritesTotal} · exposure writes ${cameraExposureWritesTotal}`,
     `Focus    requested ${diagnostic.requestedMode ?? "—"} · actual ${diagnostic.actualMode ?? "—"} · distance ${diagnostic.actualDistance ?? "—"}`,
     `Focus    committed ${diagnostic.committedFocusMode ?? "—"}/${diagnostic.committedFocusDistance ?? "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${diagnostic.actualExposureCompensation ?? "—"}`,
