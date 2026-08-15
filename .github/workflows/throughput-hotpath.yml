@@ -51,6 +51,15 @@ jobs:
           p.write_text(s.replace(old, new, 1))
           PY
           python3 .github/rewrite-throughput.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('vendor/decimen-codec/source/wrapper/decimen_codec.cpp')
+          s = p.read_text()
+          start = s.index('\\t\\tconst int dim = track.dimension;')
+          end = s.index('\n\t\tconst bool allowRS =', start)
+          s = s[:start] + s[start:end].replace('\\t', '\t') + s[end:]
+          p.write_text(s)
+          PY
       - name: Rebuild SIMD and scalar QR codecs
         shell: bash
         run: |
