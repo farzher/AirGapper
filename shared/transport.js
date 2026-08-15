@@ -26,6 +26,11 @@ const GF_LOG = new Uint8Array(256);
 function gfMul(a, b) {
   return a === 0 || b === 0 ? 0 : GF_EXP[GF_LOG[a] + GF_LOG[b]];
 }
+const GF_MUL = new Uint8Array(256 * 256);
+for (let factor = 1; factor < 256; factor++) {
+  const row = factor << 8;
+  for (let value = 1; value < 256; value++) GF_MUL[row + value] = gfMul(value, factor);
+}
 function gfInv(value) {
   return GF_EXP[255 - GF_LOG[value]];
 }
@@ -36,7 +41,8 @@ function mdsCoefficients(k, esi) {
     row[id] = 1;
     return row;
   }
-  for (let i = 0; i < k; i++) row[i] = gfMul(id, gfInv(id ^ i));
+  const factorRow = id << 8;
+  for (let i = 0; i < k; i++) row[i] = GF_MUL[factorRow + gfInv(id ^ i)];
   return row;
 }
 function addScaled(dst, src, factor) {
@@ -45,7 +51,8 @@ function addScaled(dst, src, factor) {
     for (let i = 0; i < dst.length; i++) dst[i] = dst[i] ^ src[i];
     return;
   }
-  for (let i = 0; i < dst.length; i++) dst[i] = dst[i] ^ gfMul(src[i], factor);
+  const row = factor << 8;
+  for (let i = 0; i < dst.length; i++) dst[i] = dst[i] ^ GF_MUL[row + src[i]];
 }
 class TransportEncoder {
   constructor(payload, blockLen, streamSeed, mode) {
@@ -153,8 +160,9 @@ class TransportDecoder {
     }
     const inverse = gfInv(coefficients[pivot]);
     if (inverse !== 1) {
-      for (let i = pivot; i < coefficients.length; i++) coefficients[i] = gfMul(coefficients[i], inverse);
-      for (let i = 0; i < bytes.length; i++) bytes[i] = gfMul(bytes[i], inverse);
+      const row = inverse << 8;
+      for (let i = pivot; i < coefficients.length; i++) coefficients[i] = GF_MUL[row + coefficients[i]];
+      for (let i = 0; i < bytes.length; i++) bytes[i] = GF_MUL[row + bytes[i]];
     }
     this.mdsBasis[pivot] = { coefficients, bytes };
     this.solvedCount++;

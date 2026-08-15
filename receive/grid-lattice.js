@@ -3,6 +3,7 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { gridLayoutById } from "../shared/grid-layout.js";
 const WHOLE_GRID_LOSS_MS = 2200;
+const LOCKED_REFIT_MS = 33;
 function corners(quad) {
   return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
 }
@@ -81,6 +82,8 @@ class GridLattice {
     __publicField(this, "observations", []);
     __publicField(this, "candidate");
     __publicField(this, "lastHitAt", 0);
+    __publicField(this, "lastFitAt", 0);
+    __publicField(this, "cachedSlots");
     __publicField(this, "frameWidth", 1);
     __publicField(this, "frameHeight", 1);
   }
@@ -103,6 +106,8 @@ class GridLattice {
     this.observations = [];
     this.candidate = void 0;
     this.lastHitAt = 0;
+    this.lastFitAt = 0;
+    this.cachedSlots = void 0;
   }
   accept(detection, frameWidth, frameHeight) {
     var _a;
@@ -117,12 +122,23 @@ class GridLattice {
     this.observations.push(detection);
     this.observations = this.observations.filter((item) => detection.at - item.at < 2500 && item.modules === detection.modules).slice(-32);
     if (this.locked && this.candidate) {
-      const updated = this.makeCandidate(this.candidate.layout);
-      if (updated) this.candidate = updated;
+      // Native workers already refine each QR on every frame. Keep the global
+      // lattice alive for every valid packet, but only solve its 8x8 homography
+      // about once per camera frame instead of once per decoded QR.
+      if (detection.at - this.lastFitAt >= LOCKED_REFIT_MS) {
+        const updated = this.makeCandidate(this.candidate.layout);
+        if (updated) {
+          this.candidate = updated;
+          this.cachedSlots = void 0;
+          this.lastFitAt = detection.at;
+        }
+      }
       this.transition("TRACK", "valid packet refreshed locked lattice", detection.at);
     } else {
       this.candidate = (_a = this.makeCandidate(declaredLayout)) != null ? _a : void 0;
       if (!this.candidate) return null;
+      this.lastFitAt = detection.at;
+      this.cachedSlots = void 0;
       this.transition("GRID_LOCK", "packet declared layoutId and slotIndex", detection.at);
     }
     return this.snapshot();
@@ -131,6 +147,7 @@ class GridLattice {
     if (this.active && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
       this.transition("REACQUIRE", "whole lattice expired without a valid packet", now);
       this.candidate = void 0;
+      this.cachedSlots = void 0;
       this.observations = [];
       return null;
     }
@@ -190,15 +207,18 @@ class GridLattice {
     const candidate = this.candidate;
     const count = candidate.layout.cols * candidate.layout.rows;
     const modules = candidate.observations[0].modules;
-    const decoded = new Set(candidate.observations.map((observation) => observation.slotIndex));
-    const slots = [];
-    for (let index = 0; index < count; index++) {
-      const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
-      const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
-      slots.push({ index, quad, box: bounds(quad), decoded: decoded.has(index) });
+    if (!this.cachedSlots) {
+      const decoded = new Set(candidate.observations.map((observation) => observation.slotIndex));
+      const slots = [];
+      for (let index = 0; index < count; index++) {
+        const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
+        const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+        slots.push({ index, quad, box: bounds(quad), decoded: decoded.has(index) });
+      }
+      this.cachedSlots = slots;
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
-    return { state: this.state, confidence, layout: candidate.layout, modules, slots };
+    return { state: this.state, confidence, layout: candidate.layout, modules, slots: this.cachedSlots };
   }
 }
 export {

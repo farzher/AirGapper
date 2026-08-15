@@ -1047,6 +1047,7 @@ const regions = [];
 const gridLattice = new GridLattice(noteGridTransition);
 let gridShape = "";
 let lastGridSnapshot;
+let syncedGridSlots;
 let activeDecodeBudget = 0;
 let nextRegionId = 1;
 let lastDecodedRegionSize = 0;
@@ -1071,6 +1072,9 @@ function regionInflightCount(region) {
 let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
+let transportAddCount = 0;
+let transportAddTotalMs = 0;
+let transportAddMaxMs = 0;
 let trackingInvalidations = 0;
 let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
@@ -1302,57 +1306,64 @@ function syncGrid(snapshot, now, decodedSlot, info) {
   var _a, _b;
   lastGridSnapshot = snapshot;
   const shape = `${snapshot.layout.cols}x${snapshot.layout.rows}`;
+  const geometryChanged = shape !== gridShape || snapshot.slots !== syncedGridSlots;
   if (shape !== gridShape) {
     for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot !== void 0) regions.splice(i, 1);
     gridShape = shape;
   }
-  for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot === void 0) regions.splice(i, 1);
-  let decodedRegion;
-  for (const slot of snapshot.slots) {
-    let region = regions.find((candidate) => candidate.gridSlot === slot.index);
-    if (!region) {
-      region = {
-        ...slot.box,
-        id: nextRegionId++,
-        seen: now,
-        decoded: false,
-        sightedSeen: now,
-        sequenceSamples: [],
-        qualityLevel: 0,
+  if (geometryChanged) {
+    for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot === void 0) regions.splice(i, 1);
+    for (const slot of snapshot.slots) {
+      let region = regions.find((candidate) => candidate.gridSlot === slot.index);
+      if (!region) {
+        region = {
+          ...slot.box,
+          id: nextRegionId++,
+          seen: now,
+          decoded: false,
+          sightedSeen: now,
+          sequenceSamples: [],
+          qualityLevel: 0,
+          quad: slot.quad,
+          dim: snapshot.modules,
+          crc32: true,
+          consecutiveMisses: 0,
+          gridSlot: slot.index,
+          detectionConfidence: 0,
+          decodeConfidence: 0,
+          globalGridConfidence: snapshot.confidence,
+          visibleFraction: 0,
+          pixelsPerModule: 0,
+          decodeAttempts: 0,
+          decodeSuccesses: 0,
+          averageDecodeCostMs: 0
+        };
+        regions.push(region);
+      }
+      Object.assign(region, slot.box, {
         quad: slot.quad,
         dim: snapshot.modules,
-        crc32: true,
-        consecutiveMisses: 0,
-        gridSlot: slot.index,
-        detectionConfidence: 0,
-        decodeConfidence: 0,
-        globalGridConfidence: snapshot.confidence,
-        visibleFraction: 0,
-        pixelsPerModule: 0,
-        decodeAttempts: 0,
-        decodeSuccesses: 0,
-        averageDecodeCostMs: 0
-      };
-      regions.push(region);
+        globalGridConfidence: snapshot.confidence
+      });
     }
-    Object.assign(region, slot.box, {
-      quad: slot.quad,
-      dim: snapshot.modules,
-      globalGridConfidence: snapshot.confidence
-    });
-    if (slot.index === decodedSlot) {
-      region.decoded = true;
-      region.seen = now;
-      region.decodedSeen = now;
-      region.sightedSeen = now;
-      region.consecutiveMisses = 0;
-      region.detectionConfidence = 1;
-      region.decodeConfidence = 1;
-      region.decodeSuccesses++;
-      region.crc32 = (_a = info == null ? void 0 : info.crc32) != null ? _a : true;
-      if ((info == null ? void 0 : info.scanId) !== void 0) region.lastHitScanId = Math.max((_b = region.lastHitScanId) != null ? _b : -1, info.scanId);
-      decodedRegion = region;
-    }
+    syncedGridSlots = snapshot.slots;
+  }
+  const decodedRegion = decodedSlot === void 0 ? void 0 : regions.find((candidate) => candidate.gridSlot === decodedSlot);
+  if (decodedRegion) {
+    if (info == null ? void 0 : info.box) Object.assign(decodedRegion, info.box);
+    if (info == null ? void 0 : info.quad) decodedRegion.quad = info.quad;
+    if (info == null ? void 0 : info.modules) decodedRegion.dim = info.modules;
+    decodedRegion.globalGridConfidence = snapshot.confidence;
+    decodedRegion.decoded = true;
+    decodedRegion.seen = now;
+    decodedRegion.decodedSeen = now;
+    decodedRegion.sightedSeen = now;
+    decodedRegion.consecutiveMisses = 0;
+    decodedRegion.detectionConfidence = 1;
+    decodedRegion.decodeConfidence = 1;
+    decodedRegion.decodeSuccesses++;
+    decodedRegion.crc32 = (_a = info == null ? void 0 : info.crc32) != null ? _a : true;
+    if ((info == null ? void 0 : info.scanId) !== void 0) decodedRegion.lastHitScanId = Math.max((_b = decodedRegion.lastHitScanId) != null ? _b : -1, info.scanId);
   }
   expectedRegions = snapshot.slots.length;
   expectedRegionsAt = now;
@@ -1835,6 +1846,7 @@ ${optimizerTrace.slice(-20).map(
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
+    transportAddCount ? `Transport avg ${(transportAddTotalMs / transportAddCount).toFixed(3)}ms · max ${transportAddMaxMs.toFixed(2)}ms · ${transportAddCount} packets` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
@@ -2042,6 +2054,7 @@ function stopReceiver() {
   gridLattice.reset();
   gridShape = "";
   lastGridSnapshot = void 0;
+  syncedGridSlots = void 0;
   activeDecodeBudget = 0;
   lastDecodedRegionSize = 0;
   expectedRegions = 0;
@@ -2063,6 +2076,9 @@ function stopReceiver() {
   decodeExceptions = 0;
   lastDecodeError = "";
   lastNativeMetrics = void 0;
+  transportAddCount = 0;
+  transportAddTotalMs = 0;
+  transportAddMaxMs = 0;
   trackingInvalidations = 0;
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
@@ -2726,7 +2742,7 @@ function opticalSampleDue(source) {
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function cloneDirectDecodeFrame(source) {
-  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
   let frame = source.videoFrame;
   if (!frame) {
     try {
@@ -2740,6 +2756,22 @@ function cloneDirectDecodeFrame(source) {
   } catch {
     return null;
   }
+}
+function sampleLockedQrOptics(source, candidates) {
+  if (!opticalSampleDue(source)) return;
+  const target = candidates.find((region) => region.quad && region.dim && region.visibleFraction >= 0.95 && validTrackedQuad(region, source.width, source.height));
+  if (!target) return;
+  const bounds = trackedQuadBounds(target.quad);
+  if (!bounds) return;
+  const pad = 4;
+  const x = Math.max(0, Math.floor(bounds.left - pad));
+  const y = Math.max(0, Math.floor(bounds.top - pad));
+  const right = Math.min(source.width, Math.ceil(bounds.right + pad));
+  const bottom = Math.min(source.height, Math.ceil(bounds.bottom + pad));
+  const w = right - x;
+  const h = bottom - y;
+  if (w < 32 || h < 32) return;
+  inspectStaticQrOptics(source, readBoundedVideoCrop(source, x, y, w, h), x, y);
 }
 
 function captureOptimizerOpticalSample(source) {
@@ -2955,6 +2987,7 @@ async function captureFrame(source) {
   else if (gridLattice.state === "REACQUIRE") {
     for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot !== void 0) regions.splice(i, 1);
     gridShape = "";
+    syncedGridSlots = void 0;
   }
   const live = decodedCount();
   peakRegions = Math.max(peakRegions, live);
@@ -2969,12 +3002,23 @@ async function captureFrame(source) {
     quad: region.quad,
     submitted: false
   }));
-  const gridNeedsDiscovery = visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
+  const lockedGrid = gridLattice.locked;
+  const decodableGridSlots = visibleGridSlots.filter(isGridDecodeCandidate);
+  // Once a packet declares the layout, projected geometry tells us exactly which
+  // cells can physically exist in this camera frame. Offscreen cells are not
+  // missing QRs and never trigger discovery work.
+  if (lockedGrid) {
+    expectedRegions = decodableGridSlots.length;
+    expectedRegionsAt = now;
+  }
+  const gridNeedsDiscovery = decodableGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
   gridLattice.noteMissing(gridNeedsDiscovery, now);
-  const needsRecoveryScan = live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
+  // GRID_LOCK / TRACK / PARTIAL_LOSS are fixed-layout decode states. Generic
+  // detection is only an acquisition/reacquisition operation.
+  const needsRecoveryScan = !lockedGrid && (live === 0 || live < expectedRegions || trackingUnhealthy);
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
-  const captureHasTrackedWork = gridLattice.active ? visibleGridSlots.some((region) => region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const captureHasTrackedWork = lockedGrid ? decodableGridSlots.some((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)) : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const fullScanDue = captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && regions.length === 0) {
     if (trace) {
@@ -2984,11 +3028,6 @@ async function captureFrame(source) {
     activeBenchmarkFrame = void 0;
     return;
   }
-  if (grab.width !== vw || grab.height !== vh) {
-    grab.width = vw;
-    grab.height = vh;
-  }
-  const ctx = grab.getContext("2d", { willReadFrequently: true });
   if (fullScanDue && pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
@@ -2996,6 +3035,11 @@ async function captureFrame(source) {
     return;
   }
   if (fullScanDue) {
+    if (grab.width !== vw || grab.height !== vh) {
+      grab.width = vw;
+      grab.height = vh;
+    }
+    const ctx = grab.getContext("2d", { willReadFrequently: true });
     lastFullScan = now;
     fullScans++;
     const img = source.image ? new ImageData(new Uint8ClampedArray(source.image.data), vw, vh) : (ctx.drawImage(video, 0, 0), ctx.getImageData(0, 0, vw, vh));
@@ -3020,7 +3064,7 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchRegions = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 15);
+  const batchRegions = (lockedGrid ? decodableGridSlots : regions.filter((region) => region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 15);
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
@@ -3029,10 +3073,11 @@ async function captureFrame(source) {
     dim: region.dim,
     crc32: Boolean(region.crc32)
   }));
+  const lockedOpticsDue = lockedGrid && opticalSampleDue(source);
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
   const laneLayout = lockedLayout && (lockedLayout.cols === 3 && lockedLayout.rows === 5 || lockedLayout.cols === 5 && lockedLayout.rows === 3);
-  const healthyTrackedGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
-  if (healthyTrackedGrid && laneLayout && batchTracks.length === 15 && pool.size >= 3) {
+  const hotTrackedGrid = !captureNextScan && lockedGrid && !trackingUnhealthy;
+  if (hotTrackedGrid && laneLayout && batchTracks.length > 0 && pool.size >= 3) {
     const groups = Array.from(
       { length: 3 },
       () => ({ tracks: [], regions: [] })
@@ -3046,12 +3091,16 @@ async function captureFrame(source) {
       groups[groupIndex].tracks.push(track);
       groups[groupIndex].regions.push(region);
     }
-    if (groups.every((group) => group.tracks.length === 5)) {
+    if (groups.some((group) => group.tracks.length)) {
       const freeSlots = new Set(pool.freeSlots);
       let laneJobsSubmitted = 0;
-      activeDecodeBudget = 15;
+      activeDecodeBudget = batchTracks.length;
       for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
         const group = groups[groupIndex];
+        if (!group.tracks.length) {
+          discardPendingGridLane(groupIndex);
+          continue;
+        }
         const workerSlot = [...freeSlots].find((slot) => slot % 3 === groupIndex);
         const points = group.tracks.flatMap((track) => [
           track.quad.topLeft,
@@ -3063,10 +3112,11 @@ async function captureFrame(source) {
         const minY = Math.min(...points.map((point) => point.y));
         const maxX = Math.max(...points.map((point) => point.x));
         const maxY = Math.max(...points.map((point) => point.y));
-        const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
         const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
-        const pad = Math.max(10, Math.round(typicalEdge * (0.14 + Math.min(0.18, worstMisses * 0.04))));
-        const cropQuantum = 16;
+        // Native anchor refinement searches up to roughly +/-6 px. Anything much
+        // beyond that is memory bandwidth the locked decoder cannot use.
+        const pad = Math.max(8, 6 + Math.min(6, worstMisses * 2));
+        const cropQuantum = 2;
         const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
         const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
         const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
@@ -3082,10 +3132,7 @@ async function captureFrame(source) {
         discardPendingGridLane(groupIndex);
         let laneImage;
         const direct = cloneDirectDecodeFrame(source);
-        if (!direct) {
-          laneImage = readBoundedVideoCrop(source, x, y, w, h);
-          if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
-        }
+        if (!direct) laneImage = readBoundedVideoCrop(source, x, y, w, h);
         const id = frameId++;
         const laneMessage = direct
           ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat }
@@ -3112,11 +3159,13 @@ async function captureFrame(source) {
       }
       cropRotate++;
       if (laneJobsSubmitted === 0) poolBusyTimes.push(now);
+      if (lockedOpticsDue && laneJobsSubmitted > 0) sampleLockedQrOptics(source, batchRegions);
       if (trace) trace.stateAfter = gridLattice.state;
       activeBenchmarkFrame = void 0;
       return;
     }
   }
+  clearPendingGridLanes();
   if (batchTracks.length > 1) {
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft,
@@ -3130,8 +3179,9 @@ async function captureFrame(source) {
     const maxY = Math.max(...points.map((point) => point.y));
     const typicalEdge = Math.max(...batchRegions.map((region) => Math.max(region.w, region.h)));
     const worstMisses = Math.max(...batchRegions.map((region) => region.consecutiveMisses));
-    const pad = Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
-    const cropQuantum = 16;
+    const lockedPad = Math.max(8, 6 + Math.min(6, worstMisses * 2));
+    const pad = lockedGrid ? lockedPad : Math.max(12, Math.round(typicalEdge * (0.18 + Math.min(0.28, worstMisses * 0.06))));
+    const cropQuantum = lockedGrid ? 2 : 16;
     const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
     const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
     const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
@@ -3139,22 +3189,21 @@ async function captureFrame(source) {
     const w = right - x;
     const h = bottom - y;
     if (w >= 32 && h >= 32) {
-      const healthyGrid = !captureNextScan && !gridNeedsDiscovery && !trackingUnhealthy;
       const freeWorkers = Math.max(0, pool.size - pool.busyCount);
-      if (healthyGrid && freeWorkers === 0) {
+      if (hotTrackedGrid && freeWorkers === 0) {
         poolBusyTimes.push(now);
         if (trace) trace.decision = "not scheduled: workers busy";
         activeBenchmarkFrame = void 0;
         return;
       }
       let shared;
-      const sharedDirect = healthyGrid ? cloneDirectDecodeFrame(source) : null;
+      const sharedDirect = hotTrackedGrid ? cloneDirectDecodeFrame(source) : null;
       if (!sharedDirect) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
-        inspectStaticQrOptics(source, shared, x, y);
+        if (!lockedGrid) inspectStaticQrOptics(source, shared, x, y);
         captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
       }
-      if (healthyGrid) {
+      if (hotTrackedGrid) {
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
@@ -3199,12 +3248,13 @@ async function captureFrame(source) {
       }
     }
     cropRotate++;
+    if (lockedOpticsDue) sampleLockedQrOptics(source, batchRegions);
     if (trace) trace.stateAfter = gridLattice.state;
     activeBenchmarkFrame = void 0;
     return;
   }
-  const eligible = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate).sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : [...regions];
-  activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
+  const eligible = lockedGrid ? decodableGridSlots.sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : [...regions];
+  activeDecodeBudget = lockedGrid ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
   const perRegionCapacity = Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
@@ -3219,14 +3269,14 @@ async function captureFrame(source) {
     const bottom = (_d = quadBounds == null ? void 0 : quadBounds.bottom) != null ? _d : r.y + r.h;
     const size = Math.max(right - left, bottom - top);
     const missPad = r.gridSlot === void 0 ? 0 : Math.min(0.9, r.consecutiveMisses * 0.08);
-    const pad = Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * ((_e = r.drift) != null ? _e : 0)));
+    const pad = lockedGrid && r.gridSlot !== void 0 ? Math.max(8, 6 + Math.min(6, r.consecutiveMisses * 2)) : Math.round(size * (REGION_PAD + missPad) + Math.min(size, 2 * ((_e = r.drift) != null ? _e : 0)));
     const x = Math.floor(left - pad);
     const y = Math.floor(top - pad);
     const w = Math.ceil(right + pad) - x;
     const h = Math.ceil(bottom + pad) - y;
     if (w < 32 || h < 32) continue;
     const img = readBoundedVideoCrop(source, x, y, w, h);
-    inspectStaticQrOptics(source, img, x, y);
+    if (!lockedGrid) inspectStaticQrOptics(source, img, x, y);
     captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
@@ -3250,6 +3300,7 @@ async function captureFrame(source) {
     poolBusyTimes.push(now);
     if (trace && !trace.jobs.length) trace.decision = "not scheduled: in-flight track limit";
   }
+  if (lockedOpticsDue && submitted) sampleLockedQrOptics(source, scheduledRegions);
   cropRotate++;
   if (trace) trace.stateAfter = gridLattice.state;
   activeBenchmarkFrame = void 0;
@@ -3262,6 +3313,7 @@ function resetActiveTransfer() {
   gridLattice.reset();
   gridShape = "";
   lastGridSnapshot = void 0;
+  syncedGridSlots = void 0;
   activeDecodeBudget = 0;
   expectedRegions = 0;
   expectedRegionsAt = 0;
@@ -3277,6 +3329,9 @@ function resetActiveTransfer() {
   qrReadTimes.length = 0;
   usefulFrameTimes.length = 0;
   lastDistinctArrivalAt = 0;
+  transportAddCount = 0;
+  transportAddTotalMs = 0;
+  transportAddMaxMs = 0;
   bar.style.width = "0";
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
@@ -3420,7 +3475,7 @@ function onDecoded(bytes, box, info) {
         snapshot,
         decodedAt,
         header.slotIndex,
-        { ...info, crc32: true }
+        { ...info, box, crc32: true }
       );
     }
     if (productionTrace) productionTrace.stateAfter = gridLattice.state;
@@ -3438,7 +3493,12 @@ function onDecoded(bytes, box, info) {
   const framesNewBefore = decoder.framesNew;
   const usefulBefore = decoder.usefulSymbols;
   const redundantBefore = decoder.framesRedundant;
+  const transportStarted = performance.now();
   decoder.addFrame(header.seq, block);
+  const transportMs = performance.now() - transportStarted;
+  transportAddCount++;
+  transportAddTotalMs += transportMs;
+  transportAddMaxMs = Math.max(transportAddMaxMs, transportMs);
   const receivedAt = receiverNow();
   noteScanOutcome(
     info == null ? void 0 : info.scanId,
