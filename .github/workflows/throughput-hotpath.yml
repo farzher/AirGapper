@@ -41,6 +41,13 @@ jobs:
           '''
           if old not in s:
               raise SystemExit('rewrite helper definition mismatch')
+          s = s.replace(old, new, 1)
+          old = '''    '          latencyMs: message.latencyMs ?? 0,\\n          error: message.error\\n',
+              '          latencyMs: message.latencyMs ?? 0,\\n          frameCopyMs: message.frameCopyMs ?? 0,\\n          nativeMetrics: message.nativeMetrics,\\n          directFrameFailed: Boolean(message.directFrameFailed),\\n          error: message.error\\n','''
+          new = '''    '          latencyMs: (_h = message.latencyMs) != null ? _h : 0,\\n          symbols,\\n          sightings,\\n          error: message.error\\n',
+              '          latencyMs: (_h = message.latencyMs) != null ? _h : 0,\\n          frameCopyMs: message.frameCopyMs ?? 0,\\n          nativeMetrics: message.nativeMetrics,\\n          directFrameFailed: Boolean(message.directFrameFailed),\\n          symbols,\\n          sightings,\\n          error: message.error\\n','''
+          if old not in s:
+              raise SystemExit('pool metadata rewrite source mismatch')
           p.write_text(s.replace(old, new, 1))
           PY
           python3 .github/rewrite-throughput.py
