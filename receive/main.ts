@@ -657,7 +657,7 @@ const optimizerEpochHooks = {
     const token = optimizeMeasureToken;
     const settleStartedAt = receiverNow();
     while (token === optimizeMeasureToken && latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames &&
-        receiverNow() - settleStartedAt < 1800) {
+        receiverNow() - settleStartedAt < 2600) {
       await new Promise((resolve) => setTimeout(resolve, 8));
     }
     if (token !== optimizeMeasureToken || latestSourceFrameSequence - after < CAMERA_TUNING.exposureDiscardFrames) return undefined;
@@ -709,12 +709,12 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   // Exploration should feel fast. Slow decoder completions may arrive later;
   // camera dwell is based on settled source-frame opportunities, not worker latency.
   const targetFrames = discovery
-    ? phase === "verify" ? 6 : phase === "finalist" ? 4 : phase === "revisit" ? 3 : 2
-    : phase === "verify" ? (singleQr ? 8 : 5)
-      : phase === "finalist" ? (singleQr ? 5 : 4)
-      : phase === "revisit" ? (singleQr ? 4 : 2)
-      : phase === "refine" ? (singleQr ? 3 : 2)
-      : (singleQr ? 3 : usesSimpleDecodeWorker ? 3 : 2);
+    ? phase === "verify" ? 7 : phase === "finalist" ? 5 : phase === "revisit" ? 3 : 2
+    : phase === "verify" ? (singleQr ? 8 : 7)
+      : phase === "finalist" ? (singleQr ? 6 : 5)
+      : phase === "revisit" ? (singleQr ? 5 : 3)
+      : phase === "refine" ? (singleQr ? 4 : 3)
+      : (singleQr ? 4 : usesSimpleDecodeWorker ? 4 : 3);
   const maxBurstMs = discovery
     ? phase === "verify" ? 1200 : phase === "finalist" ? 900 : 650
     : phase === "verify" ? 1200 : phase === "finalist" ? 900 : singleQr ? 750 : 550;
@@ -2992,7 +2992,11 @@ function captureOptimizerProbe(source: ReceiverFrame, trace: BenchmarkFrameTrace
     {
       id, buf: image.data.buffer, w, h, ox: x, oy: y, full: false,
       tracks: usesSimpleDecodeWorker ? undefined : targets,
-      optimizerProbe: true, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
+      // Keep the frozen geometry for apples-to-apples comparison, but use the
+      // SAME fallback budget as production. The previous optimizerProbe=true
+      // path retried every missing QR and could make very dark settings look
+      // artificially good even though normal receiving could not sustain them.
+      optimizerProbe: false, sourceSequence: source.sequence, opticsEpoch: source.opticsEpoch,
     },
     [image.data.buffer], usesSimpleDecodeWorker ? "INDIVIDUAL TRACKED CROP" : "SHARED TRACKED BATCH CROP",
     trace, source.sequence, [], targets.length, source.opticsEpoch,

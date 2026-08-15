@@ -45,7 +45,7 @@ export const CAMERA_TUNING = {
   focusSettleMs: 150,
   focusProbeSamples: 3,
   focusDiscardFrames: 1,
-  exposureDiscardFrames: 3,
+  exposureDiscardFrames: 2,
   exposureExcellent: 0.7,
   seekingOpticalIntervalMs: 110,
   lockedOpticalIntervalMs: 320,
@@ -716,14 +716,16 @@ export class FocusController {
         exposureTime: requested.requestedExposure,
         iso: requested.requestedIso,
       };
-      if (!(await this.applyProbe(generation, patch, false))) return undefined;
 
-      // Android camera providers often resolve applyConstraints before the HAL's
-      // getSettings view catches up. Manual controls tolerate this already; the
-      // optimizer must do the same. Wait briefly for an actual change, re-apply
-      // once if necessary, then use whatever ACTUAL setting the camera reports.
-      // If a request clamps back to the current state, it becomes a duplicate
-      // candidate instead of aborting the whole measurement round.
+      // Android camera providers are not transactional here. Some return false
+      // from applyConstraints even though one or both values are accepted, some
+      // expose the previous values through getSettings for several frames, and
+      // some only accept exposure/ISO reliably when the axes are nudged in two
+      // calls. Never make optimizer measurement availability depend on the
+      // boolean return from a single constraint call. The ACTUAL settings after
+      // a short staged apply are the candidate identity.
+      await this.applyProbe(generation, patch, false);
+
       const requestedChange = before.exposureTime !== requested.requestedExposure || before.iso !== requested.requestedIso;
       const readApplied = async (maxMs: number): Promise<CameraSettings> => {
         const started = performance.now();
@@ -731,17 +733,33 @@ export class FocusController {
         while (this.current(generation) && performance.now() - started < maxMs) {
           if (observed.exposureTime !== undefined && observed.iso !== undefined &&
               (!requestedChange || observed.exposureTime !== before.exposureTime || observed.iso !== before.iso)) return observed;
-          await new Promise((resolve) => setTimeout(resolve, 20));
+          await new Promise((resolve) => setTimeout(resolve, 24));
           observed = this.settings();
         }
         return observed;
       };
-      let actual = await readApplied(220);
+
+      let actual = await readApplied(260);
       if (requestedChange && actual.exposureTime === before.exposureTime && actual.iso === before.iso && this.current(generation)) {
-        await this.applyProbe(generation, patch, false);
-        actual = await readApplied(320);
+        // Mirror the manual-control path: establish manual mode, then let each
+        // numeric axis take effect. applyCameraConstraint preserves the other
+        // desired axis, so these are safe staged retries rather than resets.
+        await this.applyProbe(generation, { exposureMode: "manual" }, false);
+        await this.applyProbe(generation, { exposureTime: requested.requestedExposure }, false);
+        await this.applyProbe(generation, { iso: requested.requestedIso }, false);
+        actual = await readApplied(520);
       }
-      if (actual.exposureTime === undefined || actual.iso === undefined) return undefined;
+      if (actual.exposureTime === undefined || actual.iso === undefined) {
+        // Last-resort baseline measurement: if the camera exposes usable manual
+        // values at all, measure what it actually produced instead of creating a
+        // run with zero samples. This also makes rejected requests collapse to a
+        // duplicate candidate rather than aborting the round.
+        actual = this.settings();
+      }
+      if (actual.exposureTime === undefined || actual.iso === undefined) {
+        this.optimizeReason = "camera never reported usable manual exposure/ISO settings";
+        return undefined;
+      }
 
       const key = `${actual.exposureTime}|${actual.iso}`;
       let candidate = candidates.get(key);
@@ -762,7 +780,11 @@ export class FocusController {
         actualExposure: actual.exposureTime,
         actualIso: actual.iso,
       });
-      return epoch === undefined || !this.current(generation) ? undefined : { candidate, epoch };
+      if (epoch === undefined) {
+        this.optimizeReason = "camera produced no settled source frames for optimizer epoch";
+        return undefined;
+      }
+      return !this.current(generation) ? undefined : { candidate, epoch };
     };
 
     const captureRound = async (
@@ -810,53 +832,56 @@ export class FocusController {
       const exposureLevels = logLevels(exposureRange, 4);
       const isoLevels = logLevels(isoRange, 4);
 
-      // Hardware AE is the BRIGHTNESS CEILING, not the center of the search.
-      // Field testing on multiple phones consistently finds the QR optimum
-      // darker than default AE. Keep high ISO available, but only when paired
-      // with a proportionally shorter shutter so total exposure stays at or
-      // below the Auto baseline.
-      const autoSignal = Math.max(Number.MIN_VALUE, autoExposure * autoIso);
-      const darkestEv = -1.8; // Stay in the empirically useful darker-than-Auto band.
-      const brightnessEv = (candidate: Candidate): number =>
-        Math.log2(Math.max(Number.MIN_VALUE, candidate.exposure * candidate.iso) / autoSignal);
-      const inBrightnessBand = (candidate: Candidate): boolean => {
-        const ev = brightnessEv(candidate);
-        // Tiny tolerance is only for camera quantization. No deliberate setting
-        // may be brighter than hardware Auto.
-        return ev <= 0.01 && ev >= darkestEv - 0.08;
+      // Field testing says the useful region is normally reached by shortening
+      // the hardware-AE shutter, often while increasing ISO. Do NOT model image
+      // brightness as exposureTime*ISO: Android camera gain curves are not
+      // photometrically comparable that way, and it incorrectly excludes known
+      // good short-shutter/high-ISO states. Instead search a compact wedge:
+      // never use a longer shutter than Auto, never go into the extremely-dark
+      // shutter tail, and only pair very high ISO with substantially shorter
+      // shutter times. This removes the obviously silly long-shutter/high-ISO
+      // corner without imposing a fake brightness equation.
+      const minimumExposure = this.quantize(Math.max(exposureRange.min, autoExposure * 0.22), exposureRange);
+      const allowed = (candidate: Candidate): boolean => {
+        if (candidate.exposure > autoExposure * 1.01 || candidate.exposure < minimumExposure * 0.99) return false;
+        const shutterRatio = candidate.exposure / Math.max(exposureRange.min, autoExposure);
+        const isoRatio = candidate.iso / Math.max(isoRange.min, autoIso);
+        if (shutterRatio > 0.82 && isoRatio > 1.35) return false;
+        if (shutterRatio > 0.58 && isoRatio > 2.5) return false;
+        return true;
       };
 
-      // Search constant-brightness bands instead of a rectangular E×ISO grid.
-      // This eliminates dumb long-shutter + high-gain combinations while still
-      // testing the useful shutter/gain trade-off across each brightness level.
-      const targetBrightnessEvs = [-0.35, -0.95, -1.65];
+      const exposureRatios = [1, 0.62, 0.4, 0.26];
+      const midIso = this.quantize(Math.sqrt(Math.max(isoRange.min, autoIso) * isoRange.max), isoRange);
       const isoAnchors = [
         this.quantize(isoRange.min, isoRange),
         this.quantize(autoIso, isoRange),
+        midIso,
         this.quantize(isoRange.max, isoRange),
       ].filter((value, index, all) => all.indexOf(value) === index);
 
       let coarse: Candidate[] = [incumbent];
-      for (const ev of targetBrightnessEvs) {
-        const targetSignal = autoSignal * 2 ** ev;
+      for (const ratio of exposureRatios) {
+        const exposure = this.quantize(Math.max(minimumExposure, autoExposure * ratio), exposureRange);
         for (const iso of isoAnchors) {
-          const exposure = this.quantize(targetSignal / iso, exposureRange);
           const candidate = make(exposure, iso);
-          if (inBrightnessBand(candidate)) coarse.push(candidate);
+          if (allowed(candidate)) coarse.push(candidate);
         }
       }
       coarse = coarse.filter((candidate, index, all) => all.indexOf(candidate) === index);
       for (const candidate of coarse) candidate.coarseGrid = true;
 
       this.exposureProbes += Math.max(0, coarse.length - 1);
-      this.optimizeDecision = "fast darker-than-Auto sweep";
+      this.optimizeDecision = "fast short-shutter exposure/ISO sweep";
       await captureRound(coarse, "coarse");
       if (!this.current(generation)) return;
 
       const measured = [...new Set(coarse)].filter((candidate) => candidate.windows.length);
       if (!measured.length) {
         this.optimizeState = "paused";
-        this.optimizeReason = "camera produced no optimizer measurements";
+        if (!this.optimizeReason || this.optimizeReason === "idle") {
+          this.optimizeReason = "camera produced no optimizer measurements";
+        }
         return;
       }
 
@@ -904,7 +929,7 @@ export class FocusController {
         const localIso = neighborValues(isoLevels, winner.iso, isoRange);
         const refinements = localIso.flatMap((iso) => localExposure.map((exposure) => make(exposure, iso)))
           .filter((candidate, index, all) =>
-            candidate !== winner && !candidate.windows.length && inBrightnessBand(candidate) && all.indexOf(candidate) === index)
+            candidate !== winner && !candidate.windows.length && allowed(candidate) && all.indexOf(candidate) === index)
           .sort((a, b) => {
             const da = Math.hypot(Math.log2(a.exposure / winner.exposure), Math.log2(a.iso / winner.iso));
             const db = Math.hypot(Math.log2(b.exposure / winner.exposure), Math.log2(b.iso / winner.iso));
