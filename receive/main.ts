@@ -211,8 +211,11 @@ function applyCameraConstraint(track: MediaStreamTrack, patch: CameraPatch): Pro
   const enteringManualFocus = patch.focusMode === "manual" && desiredCamera.focusMode !== "manual";
   const enteringManualExposure = patch.exposureMode === "manual" && desiredCamera.exposureMode !== "manual";
   if (patch.exposureMode === "continuous") {
+    // Continuous AE owns shutter and gain. Never carry a stale manual ISO or
+    // exposure value across this mode boundary.
     delete desiredCamera.exposureTime;
-    if (patch.iso === undefined) delete desiredCamera.iso;
+    delete desiredCamera.iso;
+    if (patch.exposureCompensation === undefined) delete desiredCamera.exposureCompensation;
   }
   if (patch.exposureMode === "manual") delete desiredCamera.exposureCompensation;
   Object.assign(desiredCamera, patch);
@@ -696,9 +699,20 @@ async function measureReceivePerformance(label: string, epochId: number): Promis
   if (!epoch || epoch.id !== epochId) throw new Error("Optimizer candidate epoch is not active");
   const startedAt = receiverNow();
   const multiQr = optimizerFixedTargets.length > 1;
-  const coarse = label.startsWith("coarse");
-  const targetFrames = coarse ? (usesSimpleDecodeWorker && multiQr ? 4 : 3) : multiQr ? 4 : 5;
-  const maxBurstMs = coarse ? (usesSimpleDecodeWorker ? 900 : 650) : multiQr ? 800 : 900;
+  const singleQr = !multiQr;
+  const phase = label.split("·", 1)[0]!.trim().toLowerCase();
+  const targetFrames = phase === "verify"
+    ? (singleQr ? 14 : 8)
+    : phase === "finalist"
+      ? (singleQr ? 8 : 5)
+      : phase === "refine"
+        ? (singleQr ? 5 : 3)
+        : phase === "revisit"
+          ? (singleQr ? 5 : 3)
+          : (singleQr ? 4 : usesSimpleDecodeWorker ? 4 : 2);
+  const maxBurstMs = phase === "verify" ? 1600
+    : phase === "finalist" ? 1200
+      : singleQr ? 900 : 700;
   const evidence: CandidateEvidence = {
     epoch: epochId, startedAt, closedAt: 0, submittedJobs: 0, completedJobs: 0,
     sourceFrames: new Set(), successfulSourceFrames: new Set(),
@@ -793,7 +807,7 @@ function beginOptimizeWhenReady(): void {
       optimizeConverged = true;
       const performance = finished.optimizeBestPerformance;
       opticsOptimizeStatus.textContent = performance
-        ? `${performance.validDecodesPerSecond.toFixed(1)} symbols/s · ${(performance.perQrAttemptSuccessRate * 100).toFixed(0)}% · ${performance.captureFps.toFixed(1)} fps`
+        ? `${performance.validDecodesPerSecond.toFixed(1)} QR/s · ${formatExposureMs(finished.committedExposureTime)} · ISO ${finished.committedIso ?? "—"}`
         : "Optimal";
       opticsOptimizeStatus.title = finished.optimizeSummary ?? "";
       opticsKeep.hidden = false;
@@ -1471,7 +1485,30 @@ function syncExposureControls(): void {
 }
 async function applyExposureSetting(track: MediaStreamTrack): Promise<void> {
   const generation = ++exposureApplyGeneration;
-  if (automaticOptics) return;
+  if (automaticOptics) {
+    // A global Manual → Auto transition must clear every manual exposure value
+    // from both our desired state and the Android HAL. Merely observing
+    // exposureMode="continuous" is not enough: some providers retain the old
+    // manual gain for several frames.
+    delete desiredCamera.exposureTime;
+    delete desiredCamera.iso;
+    delete desiredCamera.exposureCompensation;
+    desiredCamera.exposureMode = "continuous";
+    const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
+      exposureMode?: string[];
+      exposureCompensation?: { min: number; max: number };
+    };
+    const patch: CameraPatch = { exposureMode: "continuous" };
+    if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
+      patch.exposureCompensation = 0;
+    }
+    await applyCameraConstraint(track, patch);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
+    const actual = track.getSettings() as MediaTrackSettings & CameraPatch;
+    if (actual.exposureMode !== "continuous") await applyCameraConstraint(track, patch);
+    return;
+  }
   if (automaticExposureAxis && automaticIsoAxis) {
     await applyCameraConstraint(track, { exposureMode: "continuous" });
     return;
@@ -1784,7 +1821,7 @@ function renderFocusDiagnostics(): void {
   beginOptimizeWhenReady();
   const mutation = lastCameraMutation;
   const candidateTable = diagnostic.optimizeCandidates.map((candidate, index) =>
-    `${index === 0 ? "*" : " "} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.qrAttempts} opp · ${candidate.validDecodes} valid · ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)} symbols/s · source ${(candidate.successfulSourceFrames / Math.max(1, candidate.sourceFrames) * 100).toFixed(0)}% · complete ${(candidate.completionCoverage * 100).toFixed(0)}% · ${candidate.state}`,
+    `${index === 0 ? "*" : " "} ${formatExposureMs(candidate.exposure)} · ISO ${candidate.iso} · v${candidate.visits} · ${candidate.sourceFrames}f · ${candidate.qrAttempts} opp · ${candidate.validDecodes} valid · ${(candidate.successRate * 100).toFixed(0)}% · ${candidate.normalizedQrRate.toFixed(1)} QR/s · source ${(candidate.successfulSourceFrames / Math.max(1, candidate.sourceFrames) * 100).toFixed(0)}% · complete ${(candidate.completionCoverage * 100).toFixed(0)}% · ${candidate.state}`,
   ).join("\n");
   const coarseCandidates = diagnostic.optimizeCandidates.filter((candidate) => candidate.coarseGrid);
   const matrixExposures = [...new Set(coarseCandidates.map((candidate) => candidate.exposure))].sort((a, b) => a - b);
@@ -1835,8 +1872,8 @@ function renderFocusDiagnostics(): void {
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
     `Race     survivors ${diagnostic.optimizeSurvivors ?? "—"} · decision ${diagnostic.optimizeDecision ?? "—"}${diagnostic.optimizeComparison ? ` · ${diagnostic.optimizeComparison} · ${diagnostic.optimizePairedSamples} paired` : ""}`,
     `Steps    signal Δ ${diagnostic.optimizeExposureStepEV?.toFixed(2) ?? "—"} EV · shutter Δ ${diagnostic.optimizeShutterStepEV?.toFixed(2) ?? "—"} EV`,
-    diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} valid symbols/s · ${diagnostic.optimizeCandidatePerformance.usefulSymbolsPerSecond.toFixed(1)} useful/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${diagnostic.optimizeCandidatePerformance.captureFps.toFixed(1)} camera FPS` : "",
-    diagnostic.optimizeBestPerformance ? `Winner   ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} valid symbols/s · ${(diagnostic.optimizeBestPerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${diagnostic.optimizeBestPerformance.captureFps.toFixed(1)} camera FPS · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
+    diagnostic.optimizeCandidatePerformance ? `Candidate ${diagnostic.optimizeCandidatePerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${(diagnostic.optimizeCandidatePerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity` : "",
+    diagnostic.optimizeBestPerformance ? `Winner   ${diagnostic.optimizeBestPerformance.validDecodesPerSecond.toFixed(1)} QR/s · ${(diagnostic.optimizeBestPerformance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${formatExposureMs(diagnostic.committedExposureTime)} · ISO ${diagnostic.committedIso ?? "—"}` : "",
     diagnostic.optimizeReason ? `Search   ${diagnostic.optimizeReason}` : "",
     diagnostic.optimizeExposureVisited ? `Cartesian coverage ${coarseCandidates.length}/25 actual cells · exposure ${formatExposureMs(diagnostic.optimizeExposureVisited.min)}–${formatExposureMs(diagnostic.optimizeExposureVisited.max)} · ISO ${diagnostic.optimizeIsoVisited?.min}–${diagnostic.optimizeIsoVisited?.max}` : "",
     `Attribution submitted ${optimizerJobsSubmittedTotal} · mapped ${optimizerJobsMappedTotal} · completions mapped ${optimizerCompletionsMappedTotal} · unattributed ${optimizerUnattributedResults} · epoch mismatches ${optimizerEpochMismatches} · duplicate valid events ${optimizerDuplicateValidEvents} · transition frames ${optimizerTransitionFramesDiscarded}`,
@@ -1845,7 +1882,7 @@ function renderFocusDiagnostics(): void {
     optimizerTrace.length ? `Optimizer trace\n${optimizerTrace.slice(-20).map((event) =>
       `${event.time.toFixed(0)} ${event.event} ${event.candidateId ?? "—"} ep${event.candidateEpoch ?? "—"} src${event.sourceSequence ?? "—"} scan${event.scanId ?? "—"} E${event.actualExposure ?? event.requestedExposure ?? "—"} ISO${event.actualIso ?? event.requestedIso ?? "—"} valid:${event.validDecode === undefined ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === undefined ? "—" : event.usefulSymbol ? "yes" : "no"}`,
     ).join("\n")}` : "",
-    manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} symbols/s · ${manualMeasured.performance.captureFps.toFixed(1)} camera FPS` : `${manualQrRate.toFixed(1)} live valid symbols/s · controlled measurement pending`}\nClosest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} symbols/s\n${manualVerdict}` : "",
+    manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} QR/s` : `${manualQrRate.toFixed(1)} live QR/s · controlled measurement pending`}\nClosest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s\n${manualVerdict}` : "",
     `Analyzer ${(opticalAnalyzeCount / Math.max(0.001, (performance.now() - opticalTimingStartedAt) / 1000)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${mutation?.kind ?? "—"}`,
@@ -2148,7 +2185,7 @@ function stopReceiver(): void {
   bar.classList.remove("error");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
-  metric("m-dec").textContent = "— symbols/s";
+  metric("m-dec").textContent = "— QR/s";
   metric("m-limit").textContent = "";
   metric("m-rate").textContent = "👀";
   speedFeedback.className = "speed-feedback";
@@ -4353,7 +4390,7 @@ function updateStats() {
   const scanRate = perSecond(scanCompletionTimes);
   const qrRate = perSecond(qrReadTimes);
   metric("m-cap").textContent = `${scanRate.toFixed(1)} fps`;
-  metric("m-dec").textContent = `${qrRate.toFixed(1)} valid symbols/s`;
+  metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS &&
     scanRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");

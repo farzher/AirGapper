@@ -1,7 +1,7 @@
 {
   "name": "airgapper",
   "private": true,
-  "version": "0.5.27",
+  "version": "0.5.28",
   "description": "Offline file and text transfer using RaptorQ animated QR codes.",
   "type": "module",
   "scripts": {
