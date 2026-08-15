@@ -145,9 +145,12 @@ function selectedWorkerCount() {
 }
 let strictHotPathEnabled = false;
 let strictHotPathLockSeen = false;
+let hotPathAuditGeneration = 0;
+const hotPathJobMode = new Map();
 strictHotPathToggle.addEventListener("change", () => {
   strictHotPathEnabled = strictHotPathToggle.checked;
   strictHotPathLockSeen = false;
+  hotPathAuditGeneration++;
   resetHotPathAudit();
 });
 function strictHotPathActive() {
@@ -1109,6 +1112,8 @@ const hotPathAudit = {
   bitstreamFailures: 0,
   crcFailures: 0,
   multiSampleRetries: 0,
+  anchorBypassAttempts: 0,
+  anchorBypassSuccesses: 0,
   pixelAuditTracks: 0,
   pixelAuditCrcFast: 0,
   pixelAuditMisses: 0,
@@ -1158,6 +1163,13 @@ function noteSequence(region, seq, now) {
 }
 function noteDecodeCompleted(id, completion) {
   var _a;
+  const auditMode = hotPathJobMode.get(id);
+  hotPathJobMode.delete(id);
+  const auditThisCompletion = Boolean(
+    auditMode &&
+    auditMode.generation === hotPathAuditGeneration &&
+    auditMode.strict === strictHotPathEnabled
+  );
   const benchmarkTrace = benchmarkJobFrames.get(id);
   const benchmarkJob = benchmarkTrace == null ? void 0 : benchmarkTrace.jobs.find((job) => job.id === id);
   if (benchmarkJob) {
@@ -1222,6 +1234,8 @@ function noteDecodeCompleted(id, completion) {
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.nativeMetrics) {
     lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
+  }
+  if (auditThisCompletion && completion.nativeMetrics) {
     hotPathAudit.trackedJobs++;
     hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
     hotPathAudit.nativeSuccessful += completion.nativeMetrics.successful ?? 0;
@@ -1235,9 +1249,11 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
     hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
     hotPathAudit.multiSampleRetries += completion.nativeMetrics.multiSampleRetries ?? 0;
+    hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;
+    hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;
   }
-  hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
-  if (completion.pixelAudit) {
+  if (auditThisCompletion) hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
+  if (auditThisCompletion && completion.pixelAudit) {
     hotPathAudit.pixelAuditTracks += completion.pixelAudit.tracks ?? 0;
     hotPathAudit.pixelAuditCrcFast += completion.pixelAudit.crcFastSuccesses ?? 0;
     hotPathAudit.pixelAuditMisses += completion.pixelAudit.misses ?? 0;
@@ -1246,11 +1262,11 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.pixelAuditBitstreamFailures += completion.pixelAudit.bitstreamFailures ?? 0;
     hotPathAudit.pixelAuditCrcFailures += completion.pixelAudit.crcFailures ?? 0;
   }
-  if (completion.fallbackAttempted) {
+  if (auditThisCompletion && completion.fallbackAttempted) {
     hotPathAudit.localRecoveryAttempts++;
     if (completion.fallbackSucceeded) hotPathAudit.localRecoverySuccesses++;
   }
-  if (completion.full) {
+  if (auditThisCompletion && completion.full) {
     hotPathAudit.fullScanJobs++;
     if (completion.symbolCount > 0) hotPathAudit.fullScanSuccesses++;
     if (fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
@@ -2721,8 +2737,10 @@ function readBoundedVideoCrop(source, x, y, w, h) {
   return ctx.getImageData(0, 0, w, h);
 }
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
+  const auditMode = { generation: hotPathAuditGeneration, strict: Boolean(message.strictHotPath) };
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
+    hotPathJobMode.set(message.id, auditMode);
     const submittedAt = receiverNow();
     scanCapturedAt.set(message.id, submittedAt);
     if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
@@ -4622,6 +4640,7 @@ Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fast
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
 Threshold local fallback ${hotPathAudit.thresholdFallbacks} · multisample retries ${hotPathAudit.multiSampleRetries}
+Anchor bypass CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Pixel A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;

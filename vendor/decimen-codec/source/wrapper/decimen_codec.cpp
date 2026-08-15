@@ -699,19 +699,23 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 		++track.framesSinceReacquire;
 
 		AnchorReading anchor;
+		const float trustedDx = track.dx, trustedDy = track.dy;
 		double started = emscripten_get_now();
-		bool anchored = refineAnchor(track, lumAt, anchor);
+		const bool anchored = refineAnchor(track, lumAt, anchor);
 		measured.anchorMs += emscripten_get_now() - started;
-		if (!anchored) {
-			++track.consecutiveMisses;
-			++measured.misses;
+		if (anchored) {
+			++measured.anchorSuccesses;
+		} else {
+			// Finder scoring is only a cheap motion/refinement heuristic. The
+			// cached geometry can still be exact even when raw camera luminance
+			// makes the 7x7 finder template score poorly. Do not reject the QR
+			// before sampling it; restore the last trusted translation and let
+			// the no-RS bitstream + CRC be the correctness oracle.
 			++measured.anchorMisses;
-			result.consecutiveMisses = track.consecutiveMisses;
-			result.framesSinceReacquire = track.framesSinceReacquire;
-			continue;
+			++measured.anchorBypassAttempts;
+			track.dx = trustedDx;
+			track.dy = trustedDy;
 		}
-
-		++measured.anchorSuccesses;
 		const int dim = track.dimension;
 		const auto thresholds = buildTrackThresholds(track, lumAt);
 		if (!thresholds.ok) ++measured.thresholdFallbacks;
@@ -828,6 +832,9 @@ static int decodeBatch(TrackedDecoder& decoder, const LumAt& lumAt, DecimenTrack
 				}
 			}
 		}
+		if (!packet.empty() && !anchored)
+			++measured.anchorBypassSuccesses;
+
 		if (packet.empty()) {
 			++track.consecutiveMisses;
 			++measured.misses;
