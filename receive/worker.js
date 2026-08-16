@@ -49,6 +49,13 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
+// Each worker receives successive camera frames over time. A robust QR scan can
+// seed the exact quads for that worker, after which the persistent native
+// tracked decoder gets first refusal on later frames. This keeps the expensive
+// generic finder as recovery rather than the production steady-state decoder.
+let nativeSeeded = false;
+let nativePoorStreak = 0;
+let nativeProbeCooldown = 0;
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -131,6 +138,25 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeConfigured.length = tracks.length;
   nativeCropOrigin = origin;
   return byId;
+}
+function seedNativeFromRobust(zx, tracks, symbols, ox, oy) {
+  const quadsBySlot = /* @__PURE__ */ new Map();
+  for (const symbol of symbols) {
+    const slot = symbol.header?.slotIndex;
+    if (slot !== void 0 && validQuad(symbol.quad)) quadsBySlot.set(slot, symbol.quad);
+  }
+  let matched = 0;
+  const seededTracks = tracks.map((track, index) => {
+    nativeRefresh.add(index);
+    const quad = track.slot === void 0 ? void 0 : quadsBySlot.get(track.slot);
+    if (!quad) return track;
+    matched++;
+    return { ...track, quad };
+  });
+  const configured = configureNativeBatch(zx, seededTracks, ox, oy);
+  const needed = tracks.length <= 2 ? 1 : Math.ceil(tracks.length * 0.5);
+  nativeSeeded = Boolean(configured && matched >= needed);
+  return nativeSeeded;
 }
 function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
@@ -258,7 +284,10 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
+    const trackedBatch = !full && Array.isArray(tracks) && tracks.length > 0;
+    if (nativeProbeCooldown > 0) nativeProbeCooldown--;
+    const tryNativeTracked = trackedBatch && (strictHotPath || nativeSeeded && nativeProbeCooldown === 0);
+    const robustLaneFirst = !strictHotPath && trackedBatch && !tryNativeTracked && (usedDirectFrame || pixelFormat === "rgba");
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
@@ -470,12 +499,14 @@ ctx.onmessage = async (e) => {
             box: boundsOf(result.position, ox, oy),
             quad: shifted(result.position, ox, oy),
             modules: result.modules,
-            tracked: false
+            tracked: false,
+            header: packet.header
           });
         }
       } finally {
         decoded.delete();
       }
+      if (!strictHotPath) seedNativeFromRobust(zx, tracks, symbols, ox, oy);
       mapOutputToDisplay();
       ctx.postMessage({
         id,
@@ -508,7 +539,14 @@ ctx.onmessage = async (e) => {
         inputStride
       );
       const nativeSymbols = native?.symbols ?? [];
-      const robustFallback = robustTrackedRecovery && nativeSymbols.length < tracks.length;
+      const nativeRequired = tracks.length <= 2 ? tracks.length : Math.ceil(tracks.length * 0.75);
+      const nativeHealthy = nativeSymbols.length >= nativeRequired;
+      const robustFallback = !strictHotPath && !nativeHealthy;
+      if (nativeHealthy) {
+        nativeSeeded = true;
+        nativePoorStreak = 0;
+        nativeProbeCooldown = 0;
+      }
       if (!robustFallback && (native || usedDirectFrame)) {
         ownedVideoFrame?.close();
         ownedVideoFrame = null;
@@ -574,12 +612,21 @@ ctx.onmessage = async (e) => {
             box: boundsOf(recoveredPosition, ox, oy),
             quad: shifted(recoveredPosition, ox, oy),
             modules: result.modules,
-            tracked: false
+            tracked: false,
+            header: packet.header
           });
         }
       } finally {
         decoded.delete();
       }
+      const robustSymbols = symbols.filter((symbol) => !symbol.tracked);
+      const reseeded = seedNativeFromRobust(zx, tracks, robustSymbols, ox, oy);
+      nativePoorStreak++;
+      // A same-frame robust refresh gets one immediate retry. If the native
+      // path still cannot sustain useful coverage, spend a few frames on the
+      // known-good robust decoder before probing it again instead of taxing
+      // every frame with a losing fast-path attempt.
+      nativeProbeCooldown = !reseeded ? 4 : nativePoorStreak >= 2 ? 3 : 0;
       mapOutputToDisplay();
       ctx.postMessage({
         id,
