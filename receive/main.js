@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.94";
+const RECEIVER_RUNTIME_BUILD = "v0.5.95";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2058,7 +2058,9 @@ function renderFocusDiagnostics() {
   const transportMetadataBytes = decoder ? frameOverhead(decoder.mode) + packetInternalBytes : 0;
   const transportFrameBytes = decoder ? decoder.blockLen + frameOverhead(decoder.mode) : 0;
   const transportSourceBytes = decoder ? decoder.blockLen - packetInternalBytes : 0;
-  const pumpDetail = `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
+  const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
+    ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
+    : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
   const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
@@ -2313,7 +2315,11 @@ function offerRetry(message) {
   progressEl.style.display = "block";
   showError(message);
 }
-let framePumpMode = "requestVideoFrameCallback";
+let frameTrackProcessor = null;
+let frameTrackReader = null;
+let framePumpMode = "—";
+let framePumpProcessorTotal = 0;
+let framePumpProcessorDiscarded = 0;
 let rvfcLastPresentedFrames = 0;
 let rvfcSkippedFrames = 0;
 let overlayDrawQueued = false;
@@ -2325,6 +2331,21 @@ function queueOverlayDraw() {
     if (!done && stream) drawOverlay(receiverNow());
   });
 }
+function stopFramePump() {
+  const reader = frameTrackReader;
+  frameTrackReader = null;
+  frameTrackProcessor = null;
+  framePumpMode = "—";
+  framePumpProcessorTotal = 0;
+  framePumpProcessorDiscarded = 0;
+  rvfcLastPresentedFrames = 0;
+  rvfcSkippedFrames = 0;
+  if (reader) {
+    void reader.cancel().catch(() => void 0).finally(() => {
+      try { reader.releaseLock(); } catch {}
+    });
+  }
+}
 function stopReceiver() {
   cameraStartGen++;
   focusController.detach();
@@ -2333,6 +2354,7 @@ function stopReceiver() {
   pauseStartedAt = 0;
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
+  stopFramePump();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -2392,8 +2414,6 @@ function stopReceiver() {
   peakRegions = 0;
   capturesDropped = 0;
   cameraStartedTs = 0;
-  rvfcLastPresentedFrames = 0;
-  rvfcSkippedFrames = 0;
   lastOpticalSampleAt = -Infinity;
   lastOpticalSourceSequence = -1;
   opticalAnalyzeCount = 0;
@@ -2448,6 +2468,7 @@ function pauseReceiver() {
   cameraStartGen++;
   captureGen++;
   releaseScreenWakeLock();
+  stopFramePump();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -2587,8 +2608,7 @@ async function start() {
   pool.resize(selectedWorkerCount());
   cameraStartedTs = receiverNow();
   captureGen++;
-  framePumpMode = "requestVideoFrameCallback";
-  scheduleFrame(captureGen);
+  startFramePump(captureGen, activeTrack);
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
@@ -2698,11 +2718,53 @@ function processSourceFrame(frame, gen) {
     queueOverlayDraw();
   });
 }
+async function pumpTrackFrames(gen, reader, processor) {
+  try {
+    while (!done && gen === captureGen && frameTrackReader === reader) {
+      const { value, done: ended } = await reader.read();
+      if (ended) break;
+      if (!value) continue;
+      if (done || gen !== captureGen || frameTrackReader !== reader) {
+        value.close();
+        break;
+      }
+      framePumpProcessorTotal = Number(processor.totalFrames ?? framePumpProcessorTotal + 1);
+      framePumpProcessorDiscarded = Number(processor.discardedFrames ?? framePumpProcessorDiscarded);
+      processSourceFrame(sourceFrameMeta(value), gen);
+    }
+  } catch (error) {
+    if (done || gen !== captureGen || frameTrackReader !== reader) return;
+    console.warn("MediaStreamTrackProcessor frame pump failed; falling back to requestVideoFrameCallback", error);
+    try { reader.releaseLock(); } catch {}
+    frameTrackReader = null;
+    frameTrackProcessor = null;
+    framePumpMode = "rVFC fallback";
+    scheduleFrame(gen);
+  }
+}
+function startFramePump(gen, track) {
+  stopFramePump();
+  if (track && typeof MediaStreamTrackProcessor === "function") {
+    try {
+      const processor = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 });
+      const reader = processor.readable.getReader();
+      frameTrackProcessor = processor;
+      frameTrackReader = reader;
+      framePumpMode = "MediaStreamTrackProcessor";
+      void pumpTrackFrames(gen, reader, processor);
+      return;
+    } catch (error) {
+      console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);
+    }
+  }
+  framePumpMode = "rVFC fallback";
+  scheduleFrame(gen);
+}
 function scheduleFrame(gen) {
   if (done || gen !== captureGen) return;
   const v = video;
   const next = (callbackTime = performance.now(), metadata = {}) => {
-    if (done || gen !== captureGen) return;
+    if (done || gen !== captureGen || framePumpMode === "MediaStreamTrackProcessor") return;
     scheduleFrame(gen);
     const presented = Number(metadata.presentedFrames);
     if (Number.isFinite(presented) && presented > 0) {
@@ -2720,10 +2782,6 @@ function scheduleFrame(gen) {
 }
 const grab = document.createElement("canvas");
 const replaySourceCanvas = document.createElement("canvas");
-const LOCKED_BITMAP_CAPTURE = typeof createImageBitmap === "function" && typeof OffscreenCanvas !== "undefined";
-let lockedBitmapPending = 0;
-let lockedBitmapSubmitted = 0;
-let lockedBitmapDropped = 0;
 let minimumAcceptedScanId = 0;
 let captureNextScan = false;
 let scanCaptureTimer;
@@ -2923,60 +2981,6 @@ function finishScanCapture(id, completion) {
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
   if (!scanDialog.open) scanDialog.showModal();
 }
-function cloneTrackSnapshot(track) {
-  const clonePoint = (point) => ({ x: point.x, y: point.y });
-  return {
-    ...track,
-    quad: {
-      topLeft: clonePoint(track.quad.topLeft),
-      topRight: clonePoint(track.quad.topRight),
-      bottomRight: clonePoint(track.quad.bottomRight),
-      bottomLeft: clonePoint(track.quad.bottomLeft)
-    }
-  };
-}
-function submitLockedBitmapCrop(source, x, y, w, h, tracks, trackedRegions) {
-  if (!LOCKED_BITMAP_CAPTURE || replayRunning || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source)) return "ineligible";
-  const freeWorkers = Math.max(0, pool.size - pool.busyCount);
-  if (freeWorkers <= lockedBitmapPending) return "busy";
-  const generation = captureGen;
-  const sourceSequence = source.sequence;
-  const trackSnapshot = tracks.map(cloneTrackSnapshot);
-  const regionSnapshot = [...trackedRegions];
-  const attemptSnapshot = regionSnapshot.map((region, index) => ({ region, quad: trackSnapshot[index]?.quad ?? region.quad }));
-  const strictHotPath = strictHotPathActive();
-  lockedBitmapPending++;
-  void createImageBitmap(video, x, y, w, h).then((bitmap) => {
-    lockedBitmapPending = Math.max(0, lockedBitmapPending - 1);
-    if (done || generation !== captureGen) {
-      lockedBitmapDropped++;
-      bitmap.close();
-      return;
-    }
-    const id = frameId++;
-    cropAttempts.set(id, attemptSnapshot);
-    const accepted = submitReceiverJob(
-      { id, bitmap, w, h, ox: x, oy: y, full: false, tracks: trackSnapshot, strictHotPath },
-      [bitmap],
-      "BITMAP TRACKED GRID",
-      void 0,
-      sourceSequence,
-      regionSnapshot
-    );
-    if (!accepted) {
-      cropAttempts.delete(id);
-      lockedBitmapDropped++;
-      poolBusyTimes.push(receiverNow());
-      bitmap.close();
-      return;
-    }
-    lockedBitmapSubmitted++;
-  }).catch(() => {
-    lockedBitmapPending = Math.max(0, lockedBitmapPending - 1);
-    lockedBitmapDropped++;
-  });
-  return "submitted";
-}
 function readBoundedVideoCrop(source, x, y, w, h) {
   if (grab.width < w) grab.width = w;
   if (grab.height < h) grab.height = h;
@@ -3158,7 +3162,41 @@ function opticalSampleDue(source) {
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function cloneVideoFrame(source, forceRgba = false) {
-  return null;
+  let frame = source.videoFrame;
+  if (!frame) {
+    try {
+      frame = source.videoFrame = new VideoFrame(video);
+    } catch {
+      return null;
+    }
+  }
+  const visible = frame.visibleRect;
+  const rotation = Number(frame.rotation ?? 0) % 360;
+  const scaleX = visible && source.width ? visible.width / source.width : 0;
+  const scaleY = visible && source.height ? visible.height / source.height : 0;
+  const coordinateMapSafe = Boolean(
+    visible && source.width > 0 && source.height > 0 &&
+    frame.displayWidth === source.width && frame.displayHeight === source.height &&
+    Number.isFinite(scaleX) && scaleX > 0 && Number.isFinite(scaleY) && scaleY > 0 &&
+    rotation === 0 && !frame.flip
+  );
+  const sameGrid = coordinateMapSafe && visible.x === 0 && visible.y === 0 && scaleX === 1 && scaleY === 1;
+  const mapLabel = !coordinateMapSafe ? "canvas fallback" : sameGrid ? "direct" : `direct map ${scaleX.toFixed(2)}×${scaleY.toFixed(2)}`;
+  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${visible ? `${visible.x},${visible.y} ${visible.width}×${visible.height}` : "—"} visible · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"} · ${mapLabel}`;
+  if (!coordinateMapSafe) return null;
+  try {
+    return {
+      frame: frame.clone(),
+      pixelFormat: forceRgba ? "video-rgba" : DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba",
+      visibleX: visible.x,
+      visibleY: visible.y,
+      scaleX,
+      scaleY,
+      sameGrid
+    };
+  } catch {
+    return null;
+  }
 }
 function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   const direct = cloneDirectDecodeFrame(source);
@@ -3364,36 +3402,11 @@ function captureOptimizerProbe(source, trace) {
     source.opticsEpoch
   );
 }
-function resetTrackingForSourceGeometryChange() {
-  minimumAcceptedScanId = frameId;
-  regions.length = 0;
-  gridLattice.reset();
-  gridShape = "";
-  lastGridSnapshot = void 0;
-  activeDecodeBudget = 0;
-  expectedRegions = 0;
-  expectedRegionsAt = 0;
-  lastDecodedRegionSize = 0;
-  lastFullScan = -Infinity;
-  cropAttempts.clear();
-  fullScanIds.clear();
-  fullScanJobs.clear();
-  localReacquireIds.clear();
-  scanCapturedAt.clear();
-  scanOutcomes.clear();
-  hotPathJobMode.clear();
-  benchmarkJobFrames.clear();
-  clearPendingGridLanes();
-  notePipelineEvent("source-geometry-reset", 0);
-}
 async function captureFrame(source) {
   var _a, _b, _c, _d, _e;
   const vw = source.width;
   const vh = source.height;
   if (!vw || !vh) return;
-  if (receiverFrameWidth && receiverFrameHeight && (receiverFrameWidth !== vw || receiverFrameHeight !== vh)) {
-    resetTrackingForSourceGeometryChange();
-  }
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   const now = receiverNow();
@@ -3503,10 +3516,9 @@ async function captureFrame(source) {
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
-  const orphanedAcquisitionDue = !captureHasTrackedWork && now - lastFullScan > ACQUISITION_SCAN_MS;
-  const fullScanDue = orphanedAcquisitionDue || (strictAcquiring
+  const fullScanDue = strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
-    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval);
+    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
     if (trace) {
       trace.decision = "full scan throttled";
@@ -3689,7 +3701,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     return;
   }
 }
-  if (batchTracks.length >= 1) {
+  if (batchTracks.length > 1) {
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft,
       track.quad.topRight,
@@ -3721,22 +3733,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       let shared;
       const sharedDirect = healthyGrid ? mappedDirectTrackedFrame(source, x, y, w, h, batchTracks) : null;
-      if (healthyGrid && !sharedDirect) {
-        const bitmapStatus = submitLockedBitmapCrop(source, x, y, w, h, batchTracks, batchRegions);
-        if (bitmapStatus === "submitted") {
-          activeDecodeBudget = batchTracks.length;
-          cropRotate++;
-          if (trace) trace.stateAfter = gridLattice.state;
-          activeBenchmarkFrame = void 0;
-          return;
-        }
-        if (bitmapStatus === "busy") {
-          poolBusyTimes.push(now);
-          if (trace) trace.decision = "not scheduled: bitmap workers reserved";
-          activeBenchmarkFrame = void 0;
-          return;
-        }
-      }
       if (!sharedDirect) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
         inspectStaticQrOptics(source, shared, x, y);
@@ -5010,15 +5006,15 @@ QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySu
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
-Pixel path ${lastDirectPixelPath.toUpperCase()} · bitmap pending ${lockedBitmapPending} · submitted ${lockedBitmapSubmitted} · dropped ${lockedBitmapDropped}
+Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
-  const decoderStalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && cameraRate > 0 && completionRate === 0 && pool.busyCount > 0;
+  const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : decoderStalled ? "Decoder stalled" : "";
-  limit.classList.toggle("scanner-bound", decoderStalled || Boolean(lastDecodeError));
+  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : "";
+  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;
   const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
