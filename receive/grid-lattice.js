@@ -204,17 +204,35 @@ class GridLattice {
     const candidate = this.candidate;
     const count = candidate.layout.cols * candidate.layout.rows;
     const modules = candidate.observations[0].modules;
-    const decoded = new Set(candidate.observations.map((observation) => observation.slotIndex));
+    // The whole-grid homography is a prediction model, not a replacement for
+    // measured per-QR geometry. Real phone lenses distort a large QR field in
+    // ways a single projective transform cannot represent. Once a slot has
+    // actually decoded, keep that exact CRC-backed quad and use the lattice
+    // only for cells that have not yet been observed.
+    const observed = new Map(candidate.observations.map((observation) => [observation.slotIndex, observation]));
+    const decoded = new Set(observed.keys());
     const slots = [];
     for (let index = 0; index < count; index++) {
-      const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
-      const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+      const observation = observed.get(index);
+      let quad;
+      if (observation && validGeometry(observation)) {
+        const points = corners(observation.quad);
+        quad = {
+          topLeft: { ...points[0] },
+          topRight: { ...points[1] },
+          bottomRight: { ...points[2] },
+          bottomLeft: { ...points[3] }
+        };
+      } else {
+        const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
+        quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+      }
       const box = bounds(quad);
       if (!box) return null;
-      slots.push({ index, quad, box, decoded: decoded.has(index) });
+      slots.push({ index, quad, box, decoded: decoded.has(index), observed: Boolean(observation) });
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
-    return { state: this.state, confidence, layout: candidate.layout, modules, slots };
+    return { state: this.state, confidence, layout: candidate.layout, modules, slots, observedSlots: observed.size, fitError: candidate.error };
   }
 }
 export {
