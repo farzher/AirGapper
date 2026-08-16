@@ -1,0 +1,35 @@
+name: Agent v63 frame coordinates
+on:
+  push:
+    branches: [agent/frame-coordinate-v63]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/frame-coordinate-v63
+      - name: Apply patch
+        run: python3 .github/agent-v63.py
+      - name: Verify syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+      - name: Verify invariants
+        run: |
+          grep -q 'canvas coordinate fallback' receive/main.js
+          grep -q 'strict-prelock-job-rejected' receive/main.js
+          grep -q '!auditMode?.full && completion.fallbackAttempted' receive/main.js
+          grep -q 'Build ${document.querySelector' receive/main.js
+          grep -q 'v0.5.63' index.html
+          grep -q 'airgapper-static-js-v26' sw.js
+      - name: Commit result
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/agent-v63.py .github/workflows/agent-v63.yml
+          git add receive/main.js index.html sw.js
+          git commit -m "fix VideoFrame display coordinate mismatch"
+          git push origin HEAD:agent/frame-coordinate-v63
