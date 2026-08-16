@@ -1382,7 +1382,7 @@ function noteRegion(box, now, decoded = true, info) {
       r.decodedSeen = now;
       r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
-      if (geometryIsFresh && (info == null ? void 0 : info.quad)) r.quad = info.quad;
+      if (geometryIsFresh && validQuadObject(info == null ? void 0 : info.quad)) r.quad = info.quad;
       if (geometryIsFresh && (info == null ? void 0 : info.modules)) r.dim = info.modules;
       if (geometryIsFresh && (info == null ? void 0 : info.crc32) !== void 0) r.crc32 = info.crc32;
       r.consecutiveMisses = 0;
@@ -1420,7 +1420,7 @@ function noteRegion(box, now, decoded = true, info) {
     sightedSeen: now,
     sequenceSamples: [],
     qualityLevel: 0,
-    quad: info == null ? void 0 : info.quad,
+    quad: validQuadObject(info == null ? void 0 : info.quad) ? info.quad : void 0,
     dim: info == null ? void 0 : info.modules,
     crc32: info == null ? void 0 : info.crc32,
     consecutiveMisses: 0,
@@ -2561,7 +2561,8 @@ function scheduleFrame(gen) {
     }
     void captureFrame(frame).catch((error) => {
       decodeExceptions++;
-      lastDecodeError = error instanceof Error ? error.message : String(error);
+      lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
+      console.error("AirGapper captureFrame failed", error);
     }).finally(() => {
       frame.videoFrame?.close();
       if (done || gen !== captureGen) return;
@@ -2729,6 +2730,7 @@ function finishScanCapture(id, completion) {
   const ctx = scanCapture.getContext("2d");
   ctx.putImageData(capture.image, 0, 0);
   const drawQuad = (quad, color, width) => {
+    if (!validQuadObject(quad)) return;
     const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
     ctx.beginPath();
     points.forEach((point, index) => {
@@ -2895,7 +2897,7 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
   opticalTargets.length = 0;
   let eligibleTargetExists = false;
   for (const region of regions) {
-    if (!region.quad || !region.dim || region.visibleFraction < 0.85) continue;
+    if (!validQuadObject(region.quad) || !region.dim || region.visibleFraction < 0.85) continue;
     eligibleTargetExists = true;
     const q = region.quad;
     const inside = (point) => point.x >= ox + 2 && point.y >= oy + 2 && point.x < ox + image.width - 2 && point.y < oy + image.height - 2;
@@ -3043,7 +3045,8 @@ function captureOptimizerProbe(source, trace) {
     );
     return;
   }
-  const targets = optimizerFixedTargets;
+  const targets = optimizerFixedTargets.filter((target) => validQuadObject(target.quad) && target.dim);
+  if (!targets.length) return;
   const points = targets.flatMap((target) => [
     target.quad.topLeft,
     target.quad.topRight,
@@ -3629,7 +3632,7 @@ function onDecoded(bytes, box, info) {
     if (optimizerOverlayHits.length > 80) optimizerOverlayHits.splice(0, optimizerOverlayHits.length - 80);
     if (optimizerDiscoveryMode) {
       optimizerBootstrapDecode = { box: { ...box }, info };
-      if ((info == null ? void 0 : info.quad) && info.modules) {
+      if (validQuadObject(info == null ? void 0 : info.quad) && info.modules) {
         optimizerFixedTargets = [{
           id: -1,
           slot: header.slotIndex,
@@ -3693,7 +3696,7 @@ function onDecoded(bytes, box, info) {
   lastStreamDecodeAt = decodedAt;
   plainQrPolicy.noteFramed();
   let decodedRegion;
-  if (!optimizerAttribution && box && (info == null ? void 0 : info.quad) && info.modules) {
+  if (!optimizerAttribution && box && validQuadObject(info == null ? void 0 : info.quad) && info.modules) {
     const priorBenchmarkFrame = activeBenchmarkFrame;
     if (productionTrace) activeBenchmarkFrame = productionTrace;
     const snapshot = gridLattice.accept({
@@ -4362,7 +4365,7 @@ async function inspectBenchmarkFrame(index) {
   const ctx = benchmarkFrame.getContext("2d");
   ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.rgba), frame.meta.width, frame.meta.height), 0, 0);
   const quad = (value, color, width) => {
-    if (!value) return;
+    if (!validQuadObject(value)) return;
     const points = [value.topLeft, value.topRight, value.bottomRight, value.bottomLeft];
     ctx.beginPath();
     points.forEach((point, i) => i ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
