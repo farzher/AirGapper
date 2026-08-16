@@ -1952,7 +1952,10 @@ function renderFocusDiagnostics() {
   const sourceTrack = stream?.getVideoTracks()[0];
   const sourceSettings = sourceTrack?.getSettings();
   const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > receiverNow() - STATS_WINDOW_MS), 0) / (STATS_WINDOW_MS / 1e3);
-  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
+  const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
+    ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
+    : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
+  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
     return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
@@ -2201,6 +2204,37 @@ function offerRetry(message) {
   progressEl.style.display = "block";
   showError(message);
 }
+let frameTrackProcessor = null;
+let frameTrackReader = null;
+let framePumpMode = "—";
+let framePumpProcessorTotal = 0;
+let framePumpProcessorDiscarded = 0;
+let rvfcLastPresentedFrames = 0;
+let rvfcSkippedFrames = 0;
+let overlayDrawQueued = false;
+function queueOverlayDraw() {
+  if (overlayDrawQueued) return;
+  overlayDrawQueued = true;
+  requestAnimationFrame(() => {
+    overlayDrawQueued = false;
+    if (!done && stream) drawOverlay(receiverNow());
+  });
+}
+function stopFramePump() {
+  const reader = frameTrackReader;
+  frameTrackReader = null;
+  frameTrackProcessor = null;
+  framePumpMode = "—";
+  framePumpProcessorTotal = 0;
+  framePumpProcessorDiscarded = 0;
+  rvfcLastPresentedFrames = 0;
+  rvfcSkippedFrames = 0;
+  if (reader) {
+    void reader.cancel().catch(() => void 0).finally(() => {
+      try { reader.releaseLock(); } catch {}
+    });
+  }
+}
 function stopReceiver() {
   cameraStartGen++;
   focusController.detach();
@@ -2209,6 +2243,7 @@ function stopReceiver() {
   pauseStartedAt = 0;
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
+  stopFramePump();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -2322,6 +2357,7 @@ function pauseReceiver() {
   cameraStartGen++;
   captureGen++;
   releaseScreenWakeLock();
+  stopFramePump();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -2461,7 +2497,7 @@ async function start() {
   pool.resize(selectedWorkerCount());
   cameraStartedTs = receiverNow();
   captureGen++;
-  scheduleFrame(captureGen);
+  startFramePump(captureGen, activeTrack);
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
@@ -2507,72 +2543,128 @@ async function finishCorpusRecording(recorder) {
     setStatus("");
   }
 }
+function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
+  const timestamp = Number(videoFrame?.timestamp);
+  const width = video.videoWidth || videoFrame?.displayWidth || videoFrame?.visibleRect?.width || videoFrame?.codedWidth || 0;
+  const height = video.videoHeight || videoFrame?.displayHeight || videoFrame?.visibleRect?.height || videoFrame?.codedHeight || 0;
+  const sequence = benchmarkRecordingSequence++;
+  latestSourceFrameSequence = sequence;
+  return {
+    sequence,
+    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,
+    width,
+    height,
+    callbackTimeMs: callbackTime,
+    mediaTimeMs: Number.isFinite(timestamp) ? timestamp / 1e3 : callbackTime,
+    presentationTimeMs: callbackTime,
+    expectedDisplayTimeMs: callbackTime,
+    videoFrame
+  };
+}
+function processSourceFrame(frame, gen) {
+  if (done || gen !== captureGen) {
+    frame.videoFrame?.close();
+    return;
+  }
+  if (optimizerPipelineActive && !activeOptimizerEpoch) {
+    optimizerTransitionFramesDiscarded++;
+    traceOptimizer({
+      time: receiverNow(),
+      event: "TRANSITION_FRAME",
+      candidateId: optimizerTransition?.candidateId,
+      sourceSequence: frame.sequence,
+      requestedExposure: optimizerTransition?.requestedExposure,
+      requestedIso: optimizerTransition?.requestedIso
+    });
+  }
+  const recorder = benchmarkRecorder;
+  if (recorder && frame.width && frame.height) {
+    const orientation = screen.orientation?.type ?? `${window.orientation ?? 0}`;
+    recorder.addVideo({
+      sequence: frame.sequence,
+      mediaTimeMs: frame.mediaTimeMs,
+      presentationTimeMs: frame.presentationTimeMs,
+      expectedDisplayTimeMs: frame.expectedDisplayTimeMs,
+      callbackTimeMs: frame.callbackTimeMs,
+      width: frame.width,
+      height: frame.height,
+      stride: frame.width * 4,
+      orientation
+    }, video);
+    recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
+    frame.videoFrame?.close();
+    queueOverlayDraw();
+    if (recorder.complete) void finishCorpusRecording(recorder);
+    return;
+  }
+  void captureFrame(frame).catch((error) => {
+    decodeExceptions++;
+    lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
+    console.error("AirGapper captureFrame failed", error);
+  }).finally(() => {
+    frame.videoFrame?.close();
+    if (done || gen !== captureGen) return;
+    queueOverlayDraw();
+  });
+}
+async function pumpTrackFrames(gen, reader, processor) {
+  try {
+    while (!done && gen === captureGen && frameTrackReader === reader) {
+      const { value, done: ended } = await reader.read();
+      if (ended) break;
+      if (!value) continue;
+      if (done || gen !== captureGen || frameTrackReader !== reader) {
+        value.close();
+        break;
+      }
+      framePumpProcessorTotal = Number(processor.totalFrames ?? framePumpProcessorTotal + 1);
+      framePumpProcessorDiscarded = Number(processor.discardedFrames ?? framePumpProcessorDiscarded);
+      processSourceFrame(sourceFrameMeta(value), gen);
+    }
+  } catch (error) {
+    if (done || gen !== captureGen || frameTrackReader !== reader) return;
+    console.warn("MediaStreamTrackProcessor frame pump failed; falling back to requestVideoFrameCallback", error);
+    try { reader.releaseLock(); } catch {}
+    frameTrackReader = null;
+    frameTrackProcessor = null;
+    framePumpMode = "rVFC fallback";
+    scheduleFrame(gen);
+  }
+}
+function startFramePump(gen, track) {
+  stopFramePump();
+  if (track && typeof MediaStreamTrackProcessor === "function") {
+    try {
+      const processor = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 });
+      const reader = processor.readable.getReader();
+      frameTrackProcessor = processor;
+      frameTrackReader = reader;
+      framePumpMode = "MediaStreamTrackProcessor";
+      void pumpTrackFrames(gen, reader, processor);
+      return;
+    } catch (error) {
+      console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);
+    }
+  }
+  framePumpMode = "rVFC fallback";
+  scheduleFrame(gen);
+}
 function scheduleFrame(gen) {
   if (done || gen !== captureGen) return;
   const v = video;
   const next = (callbackTime = performance.now(), metadata = {}) => {
-    var _a, _b, _c, _d, _e, _f;
-    if (done || gen !== captureGen) return;
-    // Keep camera delivery continuously armed. Previously the next
-    // requestVideoFrameCallback was registered only after captureFrame() and
-    // overlay work completed, so a few milliseconds of main-thread work could
-    // miss the next 60 Hz presentation entirely. Decoding is allowed to drop
-    // work when workers are busy; frame delivery itself must never wait for it.
+    if (done || gen !== captureGen || framePumpMode === "MediaStreamTrackProcessor") return;
     scheduleFrame(gen);
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-    const sequence = benchmarkRecordingSequence++;
-    latestSourceFrameSequence = sequence;
-    if (optimizerPipelineActive && !activeOptimizerEpoch) {
-      optimizerTransitionFramesDiscarded++;
-      traceOptimizer({
-        time: receiverNow(),
-        event: "TRANSITION_FRAME",
-        candidateId: optimizerTransition == null ? void 0 : optimizerTransition.candidateId,
-        sourceSequence: sequence,
-        requestedExposure: optimizerTransition == null ? void 0 : optimizerTransition.requestedExposure,
-        requestedIso: optimizerTransition == null ? void 0 : optimizerTransition.requestedIso
-      });
+    const presented = Number(metadata.presentedFrames);
+    if (Number.isFinite(presented) && presented > 0) {
+      if (rvfcLastPresentedFrames > 0 && presented > rvfcLastPresentedFrames + 1) rvfcSkippedFrames += presented - rvfcLastPresentedFrames - 1;
+      rvfcLastPresentedFrames = presented;
     }
-    const recorder = benchmarkRecorder;
-    const frame = {
-      sequence,
-      opticsEpoch: (activeOptimizerEpoch == null ? void 0 : activeOptimizerEpoch.collecting) ? activeOptimizerEpoch.id : void 0,
-      width,
-      height,
-      callbackTimeMs: callbackTime,
-      mediaTimeMs: ((_a = metadata.mediaTime) != null ? _a : callbackTime / 1e3) * 1e3,
-      presentationTimeMs: (_b = metadata.presentationTime) != null ? _b : callbackTime,
-      expectedDisplayTimeMs: (_c = metadata.expectedDisplayTime) != null ? _c : callbackTime
-    };
-    if (recorder && width && height) {
-      const orientation = (_f = (_d = screen.orientation) == null ? void 0 : _d.type) != null ? _f : `${(_e = window.orientation) != null ? _e : 0}`;
-      const frameMeta = {
-        sequence,
-        mediaTimeMs: frame.mediaTimeMs,
-        presentationTimeMs: frame.presentationTimeMs,
-        expectedDisplayTimeMs: frame.expectedDisplayTimeMs,
-        callbackTimeMs: frame.callbackTimeMs,
-        width,
-        height,
-        stride: width * 4,
-        orientation
-      };
-      recorder.addVideo(frameMeta, video);
-      recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
-      drawOverlay(receiverNow());
-      if (recorder.complete) void finishCorpusRecording(recorder);
-      return;
-    }
-    void captureFrame(frame).catch((error) => {
-      decodeExceptions++;
-      lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
-      console.error("AirGapper captureFrame failed", error);
-    }).finally(() => {
-      frame.videoFrame?.close();
-      if (done || gen !== captureGen) return;
-      drawOverlay(receiverNow());
-    });
+    const frame = sourceFrameMeta(null, callbackTime);
+    frame.mediaTimeMs = Number.isFinite(Number(metadata.mediaTime)) ? Number(metadata.mediaTime) * 1e3 : callbackTime;
+    frame.presentationTimeMs = Number.isFinite(Number(metadata.presentationTime)) ? Number(metadata.presentationTime) : callbackTime;
+    frame.expectedDisplayTimeMs = Number.isFinite(Number(metadata.expectedDisplayTime)) ? Number(metadata.expectedDisplayTime) : callbackTime;
+    processSourceFrame(frame, gen);
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
   else requestAnimationFrame((now) => next(now));
