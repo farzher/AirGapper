@@ -22,6 +22,9 @@ if [ ! -d third_party/zxing-cpp/.git ]; then
 fi
 git -C third_party/zxing-cpp fetch --depth 1 origin "$ZXING_COMMIT"
 git -C third_party/zxing-cpp checkout --detach "$ZXING_COMMIT" >/dev/null
+git -C third_party/zxing-cpp reset --hard "$ZXING_COMMIT" >/dev/null
+git -C third_party/zxing-cpp clean -fd >/dev/null
+python3 patches/apply_exact_sample_map.py
 
 VERSION=$(tr -d '[:space:]' < VERSION)
 if GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null); then
