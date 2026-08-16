@@ -689,7 +689,7 @@ ctx.onmessage = async (e) => {
     let trackedHit = false;
     let trackedAttempted = false;
     let fallbackAttempted = false;
-    if (!full && quad && dim) {
+    if (!full && validQuad(quad) && dim) {
       trackedAttempted = true;
       const r = zx.readTracked(
         ptr,

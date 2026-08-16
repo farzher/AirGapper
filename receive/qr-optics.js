@@ -7,6 +7,12 @@ const MAX_TILES = 5;
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
+function validQuad(quad) {
+  if (!quad) return false;
+  return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].every((point) =>
+    point && Number.isFinite(point.x) && Number.isFinite(point.y)
+  );
+}
 class StaticQrOpticsAnalyzer {
   constructor() {
     __publicField(this, "black", new Float32Array(MAX_MODULE_SAMPLES));
@@ -316,6 +322,7 @@ class StaticQrOpticsAnalyzer {
     if (Number.isFinite(lowAt) && Number.isFinite(highAt)) this.edges[this.edgeCount++] = Math.max(0.04, highAt - lowAt);
   }
   setTransform(quad, modules, offsetX, offsetY) {
+    if (!validQuad(quad)) return false;
     const p0 = quad.topLeft, p1 = quad.topRight, p2 = quad.bottomRight, p3 = quad.bottomLeft;
     const sx = p0.x - p1.x + p2.x - p3.x;
     const sy = p0.y - p1.y + p2.y - p3.y;
@@ -370,6 +377,7 @@ class StaticQrOpticsAnalyzer {
   }
 }
 function quadPoints(quad) {
+  if (!validQuad(quad)) return [];
   return [
     quad.topLeft.x,
     quad.topLeft.y,
