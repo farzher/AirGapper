@@ -37,7 +37,7 @@ function inputBuffer(zx, bytes) {
   inputCapacity = bytes;
   return inputPtr;
 }
-const NATIVE_BATCH_MAX_TRACKS = 16;
+const NATIVE_BATCH_MAX_TRACKS = 18;
 const NATIVE_TRACK_RESULT_BYTES = 32;
 const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
@@ -482,7 +482,7 @@ ctx.onmessage = async (e) => {
     }
     if (!full && tracks?.length && robustLaneFirst) {
       readFullAttempts++;
-      const robustMax = Math.min(16, Math.max(1, tracks.length));
+      const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
       const decoded = decodePixelFormat === "y8"
         ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
         : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
@@ -581,7 +581,7 @@ ctx.onmessage = async (e) => {
       // direct camera input this is Y8, so keep recovery luminance-only instead
       // of retaining/re-reading the live VideoFrame as RGBA.
       readFullAttempts++;
-      const recoveryMax = Math.min(16, Math.max(1, tracks.length));
+      const recoveryMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
       const decoded = decodePixelFormat === "y8"
         ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, recoveryMax, false)
         : zx.readFull(ptr + inputOffset, pw, ph, true, recoveryMax, false);
