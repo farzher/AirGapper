@@ -49,10 +49,6 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
-let directPixelMode = "y8";
-let directPixelAuditAttempts = 0;
-let directPixelRgbaWins = 0;
-const DIRECT_PIXEL_AUDIT_LIMIT = 3;
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -201,52 +197,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
   });
   return { symbols, attempted: true, metrics, outputBuffer: output.buffer };
 }
-function decodeNativeAuditRGBA(zx, ptr, width, height, ox, oy, tracks, stride = width * 4) {
-  const count = Math.min(NATIVE_BATCH_MAX_TRACKS, tracks.length);
-  if (!count) return null;
-  const handle = zx._createTrackedDecoder(count, 177);
-  if (!handle) return null;
-  const resultsPtr = zx._malloc(count * NATIVE_TRACK_RESULT_BYTES);
-  const outputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
-  const metricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
-  try {
-    for (let slot = 0; slot < count; slot++) {
-      const track = tracks[slot];
-      const q = track.quad;
-      if (!validQuad(q)) return null;
-      const id = track.slot ?? track.id;
-      if (!zx._setTrackedDecoderTrack(handle, slot, id, track.dim,
-        q.topLeft.x - ox, q.topLeft.y - oy,
-        q.topRight.x - ox, q.topRight.y - oy,
-        q.bottomRight.x - ox, q.bottomRight.y - oy,
-        q.bottomLeft.x - ox, q.bottomLeft.y - oy)) return null;
-      zx._setTrackedDecoderTrackCRC32(handle, slot, track.crc32 ? 1 : 0);
-    }
-    zx._setTrackedDecoderFallbackBudget(handle, 0);
-    const resultCount = zx._decodeTrackedBatchRGBA(
-      handle, ptr, width, height, stride,
-      resultsPtr, count, outputPtr, NATIVE_BATCH_OUTPUT_BYTES, metricsPtr
-    );
-    if (resultCount < 0) return null;
-    const view = new DataView(zx.HEAPU8.buffer);
-    return {
-      tracks: view.getUint32(metricsPtr + 48, true),
-      successful: view.getUint32(metricsPtr + 56, true),
-      misses: view.getUint32(metricsPtr + 60, true),
-      crcFastSuccesses: view.getUint32(metricsPtr + 64, true),
-      rsFallbacks: view.getUint32(metricsPtr + 68, true),
-      anchorMisses: view.getUint32(metricsPtr + 76, true),
-      outOfFrameMisses: view.getUint32(metricsPtr + 84, true),
-      bitstreamFailures: view.getUint32(metricsPtr + 88, true),
-      crcFailures: view.getUint32(metricsPtr + 92, true)
-    };
-  } finally {
-    zx._destroyTrackedDecoder(handle);
-    zx._free(metricsPtr);
-    zx._free(outputPtr);
-    zx._free(resultsPtr);
-  }
-}
 let qrGeneratorPromise;
 function localQuad(q, ox, oy) {
   if (!validQuad(q)) return null;
@@ -376,7 +326,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, diagnoseSampler = false } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -395,9 +345,7 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const sourceHasDirectY = pixelFormat === "y8";
-      const selectedRgba = sourceHasDirectY && directPixelMode === "rgba" && !full && Boolean(tracks?.length);
-      const copyAsRgba = pixelFormat !== "y8" || selectedRgba;
+      const copyAsRgba = pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
@@ -411,9 +359,8 @@ ctx.onmessage = async (e) => {
       decodePixelFormat = copyAsRgba ? "rgba" : "y8";
       if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
       if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
-      // Keep a direct Y-plane frame alive until the native attempt finishes.
-      // Recovery/diagnostics may need an RGBA copy of this exact same frame.
-      if (copyAsRgba || full || !(tracks?.length)) {
+      // Only LIVE local recovery needs the original Y frame after the native attempt.
+      if (copyAsRgba || full || !(tracks?.length) || !robustTrackedRecovery) {
         ownedVideoFrame.close();
         ownedVideoFrame = null;
       }
@@ -428,6 +375,29 @@ ctx.onmessage = async (e) => {
     const symbols = [];
     const sightings = [];
     const samplerDiagnostics = [];
+    const mapOutputToDisplay = () => {
+      if (!outputMap || !Number.isFinite(outputMap.scaleX) || outputMap.scaleX <= 0 || !Number.isFinite(outputMap.scaleY) || outputMap.scaleY <= 0) return;
+      const mapPoint = (point) => ({
+        x: (point.x - outputMap.offsetX) / outputMap.scaleX,
+        y: (point.y - outputMap.offsetY) / outputMap.scaleY
+      });
+      for (const symbol of symbols) {
+        if (!validQuad(symbol.quad)) continue;
+        symbol.quad = {
+          topLeft: mapPoint(symbol.quad.topLeft),
+          topRight: mapPoint(symbol.quad.topRight),
+          bottomRight: mapPoint(symbol.quad.bottomRight),
+          bottomLeft: mapPoint(symbol.quad.bottomLeft)
+        };
+        symbol.box = boundsOf(symbol.quad, 0, 0);
+      }
+      for (const box of sightings) {
+        box.x = (box.x - outputMap.offsetX) / outputMap.scaleX;
+        box.y = (box.y - outputMap.offsetY) / outputMap.scaleY;
+        box.w /= outputMap.scaleX;
+        box.h /= outputMap.scaleY;
+      }
+    };
     if (oracle) {
       const seen = /* @__PURE__ */ new Set();
       const valid = [];
@@ -562,57 +532,12 @@ ctx.onmessage = async (e) => {
         inputStride
       );
       const nativeSymbols = native?.symbols ?? [];
-      let pixelAudit = null;
-      let rgbaRecoveryPtr = 0;
-      let rgbaRecoveryStride = 0;
-
-      // Same-frame representation A/B. A Y8 miss gets a bounded number of
-      // isolated RGBA retries using the exact same VideoFrame crop and geometry.
-      // The probe result is NEVER accepted for this frame and never mutates the
-      // persistent native decoder. If RGBA independently wins twice, however,
-      // that is strong evidence the browser's direct Y representation is the
-      // problem, so subsequent frames on this worker use RGBA as their normal
-      // tracked input. This is pixel-format adaptation, not a per-frame rescue.
-      if (nativeSymbols.length === 0 && usedDirectFrame && pixelFormat === "y8" &&
-          decodePixelFormat === "y8" && ownedVideoFrame && directPixelAuditAttempts < DIRECT_PIXEL_AUDIT_LIMIT) {
-        directPixelAuditAttempts++;
-        const rect = { x: cropX, y: cropY, width: w, height: h };
-        const options = { rect, format: "RGBA" };
-        const bytes = ownedVideoFrame.allocationSize(options);
-        rgbaRecoveryPtr = inputBuffer(zx, bytes);
-        const copyStarted = performance.now();
-        const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(rgbaRecoveryPtr, rgbaRecoveryPtr + bytes), options);
-        frameCopyMs += performance.now() - copyStarted;
-        rgbaRecoveryStride = planes[0]?.stride ?? w * 4;
-        const measured = decodeNativeAuditRGBA(zx, rgbaRecoveryPtr + (planes[0]?.offset ?? 0), pw, ph, ox, oy, tracks, rgbaRecoveryStride);
-        if (measured?.crcFastSuccesses > 0) directPixelRgbaWins++;
-        if (directPixelRgbaWins >= 2) directPixelMode = "rgba";
-        pixelAudit = measured ? {
-          ...measured,
-          attempt: directPixelAuditAttempts,
-          rgbaWins: directPixelRgbaWins,
-          selectedPath: directPixelMode
-        } : {
-          tracks: 0,
-          successful: 0,
-          misses: 0,
-          crcFastSuccesses: 0,
-          rsFallbacks: 0,
-          anchorMisses: 0,
-          outOfFrameMisses: 0,
-          bitstreamFailures: 0,
-          crcFailures: 0,
-          attempt: directPixelAuditAttempts,
-          rgbaWins: directPixelRgbaWins,
-          selectedPath: directPixelMode
-        };
-      }
-
       const robustFallback = robustTrackedRecovery && nativeSymbols.length === 0;
       if (!robustFallback && (native || usedDirectFrame)) {
         ownedVideoFrame?.close();
         ownedVideoFrame = null;
         const directFrameFailed = usedDirectFrame && !native;
+        mapOutputToDisplay();
         const reply = {
           id,
           symbols: nativeSymbols,
@@ -629,7 +554,6 @@ ctx.onmessage = async (e) => {
           targetedSuccesses: 0,
           frameCopyMs,
           nativeMetrics: native?.metrics,
-          pixelAudit,
           pixelPath: decodePixelFormat,
           directFrameFailed,
           latencyMs: performance.now() - startedAt
@@ -698,6 +622,7 @@ ctx.onmessage = async (e) => {
       } finally {
         decoded.delete();
       }
+      mapOutputToDisplay();
       ctx.postMessage({
         id,
         symbols,
@@ -711,7 +636,6 @@ ctx.onmessage = async (e) => {
         workerWaitMs,
         frameCopyMs,
         nativeMetrics: native?.metrics,
-        pixelAudit,
         pixelPath: decodePixelFormat,
         samplerDiagnostics,
         latencyMs: performance.now() - startedAt
@@ -788,6 +712,7 @@ ctx.onmessage = async (e) => {
     }
     ownedVideoFrame?.close();
     ownedVideoFrame = null;
+    mapOutputToDisplay();
     ctx.postMessage({
       id,
       symbols,
