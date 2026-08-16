@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.87";
+const RECEIVER_RUNTIME_BUILD = "v0.5.88";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3701,7 +3701,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     return;
   }
 }
-  if (batchTracks.length > 1) {
+  if (batchTracks.length >= 1) {
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft,
       track.quad.topRight,

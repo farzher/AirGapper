@@ -494,6 +494,7 @@ async function startStream(revealStage = false) {
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
+  const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
   if (transport.mode === "raptorq") {
@@ -567,9 +568,9 @@ async function startStream(revealStage = false) {
   showStreamPanels(true);
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
-    const stride = modules + GRID_MARGIN;
-    const totalW = modules * gridCols + GRID_MARGIN * (gridCols + 1);
-    const totalH = modules * gridRows + GRID_MARGIN * (gridRows + 1);
+    const stride = modules + gridMargin;
+    const totalW = modules * gridCols + gridMargin * (gridCols + 1);
+    const totalH = modules * gridRows + gridMargin * (gridRows + 1);
     const landscape = landscapeGrid();
     const displayW = landscape ? totalH : totalW;
     const displayH = landscape ? totalW : totalH;
@@ -686,7 +687,7 @@ async function startStream(revealStage = false) {
               landscape: landscapeGrid(),
               static: staticStream,
               sizeLevel,
-              gridMargin: GRID_MARGIN,
+              gridMargin,
               scaling: fitScaling ? "fit" : "integer"
             },
             qr: {
@@ -708,7 +709,7 @@ async function startStream(revealStage = false) {
         }).catch(() => void 0);
       }
     }
-    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, gridMargin);
     return {
       image: new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
       ordinal
@@ -730,8 +731,8 @@ async function startStream(revealStage = false) {
   pump();
   const paintCell = (entry) => {
     const img = entry.image;
-    const cell = modules + 2 * GRID_MARGIN;
-    const stride = modules + GRID_MARGIN;
+    const cell = modules + 2 * gridMargin;
+    const stride = modules + gridMargin;
     const cx = cellCursor % gridCols * stride;
     const cy = Math.floor(cellCursor / gridCols) * stride;
     cells[cellCursor] = img;

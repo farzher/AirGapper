@@ -451,9 +451,10 @@ ctx.onmessage = async (e) => {
     if (!full && tracks?.length && robustLaneFirst) {
       readFullAttempts++;
       const robustMax = Math.min(16, Math.max(1, tracks.length));
+      const robustTryHarder = tracks.length === 1;
       const decoded = decodePixelFormat === "y8"
-        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, false, robustMax, false)
-        : zx.readFull(ptr + inputOffset, pw, ph, false, robustMax, false);
+        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, robustTryHarder, robustMax, false)
+        : zx.readFull(ptr + inputOffset, pw, ph, robustTryHarder, robustMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
         for (let i = 0; i < decoded.size(); i++) {
