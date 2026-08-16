@@ -60,6 +60,8 @@ class DecodeWorkerPool {
           exactMapCoverage: message.exactMapCoverage,
           exactMapTotal: message.exactMapTotal,
           exactMapsSeeded: message.exactMapsSeeded ?? 0,
+          exactSameFrameOracleAttempts: message.exactSameFrameOracleAttempts ?? 0,
+          exactSameFrameOracleSuccesses: message.exactSameFrameOracleSuccesses ?? 0,
           nativeMs: message.nativeMs ?? 0,
           robustMs: message.robustMs ?? 0,
           exactFastPath: Boolean(message.exactFastPath),

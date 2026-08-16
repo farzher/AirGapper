@@ -54,6 +54,9 @@ let nativeExactMapVersion = 1;
 let nativeSampleScratchPtr = 0;
 let nativeSampleScratchFloats = 0;
 let nativeLowYieldStreak = 0;
+let exactSameFrameOracleDone = false;
+let exactSameFrameOracleAttempts = 0;
+let exactSameFrameOracleSuccesses = 0;
 function nativeTrackId(track) {
   return track.slot ?? track.id;
 }
@@ -252,11 +255,11 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4, rsBudget = 0) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, rsBudget);
   const count = decode(
     nativeBatchHandle,
     ptr,
@@ -621,6 +624,8 @@ ctx.onmessage = async (e) => {
             pixelPath: decodePixelFormat,
             exactMapCoverage: seeded.length,
             exactMapTotal: tracks.length,
+            exactSameFrameOracleAttempts,
+            exactSameFrameOracleSuccesses,
             nativeMs,
             robustMs,
             exactFastPath: true,
@@ -650,6 +655,8 @@ ctx.onmessage = async (e) => {
             pixelPath: decodePixelFormat,
             exactMapCoverage: seeded.length,
             exactMapTotal: tracks.length,
+            exactSameFrameOracleAttempts,
+            exactSameFrameOracleSuccesses,
             nativeMs,
             robustMs,
             exactFastPath: true,
@@ -679,6 +686,7 @@ ctx.onmessage = async (e) => {
         if (slot !== void 0) bySlot.set(slot, symbol);
       }
       let mapsSeeded = 0;
+      const sameFrameTracks = [];
       try {
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
@@ -686,7 +694,17 @@ ctx.onmessage = async (e) => {
           const packet = parseFrame(result.bytes);
           const slot = packet?.header.slotIndex;
           if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
-          if (slot !== void 0 && exactReader && rememberExactSampleMap(slot, result.modules, result.sampleMap, ox, oy, result.position)) mapsSeeded++;
+          if (slot !== void 0 && exactReader && rememberExactSampleMap(slot, result.modules, result.sampleMap, ox, oy, result.position)) {
+            mapsSeeded++;
+            sameFrameTracks.push({
+              id: slot,
+              slot,
+              misses: 0,
+              quad: shifted(result.position, ox, oy),
+              dim: result.modules,
+              crc32: true
+            });
+          }
           const symbol = {
             bytes: result.bytes,
             box: boundsOf(result.position, ox, oy),
@@ -702,6 +720,23 @@ ctx.onmessage = async (e) => {
         decoded.delete();
       }
       symbols.push(...bySlot.values());
+      if (!exactSameFrameOracleDone && decodePixelFormat === "y8" && sameFrameTracks.length) {
+        exactSameFrameOracleDone = true;
+        const oracle = decodeNativeBatch(
+          zx,
+          ptr + inputOffset,
+          pw,
+          ph,
+          ox,
+          oy,
+          sameFrameTracks,
+          decodePixelFormat,
+          inputStride,
+          sameFrameTracks.length
+        );
+        exactSameFrameOracleAttempts = sameFrameTracks.length;
+        exactSameFrameOracleSuccesses = oracle?.symbols?.length ?? 0;
+      }
       nativeLowYieldStreak = 0;
       mapOutputToDisplay();
       const coverage = exactTracks(tracks).length;
@@ -723,6 +758,8 @@ ctx.onmessage = async (e) => {
         exactMapCoverage: coverage,
         exactMapTotal: tracks.length,
         exactMapsSeeded: mapsSeeded,
+        exactSameFrameOracleAttempts,
+        exactSameFrameOracleSuccesses,
         nativeMs,
         robustMs,
         exactFastPath: false,

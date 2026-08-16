@@ -1302,57 +1302,138 @@ static ByteArray decodeExactMapBits(PersistentTrack& track, const BitMatrix& ima
 }
 
 static int decodeBatchExactMapBits(TrackedDecoder& decoder, const BitMatrix& imageBits,
-									DecimenTrackedResult* results, int resultCapacity,
-									uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+                                    DecimenTrackedResult* results, int resultCapacity,
+                                    uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
 {
-	DecimenBatchMetrics measured{};
-	const double totalStart = emscripten_get_now();
-	int resultCount = 0, outputUsed = 0, budgetedFallbacks = 0;
-	for (auto& track : decoder.tracks) {
-		if (!track.active || resultCount >= resultCapacity)
-			continue;
-		auto& result = results[resultCount++];
-		++measured.tracks;
-		++track.framesSinceReacquire;
-		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
-				  track.framesSinceReacquire, track.dx, track.dy};
-		if (!track.exactSampleMap || !track.crc32Payload) {
-			++track.consecutiveMisses;
-			++measured.misses;
-			result.consecutiveMisses = track.consecutiveMisses;
-			continue;
-		}
-		const bool allowRS = budgetedFallbacks < decoder.maxRSFallbacks;
-		if (allowRS)
-			++budgetedFallbacks;
-		auto packet = decodeExactMapBits(track, imageBits, allowRS, measured);
-		if (packet.empty()) {
-			++track.consecutiveMisses;
-			++measured.misses;
-			result.consecutiveMisses = track.consecutiveMisses;
-			continue;
-		}
-		if (outputUsed + int(packet.size()) > outputCapacity) {
-			result.status = DECIMEN_TRACK_OUTPUT_FULL;
-			result.bytesOffset = -1;
-		} else {
-			std::memcpy(output + outputUsed, packet.data(), packet.size());
-			result.status = DECIMEN_TRACK_OK;
-			result.bytesOffset = outputUsed;
-			result.bytesLength = packet.size();
-			outputUsed += packet.size();
-			++measured.successful;
-			++measured.crcFastSuccesses;
-		}
-		track.consecutiveMisses = 0;
-		result.consecutiveMisses = 0;
-		result.dx = track.dx;
-		result.dy = track.dy;
-	}
-	measured.totalMs = emscripten_get_now() - totalStart;
-	if (metrics)
-		*metrics = measured;
-	return resultCount;
+    DecimenBatchMetrics measured{};
+    const double totalStart = emscripten_get_now();
+    int resultCount = 0, outputUsed = 0, budgetedFallbacks = 0;
+
+    struct PendingTrack {
+        PersistentTrack* track = nullptr;
+        DecimenTrackedResult* result = nullptr;
+    };
+    std::vector<PendingTrack> pending;
+    pending.reserve(decoder.tracks.size());
+
+    auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
+        const bool allowRS = budgetedFallbacks < decoder.maxRSFallbacks;
+        auto packet = decodeExactMapBits(track, imageBits, allowRS, measured);
+        if (packet.empty()) {
+            if (allowRS)
+                ++budgetedFallbacks;
+            return false;
+        }
+        if (allowRS && measured.rsFallbacks > uint32_t(budgetedFallbacks))
+            ++budgetedFallbacks;
+        if (outputUsed + int(packet.size()) > outputCapacity) {
+            result.status = DECIMEN_TRACK_OUTPUT_FULL;
+            result.bytesOffset = -1;
+            return true;
+        }
+        std::memcpy(output + outputUsed, packet.data(), packet.size());
+        result.status = DECIMEN_TRACK_OK;
+        result.bytesOffset = outputUsed;
+        result.bytesLength = packet.size();
+        outputUsed += packet.size();
+        track.consecutiveMisses = 0;
+        result.consecutiveMisses = 0;
+        result.dx = track.dx;
+        result.dy = track.dy;
+        ++measured.successful;
+        ++measured.crcFastSuccesses;
+        return true;
+    };
+
+    for (auto& track : decoder.tracks) {
+        if (!track.active || resultCount >= resultCapacity)
+            continue;
+        auto& result = results[resultCount++];
+        ++measured.tracks;
+        ++track.framesSinceReacquire;
+        result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
+                  track.framesSinceReacquire, track.dx, track.dy};
+        if (!track.exactSampleMap || !track.crc32Payload) {
+            pending.push_back({&track, &result});
+            continue;
+        }
+        if (!tryTrack(track, result))
+            pending.push_back({&track, &result});
+    }
+
+    // Exact SampleQR coordinates already encode lens/alignment distortion.
+    // The only cheap correction we permit in steady state is one shared image
+    // translation, measured from finder modules on the HybridBinarizer matrix.
+    // Never commit that translation unless it produces a CRC-valid QR.
+    if (!pending.empty() && measured.successful == 0) {
+        PendingTrack* reference = nullptr;
+        for (auto& candidate : pending) {
+            if (!candidate.track->exactSampleMap || !candidate.track->crc32Payload)
+                continue;
+            if (!reference || candidate.track->consecutiveMisses < reference->track->consecutiveMisses)
+                reference = &candidate;
+        }
+        if (reference) {
+            auto& ref = *reference->track;
+            const float oldX = ref.dx, oldY = ref.dy;
+            AnchorReading reading;
+            auto binaryLumAt = [&](float fx, float fy) {
+                const PointF p{fx, fy};
+                return imageBits.isIn(p) ? (imageBits.get(p) ? 0 : 255) : -1;
+            };
+            ++measured.translationAttempts;
+            const double motionStarted = emscripten_get_now();
+            const bool anchored = refineAnchor(ref, binaryLumAt, reading);
+            measured.anchorMs += emscripten_get_now() - motionStarted;
+            const float deltaX = ref.dx - oldX, deltaY = ref.dy - oldY;
+            if (anchored && (std::abs(deltaX) > 0.01f || std::abs(deltaY) > 0.01f)) {
+                for (auto& track : decoder.tracks) {
+                    if (track.active && &track != &ref) {
+                        track.dx += deltaX;
+                        track.dy += deltaY;
+                    }
+                }
+                const int successesBefore = measured.successful;
+                std::vector<PendingTrack> stillPending;
+                stillPending.reserve(pending.size());
+                for (auto& candidate : pending) {
+                    if (!candidate.track->exactSampleMap || !tryTrack(*candidate.track, *candidate.result))
+                        stillPending.push_back(candidate);
+                }
+                if (measured.successful > successesBefore) {
+                    ++measured.translationSuccesses;
+                    pending = std::move(stillPending);
+                } else {
+                    for (auto& track : decoder.tracks) {
+                        if (track.active) {
+                            track.dx -= deltaX;
+                            track.dy -= deltaY;
+                        }
+                    }
+                    ref.dx = oldX;
+                    ref.dy = oldY;
+                }
+            } else {
+                ref.dx = oldX;
+                ref.dy = oldY;
+            }
+        }
+    }
+
+    for (auto& candidate : pending) {
+        auto& track = *candidate.track;
+        auto& result = *candidate.result;
+        ++track.consecutiveMisses;
+        ++measured.misses;
+        result.consecutiveMisses = track.consecutiveMisses;
+        result.dx = track.dx;
+        result.dy = track.dy;
+    }
+
+    measured.totalMs = emscripten_get_now() - totalStart;
+    if (metrics)
+        *metrics = measured;
+    return resultCount;
 }
 
 // The persistent hot path intentionally uses the same two pixel operations as
@@ -1651,19 +1732,18 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		};
 
 		DecimenBatchMetrics measured{};
-		int count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &measured);
-		if (measured.tracks > 0 && measured.successful == measured.tracks) {
-			measured.totalMs = emscripten_get_now() - totalStart;
-			if (metrics) *metrics = measured;
-			return count;
-		}
 
-		// Exact SampleQR maps are already geometrically solved. If raw-luma
-		// thresholding misses, pay only for HybridBinarizer and re-sample those
-		// same coordinates; never run finder/detector work for calibrated maps.
+		// A true SampleQR map is already the detector's final sampling geometry.
+		// Do not run the old raw-luma approximation first: besides wasting work,
+		// its finder search could mutate dx/dy and poison the exact pass.
 		bool haveExactMaps = false;
-		for (const auto& track : decoder->tracks)
-			haveExactMaps = haveExactMaps || (track.active && track.exactSampleMap);
+		bool allActiveExact = true;
+		for (const auto& track : decoder->tracks) {
+			if (!track.active)
+				continue;
+			haveExactMaps = haveExactMaps || track.exactSampleMap;
+			allActiveExact = allActiveExact && track.exactSampleMap;
+		}
 		if (haveExactMaps) {
 			const double binStarted = emscripten_get_now();
 			ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
@@ -1672,26 +1752,20 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 			measured.binarizeMs += emscripten_get_now() - binStarted;
 			if (bits) {
 				DecimenBatchMetrics exact{};
-				count = decodeBatchExactMapBits(*decoder, *bits, results, resultCapacity, output, outputCapacity, &exact);
-				measured.samplingMs += exact.samplingMs;
-				measured.bitExtractionMs += exact.bitExtractionMs;
-				measured.crcMs += exact.crcMs;
-				measured.rsFallbackMs += exact.rsFallbackMs;
-				measured.outOfFrameMisses += exact.outOfFrameMisses;
-				measured.bitstreamFailures += exact.bitstreamFailures;
-				measured.crcFailures += exact.crcFailures;
-				measured.exactMapAttempts += exact.exactMapAttempts;
-				measured.exactMapSuccesses += exact.exactMapSuccesses;
-				measured.tracks = exact.tracks;
-				measured.successful = exact.successful;
-				measured.misses = exact.misses;
-				measured.crcFastSuccesses = exact.crcFastSuccesses;
-				if (exact.tracks > 0 && exact.successful == exact.tracks) {
-					measured.totalMs = emscripten_get_now() - totalStart;
-					if (metrics) *metrics = measured;
+				const int count = decodeBatchExactMapBits(*decoder, *bits, results, resultCapacity, output, outputCapacity, &exact);
+				addBatchMetrics(measured, exact);
+				measured.totalMs = emscripten_get_now() - totalStart;
+				if (metrics) *metrics = measured;
+				if (allActiveExact)
 					return count;
-				}
 			}
+		}
+
+		int count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &measured);
+		if (measured.tracks > 0 && measured.successful == measured.tracks) {
+			measured.totalMs = emscripten_get_now() - totalStart;
+			if (metrics) *metrics = measured;
+			return count;
 		}
 
 		bool calibrationDue = false;

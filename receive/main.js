@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.97";
+const RECEIVER_RUNTIME_BUILD = "v0.5.98";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1203,6 +1203,7 @@ let lastNativeMetrics;
 let lastDirectPixelPath = "—";
 let lastExactMapCoverage = "—";
 let lastExactMapsSeeded = 0;
+let lastExactSameFrameOracle = "—";
 let lastNativePhaseMs = 0;
 let lastRobustPhaseMs = 0;
 const hotPathAudit = {
@@ -1348,6 +1349,9 @@ function noteDecodeCompleted(id, completion) {
   if (completion.exactMapTotal) {
     lastExactMapCoverage = `${completion.exactMapCoverage ?? 0}/${completion.exactMapTotal}`;
     lastExactMapsSeeded = completion.exactMapsSeeded ?? 0;
+  }
+  if (completion.exactSameFrameOracleAttempts) {
+    lastExactSameFrameOracle = `${completion.exactSameFrameOracleSuccesses ?? 0}/${completion.exactSameFrameOracleAttempts}`;
   }
   if (Number.isFinite(completion.nativeMs)) lastNativePhaseMs = completion.nativeMs;
   if (Number.isFinite(completion.robustMs)) lastRobustPhaseMs = completion.robustMs;
@@ -5016,7 +5020,7 @@ QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySu
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
-Pixel path ${lastDirectPixelPath.toUpperCase()} · exact maps ${lastExactMapCoverage} · seeded +${lastExactMapsSeeded} · native ${lastNativePhaseMs.toFixed(1)}ms · robust ${lastRobustPhaseMs.toFixed(1)}ms${lastNativeMetrics ? ` · bin ${Number(lastNativeMetrics.binarizeMs ?? 0).toFixed(1)}ms · exact ${lastNativeMetrics.exactMapSuccesses ?? 0}/${lastNativeMetrics.exactMapAttempts ?? 0}` : ""}
+Pixel path ${lastDirectPixelPath.toUpperCase()} · exact maps ${lastExactMapCoverage} · seeded +${lastExactMapsSeeded} · oracle ${lastExactSameFrameOracle} · native ${lastNativePhaseMs.toFixed(1)}ms · robust ${lastRobustPhaseMs.toFixed(1)}ms${lastNativeMetrics ? ` · bin ${Number(lastNativeMetrics.binarizeMs ?? 0).toFixed(1)}ms · exact ${lastNativeMetrics.exactMapSuccesses ?? 0}/${lastNativeMetrics.exactMapAttempts ?? 0}` : ""}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
