@@ -1,0 +1,26 @@
+name: Agent v77 scalar distribution
+on:
+  push:
+    branches: [agent/v77-cached-module-hotpath]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v77-cached-module-hotpath
+      - name: Build scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit scalar distribution
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git checkout -- vendor/decimen-codec/source/build-scalar || true
+          git rm .github/workflows/agent-v77-scalar-fix.yml
+          git add vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
+          git commit -m "rebuild scalar cached module codec"
+          git push origin HEAD:agent/v77-cached-module-hotpath
