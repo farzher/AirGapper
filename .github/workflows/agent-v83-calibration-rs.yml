@@ -1,0 +1,29 @@
+name: Agent v83 calibration RS
+on:
+  push:
+    branches: [agent/v83-calibration-rs]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v83-calibration-rs
+      - name: Apply patch
+        run: python3 .github/v83_patch.py
+      - name: Build SIMD codec
+        run: cd vendor/decimen-codec/source && ./build.sh
+      - name: Build scalar codec
+        run: cd vendor/decimen-codec/source && DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit build
+        shell: bash
+        run: |
+          git checkout -- vendor/decimen-codec/source/build-simd vendor/decimen-codec/source/build-scalar 2>/dev/null || true
+          rm -f .github/v83_patch.py .github/workflows/agent-v83-calibration-rs.yml
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add -A
+          git commit -m 'allow RS-validated cached calibration'
+          git push origin HEAD:agent/v83-calibration-rs
