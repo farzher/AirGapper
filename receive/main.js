@@ -619,7 +619,7 @@ function clearPendingGridLanes() {
   for (let index = 0; index < pendingGridLanes.length; index++) discardPendingGridLane(index);
 }
 function queuePendingGridLane(groupIndex, source, geometry) {
-  const direct = cloneDirectDecodeFrame(source);
+  const direct = mappedDirectTrackedFrame(source, geometry.x, geometry.y, geometry.w, geometry.h, geometry.tracks);
   if (!direct) return false;
   discardPendingGridLane(groupIndex);
   pendingGridLanes[groupIndex] = { ...geometry, direct };
@@ -641,17 +641,17 @@ function drainPendingGridLane(workerSlot) {
   const message = {
     id,
     videoFrame: pending.direct.frame,
-    cropX: pending.x,
-    cropY: pending.y,
-    w: pending.w,
-    h: pending.h,
-    ox: pending.x,
-    oy: pending.y,
+    cropX: pending.direct.cropX,
+    cropY: pending.direct.cropY,
+    w: pending.direct.w,
+    h: pending.direct.h,
+    ox: pending.direct.ox,
+    oy: pending.direct.oy,
     full: false,
-    tracks: pending.tracks,
+    tracks: pending.direct.tracks,
     pixelFormat: pending.direct.pixelFormat,
-    strictHotPath: pending.strictHotPath,
-    diagnoseSampler: pending.diagnoseSampler
+    outputMap: pending.direct.outputMap,
+    strictHotPath: pending.strictHotPath
   };
   const accepted = submitReceiverJob(
     message,
@@ -1160,7 +1160,6 @@ let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
 let lastDirectPixelPath = "—";
-let lastSamplerDiagnostics = [];
 const hotPathAudit = {
   trackedJobs: 0,
   nativeTracks: 0,
@@ -1170,20 +1169,11 @@ const hotPathAudit = {
   rsFallbacks: 0,
   anchorSuccesses: 0,
   anchorMisses: 0,
-  alignmentFitAttempts: 0,
   outOfFrameMisses: 0,
   bitstreamFailures: 0,
   crcFailures: 0,
-  alignmentFitSuccesses: 0,
   anchorBypassAttempts: 0,
   anchorBypassSuccesses: 0,
-  pixelAuditTracks: 0,
-  pixelAuditCrcFast: 0,
-  pixelAuditMisses: 0,
-  pixelAuditAnchorMisses: 0,
-  pixelAuditFrameMisses: 0,
-  pixelAuditBitstreamFailures: 0,
-  pixelAuditCrcFailures: 0,
   localRecoveryAttempts: 0,
   localRecoverySuccesses: 0,
   fullScanJobs: 0,
@@ -1194,7 +1184,6 @@ const hotPathAudit = {
 };
 function resetHotPathAudit() {
   for (const key of Object.keys(hotPathAudit)) hotPathAudit[key] = 0;
-  lastSamplerDiagnostics = [];
 }
 let trackingInvalidations = 0;
 let workerLatencyMaxMs = 0;
@@ -1304,24 +1293,13 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
     hotPathAudit.anchorSuccesses += completion.nativeMetrics.anchorSuccesses ?? 0;
     hotPathAudit.anchorMisses += completion.nativeMetrics.anchorMisses ?? 0;
-    hotPathAudit.alignmentFitAttempts += completion.nativeMetrics.alignmentFitAttempts ?? 0;
     hotPathAudit.outOfFrameMisses += completion.nativeMetrics.outOfFrameMisses ?? 0;
     hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
     hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
-    hotPathAudit.alignmentFitSuccesses += completion.nativeMetrics.alignmentFitSuccesses ?? 0;
     hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;
     hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;
   }
   if (auditThisCompletion) hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
-  if (auditThisCompletion && completion.pixelAudit) {
-    hotPathAudit.pixelAuditTracks += completion.pixelAudit.tracks ?? 0;
-    hotPathAudit.pixelAuditCrcFast += completion.pixelAudit.crcFastSuccesses ?? 0;
-    hotPathAudit.pixelAuditMisses += completion.pixelAudit.misses ?? 0;
-    hotPathAudit.pixelAuditAnchorMisses += completion.pixelAudit.anchorMisses ?? 0;
-    hotPathAudit.pixelAuditFrameMisses += completion.pixelAudit.outOfFrameMisses ?? 0;
-    hotPathAudit.pixelAuditBitstreamFailures += completion.pixelAudit.bitstreamFailures ?? 0;
-    hotPathAudit.pixelAuditCrcFailures += completion.pixelAudit.crcFailures ?? 0;
-  }
   if (auditThisCompletion && !auditMode?.full && completion.fallbackAttempted) {
     hotPathAudit.localRecoveryAttempts++;
     if (completion.fallbackSucceeded) hotPathAudit.localRecoverySuccesses++;
@@ -1332,7 +1310,6 @@ function noteDecodeCompleted(id, completion) {
     if (auditMode.reacquire || fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
     else if (auditMode.acquisition || fullJob?.acquisition) hotPathAudit.acquisitionFullScans++;
   }
-  if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
   if (completion.error) {
     decodeExceptions++;
     lastDecodeError = completion.error;
@@ -2827,7 +2804,7 @@ function readBoundedVideoCrop(source, x, y, w, h) {
 }
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   if (message.strictHotPath === void 0) message.strictHotPath = strictHotPathActive();
-  if (message.strictHotPath && !strictHotPathLockSeen && !message.full) {
+  if (message.strictHotPath && !gridLattice.locked && !message.full) {
     notePipelineEvent("strict-prelock-job-rejected");
     if (trace) trace.decision = "strict pre-lock: only full acquisition allowed";
     return false;
@@ -2836,8 +2813,8 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     generation: hotPathAuditGeneration,
     strict: Boolean(message.strictHotPath),
     full: Boolean(message.full),
-    acquisition: Boolean(message.full && !gridLattice.active),
-    reacquire: Boolean(message.full && gridLattice.state === "REACQUIRE"),
+    acquisition: Boolean(message.full && !gridLattice.locked),
+    reacquire: Boolean(message.full && gridLattice.locked),
     kind
   };
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
@@ -2891,8 +2868,8 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       fullScanJobs.set(message.id, {
         thorough: Boolean(message.thorough),
         native: true,
-        reacquire: gridLattice.state === "REACQUIRE",
-        acquisition: !gridLattice.active
+        reacquire: gridLattice.locked,
+        acquisition: !gridLattice.locked
       });
     }
   }
@@ -2985,26 +2962,74 @@ function cloneVideoFrame(source, forceRgba = false) {
   }
   const visible = frame.visibleRect;
   const rotation = Number(frame.rotation ?? 0) % 360;
-  const displaySafe = Boolean(
-    visible &&
-    visible.x === 0 && visible.y === 0 &&
-    visible.width === source.width && visible.height === source.height &&
+  const scaleX = visible && source.width ? visible.width / source.width : 0;
+  const scaleY = visible && source.height ? visible.height / source.height : 0;
+  const coordinateMapSafe = Boolean(
+    visible && source.width > 0 && source.height > 0 &&
     frame.displayWidth === source.width && frame.displayHeight === source.height &&
+    Number.isFinite(scaleX) && scaleX > 0 && Number.isFinite(scaleY) && scaleY > 0 &&
     rotation === 0 && !frame.flip
   );
-  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${visible ? `${visible.x},${visible.y} ${visible.width}×${visible.height}` : "—"} visible · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"} · ${displaySafe ? "direct" : "canvas coordinate fallback"}`;
-  if (!displaySafe) {
-    // copyTo(rect) addresses VideoFrame pixels, while all AirGapper geometry is
-    // expressed in the rendered <video> coordinate system. A scaled/cropped/
-    // rotated frame therefore cannot safely share our display-space quads.
-    directFrameDisabled = true;
-    return null;
-  }
+  const sameGrid = coordinateMapSafe && visible.x === 0 && visible.y === 0 && scaleX === 1 && scaleY === 1;
+  const mapLabel = !coordinateMapSafe ? "canvas fallback" : sameGrid ? "direct" : `direct map ${scaleX.toFixed(2)}×${scaleY.toFixed(2)}`;
+  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${visible ? `${visible.x},${visible.y} ${visible.width}×${visible.height}` : "—"} visible · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"} · ${mapLabel}`;
+  if (!coordinateMapSafe) return null;
   try {
-    return { frame: frame.clone(), pixelFormat: forceRgba ? "video-rgba" : DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" };
+    return {
+      frame: frame.clone(),
+      pixelFormat: forceRgba ? "video-rgba" : DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba",
+      visibleX: visible.x,
+      visibleY: visible.y,
+      scaleX,
+      scaleY,
+      sameGrid
+    };
   } catch {
     return null;
   }
+}
+function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
+  const direct = cloneDirectDecodeFrame(source);
+  if (!direct) return null;
+  const pixelXf = direct.visibleX + x * direct.scaleX;
+  const pixelYf = direct.visibleY + y * direct.scaleY;
+  const pixelRf = direct.visibleX + (x + w) * direct.scaleX;
+  const pixelBf = direct.visibleY + (y + h) * direct.scaleY;
+  const pixelX = Math.round(pixelXf), pixelY = Math.round(pixelYf);
+  const pixelRight = Math.round(pixelRf), pixelBottom = Math.round(pixelBf);
+  if ([pixelXf - pixelX, pixelYf - pixelY, pixelRf - pixelRight, pixelBf - pixelBottom].some((delta) => Math.abs(delta) > 1e-4)) {
+    direct.frame.close();
+    return null;
+  }
+  const mapPoint = (point) => ({
+    x: direct.visibleX + point.x * direct.scaleX,
+    y: direct.visibleY + point.y * direct.scaleY
+  });
+  const mappedTracks = tracks.map((track) => ({
+    ...track,
+    quad: {
+      topLeft: mapPoint(track.quad.topLeft),
+      topRight: mapPoint(track.quad.topRight),
+      bottomRight: mapPoint(track.quad.bottomRight),
+      bottomLeft: mapPoint(track.quad.bottomLeft)
+    }
+  }));
+  return {
+    ...direct,
+    cropX: pixelX,
+    cropY: pixelY,
+    w: pixelRight - pixelX,
+    h: pixelBottom - pixelY,
+    ox: pixelX,
+    oy: pixelY,
+    tracks: mappedTracks,
+    outputMap: {
+      offsetX: direct.visibleX,
+      offsetY: direct.visibleY,
+      scaleX: direct.scaleX,
+      scaleY: direct.scaleY
+    }
+  };
 }
 function cloneDirectDecodeFrame(source) {
   if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
@@ -3012,7 +3037,12 @@ function cloneDirectDecodeFrame(source) {
 }
 function cloneDirectFullScanFrame(source) {
   if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
-  return cloneVideoFrame(source, true);
+  const direct = cloneVideoFrame(source, true);
+  if (!direct || !direct.sameGrid) {
+    direct?.frame.close();
+    return null;
+  }
+  return direct;
 }
 
 function captureOptimizerOpticalSample(source) {
@@ -3415,22 +3445,22 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const w = right - x;
       const h = bottom - y;
       if (w < 32 || h < 32) continue;
-      const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
+      const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount, strictHotPath: strictHotPathActive() };
       if (workerSlot === void 0) {
         queuePendingGridLane(groupIndex, source, geometry);
         continue;
       }
       discardPendingGridLane(groupIndex);
       let laneImage;
-      const direct = cloneDirectDecodeFrame(source);
+      const direct = mappedDirectTrackedFrame(source, x, y, w, h, group.tracks);
       if (!direct) {
         laneImage = readBoundedVideoCrop(source, x, y, w, h);
         if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
       }
       const id = frameId++;
       const laneMessage = direct
-        ? { id, videoFrame: direct.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: group.tracks, pixelFormat: direct.pixelFormat, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden }
-        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
+        ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: direct.pixelFormat, outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
+        : { id, buf: laneImage.data.buffer, w, h, ox: x, oy: y, full: false, tracks: group.tracks, strictHotPath: strictHotPathActive() };
       const laneTransfer = direct ? [direct.frame] : [laneImage.data.buffer];
       const accepted = submitReceiverJob(
         laneMessage,
@@ -3489,7 +3519,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         return;
       }
       let shared;
-      const sharedDirect = healthyGrid ? cloneDirectDecodeFrame(source) : null;
+      const sharedDirect = healthyGrid ? mappedDirectTrackedFrame(source, x, y, w, h, batchTracks) : null;
       if (!sharedDirect) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
         inspectStaticQrOptics(source, shared, x, y);
@@ -3499,8 +3529,8 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: x, cropY: y, w, h, ox: x, oy: y, full: false, tracks: batchTracks, pixelFormat: sharedDirect.pixelFormat, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden }
-          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: sharedDirect.cropX, cropY: sharedDirect.cropY, w: sharedDirect.w, h: sharedDirect.h, ox: sharedDirect.ox, oy: sharedDirect.oy, full: false, tracks: sharedDirect.tracks, pixelFormat: sharedDirect.pixelFormat, outputMap: sharedDirect.outputMap, strictHotPath: strictHotPathActive() }
+          : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictHotPath: strictHotPathActive() };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
         if (!submitReceiverJob(
@@ -3525,7 +3555,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       const id = frameId++;
       if (submitReceiverJob(
-        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, diagnoseSampler: !receiverDevActions.hidden },
+        { id, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks },
         [shared.data.buffer],
         "SHARED TRACKED BATCH CROP",
         trace,
@@ -3580,7 +3610,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       crc32: Boolean(r.crc32)
     };
     if (!submitReceiverJob(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden },
+      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive() },
       [img.data.buffer],
       "INDIVIDUAL TRACKED CROP",
       trace,
@@ -4745,12 +4775,6 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
   const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
-  const samplerLine = lastSamplerDiagnostics.length
-    ? lastSamplerDiagnostics.map((item) => item.error
-      ? `s${item.slot ?? "?"} error ${item.error}`
-      : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} · lattice ${item.current.mismatches}/${item.current.total} · fresh ${item.fresh.mismatches}/${item.fresh.total}`
-    ).join(" | ")
-    : "no matrix-oracle recovery event";
   transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"}
 Transport
 Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
@@ -4761,10 +4785,9 @@ Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "es
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
-Sampler HybridBinarizer · plain-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts} · alignment-fit CRC ${hotPathAudit.alignmentFitSuccesses}/${hotPathAudit.alignmentFitAttempts}
-Pixel path ${lastDirectPixelPath.toUpperCase()} · A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
-Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
-Sampler ${samplerLine}`;
+Sampler HybridBinarizer + SampleGrid · CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Pixel path ${lastDirectPixelPath.toUpperCase()}
+Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
