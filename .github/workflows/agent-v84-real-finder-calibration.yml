@@ -1,0 +1,41 @@
+name: Agent v84 real finder calibration
+on:
+  push:
+    branches: [agent/v84-real-finder-calibration]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v84-real-finder-calibration
+      - name: Apply patch
+        run: python3 .github/v84_patch.py
+      - name: Build SIMD codec
+        working-directory: vendor/decimen-codec/source
+        run: ./build.sh
+      - name: Build scalar codec
+        working-directory: vendor/decimen-codec/source
+        env:
+          DECIMEN_SIMD: '0'
+          DECIMEN_OUTPUT_DIR: ../../decimen-codec-android
+        run: ./build.sh
+      - name: Syntax checks
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check sw.js
+      - name: Commit build
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v84_patch.py .github/workflows/agent-v84-real-finder-calibration.yml
+          git add index.html main.js receive/main.js sw.js \
+            vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+            vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
+            vendor/decimen-codec/source/VERSION vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          git commit -m "seed cached calibration from real finder patterns"
+          git push origin HEAD:agent/v84-real-finder-calibration
