@@ -107,35 +107,61 @@ function squareToQuad(q) {
 }
 function projectUnitQuad(model, u, v) {
   const denominator = model.g * u + model.h * v + 1;
+  if (Math.abs(denominator) < 1e-9) return null;
   return {
     x: (model.a * u + model.b * v + model.c) / denominator,
     y: (model.d * u + model.e * v + model.f) / denominator
+  };
+}
+function invertProjective(model) {
+  const a = model.a, b = model.b, c = model.c;
+  const d = model.d, e = model.e, f = model.f;
+  const g = model.g, h = model.h, i = 1;
+  const A = e * i - f * h;
+  const B = c * h - b * i;
+  const C = b * f - c * e;
+  const D = f * g - d * i;
+  const E = a * i - c * g;
+  const F = c * d - a * f;
+  const G = d * h - e * g;
+  const H = b * g - a * h;
+  const I = a * e - b * d;
+  const det = a * A + b * D + c * G;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-10) return null;
+  const inv = 1 / det;
+  return [A * inv, B * inv, C * inv, D * inv, E * inv, F * inv, G * inv, H * inv, I * inv];
+}
+function projectMatrix(model, x, y) {
+  const denominator = model[6] * x + model[7] * y + model[8];
+  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) return null;
+  return {
+    x: (model[0] * x + model[1] * y + model[2]) / denominator,
+    y: (model[3] * x + model[4] * y + model[5]) / denominator
   };
 }
 function rememberExactSampleMap(id, dim, sampleMap, ox, oy, localQuad) {
   if (!sampleMap || sampleMap.length !== dim * dim * 2 || !validQuad(localQuad)) return false;
   const anchorQuad = shifted(localQuad, ox, oy);
   const anchorModel = squareToQuad(anchorQuad);
-  if (!anchorModel) return false;
-  const residual = new Float32Array(sampleMap.length);
-  let i = 0;
-  for (let y = 0; y < dim; y++) {
-    const v = (y + 0.5) / dim;
-    for (let x = 0; x < dim; x++, i += 2) {
-      const u = (x + 0.5) / dim;
-      const projected = projectUnitQuad(anchorModel, u, v);
-      residual[i] = sampleMap[i] + ox - projected.x;
-      residual[i + 1] = sampleMap[i + 1] + oy - projected.y;
-    }
+  const anchorInverse = anchorModel ? invertProjective(anchorModel) : null;
+  if (!anchorInverse) return false;
+  const points = new Float32Array(sampleMap.length);
+  for (let i = 0; i < sampleMap.length; i += 2) {
+    points[i] = sampleMap[i] + ox;
+    points[i + 1] = sampleMap[i + 1] + oy;
   }
-  nativeExactMaps.set(id, { dim, residual, version: nativeExactMapVersion++ });
+  // Preserve the actual SampleQR point cloud. On later frames, transport each
+  // point through H(currentQuad) * inverse(H(acquisitionQuad)). This transforms
+  // the distortion-corrected geometry itself; adding an old screen-space
+  // residual to a new homography (v0.5.97/98) was not projectively valid.
+  nativeExactMaps.set(id, { dim, points, anchorInverse, version: nativeExactMapVersion++ });
   return true;
 }
 function applyExactSampleMap(zx, nativeSlot, map, track, ox, oy) {
   const pointCount = map.dim * map.dim;
   const floats = pointCount * 2;
   const currentModel = squareToQuad(track.quad);
-  if (!currentModel) return false;
+  if (!currentModel || !map.anchorInverse) return false;
   if (floats > nativeSampleScratchFloats) {
     if (nativeSampleScratchPtr) zx._free(nativeSampleScratchPtr);
     nativeSampleScratchPtr = zx._malloc(floats * 4);
@@ -143,15 +169,13 @@ function applyExactSampleMap(zx, nativeSlot, map, track, ox, oy) {
   }
   if (!nativeSampleScratchPtr) return false;
   const out = new Float32Array(zx.HEAPU8.buffer, nativeSampleScratchPtr, floats);
-  let i = 0;
-  for (let y = 0; y < map.dim; y++) {
-    const v = (y + 0.5) / map.dim;
-    for (let x = 0; x < map.dim; x++, i += 2) {
-      const u = (x + 0.5) / map.dim;
-      const projected = projectUnitQuad(currentModel, u, v);
-      out[i] = projected.x + map.residual[i] - ox;
-      out[i + 1] = projected.y + map.residual[i + 1] - oy;
-    }
+  for (let i = 0; i < floats; i += 2) {
+    const uv = projectMatrix(map.anchorInverse, map.points[i], map.points[i + 1]);
+    if (!uv) return false;
+    const projected = projectUnitQuad(currentModel, uv.x, uv.y);
+    if (!projected || !Number.isFinite(projected.x) || !Number.isFinite(projected.y)) return false;
+    out[i] = projected.x - ox;
+    out[i + 1] = projected.y - oy;
   }
   return Boolean(zx._setTrackedDecoderSampleMap(nativeBatchHandle, nativeSlot, nativeSampleScratchPtr, pointCount));
 }

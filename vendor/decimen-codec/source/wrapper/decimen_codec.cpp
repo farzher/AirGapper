@@ -693,6 +693,56 @@ static bool refineAnchor(PersistentTrack& track, const LumAt& lumAt, AnchorReadi
 	return reading.score >= 125 && reading.contrast >= 24;
 }
 
+
+template <class LumAt>
+static bool refineExactAnchorWide(PersistentTrack& track, const LumAt& lumAt, AnchorReading& reading)
+{
+    const float originX = track.dx, originY = track.dy;
+    float bestX = originX, bestY = originY;
+    reading = readAnchor(track, originX, originY, lumAt);
+    AnchorReading best = reading;
+
+    auto test = [&](float dx, float dy) {
+        auto candidate = readAnchor(track, dx, dy, lumAt);
+        if (candidate.score > best.score ||
+            (candidate.score == best.score && candidate.contrast > best.contrast)) {
+            best = candidate;
+            bestX = dx;
+            bestY = dy;
+        }
+    };
+
+    if (best.score < 140 || best.contrast < 32) {
+        // A worker currently sees only ~1/6 of submitted frames, so its exact
+        // map can be tens of pixels stale while the phone is handheld. Search
+        // one QR's 147 known finder modules over a wide translation window.
+        // ±72 at 2px spacing is <0.8M binary probes and is far cheaper than a
+        // generic finder/detector scan over the entire 1440x2560 image.
+        constexpr int R = 72;
+        constexpr int STEP = 2;
+        for (int y = -R; y <= R; y += STEP)
+            for (int x = -R; x <= R; x += STEP)
+                if (x || y)
+                    test(originX + float(x), originY + float(y));
+
+        const float coarseX = bestX, coarseY = bestY;
+        for (int y = -1; y <= 1; ++y)
+            for (int x = -1; x <= 1; ++x)
+                if (x || y)
+                    test(coarseX + float(x), coarseY + float(y));
+    }
+
+    reading = best;
+    if (best.score >= 125 && best.contrast >= 24) {
+        track.dx = bestX;
+        track.dy = bestY;
+        return true;
+    }
+    track.dx = originX;
+    track.dy = originY;
+    return false;
+}
+
 static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits)
 {
 	auto format = QRCode::ReadFormatInformation(bits);
@@ -1361,62 +1411,64 @@ static int decodeBatchExactMapBits(TrackedDecoder& decoder, const BitMatrix& ima
             pending.push_back({&track, &result});
     }
 
-    // Exact SampleQR coordinates already encode lens/alignment distortion.
-    // The only cheap correction we permit in steady state is one shared image
-    // translation, measured from finder modules on the HybridBinarizer matrix.
-    // Never commit that translation unless it produces a CRC-valid QR.
+    // The per-QR homography above follows scale/rotation/perspective. What can
+    // still be stale is frame timing: each worker sees only a fraction of camera
+    // frames. Recover that residual motion directly from known finder modules.
+    // Try up to three QRs so glare/occlusion on one anchor cannot force a full
+    // robust scan. A candidate translation is committed only if it produces an
+    // actual CRC-valid AirGapper QR.
     if (!pending.empty() && measured.successful == 0) {
-        PendingTrack* reference = nullptr;
-        for (auto& candidate : pending) {
-            if (!candidate.track->exactSampleMap || !candidate.track->crc32Payload)
+        auto binaryLumAt = [&](float fx, float fy) {
+            const PointF p{fx, fy};
+            return imageBits.isIn(p) ? (imageBits.get(p) ? 0 : 255) : -1;
+        };
+        int referencesTried = 0;
+        for (auto& reference : pending) {
+            if (referencesTried >= 3)
+                break;
+            if (!reference.track->exactSampleMap || !reference.track->crc32Payload)
                 continue;
-            if (!reference || candidate.track->consecutiveMisses < reference->track->consecutiveMisses)
-                reference = &candidate;
-        }
-        if (reference) {
-            auto& ref = *reference->track;
+            ++referencesTried;
+            auto& ref = *reference.track;
             const float oldX = ref.dx, oldY = ref.dy;
             AnchorReading reading;
-            auto binaryLumAt = [&](float fx, float fy) {
-                const PointF p{fx, fy};
-                return imageBits.isIn(p) ? (imageBits.get(p) ? 0 : 255) : -1;
-            };
             ++measured.translationAttempts;
             const double motionStarted = emscripten_get_now();
-            const bool anchored = refineAnchor(ref, binaryLumAt, reading);
+            const bool anchored = refineExactAnchorWide(ref, binaryLumAt, reading);
             measured.anchorMs += emscripten_get_now() - motionStarted;
             const float deltaX = ref.dx - oldX, deltaY = ref.dy - oldY;
-            if (anchored && (std::abs(deltaX) > 0.01f || std::abs(deltaY) > 0.01f)) {
-                for (auto& track : decoder.tracks) {
-                    if (track.active && &track != &ref) {
-                        track.dx += deltaX;
-                        track.dy += deltaY;
-                    }
-                }
-                const int successesBefore = measured.successful;
-                std::vector<PendingTrack> stillPending;
-                stillPending.reserve(pending.size());
-                for (auto& candidate : pending) {
-                    if (!candidate.track->exactSampleMap || !tryTrack(*candidate.track, *candidate.result))
-                        stillPending.push_back(candidate);
-                }
-                if (measured.successful > successesBefore) {
-                    ++measured.translationSuccesses;
-                    pending = std::move(stillPending);
-                } else {
-                    for (auto& track : decoder.tracks) {
-                        if (track.active) {
-                            track.dx -= deltaX;
-                            track.dy -= deltaY;
-                        }
-                    }
-                    ref.dx = oldX;
-                    ref.dy = oldY;
-                }
-            } else {
+            if (!anchored || (std::abs(deltaX) <= 0.01f && std::abs(deltaY) <= 0.01f)) {
                 ref.dx = oldX;
                 ref.dy = oldY;
+                continue;
             }
+
+            for (auto& track : decoder.tracks)
+                if (track.active && &track != &ref) {
+                    track.dx += deltaX;
+                    track.dy += deltaY;
+                }
+
+            const int successesBefore = measured.successful;
+            std::vector<PendingTrack> stillPending;
+            stillPending.reserve(pending.size());
+            for (auto& candidate : pending) {
+                if (!candidate.track->exactSampleMap || !tryTrack(*candidate.track, *candidate.result))
+                    stillPending.push_back(candidate);
+            }
+            if (measured.successful > successesBefore) {
+                ++measured.translationSuccesses;
+                pending = std::move(stillPending);
+                break;
+            }
+
+            // Correlation alone is not authoritative. If the QR payload did not
+            // validate, undo the global motion and let another QR anchor try.
+            for (auto& track : decoder.tracks)
+                if (track.active)
+                    track.dx -= deltaX;
+            ref.dx = oldX;
+            ref.dy = oldY;
         }
     }
 
