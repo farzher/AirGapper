@@ -1,19 +1,46 @@
-name: Agent topLeft audit v60
+name: Agent topLeft fix v60
 on:
   push:
     branches: [agent/top-left-audit-v60]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  audit:
+  patch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/top-left-audit-v60
-      - name: Audit source dereferences
+      - name: Apply patch
+        run: python3 .github/agent-top-left-fix-v60.py
+      - name: Verify syntax
         run: |
-          echo '=== topLeft occurrences ==='
-          grep -RIn --exclude='*.wasm' --exclude-dir=.git --exclude='*.map' 'topLeft' receive shared main.js index.html || true
-          echo '=== topRight occurrences ==='
-          grep -RIn --exclude='*.wasm' --exclude-dir=.git --exclude='*.map' 'topRight' receive shared main.js index.html || true
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check receive/qr-optics.js
+      - name: Verify malformed-quad optics is harmless
+        run: |
+          node --input-type=module - <<'NODE'
+          import { StaticQrOpticsAnalyzer } from './receive/qr-optics.js';
+          const analyzer = new StaticQrOpticsAnalyzer();
+          const image = { width: 64, height: 64, data: new Uint8ClampedArray(64 * 64 * 4) };
+          const result = analyzer.analyze(image, [{ quad: { topRight: {x:1,y:1} }, modules: 105 }]);
+          if (result !== undefined) throw new Error('malformed quad should be ignored');
+          NODE
+      - name: Verify invariants
+        run: |
+          grep -q 'if (!full && validQuad(quad) && dim)' receive/worker.js
+          grep -q 'if (!validQuadObject(region.quad) || !region.dim || region.visibleFraction < 0.85)' receive/main.js
+          grep -q 'validQuadObject(info == null ? void 0 : info.quad)' receive/main.js
+          grep -q 'captureFrame:' receive/main.js
+          grep -q 'if (!validQuad(quad)) return false' receive/qr-optics.js
+          grep -q 'v0.5.60' index.html
+          grep -q 'airgapper-static-js-v23' sw.js
+      - name: Commit result
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/agent-top-left-fix-v60.py .github/workflows/agent-top-left-audit-v60.yml
+          git add receive/main.js receive/worker.js receive/qr-optics.js index.html sw.js
+          git commit -m "guard all receiver quad consumers"
+          git push origin HEAD:agent/top-left-audit-v60
