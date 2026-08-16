@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.129";
+const RECEIVER_RUNTIME_BUILD = "v0.5.130";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2342,7 +2342,7 @@ function renderFocusDiagnostics() {
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -3975,9 +3975,15 @@ async function captureFrame(source) {
     activeBenchmarkFrame = void 0;
     return;
   }
-  const gridNeedsDiscovery = lockedGeometryTrusted
+  // A decoded QR is not the same thing as acquired grid geometry. In SEARCH
+  // or REACQUIRE, one valid seed can set expectedRegions/live to 1 before the
+  // lattice accepts its geometry. Never let that lone region suppress the
+  // full-frame acquisition loop; only an active lattice may hand scheduling
+  // over to tracked QR work.
+  const preLatticeDiscovery = !gridLattice.active;
+  const gridNeedsDiscovery = preLatticeDiscovery || (lockedGeometryTrusted
     ? allLockedCandidatesCold
-    : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
+    : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST"));
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
   if (gridLattice.locked) strictHotPathLockSeen = true;
   const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen && gridLattice.locked;
@@ -3985,10 +3991,13 @@ async function captureFrame(source) {
   // the grid once. After lock, it may not hide tracked failures by falling
   // back to local robust decode or by abandoning the grid and reacquiring it.
   gridLattice.noteMissing(strictLockedAudit ? false : gridNeedsDiscovery, now);
-  const needsRecoveryScan = strictLockedAudit ? false : lockedGeometryTrusted
+  const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
     ? geometryProbeDue || allLockedCandidatesCold || trackingUnhealthy
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
-  const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
+  // SEARCH/REACQUIRE is acquisition regardless of whether one seed QR has
+  // already decoded. Keep the fast acquisition cadence until lattice geometry
+  // actually exists.
+  const scanInterval = preLatticeDiscovery || live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
   const fullScanDue = strictAcquiring
