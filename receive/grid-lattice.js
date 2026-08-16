@@ -178,6 +178,89 @@ class GridLattice {
     if (!this.locked) return;
     this.transition(anyMissing ? "PARTIAL_LOSS" : "TRACK", anyMissing ? "one or more predicted slots missing" : "all predicted slots healthy", now);
   }
+  nudgeFromSightings(sightings, at = this.lastHitAt) {
+    if (!this.locked || !this.candidate || !Array.isArray(sightings) || !sightings.length) return null;
+    const snapshot = this.snapshot();
+    if (!snapshot) return null;
+    const validBox = (box) => box && [box.x, box.y, box.w, box.h].every(Number.isFinite) &&
+      box.w >= 20 && box.h >= 20 && Math.max(box.w / box.h, box.h / box.w) < 2.4;
+    const candidates = snapshot.slots.filter((slot) => validBox(slot.box));
+    if (!candidates.length) return null;
+    const unused = new Set(candidates.map((slot) => slot.index));
+    const matches = [];
+    // Greedy nearest-neighbor matching is intentionally conservative. Finder
+    // sightings contain no identity/CRC, so require similar size, proximity to
+    // an already-proven slot, and later a coherent multi-sighting translation.
+    for (const sighting of sightings.filter(validBox)) {
+      const sx = sighting.x + sighting.w / 2;
+      const sy = sighting.y + sighting.h / 2;
+      let best = null;
+      for (const slot of candidates) {
+        if (!unused.has(slot.index)) continue;
+        const box = slot.box;
+        const px = box.x + box.w / 2;
+        const py = box.y + box.h / 2;
+        const edge = Math.max(24, Math.sqrt(box.w * box.h));
+        const ratio = Math.sqrt(sighting.w * sighting.h / Math.max(1, box.w * box.h));
+        if (ratio < 0.5 || ratio > 1.9) continue;
+        const distance = Math.hypot(sx - px, sy - py);
+        if (distance > edge * 0.9) continue;
+        const score = distance / edge + Math.abs(Math.log(ratio)) * 0.55;
+        if (!best || score < best.score) {
+          best = { slot, dx: sx - px, dy: sy - py, ratio, edge, score };
+        }
+      }
+      if (best) {
+        unused.delete(best.slot.index);
+        matches.push(best);
+      }
+    }
+    const wallCount = snapshot.layout.cols * snapshot.layout.rows;
+    const minimumMatches = wallCount <= 1 ? 1 : 2;
+    if (matches.length < minimumMatches) return null;
+    const median = (values) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    let dx = median(matches.map((match) => match.dx));
+    let dy = median(matches.map((match) => match.dy));
+    const edge = median(matches.map((match) => match.edge));
+    let inliers = matches.filter((match) => Math.hypot(match.dx - dx, match.dy - dy) <= edge * 0.3);
+    if (inliers.length < minimumMatches) return null;
+    dx = median(inliers.map((match) => match.dx));
+    dy = median(inliers.map((match) => match.dy));
+    const shift = Math.hypot(dx, dy);
+    // Ignore sub-pixel/no-op results and large jumps that are more likely to be
+    // a different object/grid. This is a rescue nudge, never reacquisition.
+    if (shift < 1 || shift > edge * 0.72) return null;
+    const bySlot = new Map(inliers.map((match) => [match.slot.index, match]));
+    const movePoint = (point, mx, my, scale, cx, cy) => ({
+      x: cx + (point.x - cx) * scale + mx,
+      y: cy + (point.y - cy) * scale + my
+    });
+    this.observations = this.observations.map((observation) => {
+      const match = bySlot.get(observation.slotIndex);
+      const mx = match ? match.dx : dx;
+      const my = match ? match.dy : dy;
+      // A sighting's bounding box can estimate a small zoom change, but clamp
+      // it tightly because failed finder geometry is noisier than CRC geometry.
+      const scale = match ? Math.max(0.92, Math.min(1.08, match.ratio)) : 1;
+      const box = observation.box;
+      const cx = box.x + box.w / 2;
+      const cy = box.y + box.h / 2;
+      const points = corners(observation.quad).map((point) => movePoint(point, mx, my, scale, cx, cy));
+      const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+      return { ...observation, quad, box: bounds(quad) };
+    });
+    const updated = this.makeCandidate(this.candidate.layout);
+    if (!updated) return null;
+    this.candidate = updated;
+    // Deliberately do not advance lastHitAt: finder-only evidence may reposition
+    // a proven wall, but only a valid AirGapper packet may keep it alive.
+    this.transition("PARTIAL_LOSS", "finder sightings recentered locked lattice", at);
+    return this.snapshot();
+  }
   makeCandidate(layout) {
     const count = layout.cols * layout.rows;
     const latest = /* @__PURE__ */ new Map();
