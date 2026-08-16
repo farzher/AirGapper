@@ -781,6 +781,20 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 				  track.framesSinceReacquire, track.dx, track.dy};
 
+		// The distortion map is persistent, but a handheld camera is not. Before
+		// touching the full module grid, align the three invariant finder patterns
+		// and apply that cheap translation to every cached sample point. On a
+		// stable frame this is only 147 luminance reads.
+		if (track.crc32Payload) {
+			++measured.translationAttempts;
+			AnchorReading motion;
+			const double motionStarted = emscripten_get_now();
+			const bool tracked = refineAnchor(track, lumAt, motion);
+			measured.anchorMs += emscripten_get_now() - motionStarted;
+			if (tracked)
+				++measured.translationSuccesses;
+		}
+
 		ByteArray packet = track.crc32Payload ? decodeCachedTrack(track, lumAt, measured) : ByteArray{};
 		if (packet.empty()) {
 			++track.consecutiveMisses;
@@ -1005,6 +1019,10 @@ static void addBatchMetrics(DecimenBatchMetrics& dst, const DecimenBatchMetrics&
 	dst.alignmentFitSuccesses += src.alignmentFitSuccesses;
 	dst.anchorBypassAttempts += src.anchorBypassAttempts;
 	dst.anchorBypassSuccesses += src.anchorBypassSuccesses;
+	dst.translationAttempts += src.translationAttempts;
+	dst.translationSuccesses += src.translationSuccesses;
+	dst.calibrationAttempts += src.calibrationAttempts;
+	dst.calibrationSuccesses += src.calibrationSuccesses;
 }
 
 // The persistent hot path intentionally uses the same two pixel operations as
@@ -1341,11 +1359,13 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		for (auto& track : decoder->tracks) {
 			if (!track.active || track.calibrationCooldown > 0 || (track.calibrated && track.consecutiveMisses < 2))
 				continue;
+			++measured.calibrationAttempts;
 			const double calibrationStarted = emscripten_get_now();
 			const bool ok = calibrateTrackSampleMap(track, *bits);
 			measured.anchorMs += emscripten_get_now() - calibrationStarted;
 			if (ok) {
 				++measured.anchorSuccesses;
+				++measured.calibrationSuccesses;
 				calibratedAny = true;
 			} else {
 				++measured.anchorMisses;

@@ -39,7 +39,7 @@ function inputBuffer(zx, bytes) {
 }
 const NATIVE_BATCH_MAX_TRACKS = 16;
 const NATIVE_TRACK_RESULT_BYTES = 32;
-const NATIVE_BATCH_METRICS_BYTES = 112;
+const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
 let nativeBatchHandle = 0;
@@ -154,7 +154,11 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     crcFailures: view.getUint32(nativeMetricsPtr + 92, true),
     fastSamplerSuccesses: view.getUint32(nativeMetricsPtr + 96, true),
     anchorBypassAttempts: view.getUint32(nativeMetricsPtr + 100, true),
-    anchorBypassSuccesses: view.getUint32(nativeMetricsPtr + 104, true)
+    anchorBypassSuccesses: view.getUint32(nativeMetricsPtr + 104, true),
+    translationAttempts: view.getUint32(nativeMetricsPtr + 108, true),
+    translationSuccesses: view.getUint32(nativeMetricsPtr + 112, true),
+    calibrationAttempts: view.getUint32(nativeMetricsPtr + 116, true),
+    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true)
   };
   const pending = [];
   let outputEnd = 0;
