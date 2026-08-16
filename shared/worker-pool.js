@@ -14,6 +14,7 @@ class DecodeWorkerPool {
     __publicField(this, "busy", []);
     __publicField(this, "activeIds", []);
     __publicField(this, "activeFull", []);
+    __publicField(this, "activeMeta", []);
     __publicField(this, "jobTimers", []);
     __publicField(this, "jobOptics", /* @__PURE__ */ new Map());
   }
@@ -39,6 +40,7 @@ class DecodeWorkerPool {
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
+      this.activeMeta[slot] = null;
       this.onAvailable?.(slot);
       const completion = {
         full: Boolean(message.full),
@@ -103,6 +105,7 @@ class DecodeWorkerPool {
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
+      this.activeMeta[slot] = null;
       if (id !== void 0) this.jobOptics.delete(id);
       (_b = this.onCompleted) == null ? void 0 : _b.call(this, id != null ? id : -1, {
         full,
@@ -136,6 +139,7 @@ class DecodeWorkerPool {
       this.busy.pop();
       this.activeIds.pop();
       this.activeFull.pop();
+      this.activeMeta.pop();
       clearTimeout(this.jobTimers.pop());
     }
     while (this.workers.length < count) {
@@ -145,9 +149,16 @@ class DecodeWorkerPool {
       this.busy.push(false);
       this.activeIds.push(void 0);
       this.activeFull.push(false);
+      this.activeMeta.push(null);
       this.jobTimers.push(void 0);
       this.configureWorker(slot, worker);
     }
+  }
+  /** Live worker ownership for diagnostics. Ages are measured from postMessage,
+   * so a long-running job cannot masquerade as an unexplained scanner stall. */
+  get activeJobs() {
+    const now = performance.now();
+    return this.activeMeta.flatMap((meta, slot) => meta ? [{ ...meta, slot, ageMs: Math.max(0, now - meta.startedAt) }] : []);
   }
   /** Worker slots that can accept a job right now. Exposed so dense-grid
    * schedulers can preserve per-worker native tracking affinity instead of
@@ -164,6 +175,14 @@ class DecodeWorkerPool {
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : void 0;
     this.activeFull[slot] = Boolean(message.full);
+    this.activeMeta[slot] = {
+      id: typeof id === "number" ? id : void 0,
+      kind: message.jobKind ?? (message.full ? "full" : "tracked"),
+      full: Boolean(message.full),
+      tracks: Number(message.trackCount ?? message.tracks?.length ?? 0),
+      pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0),
+      startedAt: performance.now()
+    };
     if (typeof id === "number") {
       const metadata = message;
       this.jobOptics.set(id, {
@@ -184,6 +203,7 @@ class DecodeWorkerPool {
         this.busy[slot] = false;
         this.activeIds[slot] = void 0;
         this.activeFull[slot] = false;
+        this.activeMeta[slot] = null;
         this.jobTimers[slot] = void 0;
         (_b2 = this.onCompleted) == null ? void 0 : _b2.call(this, activeId, {
           full,
@@ -214,6 +234,7 @@ class DecodeWorkerPool {
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
+      this.activeMeta[slot] = null;
       if (typeof id === "number") this.jobOptics.delete(id);
       if (typeof id === "number") (_b = this.onCompleted) == null ? void 0 : _b.call(this, id, {
         full,
