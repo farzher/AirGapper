@@ -1013,9 +1013,8 @@ static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& tra
 	return {};
 }
 
-// A local finder-pattern search is tens of thousands of point reads, not a
-// multi-megapixel QR detector pass. Four spatially distributed QR anchors are
-// enough to fit the rigid screen's current affine pose.
+// Four tiny finder-template searches replace a multi-megapixel QR detector.
+// Their real finder centers define the rigid screen's current projective pose.
 struct MotionObservation
 {
 	PersistentTrack* track = nullptr;
@@ -1024,46 +1023,39 @@ struct MotionObservation
 };
 
 template <class LumAt>
-static AnchorReading readAffineAnchor(const TrackedDecoder& decoder, const PersistentTrack& track,
+static AnchorReading readMotionFinder(const TrackedDecoder& decoder, const PersistentTrack& track,
                                       float localDx, float localDy, const LumAt& lumAt)
 {
-	const int dim = track.dimension;
-	const PointI corners[3] = {{0, 0}, {dim - 7, 0}, {0, dim - 7}};
+	// One actual finder center is one projective point correspondence. Sampling
+	// all three finders here used 3x the pixels and implicitly assumed the whole
+	// QR moved by a translation before fitting the global screen transform.
 	AnchorReading out;
-	out.contrast = 255;
-	int globalBlackSum = 0, globalWhiteSum = 0, globalBlackCount = 0, globalWhiteCount = 0;
-	for (auto corner : corners) {
-		uint8_t values[49];
-		bool expected[49];
-		int count = 0, blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
-		for (int my = 0; my < 7; ++my)
-			for (int mx = 0; mx < 7; ++mx) {
-				const auto& p = track.samples[(corner.y + my) * dim + corner.x + mx];
-				const auto q = decoder.motion.apply(PointF{p.x, p.y});
-				const int lum = lumAt(q.x + localDx, q.y + localDy);
-				if (lum < 0)
-					return {};
-				const bool black = finderIdeal(mx, my);
-				values[count] = static_cast<uint8_t>(lum);
-				expected[count++] = black;
-				if (black) { blackSum += lum; ++blackCount; }
-				else { whiteSum += lum; ++whiteCount; }
-			}
-		const int black = blackSum / blackCount;
-		const int white = whiteSum / whiteCount;
-		const int contrast = white - black;
-		out.contrast = std::min(out.contrast, contrast);
-		const int threshold = (black + white) / 2;
-		if (contrast >= 24)
-			for (int i = 0; i < count; ++i)
-				out.score += (values[i] <= threshold) == expected[i];
-		globalBlackSum += blackSum; globalBlackCount += blackCount;
-		globalWhiteSum += whiteSum; globalWhiteCount += whiteCount;
-	}
-	const int globalBlack = globalBlackSum / std::max(1, globalBlackCount);
-	const int globalWhite = globalWhiteSum / std::max(1, globalWhiteCount);
-	out.threshold = (globalBlack + globalWhite) / 2;
-	if (out.contrast == 255) out.contrast = 0;
+	int blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
+	uint8_t values[49];
+	bool expected[49];
+	int count = 0;
+	for (int my = 0; my < 7; ++my)
+		for (int mx = 0; mx < 7; ++mx) {
+			const auto& p = track.samples[my * track.dimension + mx];
+			const auto q = decoder.motion.apply(PointF{p.x, p.y});
+			const int lum = lumAt(q.x + localDx, q.y + localDy);
+			if (lum < 0)
+				return {};
+			const bool black = finderIdeal(mx, my);
+			values[count] = static_cast<uint8_t>(lum);
+			expected[count++] = black;
+			if (black) { blackSum += lum; ++blackCount; }
+			else { whiteSum += lum; ++whiteCount; }
+		}
+	if (!blackCount || !whiteCount)
+		return {};
+	const int black = blackSum / blackCount;
+	const int white = whiteSum / whiteCount;
+	out.contrast = white - black;
+	out.threshold = (black + white) / 2;
+	if (out.contrast >= 24)
+		for (int i = 0; i < count; ++i)
+			out.score += (values[i] <= out.threshold) == expected[i];
 	return out;
 }
 
@@ -1073,21 +1065,23 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 {
 	if (!track.calibrated || track.samples.empty())
 		return false;
-	const int center = track.dimension / 2;
-	const auto& cp = track.samples[center * track.dimension + center];
-	const PointF base{cp.x, cp.y};
+	// Use the center module of this QR's top-left finder as the actual fitted
+	// point. Four QRs distributed over the wall therefore provide four real
+	// screen points for the homography instead of inferred QR-center shifts.
+	const auto& fp = track.samples[3 * track.dimension + 3];
+	const PointF base{fp.x, fp.y};
 	const PointF predicted = decoder.motion.apply(base);
-	AnchorReading best = readAffineAnchor(decoder, track, 0, 0, lumAt);
+	AnchorReading best = readMotionFinder(decoder, track, 0, 0, lumAt);
 	float bestDx = 0, bestDy = 0;
 	auto test = [&](float dx, float dy) {
-		auto candidate = readAffineAnchor(decoder, track, dx, dy, lumAt);
+		auto candidate = readMotionFinder(decoder, track, dx, dy, lumAt);
 		if (candidate.score > best.score || (candidate.score == best.score && candidate.contrast > best.contrast)) {
 			best = candidate;
 			bestDx = dx;
 			bestDy = dy;
 		}
 	};
-	if (!(best.score >= 140 && best.contrast >= 32)) {
+	if (!(best.score >= 47 && best.contrast >= 32)) {
 		for (int y = -8; y <= 8; y += 2)
 			for (int x = -8; x <= 8; x += 2)
 				if (x || y)
@@ -1098,10 +1092,7 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 				if (x || y)
 					test(coarseX + x * 0.5f, coarseY + y * 0.5f);
 	}
-	if (best.score < 125 || best.contrast < 24) {
-		// A worker normally sees every ~6th camera frame. A quick hand motion can
-		// therefore move an otherwise healthy wall beyond ±8 px. Search a sparse
-		// ±24 px field only on failure; it is still tiny beside a 3.6 MP finder pass.
+	if (best.score < 42 || best.contrast < 24) {
 		for (int y = -24; y <= 24; y += 4)
 			for (int x = -24; x <= 24; x += 4)
 				if (std::abs(x) > 8 || std::abs(y) > 8)
@@ -1112,7 +1103,7 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 				if (x || y)
 					test(wideX + float(x), wideY + float(y));
 	}
-	if (best.score < 125 || best.contrast < 24)
+	if (best.score < 42 || best.contrast < 24)
 		return false;
 	observation = {&track, base, PointF{predicted.x + bestDx, predicted.y + bestDy}};
 	return true;
