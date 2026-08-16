@@ -1,0 +1,25 @@
+name: Agent v82 stable lane crops
+on:
+  push:
+    branches: [agent/v82-stable-lane-crops]
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v82-stable-lane-crops
+      - name: Apply patch
+        shell: bash
+        run: python3 .github/v82_patch.py
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          rm -f .github/v82_patch.py .github/workflows/agent-v82-stable-lane-crops.yml
+          git add -A
+          git commit -m 'stabilize locked lane crop coordinates'
+          git push origin HEAD:agent/v82-stable-lane-crops
