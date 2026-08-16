@@ -50,7 +50,7 @@ cmake_ninja_workdir = /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec
 build cmake_object_order_depends_target_decimen_codec: phony || cmake_object_order_depends_target_ZXing
 
 build CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o: CXX_COMPILER__decimen_codec_unscanned_Release /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp || cmake_object_order_depends_target_decimen_codec
-  DEFINES = -DDECIMEN_CODEC_BUILD=\"b4d09ad-dirty\" -DDECIMEN_CODEC_VERSION=\"0.1.3\" -DZXING_INTERNAL
+  DEFINES = -DDECIMEN_CODEC_BUILD=\"8590057-dirty\" -DDECIMEN_CODEC_VERSION=\"0.1.7\" -DZXING_INTERNAL
   DEP_FILE = CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o.d
   FLAGS = -msimd128 -O3 -DNDEBUG -std=gnu++20   -s DISABLE_EXCEPTION_CATCHING=0
   INCLUDES = -I/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/third_party/zxing-cpp/core/src -I/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/ZXing
