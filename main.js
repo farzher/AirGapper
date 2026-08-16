@@ -2,36 +2,14 @@ var _a;
 import { closeOnBackdropClick } from "./shared/dialog.js";
 import { isAndroid, isIOS } from "./shared/platform.js";
 
-const APP_BUILD = "v0.5.77";
+const APP_BUILD = "v0.5.78";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
-let swBootComplete = false;
-let reloading = false;
-
-function waitForServiceWorkerState(worker, timeoutMs = 5000) {
-  if (!worker || worker.state === "installed" || worker.state === "activated" || worker.state === "redundant") return Promise.resolve();
-  return Promise.race([
-    new Promise((resolve) => worker.addEventListener("statechange", () => {
-      if (worker.state === "installed" || worker.state === "activated" || worker.state === "redundant") resolve();
-    })),
-    new Promise((resolve) => setTimeout(resolve, timeoutMs))
-  ]);
-}
 
 async function prepareServiceWorker() {
   if (!serviceWorkers) return;
-  const priorController = serviceWorkers.controller;
   try {
     registration = await serviceWorkers.register(`./sw.js?build=${APP_BUILD}`, { scope: "./", updateViaCache: "none" });
-    await registration.update().catch(() => void 0);
-    await waitForServiceWorkerState(registration.installing);
-    registration.waiting?.postMessage({ type: "SKIP_WAITING" });
-    if (priorController && serviceWorkers.controller === priorController && registration.waiting) {
-      await Promise.race([
-        new Promise((resolve) => serviceWorkers.addEventListener("controllerchange", resolve, { once: true })),
-        new Promise((resolve) => setTimeout(resolve, 3000))
-      ]);
-    }
   } catch {
   }
 }
@@ -43,17 +21,11 @@ await Promise.all([
 ]);
 
 document.querySelector(".app-version").textContent = APP_BUILD;
-swBootComplete = true;
 if (serviceWorkers) {
-  serviceWorkers.addEventListener("controllerchange", () => {
-    if (!swBootComplete || reloading) return;
-    reloading = true;
-    location.reload();
-  });
+  // Check for a newer worker without ever taking over or reloading this page.
+  // The new worker stays waiting while any client using the current build is
+  // open, then activates naturally after those clients are gone.
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void registration?.update().catch(() => void 0);
-  });
 }
 const installShell = document.querySelector(".install-shell");
 const installMenuButton = document.getElementById("install-menu-button");
