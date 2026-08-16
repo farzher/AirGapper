@@ -1753,22 +1753,52 @@ video.addEventListener("loadedmetadata", syncPreviewAspect);
 window.addEventListener("resize", syncPreviewAspect);
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
+const QUALITY_PROMOTE_MS = 450;
+const QUALITY_DEMOTE_MS = 1100;
+const QUALITY_COLORS = ["#ff665c", "#ffb23e", "#d5d936", "#35d66f", "#42a5ff", "#00efff"];
 const overlayCtx = overlay.getContext("2d");
 function captureQualityRate(region, now) {
   pruneSequenceSamples(region, now);
   return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
 }
-function captureQualityColor(region, rate) {
-  // Overlay color is decode reliability only. Spatial density, FPS, and
-  // layout headroom are separate throughput questions.
-  let level = 0;
-  if (rate >= 0.95 || region.qualityLevel === 5 && rate >= 0.9) level = 5;
-  else if (rate >= 0.8 || region.qualityLevel >= 4 && rate >= 0.72) level = 4;
-  else if (rate >= 0.6 || region.qualityLevel >= 3 && rate >= 0.52) level = 3;
-  else if (rate >= 0.35 || region.qualityLevel >= 2 && rate >= 0.28) level = 2;
-  else if (rate >= 0.12 || region.qualityLevel >= 1 && rate >= 0.08) level = 1;
-  region.qualityLevel = level;
-  return ["#ff665c", "#ffb23e", "#d5d936", "#35d66f", "#42a5ff", "#00efff"][level];
+function qualityLevelForRate(rate) {
+  if (rate >= 0.95) return 5;
+  if (rate >= 0.8) return 4;
+  if (rate >= 0.6) return 3;
+  if (rate >= 0.35) return 2;
+  if (rate >= 0.12) return 1;
+  return 0;
+}
+function captureQualityColor(region, rate, now) {
+  // Decode confidence is intentionally responsive; the display is not. Keep
+  // a temporal state so a handful of misses cannot make a dense grid flash
+  // through multiple colors. New regions start at their measured level, then
+  // move only one color at a time after the new level persists.
+  const target = qualityLevelForRate(rate);
+  if (!region.qualityDisplayInitialized) {
+    region.qualityDisplayInitialized = true;
+    region.qualityLevel = target;
+    region.qualityPendingLevel = target;
+    region.qualityPendingSince = now;
+    return QUALITY_COLORS[target];
+  }
+  const current = Math.max(0, Math.min(QUALITY_COLORS.length - 1, region.qualityLevel ?? target));
+  if (target === current) {
+    region.qualityPendingLevel = target;
+    region.qualityPendingSince = now;
+    return QUALITY_COLORS[current];
+  }
+  if (region.qualityPendingLevel !== target) {
+    region.qualityPendingLevel = target;
+    region.qualityPendingSince = now;
+    return QUALITY_COLORS[current];
+  }
+  const holdMs = target > current ? QUALITY_PROMOTE_MS : QUALITY_DEMOTE_MS;
+  if (now - (region.qualityPendingSince ?? now) >= holdMs) {
+    region.qualityLevel = current + Math.sign(target - current);
+    region.qualityPendingSince = now;
+  }
+  return QUALITY_COLORS[region.qualityLevel ?? current];
 }
 function layoutOrder(a, b) {
   const dy = a.y + a.h / 2 - (b.y + b.h / 2);
@@ -1805,7 +1835,7 @@ function drawOverlay(now) {
     const successful = decodedAge <= INDICATOR_FADE_MS;
     if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
     const quality = captureQualityRate(r, now);
-    const color = captureQualityColor(r, quality);
+    const color = captureQualityColor(r, quality, now);
     overlayCtx.strokeStyle = color;
     overlayCtx.shadowColor = color;
     overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
