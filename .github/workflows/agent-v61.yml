@@ -1,0 +1,36 @@
+name: Agent v61 receiver fixes
+on:
+  push:
+    branches: [agent/mobile-camera-pixel-v61]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/mobile-camera-pixel-v61
+      - name: Apply patch
+        run: python3 .github/agent-v61.py
+      - name: Verify syntax
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check shared/worker-pool.js
+      - name: Verify invariants
+        run: |
+          grep -q 'v0.5.61' index.html
+          grep -q 'airgapper-static-js-v24' sw.js
+          grep -q 'pixelAudit: message.pixelAudit' shared/worker-pool.js
+          grep -q 'directPixelMode = "rgba"' receive/worker.js
+          grep -q 'mobileCameraUi' receive/main.js
+          grep -q 'strictHotPath: pending.strictHotPath' receive/main.js
+      - name: Commit result
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/agent-v61.py .github/workflows/agent-v61.yml
+          git add index.html sw.js receive/main.js receive/worker.js shared/worker-pool.js
+          git commit -m "fix mobile camera UI and adapt direct pixel path"
+          git push origin HEAD:agent/mobile-camera-pixel-v61
