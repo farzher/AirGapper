@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.111";
+const RECEIVER_RUNTIME_BUILD = "v0.5.112";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -737,20 +737,27 @@ const livePipeline = {
   submittedJobs: 0,
   submittedTracked: 0,
   submittedFull: 0,
+  submittedAcquisition: 0,
+  submittedReacquire: 0,
   submittedTracks: 0,
   submittedPixels: 0,
+  submittedTrackedPixels: 0,
+  submittedFullPixels: 0,
   submittedFrames: 0,
   lastSubmittedSourceSequence: -1,
   lastSubmittedAt: 0,
   completedJobs: 0,
   completedTracked: 0,
   completedFull: 0,
-  outputSymbols: 0,
+  trackedOutputSymbols: 0,
+  fullOutputSymbols: 0,
   latencyMs: 0,
   trackedLatencyMs: 0,
   fullLatencyMs: 0,
   copyMs: 0,
   robustMs: 0,
+  trackedRobustMs: 0,
+  fullRobustMs: 0,
   nativeMs: 0,
   workerWaitMs: 0,
   otherMs: 0,
@@ -765,9 +772,10 @@ const livePipeline = {
 function resetLivePipeline(now = receiverNow()) {
   Object.assign(livePipeline, {
     startedAt: now, captures: 0, submittedJobs: 0, submittedTracked: 0, submittedFull: 0,
-    submittedTracks: 0, submittedPixels: 0, submittedFrames: 0, lastSubmittedSourceSequence: -1,
-    lastSubmittedAt: 0, completedJobs: 0, completedTracked: 0, completedFull: 0, outputSymbols: 0,
-    latencyMs: 0, trackedLatencyMs: 0, fullLatencyMs: 0, copyMs: 0, robustMs: 0, nativeMs: 0,
+    submittedAcquisition: 0, submittedReacquire: 0, submittedTracks: 0, submittedPixels: 0,
+    submittedTrackedPixels: 0, submittedFullPixels: 0, submittedFrames: 0, lastSubmittedSourceSequence: -1,
+    lastSubmittedAt: 0, completedJobs: 0, completedTracked: 0, completedFull: 0, trackedOutputSymbols: 0, fullOutputSymbols: 0,
+    latencyMs: 0, trackedLatencyMs: 0, fullLatencyMs: 0, copyMs: 0, robustMs: 0, trackedRobustMs: 0, fullRobustMs: 0, nativeMs: 0,
     workerWaitMs: 0, otherMs: 0, readFullAttempts: 0, timeouts: 0, errors: 0, lastCompletedAt: 0,
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
@@ -1321,7 +1329,7 @@ function noteDecodeCompleted(id, completion) {
     const nativeMs = Math.max(0, Number(completion.nativeMetrics?.totalMs ?? completion.nativeMs) || 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     livePipeline.completedJobs++;
-    livePipeline.outputSymbols += Math.max(0, Number(completion.symbolCount) || 0);
+    const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
     livePipeline.latencyMs += latencyMs;
     livePipeline.copyMs += copyMs;
     livePipeline.robustMs += robustMs;
@@ -1332,11 +1340,15 @@ function noteDecodeCompleted(id, completion) {
     livePipeline.lastCompletedAt = receiverNow();
     if (auditMode.full) {
       livePipeline.completedFull++;
+      livePipeline.fullOutputSymbols += outputSymbols;
       livePipeline.fullLatencyMs += latencyMs;
+      livePipeline.fullRobustMs += robustMs;
       pushLiveLatency(livePipeline.fullLatencies, latencyMs);
     } else {
       livePipeline.completedTracked++;
+      livePipeline.trackedOutputSymbols += outputSymbols;
       livePipeline.trackedLatencyMs += latencyMs;
+      livePipeline.trackedRobustMs += robustMs;
       pushLiveLatency(livePipeline.trackedLatencies, latencyMs);
     }
     if (completion.error === "Decode worker timed out") livePipeline.timeouts++;
@@ -3113,12 +3125,18 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     const submittedAt = receiverNow();
     if (!replayRunning && livePipeline.startedAt) {
       livePipeline.submittedJobs++;
-      if (auditMode.full) livePipeline.submittedFull++;
-      else {
+      const submittedPixels = Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0);
+      if (auditMode.full) {
+        livePipeline.submittedFull++;
+        livePipeline.submittedFullPixels += submittedPixels;
+        if (auditMode.reacquire) livePipeline.submittedReacquire++;
+        else livePipeline.submittedAcquisition++;
+      } else {
         livePipeline.submittedTracked++;
         livePipeline.submittedTracks += auditMode.tracks;
+        livePipeline.submittedTrackedPixels += submittedPixels;
       }
-      livePipeline.submittedPixels += Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0);
+      livePipeline.submittedPixels += submittedPixels;
       if (sourceSequence !== livePipeline.lastSubmittedSourceSequence) {
         livePipeline.lastSubmittedSourceSequence = sourceSequence;
         livePipeline.submittedFrames++;
@@ -5209,14 +5227,21 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   const fullP50 = livePercentile(livePipeline.fullLatencies, 0.5);
   const fullP95 = livePercentile(livePipeline.fullLatencies, 0.95);
   const workerSeconds = livePipeline.latencyMs / 1e3;
+  const activeWorkerSeconds = activeJobs.reduce((sum, job) => sum + job.ageMs, 0) / 1e3;
+  const accountedWorkerSeconds = workerSeconds + activeWorkerSeconds;
   const workerCapacitySeconds = pipelineSeconds * Math.max(1, pool.size);
-  const workerCpuPercent = workerCapacitySeconds ? Math.min(999, workerSeconds / workerCapacitySeconds * 100) : 0;
+  const workerCpuPercent = workerCapacitySeconds ? Math.min(999, accountedWorkerSeconds / workerCapacitySeconds * 100) : 0;
   const phaseTotalMs = Math.max(1e-6, livePipeline.latencyMs);
   const busyDrops = Math.max(0, capturesDropped - livePipeline.droppedBase);
   const processorTotal = Number(frameTrackProcessor?.totalFrames ?? 0);
   const processorDiscarded = Number(frameTrackProcessor?.discardedFrames ?? 0);
   const processorDropPercent = processorTotal > 0 ? processorDiscarded / processorTotal * 100 : 0;
-  const trackedYield = livePipeline.submittedTracks ? livePipeline.outputSymbols / livePipeline.submittedTracks * 100 : 0;
+  const trackedYield = livePipeline.submittedTracks ? livePipeline.trackedOutputSymbols / livePipeline.submittedTracks * 100 : 0;
+  const trackedMpPerJob = livePipeline.submittedTracked ? livePipeline.submittedTrackedPixels / livePipeline.submittedTracked / 1e6 : 0;
+  const fullMpPerJob = livePipeline.submittedFull ? livePipeline.submittedFullPixels / livePipeline.submittedFull / 1e6 : 0;
+  const mpPerSecond = pipelineSeconds ? livePipeline.submittedPixels / 1e6 / pipelineSeconds : 0;
+  const trackedMax = livePipeline.trackedLatencies.length ? Math.max(...livePipeline.trackedLatencies) : 0;
+  const fullMax = livePipeline.fullLatencies.length ? Math.max(...livePipeline.fullLatencies) : 0;
   const activeSummary = activeJobs.length
     ? activeJobs.map((job) => `w${job.slot}:${job.full ? "full" : "track"}/${job.tracks}@${(job.ageMs / 1e3).toFixed(1)}s`).join(" ")
     : "none";
@@ -5232,10 +5257,12 @@ ${totals}
 
 Pipeline
 Camera ${pipelineSeconds ? formatDuration(pipelineSeconds) : "—"} · delivered ${livePipeline.captures} (${pipelineSeconds ? (livePipeline.captures / pipelineSeconds).toFixed(1) : "0.0"}/s) · processor ${processorTotal || "—"} source / ${processorDiscarded} discarded (${processorDropPercent.toFixed(1)}%)
-Schedule ${livePipeline.submittedFrames} frames · ${livePipeline.submittedJobs} jobs = ${livePipeline.submittedTracked} tracked + ${livePipeline.submittedFull} full · ${busyDrops} worker-busy drops · ${activeJobs.length} in flight
-Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.outputSymbols} decoded outputs (${trackedYield.toFixed(1)}%) · ${livePipeline.readFullAttempts} readFull calls
-CPU     ${workerSeconds.toFixed(1)} worker-s / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%) · robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} ms
+Schedule ${livePipeline.submittedFrames} frames · ${livePipeline.submittedJobs} jobs = ${livePipeline.submittedTracked} tracked + ${livePipeline.submittedFull} full (${livePipeline.submittedAcquisition} acquire / ${livePipeline.submittedReacquire} reacquire) · ${busyDrops} worker-busy drops · ${activeJobs.length} in flight
+Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.trackedOutputSymbols} tracked outputs (${trackedYield.toFixed(1)}%) · full outputs ${livePipeline.fullOutputSymbols} · ${livePipeline.readFullAttempts} readFull calls
+Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
+CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
+Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
+Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}
 
