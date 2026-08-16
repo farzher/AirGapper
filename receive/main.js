@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.125";
+const RECEIVER_RUNTIME_BUILD = "v0.5.126";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -744,6 +744,86 @@ const workerLoadSamples = [];
 const pendingLaneReplaceTimes = [];
 let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
+const GUIDED_MIN_TRACKS = 12;
+const guidedRollout = {
+  state: "warmup",
+  inFlight: 0,
+  failures: 0,
+  rampGood: 0,
+  badStreak: 0,
+  robustSinceRetry: 0,
+  robustLatencies: []
+};
+function resetGuidedRollout() {
+  guidedRollout.state = "warmup";
+  guidedRollout.inFlight = 0;
+  guidedRollout.failures = 0;
+  guidedRollout.rampGood = 0;
+  guidedRollout.badStreak = 0;
+  guidedRollout.robustSinceRetry = 0;
+  guidedRollout.robustLatencies.length = 0;
+}
+function guidedBaselineP50() {
+  return livePercentile(guidedRollout.robustLatencies, 0.5);
+}
+function chooseGuidedStage(message) {
+  if (message.full || message.strictHotPath || message.pixelFormat !== "y8" || !Array.isArray(message.tracks) || message.tracks.length < GUIDED_MIN_TRACKS)
+    return "";
+  if (guidedRollout.state === "warmup" && guidedRollout.robustLatencies.length >= 4)
+    guidedRollout.state = "probe";
+  const limit = guidedRollout.state === "probe" ? 1 : guidedRollout.state === "ramp" ? 2 : guidedRollout.state === "active" ? Math.max(1, pool.size - 1) : 0;
+  if (!limit || guidedRollout.inFlight >= limit)
+    return "";
+  const stage = guidedRollout.state;
+  guidedRollout.inFlight++;
+  message.guidedDecode = true;
+  return stage;
+}
+function noteGuidedRobustBaseline(latencyMs) {
+  guidedRollout.robustLatencies.push(latencyMs);
+  if (guidedRollout.robustLatencies.length > 24) guidedRollout.robustLatencies.shift();
+  if (guidedRollout.state === "warmup" && guidedRollout.robustLatencies.length >= 4)
+    guidedRollout.state = "probe";
+  if (guidedRollout.state === "retry" && ++guidedRollout.robustSinceRetry >= 2) {
+    guidedRollout.robustSinceRetry = 0;
+    guidedRollout.state = guidedRollout.failures < 2 ? "probe" : "disabled";
+  }
+}
+function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
+  guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
+  if (!stage || guidedRollout.state === "disabled") return;
+  const baseline = guidedBaselineP50();
+  const minOutput = Math.max(4, Math.ceil(Math.max(1, tracks) / 3));
+  const fastEnough = !baseline || latencyMs <= Math.max(180, baseline * 0.85);
+  const good = outputSymbols >= minOutput && fastEnough;
+  if (stage === "probe") {
+    if (good && guidedRollout.state === "probe") {
+      guidedRollout.state = "ramp";
+      guidedRollout.rampGood = 1;
+      guidedRollout.badStreak = 0;
+    } else if (guidedRollout.state === "probe") {
+      guidedRollout.failures++;
+      guidedRollout.state = guidedRollout.failures >= 2 ? "disabled" : "retry";
+      guidedRollout.robustSinceRetry = 0;
+    }
+    return;
+  }
+  if (stage === "ramp") {
+    if (guidedRollout.state !== "ramp") return;
+    if (good) {
+      if (++guidedRollout.rampGood >= 4) guidedRollout.state = "active";
+    } else {
+      guidedRollout.failures++;
+      guidedRollout.state = guidedRollout.failures >= 2 ? "disabled" : "retry";
+      guidedRollout.robustSinceRetry = 0;
+    }
+    return;
+  }
+  if (stage === "active" && guidedRollout.state === "active") {
+    if (good) guidedRollout.badStreak = 0;
+    else if (++guidedRollout.badStreak >= 2) guidedRollout.state = "disabled";
+  }
+}
 const livePipeline = {
   startedAt: 0,
   captures: 0,
@@ -772,6 +852,15 @@ const livePipeline = {
   trackedRobustMs: 0,
   fullRobustMs: 0,
   nativeMs: 0,
+  guidedMs: 0,
+  guidedBinarizeMs: 0,
+  guidedFinderMs: 0,
+  guidedSampleMs: 0,
+  guidedDecodeMs: 0,
+  guidedJobs: 0,
+  guidedOutputs: 0,
+  guidedFinderAttempts: 0,
+  guidedFinderSuccesses: 0,
   workerWaitMs: 0,
   otherMs: 0,
   readFullAttempts: 0,
@@ -789,9 +878,12 @@ function resetLivePipeline(now = receiverNow()) {
     submittedTrackedPixels: 0, submittedFullPixels: 0, submittedFrames: 0, lastSubmittedSourceSequence: -1,
     lastSubmittedAt: 0, completedJobs: 0, completedTracked: 0, completedFull: 0, trackedOutputSymbols: 0, fullOutputSymbols: 0,
     latencyMs: 0, trackedLatencyMs: 0, fullLatencyMs: 0, copyMs: 0, robustMs: 0, trackedRobustMs: 0, fullRobustMs: 0, nativeMs: 0,
+    guidedMs: 0, guidedBinarizeMs: 0, guidedFinderMs: 0, guidedSampleMs: 0, guidedDecodeMs: 0,
+    guidedJobs: 0, guidedOutputs: 0, guidedFinderAttempts: 0, guidedFinderSuccesses: 0,
     workerWaitMs: 0, otherMs: 0, readFullAttempts: 0, timeouts: 0, errors: 0, lastCompletedAt: 0,
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
+  resetGuidedRollout();
 }
 function pushLiveLatency(target, value) {
   if (!Number.isFinite(value)) return;
@@ -1272,6 +1364,7 @@ function regionInflightCount(region) {
 let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
+let lastGuidedMetrics;
 let lastDirectPixelPath = "—";
 const hotPathAudit = {
   trackedJobs: 0,
@@ -1342,14 +1435,27 @@ function noteDecodeCompleted(id, completion) {
     const reportedRobustMs = Math.max(0, Number(completion.robustMs) || 0);
     const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
+    const guided = completion.guidedMetrics;
+    const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
     livePipeline.latencyMs += latencyMs;
     livePipeline.copyMs += copyMs;
     livePipeline.robustMs += robustMs;
     livePipeline.nativeMs += nativeMs;
+    livePipeline.guidedMs += guidedMs;
+    if (guided) {
+      livePipeline.guidedJobs++;
+      livePipeline.guidedOutputs += outputSymbols;
+      livePipeline.guidedBinarizeMs += Math.max(0, Number(guided.binarizeMs) || 0);
+      livePipeline.guidedFinderMs += Math.max(0, Number(guided.finderMs) || 0);
+      livePipeline.guidedSampleMs += Math.max(0, Number(guided.sampleMs) || 0);
+      livePipeline.guidedDecodeMs += Math.max(0, Number(guided.decodeMs) || 0);
+      livePipeline.guidedFinderAttempts += Math.max(0, Number(guided.finderAttempts) || 0);
+      livePipeline.guidedFinderSuccesses += Math.max(0, Number(guided.finderSuccesses) || 0);
+    }
     livePipeline.workerWaitMs += workerWaitMs;
-    livePipeline.otherMs += Math.max(0, latencyMs - copyMs - robustMs - nativeMs);
+    livePipeline.otherMs += Math.max(0, latencyMs - copyMs - robustMs - nativeMs - guidedMs);
     livePipeline.readFullAttempts += Math.max(0, Number(completion.readFullAttempts) || 0);
     livePipeline.lastCompletedAt = receiverNow();
     if (auditMode.full) {
@@ -1367,6 +1473,10 @@ function noteDecodeCompleted(id, completion) {
     }
     if (completion.error === "Decode worker timed out") livePipeline.timeouts++;
     else if (completion.error) livePipeline.errors++;
+    if (!auditMode.full) {
+      if (auditMode.guided) noteGuidedCompletion(auditMode.guidedStage, outputSymbols, auditMode.tracks, latencyMs);
+      else if (!completion.error && completion.readFullAttempts) noteGuidedRobustBaseline(latencyMs);
+    }
   }
   if (auditMode) {
     hotJobCompletionSamples.push({
@@ -1376,8 +1486,9 @@ function noteDecodeCompleted(id, completion) {
       latencyMs: completion.latencyMs || 0,
       nativeMs: completion.nativeMetrics?.totalMs || 0,
       copyMs: completion.frameCopyMs || 0,
-      robustBands: completion.robustBands || 1,
-      robustSearchMs: completion.robustMs || completion.robustSearchMs || (completion.readFullAttempts ? Math.max(0, (completion.latencyMs || 0) - (completion.frameCopyMs || 0) - (completion.nativeMetrics?.totalMs || 0)) : 0)
+      robustBands: completion.robustBands || (completion.readFullAttempts ? 1 : 0),
+      robustSearchMs: completion.robustMs || completion.robustSearchMs || (completion.readFullAttempts ? Math.max(0, (completion.latencyMs || 0) - (completion.frameCopyMs || 0) - (completion.nativeMetrics?.totalMs || 0)) : 0),
+      guidedMs: completion.guidedMetrics?.totalMs || 0
     });
   }
   hotPathJobMode.delete(id);
@@ -1398,6 +1509,7 @@ function noteDecodeCompleted(id, completion) {
     benchmarkJob.fallbackAttempts = Number(completion.fallbackAttempted);
     benchmarkJob.fallbackSuccesses = Number(completion.fallbackSucceeded);
     benchmarkJob.nativeMetrics = completion.nativeMetrics ? { ...completion.nativeMetrics } : null;
+    benchmarkJob.guidedMetrics = completion.guidedMetrics ? { ...completion.guidedMetrics } : null;
   }
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
@@ -1446,6 +1558,9 @@ function noteDecodeCompleted(id, completion) {
   workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
   if (completion.nativeMetrics) {
     lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
+  }
+  if (completion.guidedMetrics) {
+    lastGuidedMetrics = { ...completion.guidedMetrics, frameCopyMs: completion.frameCopyMs };
   }
   if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
   if (auditThisCompletion && completion.nativeMetrics) {
@@ -2157,6 +2272,7 @@ function renderFocusDiagnostics() {
     : 0;
   const averageJobMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.latencyMs, 0) / trackedCompletions.length : 0;
   const averageNativeMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.nativeMs, 0) / trackedCompletions.length : 0;
+  const averageGuidedMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + (sample.guidedMs || 0), 0) / trackedCompletions.length : 0;
   const averageCopyMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.copyMs, 0) / trackedCompletions.length : 0;
   const averageRobustBands = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustBands, 0) / trackedCompletions.length : 0;
   const averageRobustSearchMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustSearchMs, 0) / trackedCompletions.length : 0;
@@ -2185,7 +2301,7 @@ function renderFocusDiagnostics() {
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · decode frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
@@ -2215,6 +2331,7 @@ ${optimizerTrace.slice(-20).map(
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · maps ${lastNativeMetrics.calibratedTracks ?? 0}/${lastNativeMetrics.activeTracks ?? 0} · pose ${lastNativeMetrics.translationSuccesses ?? 0}/${lastNativeMetrics.translationAttempts ?? 0} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
+    lastGuidedMetrics ? `Guided   state ${guidedRollout.state} · ${lastGuidedMetrics.totalMs.toFixed(1)}ms · bin ${lastGuidedMetrics.binarizeMs.toFixed(1)} · finder ${lastGuidedMetrics.finderMs.toFixed(1)} · sample ${lastGuidedMetrics.sampleMs.toFixed(1)} · decode ${lastGuidedMetrics.decodeMs.toFixed(1)} · finders ${lastGuidedMetrics.finderSuccesses}/${lastGuidedMetrics.finderAttempts} · triplets ${lastGuidedMetrics.finderTriplets} · ${lastGuidedMetrics.successful}/${lastGuidedMetrics.tracks} QR` : `Guided   state ${guidedRollout.state} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms`,
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
@@ -2507,6 +2624,7 @@ function stopReceiver() {
   decodeExceptions = 0;
   lastDecodeError = "";
   lastNativeMetrics = void 0;
+  lastGuidedMetrics = void 0;
   lastDirectPixelPath = "—";
   resetHotPathAudit();
   strictHotPathLockSeen = false;
@@ -3122,6 +3240,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     if (trace) trace.decision = "strict pre-lock: only full acquisition allowed";
     return false;
   }
+  const guidedStage = chooseGuidedStage(message);
   const auditMode = {
     generation: hotPathAuditGeneration,
     strict: Boolean(message.strictHotPath),
@@ -3129,11 +3248,14 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     acquisition: Boolean(message.full && !gridLattice.locked),
     reacquire: Boolean(message.full && gridLattice.locked),
     tracks: Array.isArray(message.tracks) ? message.tracks.length : 0,
+    guided: Boolean(guidedStage),
+    guidedStage,
     kind
   };
   message.jobKind = kind;
   message.trackCount = auditMode.tracks;
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
+  if (!accepted && guidedStage) guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (accepted) {
     hotPathJobMode.set(message.id, auditMode);
     const submittedAt = receiverNow();
@@ -4131,6 +4253,7 @@ function resetActiveTransfer() {
   workerLoadSamples.length = 0;
   pendingLaneReplaceTimes.length = 0;
   resetHotPathAudit();
+  resetGuidedRollout();
   strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
   bar.style.width = "0";
@@ -5305,7 +5428,8 @@ Schedule ${livePipeline.submittedFrames} frames · ${livePipeline.submittedJobs}
 Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.trackedOutputSymbols} tracked outputs (${trackedYield.toFixed(1)}%) · full outputs ${livePipeline.fullOutputSymbols} · ${livePipeline.readFullAttempts} readFull calls
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
-Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
+Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)}) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}

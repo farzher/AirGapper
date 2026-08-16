@@ -42,6 +42,14 @@ const NATIVE_TRACK_RESULT_BYTES = 32;
 const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
+const GUIDED_TRACK_BYTES = 40;
+const GUIDED_RESULT_BYTES = 52;
+const GUIDED_METRICS_BYTES = 80;
+const GUIDED_OUTPUT_BYTES = 128 * 1024;
+let guidedTracksPtr = 0;
+let guidedResultsPtr = 0;
+let guidedMetricsPtr = 0;
+let guidedOutputPtr = 0;
 let nativeBatchHandle = 0;
 let nativeResultsPtr = 0;
 let nativeOutputPtr = 0;
@@ -49,6 +57,86 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
+function ensureGuidedBatch(zx) {
+  if (guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr) return true;
+  guidedTracksPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
+  guidedResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
+  guidedMetricsPtr = zx._malloc(GUIDED_METRICS_BYTES);
+  guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
+  return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
+}
+function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
+  if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > NATIVE_BATCH_MAX_TRACKS) return null;
+  let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i];
+    if (!validQuad(track.quad) || !track.dim) return null;
+    const base = i * GUIDED_TRACK_BYTES;
+    view.setInt32(base, track.slot ?? track.id ?? i, true);
+    view.setInt32(base + 4, track.dim, true);
+    const points = [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft];
+    for (let p = 0; p < 4; p++) {
+      view.setFloat32(base + 8 + p * 8, points[p].x - ox, true);
+      view.setFloat32(base + 12 + p * 8, points[p].y - oy, true);
+    }
+  }
+  const count = zx._decodeGuidedBatchY(
+    yPtr, width, height, stride,
+    guidedTracksPtr, tracks.length,
+    guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
+    guidedOutputPtr, GUIDED_OUTPUT_BYTES,
+    Math.min(12, tracks.length), guidedMetricsPtr
+  );
+  const metricsView = new DataView(zx.HEAPU8.buffer, guidedMetricsPtr, GUIDED_METRICS_BYTES);
+  const metrics = {
+    totalMs: metricsView.getFloat64(0, true),
+    binarizeMs: metricsView.getFloat64(8, true),
+    finderMs: metricsView.getFloat64(16, true),
+    sampleMs: metricsView.getFloat64(24, true),
+    decodeMs: metricsView.getFloat64(32, true),
+    tracks: metricsView.getUint32(40, true),
+    finderAttempts: metricsView.getUint32(44, true),
+    finderSuccesses: metricsView.getUint32(48, true),
+    finderTriplets: metricsView.getUint32(52, true),
+    sampleAttempts: metricsView.getUint32(56, true),
+    successful: metricsView.getUint32(60, true),
+    misses: metricsView.getUint32(64, true)
+  };
+  if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
+  view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
+  const symbols = [];
+  const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
+  const decodedSlots = /* @__PURE__ */ new Set();
+  for (let i = 0; i < count; i++) {
+    const base = i * GUIDED_RESULT_BYTES;
+    if (view.getInt32(base + 4, true) !== NATIVE_TRACK_OK) continue;
+    const outputOffset = view.getInt32(base + 8, true);
+    const outputLength = view.getInt32(base + 12, true);
+    const modules = view.getInt32(base + 16, true);
+    if (outputOffset < 0 || outputLength <= 0 || outputOffset + outputLength > GUIDED_OUTPUT_BYTES) continue;
+    const bytes = zx.HEAPU8.slice(guidedOutputPtr + outputOffset, guidedOutputPtr + outputOffset + outputLength);
+    const packet = parseFrame(bytes);
+    const slot = packet?.header.slotIndex;
+    if (!packet || slot === void 0 || expectedSlots.size && !expectedSlots.has(slot) || decodedSlots.has(slot)) continue;
+    decodedSlots.add(slot);
+    const quad = {
+      topLeft: { x: view.getFloat32(base + 20, true), y: view.getFloat32(base + 24, true) },
+      topRight: { x: view.getFloat32(base + 28, true), y: view.getFloat32(base + 32, true) },
+      bottomRight: { x: view.getFloat32(base + 36, true), y: view.getFloat32(base + 40, true) },
+      bottomLeft: { x: view.getFloat32(base + 44, true), y: view.getFloat32(base + 48, true) }
+    };
+    if (!validQuad(quad)) continue;
+    symbols.push({
+      bytes,
+      box: boundsOf(quad, ox, oy),
+      quad: shifted(quad, ox, oy),
+      modules,
+      tracked: true,
+      header: packet.header
+    });
+  }
+  return { symbols, metrics };
+}
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -252,7 +340,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -452,6 +540,29 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
+      if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 12) {
+        const guided = decodeGuidedBatch(zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks);
+        if (guided) symbols.push(...guided.symbols);
+        mapOutputToDisplay();
+        ctx.postMessage({
+          id,
+          symbols,
+          sightings,
+          full: false,
+          trackedAttempted: true,
+          trackedHit: symbols.length > 0,
+          fallbackAttempted: false,
+          fallbackSucceeded: false,
+          readFullAttempts: 0,
+          workerWaitMs,
+          frameCopyMs,
+          guidedMetrics: guided?.metrics,
+          pixelPath: "y8-guided",
+          guidedError: guided?.error,
+          latencyMs: performance.now() - startedAt
+        });
+        return;
+      }
       readFullAttempts++;
       const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
       const decoded = decodePixelFormat === "y8"

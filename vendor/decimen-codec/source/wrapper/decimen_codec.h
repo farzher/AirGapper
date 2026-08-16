@@ -24,6 +24,36 @@ struct DecimenTrackedResult {
 	float dy;
 };
 
+struct DecimenGuidedTrack {
+	int32_t id;
+	int32_t dimension;
+	float x0, y0, x1, y1, x2, y2, x3, y3;
+};
+
+struct DecimenGuidedResult {
+	int32_t id;
+	int32_t status;
+	int32_t bytesOffset;
+	int32_t bytesLength;
+	int32_t dimension;
+	float x0, y0, x1, y1, x2, y2, x3, y3;
+};
+
+struct DecimenGuidedMetrics {
+	double totalMs;
+	double binarizeMs;
+	double finderMs;
+	double sampleMs;
+	double decodeMs;
+	uint32_t tracks;
+	uint32_t finderAttempts;
+	uint32_t finderSuccesses;
+	uint32_t finderTriplets;
+	uint32_t sampleAttempts;
+	uint32_t successful;
+	uint32_t misses;
+};
+
 struct DecimenBatchMetrics {
 	double anchorMs;
 	double samplingMs;
@@ -61,6 +91,12 @@ void clearTrackedDecoderTrack(int handle, int slot);
 int setTrackedDecoderSampleMap(int handle, int slot, const float* xy, int pointCount);
 void setTrackedDecoderTrackCRC32(int handle, int slot, int enabled);
 void setTrackedDecoderFallbackBudget(int handle, int maxRSFallbacksPerFrame);
+int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
+						 const DecimenGuidedTrack* tracks, int trackCount,
+						 DecimenGuidedResult* results, int resultCapacity,
+						 uint8_t* output, int outputCapacity, int maxSymbols,
+						 DecimenGuidedMetrics* metrics);
+
 int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
 						DecimenTrackedResult* results, int resultCapacity,
 						uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics);

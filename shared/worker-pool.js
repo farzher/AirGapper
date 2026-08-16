@@ -58,6 +58,8 @@ class DecodeWorkerPool {
                   latencyMs: (_h = message.latencyMs) != null ? _h : 0,
           frameCopyMs: message.frameCopyMs ?? 0,
           nativeMetrics: message.nativeMetrics,
+          guidedMetrics: message.guidedMetrics,
+          guidedError: message.guidedError,
           pixelPath: message.pixelPath,
           exactMapCoverage: message.exactMapCoverage,
           exactMapTotal: message.exactMapTotal,

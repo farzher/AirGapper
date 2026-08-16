@@ -52,7 +52,7 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --bind \
  -s EXPORT_ES6=1 \
  -s DYNAMIC_EXECUTION=0 \
  -s EXPORT_NAME=DecimenCodec \
- -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA']\" \
+ -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA', '_decodeGuidedBatchY']\" \
  -s EXPORTED_RUNTIME_METHODS=HEAPU8 \
  -s ALLOW_MEMORY_GROWTH=1")
 

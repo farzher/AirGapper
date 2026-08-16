@@ -195,6 +195,220 @@ std::vector<DecimenResult> readDenseY(int bufferPtr, int width, int height, int 
     return readFullYWithOptions(bufferPtr, width, height, stride, true, false, maxSymbols, false);
 }
 
+
+namespace {
+
+constexpr auto GUIDED_QR_FINDER = FixedPattern<5, 7>{1, 1, 3, 1, 1};
+
+static double guidedNowMs()
+{
+    return emscripten_get_now();
+}
+
+static float guidedModuleSize(const DecimenGuidedTrack& track)
+{
+    const auto edge = [](float ax, float ay, float bx, float by) {
+        return std::hypot(bx - ax, by - ay);
+    };
+    const float shortest = std::min({
+        edge(track.x0, track.y0, track.x1, track.y1),
+        edge(track.x1, track.y1, track.x2, track.y2),
+        edge(track.x2, track.y2, track.x3, track.y3),
+        edge(track.x3, track.y3, track.x0, track.y0)
+    });
+    return shortest / std::max(1, track.dimension);
+}
+
+static std::optional<ConcentricPattern> locateGuidedFinder(const BitMatrix& image, PointF predicted,
+                                                            float moduleSize, int maxRing,
+                                                            DecimenGuidedMetrics& metrics)
+{
+    const int width = std::max(12, int(std::lround(moduleSize * 14.0f)));
+    const float step = std::max(1.0f, moduleSize * 1.25f);
+    for (int ring = 0; ring <= maxRing; ++ring) {
+        for (int gy = -ring; gy <= ring; ++gy) {
+            for (int gx = -ring; gx <= ring; ++gx) {
+                if (ring && std::max(std::abs(gx), std::abs(gy)) != ring)
+                    continue;
+                PointF candidate = predicted + PointF{gx * step, gy * step};
+                if (!image.isIn(candidate) || !image.get(candidate))
+                    continue;
+                metrics.finderAttempts++;
+                if (auto found = LocateConcentricPattern<true>(image, GUIDED_QR_FINDER, candidate, width)) {
+                    metrics.finderSuccesses++;
+                    return found;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+static bool guidedFinderTriplet(const BitMatrix& image, const DecimenGuidedTrack& track,
+                                QRCode::FinderPatternSet& out, DecimenGuidedMetrics& metrics)
+{
+    const int dim = track.dimension;
+    if (dim < 21 || dim > 177 || ((dim - 17) & 3))
+        return false;
+    const float moduleSize = guidedModuleSize(track);
+    if (!(moduleSize >= 1.0f && moduleSize < 32.0f))
+        return false;
+
+    PerspectiveTransform mod2Pix(
+        QuadrilateralF{PointF{0, 0}, PointF{double(dim), 0}, PointF{double(dim), double(dim)}, PointF{0, double(dim)}},
+        QuadrilateralF{PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
+                       PointF{track.x2, track.y2}, PointF{track.x3, track.y3}});
+
+    std::array<PointF, 3> predicted = {
+        mod2Pix(PointF{3.5, dim - 3.5}), // bottom-left
+        mod2Pix(PointF{3.5, 3.5}),       // top-left
+        mod2Pix(PointF{dim - 3.5, 3.5})  // top-right
+    };
+
+    // Start with the finder farthest from image edges; partial edge QRs can
+    // still use an interior finder as the motion anchor. Once one real finder
+    // is found, its displacement recenters the other two searches.
+    std::array<int, 3> order = {0, 1, 2};
+    auto margin = [&](PointF p) {
+        return std::min({p.x, p.y, float(image.width()) - p.x, float(image.height()) - p.y});
+    };
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return margin(predicted[a]) > margin(predicted[b]); });
+
+    std::array<std::optional<ConcentricPattern>, 3> found;
+    int anchor = -1;
+    for (int index : order) {
+        found[index] = locateGuidedFinder(image, predicted[index], moduleSize, 4, metrics);
+        if (found[index]) {
+            anchor = index;
+            break;
+        }
+    }
+    if (anchor < 0)
+        return false;
+
+    const PointF delta = PointF(*found[anchor]) - predicted[anchor];
+    for (int index = 0; index < 3; ++index) {
+        if (index == anchor)
+            continue;
+        found[index] = locateGuidedFinder(image, predicted[index] + delta, moduleSize, 2, metrics);
+        if (!found[index])
+            return false;
+    }
+
+    out = QRCode::FinderPatternSet{*found[0], *found[1], *found[2]};
+    metrics.finderTriplets++;
+    return true;
+}
+
+} // namespace
+
+extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
+                                   const DecimenGuidedTrack* tracks, int trackCount,
+                                   DecimenGuidedResult* results, int resultCapacity,
+                                   uint8_t* output, int outputCapacity, int maxSymbols,
+                                   DecimenGuidedMetrics* metrics)
+{
+    if (!metrics)
+        return -1;
+    *metrics = {};
+    const double started = guidedNowMs();
+    if (!yPlane || !tracks || !results || !output || width <= 0 || height <= 0 || stride < width ||
+        trackCount <= 0 || resultCapacity <= 0 || outputCapacity <= 0 || maxSymbols <= 0) {
+        metrics->totalMs = guidedNowMs() - started;
+        return -1;
+    }
+
+    try {
+        const double binStart = guidedNowMs();
+        ImageView iv(const_cast<uint8_t*>(yPlane), width, height, ImageFormat::Lum, stride, 1);
+        HybridBinarizer binarized(iv);
+        auto bits = binarized.getBitMatrix();
+        metrics->binarizeMs = guidedNowMs() - binStart;
+        if (!bits) {
+            metrics->totalMs = guidedNowMs() - started;
+            return 0;
+        }
+
+        std::vector<int> order;
+        order.reserve(trackCount);
+        for (int i = 0; i < trackCount; ++i)
+            order.push_back(i);
+        const PointF imageCenter{width * 0.5, height * 0.5};
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            auto center = [](const DecimenGuidedTrack& t) {
+                return PointF{(t.x0 + t.x1 + t.x2 + t.x3) * 0.25f,
+                              (t.y0 + t.y1 + t.y2 + t.y3) * 0.25f};
+            };
+            const PointF ca = center(tracks[a]);
+            const PointF cb = center(tracks[b]);
+            return std::hypot(ca.x - imageCenter.x, ca.y - imageCenter.y) <
+                   std::hypot(cb.x - imageCenter.x, cb.y - imageCenter.y);
+        });
+
+        int resultCount = 0;
+        int outputUsed = 0;
+        for (int trackIndex : order) {
+            if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
+                break;
+            const auto& track = tracks[trackIndex];
+            metrics->tracks++;
+
+            QRCode::FinderPatternSet finderSet;
+            const double finderStart = guidedNowMs();
+            const bool haveFinders = guidedFinderTriplet(*bits, track, finderSet, *metrics);
+            metrics->finderMs += guidedNowMs() - finderStart;
+            if (!haveFinders)
+                continue;
+
+            const double sampleStart = guidedNowMs();
+            double decodeSpent = 0;
+            bool decodedTrack = false;
+            for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
+                metrics->sampleAttempts++;
+                if (!detected.isValid() || detected.bits().width() != track.dimension)
+                    continue;
+                const double decodeStart = guidedNowMs();
+                auto decoded = QRCode::Decode(detected.bits());
+                const double decodeElapsed = guidedNowMs() - decodeStart;
+                decodeSpent += decodeElapsed;
+                metrics->decodeMs += decodeElapsed;
+                if (!decoded.isValid() || decoded.content().bytes.empty())
+                    continue;
+
+                const auto& bytes = decoded.content().bytes;
+                if (outputUsed + int(bytes.size()) > outputCapacity)
+                    break;
+                std::memcpy(output + outputUsed, bytes.data(), bytes.size());
+                const Position pos = detected.position();
+                auto& result = results[resultCount++];
+                result = {};
+                result.id = track.id;
+                result.status = DECIMEN_TRACK_OK;
+                result.bytesOffset = outputUsed;
+                result.bytesLength = int(bytes.size());
+                result.dimension = detected.bits().width();
+                result.x0 = pos[0].x; result.y0 = pos[0].y;
+                result.x1 = pos[1].x; result.y1 = pos[1].y;
+                result.x2 = pos[2].x; result.y2 = pos[2].y;
+                result.x3 = pos[3].x; result.y3 = pos[3].y;
+                outputUsed += int(bytes.size());
+                metrics->successful++;
+                decodedTrack = true;
+                break;
+            }
+            metrics->sampleMs += std::max(0.0, guidedNowMs() - sampleStart - decodeSpent);
+            (void)decodedTrack;
+        }
+        metrics->misses = metrics->tracks - metrics->successful;
+        metrics->totalMs = guidedNowMs() - started;
+        return resultCount;
+    } catch (...) {
+        metrics->misses = metrics->tracks - metrics->successful;
+        metrics->totalMs = guidedNowMs() - started;
+        return -1;
+    }
+}
+
 /** How well the three finder patterns match at a candidate offset: sampled
  *  through the transform, compared against the ideal 7×7 template. Max 147.
  *  This is the cheap anchor — 147 point samples per candidate versus a full
