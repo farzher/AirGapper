@@ -1,0 +1,19 @@
+name: Agent topLeft audit v60
+on:
+  push:
+    branches: [agent/top-left-audit-v60]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/top-left-audit-v60
+      - name: Audit source dereferences
+        run: |
+          echo '=== topLeft occurrences ==='
+          grep -RIn --exclude='*.wasm' --exclude-dir=.git --exclude='*.map' 'topLeft' receive shared main.js index.html || true
+          echo '=== topRight occurrences ==='
+          grep -RIn --exclude='*.wasm' --exclude-dir=.git --exclude='*.map' 'topRight' receive shared main.js index.html || true
