@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.103";
+const RECEIVER_RUNTIME_BUILD = "v0.5.104";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3198,6 +3198,10 @@ function cloneVideoFrame(source, forceRgba = false) {
   }
 }
 function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
+  // A lattice slot may lose its quad before the surrounding scheduler has
+  // finished retiring that slot. Missing geometry is a normal erasure during
+  // target loss, never a reason to throw from the camera loop.
+  if (tracks.some((track) => !track || !validQuadObject(track.quad) || !track.dim)) return null;
   // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
   // path for every receiver state. Never decline direct Y8 because an optics
   // sample is due; doing so used to fall through to live <video> canvas readback.
@@ -3862,7 +3866,14 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
   for (let i = 0; i < scheduledRegions.length; i++) {
     const r = scheduledRegions[(i + cropRotate) % scheduledRegions.length];
     if (regionInflightCount(r) >= perRegionCapacity) continue;
-    const quadBounds = r.quad ? trackedQuadBounds(r.quad) : null;
+    // LOST lattice slots can remain in the scheduling set for a frame after
+    // their geometry is cleared. Do not manufacture a tracked job from stale
+    // region bounds; let the normal recovery/full-scan path reacquire it.
+    if (!validQuadObject(r.quad) || !r.dim) {
+      if (r.gridSlot !== void 0) r.decoded = false;
+      continue;
+    }
+    const quadBounds = trackedQuadBounds(r.quad);
     const left = (_a = quadBounds == null ? void 0 : quadBounds.left) != null ? _a : r.x;
     const top = (_b = quadBounds == null ? void 0 : quadBounds.top) != null ? _b : r.y;
     const right = (_c = quadBounds == null ? void 0 : quadBounds.right) != null ? _c : r.x + r.w;
