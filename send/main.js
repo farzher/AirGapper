@@ -59,6 +59,21 @@ function layoutGrid(mode = selectedLayout()) {
   }
 }
 const canvas = document.getElementById("qr");
+const CURSOR_IDLE_MS = 1000;
+let cursorIdleTimer;
+function wakeCanvasCursor() {
+  clearTimeout(cursorIdleTimer);
+  canvas.classList.remove("cursor-idle");
+  cursorIdleTimer = setTimeout(() => {
+    if (canvas.matches(":hover")) canvas.classList.add("cursor-idle");
+  }, CURSOR_IDLE_MS);
+}
+canvas.addEventListener("mouseenter", wakeCanvasCursor);
+canvas.addEventListener("mousemove", wakeCanvasCursor);
+canvas.addEventListener("mouseleave", () => {
+  clearTimeout(cursorIdleTimer);
+  canvas.classList.remove("cursor-idle");
+});
 const stage = document.getElementById("stage");
 const stageError = document.getElementById("stage-error");
 const sendStart = document.querySelector(".send-start");
