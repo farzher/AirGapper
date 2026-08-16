@@ -11,6 +11,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/v74-fast-hot-path
+      - name: Fix staged native patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/v74_patch.py')
+          s = p.read_text()
+          old = 'candidates.push_back({&track, ByteArray(bytes.begin(), bytes.end() - 4)});'
+          new = '''ByteArray packet(int(bytes.size() - 4));
+          std::copy_n(bytes.begin(), bytes.size() - 4, packet.begin());
+          candidates.push_back({&track, std::move(packet)});'''
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
       - name: Apply patch
         run: python3 .github/v74_patch.py
       - name: Build SIMD and scalar codecs
