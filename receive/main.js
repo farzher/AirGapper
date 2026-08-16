@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.127";
+const RECEIVER_RUNTIME_BUILD = "v0.5.128";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1420,6 +1420,12 @@ let trackingInvalidations = 0;
 let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
 let lastStreamDecodeAt = 0;
+let geometryRecoveryProbes = 0;
+let geometryRecoveryResets = 0;
+let recoveryWorkerRestarts = 0;
+let recoveryAbortedJobs = 0;
+let recoveryAbortedWorkerMs = 0;
+let lastRecoveryReason = "—";
 let maxSequenceGapMs = 0;
 const pipelineEvents = [];
 const PIPELINE_EVENT_LIMIT = 80;
@@ -1654,6 +1660,9 @@ const REGION_TTL_MS = 5e3;
 const SIGHTING_REGION_TTL_MS = 3e3;
 const ACQUISITION_SCAN_MS = 100;
 const FULL_SCAN_DEGRADED_MS = 250;
+const GEOMETRY_PROBE_SILENCE_MS = 650;
+const GEOMETRY_COLD_MISSES = 3;
+const CAMERA_MUTATION_SETTLE_MS = 350;
 const EXPECTED_REGIONS_DECAY_MS = 1e4;
 const MAX_REGIONS = 15;
 const REGION_PAD = 0.35;
@@ -2333,6 +2342,7 @@ function renderFocusDiagnostics() {
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
+    `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -2367,12 +2377,14 @@ ${diagnostic.transitions.join("\n")}` : ""
   ].filter(Boolean).join("\n");
 }
 focusMode.addEventListener("change", () => {
+  holdDecoderForCameraMutation("manual focus mode changing", 500);
   manualFocusMode = focusMode.value;
   syncExposureControls();
   saveCameraSettings();
   focusController.setStrategy(manualFocusMode);
 });
 focusDistance.addEventListener("input", () => {
+  holdDecoderForCameraMutation("manual focus changing", 500);
   preferredFocusDistance = Number(focusDistance.value);
   focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
   saveCameraSettings();
@@ -2444,7 +2456,12 @@ const changeCameraSettings = async () => {
     attachCameraController(track);
   }
 };
-cameraResolution.addEventListener("change", () => void changeCameraSettings());
+cameraResolution.addEventListener("change", () => {
+  holdDecoderForCameraMutation("camera mode changing", 2500);
+  void changeCameraSettings().finally(() => {
+    if (stream && !done) enterGeometryRecovery("camera mode changed", receiverNow(), true);
+  });
+});
 cameraDevice?.addEventListener("change", () => {
   preferredCameraDeviceId = cameraDevice.value;
   saveCameraSettings();
@@ -2497,6 +2514,7 @@ isoAxisReset.addEventListener("click", () => {
   if (track) void applyExposureSetting(track);
 });
 function queueExposureChange(immediate = false) {
+  holdDecoderForCameraMutation("manual exposure changing");
   resetGuidedRollout();
   preferredExposureTime = Number(cameraExposure.value);
   focusController.developerOverride("developer changed exposure time");
@@ -2513,6 +2531,7 @@ function queueExposureChange(immediate = false) {
 cameraExposure.addEventListener("input", () => queueExposureChange());
 cameraExposure.addEventListener("change", () => queueExposureChange(true));
 function queueIsoChange(immediate = false) {
+  holdDecoderForCameraMutation("manual ISO changing");
   resetGuidedRollout();
   preferredIso = Number(cameraIso.value);
   automaticIsoAxis = false;
@@ -2658,6 +2677,14 @@ function stopReceiver() {
   workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
   lastStreamDecodeAt = 0;
+  geometryRecoveryProbes = 0;
+  geometryRecoveryResets = 0;
+  recoveryWorkerRestarts = 0;
+  recoveryAbortedJobs = 0;
+  recoveryAbortedWorkerMs = 0;
+  lastRecoveryReason = "—";
+  decoderFreshnessHoldUntil = 0;
+  decoderFreshnessHoldActive = false;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
   usefulFrameTimes.length = 0;
@@ -3037,6 +3064,67 @@ function scheduleFrame(gen) {
 const grab = document.createElement("canvas");
 const replaySourceCanvas = document.createElement("canvas");
 let minimumAcceptedScanId = 0;
+let decoderFreshnessHoldUntil = 0;
+let decoderFreshnessHoldActive = false;
+
+function discardInFlightDecodeWork(reason, restartWorkers = true) {
+  const active = pool.activeJobs;
+  minimumAcceptedScanId = frameId;
+  clearPendingGridLanes();
+  cropAttempts.clear();
+  fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  scanCapturedAt.clear();
+  for (const job of active) {
+    if (job.id === void 0) continue;
+    hotPathJobMode.delete(job.id);
+    scanOutcomes.delete(job.id);
+    scanCandidateEpoch.delete(job.id);
+    optimizerJobIds.delete(job.id);
+  }
+  recoveryAbortedJobs += active.length;
+  recoveryAbortedWorkerMs += active.reduce((sum, job) => sum + Math.max(0, job.ageMs || 0), 0);
+  if (restartWorkers && pool.size) {
+    const count = selectedWorkerCount();
+    pool.resize(0);
+    if (stream && !done) pool.resize(count);
+    recoveryWorkerRestarts++;
+  }
+  lastRecoveryReason = reason;
+  notePipelineEvent("decoder-fresh-start", active.length);
+}
+
+function holdDecoderForCameraMutation(reason, settleMs = CAMERA_MUTATION_SETTLE_MS) {
+  const now = receiverNow();
+  decoderFreshnessHoldUntil = Math.max(decoderFreshnessHoldUntil, now + settleMs);
+  if (!decoderFreshnessHoldActive) {
+    decoderFreshnessHoldActive = true;
+    // Geometry remains valid across exposure/focus changes. Only old-image
+    // work is stale, so restart workers without throwing away the lattice.
+    discardInFlightDecodeWork(reason, true);
+    resetGuidedRollout();
+  }
+}
+
+function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = true) {
+  geometryRecoveryResets++;
+  decoderFreshnessHoldActive = false;
+  decoderFreshnessHoldUntil = 0;
+  discardInFlightDecodeWork(reason, restartWorkers);
+  if (gridLattice.state !== "REACQUIRE") gridLattice.reacquire(now, reason);
+  regions.length = 0;
+  gridShape = "";
+  lastGridSnapshot = void 0;
+  activeDecodeBudget = 0;
+  expectedRegions = 0;
+  expectedRegionsAt = now;
+  lastDecodedRegionSize = 0;
+  lastFullScan = 0;
+  resetGuidedRollout();
+  notePipelineEvent("geometry-recovery", geometryRecoveryResets);
+}
+
 let captureNextScan = false;
 let scanCaptureTimer;
 const SCAN_CAPTURE_TIMEOUT_MS = 12e3;
@@ -3728,7 +3816,6 @@ async function captureFrame(source) {
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   const now = receiverNow();
-  if (!replayRunning && livePipeline.startedAt) livePipeline.captures++;
   const trace = replayRunning ? {
     sequence: source.sequence,
     timestampMs: now,
@@ -3747,6 +3834,17 @@ async function captureFrame(source) {
     benchmarkTraces.push(trace);
     activeBenchmarkFrame = trace;
   }
+  if (!replayRunning && decoderFreshnessHoldActive) {
+    if (now < decoderFreshnessHoldUntil) {
+      activeBenchmarkFrame = void 0;
+      return;
+    }
+    decoderFreshnessHoldActive = false;
+    decoderFreshnessHoldUntil = 0;
+    lastFullScan = 0;
+    notePipelineEvent("camera-mutation-settled");
+  }
+  if (!replayRunning && livePipeline.startedAt) livePipeline.captures++;
   captureTimes.push(now);
   workerLoadSamples.push({ at: now, busy: pool.busyCount, size: pool.size });
   totalCaptures++;
@@ -3784,11 +3882,19 @@ async function captureFrame(source) {
       notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
     }
   }
+  const wasLockedBeforeTick = gridLattice.locked;
   const latticeSnapshot = gridLattice.tick(now);
   if (latticeSnapshot) syncGrid(latticeSnapshot, now);
   else if (gridLattice.state === "REACQUIRE") {
+    if (wasLockedBeforeTick) {
+      enterGeometryRecovery("whole lattice timed out; fresh acquisition", now, true);
+      if (trace) trace.stateAfter = gridLattice.state;
+      activeBenchmarkFrame = void 0;
+      return;
+    }
     for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot !== void 0) regions.splice(i, 1);
     gridShape = "";
+    lastGridSnapshot = void 0;
   }
   const live = decodedCount();
   peakRegions = Math.max(peakRegions, live);
@@ -3814,10 +3920,16 @@ async function captureFrame(source) {
   const recentLockedHits = lockedGeometryCandidates.reduce((count, region) =>
     count + Number(now - (region.decodedSeen ?? -Infinity) < 900), 0
   );
+  const lockedDecodeSilenceMs = gridLattice.locked && lastStreamDecodeAt ? now - lastStreamDecodeAt : 0;
+  const geometryProbeDue = lockedGeometryTrusted && recentLockedHits === 0 &&
+    lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS;
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
-    lockedGeometryCandidates.every((region) => region.consecutiveMisses >= 5);
+    lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
   if (allLockedCandidatesCold) {
-    gridLattice.reacquire(now, "all tracked slots cold; reacquiring geometry");
+    enterGeometryRecovery("all tracked slots cold; fresh acquisition", now, true);
+    if (trace) trace.stateAfter = gridLattice.state;
+    activeBenchmarkFrame = void 0;
+    return;
   }
   const gridNeedsDiscovery = lockedGeometryTrusted
     ? allLockedCandidatesCold
@@ -3830,7 +3942,7 @@ async function captureFrame(source) {
   // back to local robust decode or by abandoning the grid and reacquiring it.
   gridLattice.noteMissing(strictLockedAudit ? false : gridNeedsDiscovery, now);
   const needsRecoveryScan = strictLockedAudit ? false : lockedGeometryTrusted
-    ? allLockedCandidatesCold || trackingUnhealthy
+    ? geometryProbeDue || allLockedCandidatesCold || trackingUnhealthy
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
@@ -3855,6 +3967,18 @@ async function captureFrame(source) {
   // and memory bandwidth. Two fresh-frame seed searches are enough to keep
   // acquisition parallel without burying slower phones under duplicate work.
   const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
+  const globalRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked && geometryProbeDue;
+  if (globalRecoverySeedScan) {
+    const recoveryInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
+    if (recoveryInflight >= 1) {
+      if (trace) {
+        trace.decision = "global recovery seed already in flight";
+        trace.stateAfter = gridLattice.state;
+      }
+      activeBenchmarkFrame = void 0;
+      return;
+    }
+  }
   if (acquisitionSeedScan) {
     const acquisitionInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
     const acquisitionInflightLimit = Math.min(2, pool.size);
@@ -3879,6 +4003,10 @@ async function captureFrame(source) {
   if (fullScanDue) {
     lastFullScan = now;
     fullScans++;
+    if (globalRecoverySeedScan) {
+      geometryRecoveryProbes++;
+      notePipelineEvent("global-recovery-probe", geometryRecoveryProbes);
+    }
     // Seven cheap seed attempts for every deep tryHarder attempt. Never run a
     // cheap miss and a deep retry on the same frame: the next camera frame is
     // fresher and avoids the old multi-second double scan.
@@ -3887,7 +4015,7 @@ async function captureFrame(source) {
     // During a still-trusted lock, even recovery is bounded to the only place
     // the declared grid can exist. Give it generous motion headroom, but never
     // pay a generic finder to inspect unrelated camera pixels.
-    if (!captureNextScan && lockedGeometryTrusted && gridLattice.locked && !allLockedCandidatesCold) {
+    if (!captureNextScan && lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold) {
       const points = lockedGeometryCandidates.flatMap((region) => [
         region.quad.topLeft,
         region.quad.topRight,
