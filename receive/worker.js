@@ -774,11 +774,11 @@ ctx.onmessage = async (e) => {
         }
       };
       if (full) {
-        // Acquisition only needs one valid AirGapper packet to learn the
-        // layout/slot and seed the lattice. Do not ask ZXing to rediscover an
-        // entire 18-QR wall before tracking can begin. Normal seed scans use
-        // the cheap finder pass; occasional deep scans enable tryHarder's
-        // downscale sweep. The expensive multi-symbol scan is developer-only.
+        // Acquisition needs a small set of distinct slots before a multi-QR
+        // lattice becomes trusted. Keep this far cheaper than the historical
+        // 16->24 symbol scan, but do not stop after the easiest single QR.
+        // Normal scans collect up to four current-frame seeds; occasional deep
+        // scans use the same bound with tryHarder's downscale sweep.
         const fullMode = acquisitionMode ?? (thorough ? "thorough" : "fast");
         const readFull = (tryHarder, maxSymbols, returnErrors) => decodePixelFormat === "y8"
           ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, tryHarder, maxSymbols, returnErrors)
@@ -792,7 +792,7 @@ ctx.onmessage = async (e) => {
           }
         } else {
           readFullAttempts++;
-          appendResults(readFull(fullMode === "deep", 1, false), false);
+          appendResults(readFull(fullMode === "deep", 4, false), false);
         }
       } else {
         readFullAttempts++;

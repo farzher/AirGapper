@@ -77,6 +77,21 @@ function bounds(quad) {
   const bottom = Math.max(...points.map((p) => p.y));
   return { x: left, y: top, w: right - left, h: bottom - top };
 }
+function lockReady(layout, observations) {
+  const count = layout.cols * layout.rows;
+  if (count <= 1) return true;
+  const slots = [...new Set(observations.map((observation) => observation.slotIndex))];
+  if (slots.length < 2) return false;
+  // A one-dimensional grid needs observations from both positions before the
+  // lattice may replace measured geometry with a predicted neighbor.
+  if (layout.cols === 1 || layout.rows === 1) return true;
+  // For a two-dimensional wall, require evidence along both axes. Two
+  // diagonally separated QRs are sufficient; two QRs from one row/column are
+  // still only a provisional seed and acquisition must continue.
+  const cols = new Set(slots.map((slot) => slot % layout.cols));
+  const rows = new Set(slots.map((slot) => Math.floor(slot / layout.cols)));
+  return cols.size >= 2 && rows.size >= 2;
+}
 class GridLattice {
   constructor(onTransition) {
     this.onTransition = onTransition;
@@ -137,7 +152,11 @@ class GridLattice {
     } else {
       this.candidate = (_a = this.makeCandidate(declaredLayout)) != null ? _a : void 0;
       if (!this.candidate) return null;
-      this.transition("GRID_LOCK", "packet declared layoutId and slotIndex", detection.at);
+      // One QR is enough to create a provisional homography but not enough to
+      // trust a multi-QR wall. Stay in SEARCH/REACQUIRE so full acquisition
+      // continues until distinct observed slots constrain the declared grid.
+      if (!lockReady(declaredLayout, this.candidate.observations)) return null;
+      this.transition("GRID_LOCK", "multi-slot geometry confirmed", detection.at);
     }
     return this.snapshot();
   }
@@ -148,7 +167,9 @@ class GridLattice {
       this.observations = [];
       return null;
     }
-    return this.candidate ? this.snapshot() : null;
+    // Never publish a provisional one-QR grid through tick(). Acquisition
+    // owns SEARCH/REACQUIRE until accept() has satisfied the lock quorum.
+    return this.active && this.candidate ? this.snapshot() : null;
   }
   noteMissing(anyMissing, now = this.lastHitAt) {
     if (!this.locked) return;
