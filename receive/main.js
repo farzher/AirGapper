@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.143";
+const RECEIVER_RUNTIME_BUILD = "v0.5.144";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -207,19 +207,14 @@ const AUTO_QR_EV_BIAS = -0.7;
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
-const AUTO_OPTICS_LOCK_SETTLE_MS = 1800;
-const AUTO_OPTICS_RELEASE_SILENCE_MS = 2400;
+const AUTO_OPTICS_LOCK_SETTLE_MS = 1400;
 const AUTO_OPTICS_RECENT_DECODE_MS = 900;
-const AUTO_OPTICS_MIN_STRUGGLING_QR_PER_SECOND = 5;
-const AUTO_OPTICS_MAX_STRUGGLING_QR_PER_SECOND = 45;
+const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
 const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.30;
-const AUTO_OPTICS_VALIDATE_MS = 900;
 let autoOpticsRuntimeState = "ae";
 let autoOpticsMutationRunning = false;
 let autoOpticsLockSince = 0;
 let autoOpticsRetryAt = 0;
-let autoOpticsValidationAt = 0;
-let autoOpticsBaselineQrRate = 0;
 let preferredExposureTime;
 let manualFocusMode = "camera-auto";
 let preferredFocusDistance;
@@ -2088,8 +2083,6 @@ function resetAutomaticOpticsRuntime() {
   autoOpticsMutationRunning = false;
   autoOpticsLockSince = 0;
   autoOpticsRetryAt = 0;
-  autoOpticsValidationAt = 0;
-  autoOpticsBaselineQrRate = 0;
 }
 function quantizeCameraRange(value, range) {
   const clamped = Math.max(range.min, Math.min(range.max, value));
@@ -2141,8 +2134,11 @@ async function settleAutomaticQrOptics(track, now) {
       return;
     }
     autoOpticsRuntimeState = "manual";
-    autoOpticsRetryAt = receiverNow() + 1500;
-    autoOpticsValidationAt = receiverNow() + AUTO_OPTICS_VALIDATE_MS;
+    // Automatic optics is intentionally one-way for this camera session.
+    // Continuous AE reacts to the animated QR wall itself and repeatedly moves
+    // a scene that decodes better when held still. Once we have a verified QR
+    // lock, keep this manual exposure through ordinary loss/reacquisition.
+    autoOpticsRetryAt = Infinity;
     preferredExposureTime = track.getSettings().exposureTime ?? exposure;
     preferredIso = track.getSettings().iso ?? iso;
     focusController.adoptAutomaticCameraState("automatic QR exposure settled to motion-safe shutter + ISO");
@@ -2151,18 +2147,18 @@ async function settleAutomaticQrOptics(track, now) {
   }
 }
 async function releaseAutomaticQrOptics(track, now) {
-  if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
+  // Kept for explicit/session-level resets only. Normal target loss must not
+  // bounce the camera back into continuous AE.
+  if (autoOpticsMutationRunning || !automaticOptics) return;
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "settling";
-  holdDecoderForCameraMutation("automatic optics returning to hardware AE", 280);
+  holdDecoderForCameraMutation("automatic optics session reset", 280);
   try {
+    autoOpticsRetryAt = 0;
     await applyExposureSetting(track);
     autoOpticsRuntimeState = "ae";
     autoOpticsLockSince = 0;
-    autoOpticsValidationAt = 0;
-    autoOpticsBaselineQrRate = 0;
-    autoOpticsRetryAt = receiverNow() + 900;
-    focusController.adoptAutomaticCameraState("target lost; hardware AE restored for reacquisition");
+    focusController.adoptAutomaticCameraState("hardware AE restored for new optics session");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -2171,49 +2167,29 @@ function maintainAutomaticQrOptics(now) {
   if (!automaticOptics || replayRunning || optimizerPipelineActive || optimizeRunning || autoOpticsMutationRunning) return;
   const track = stream?.getVideoTracks()[0];
   if (!track || track.readyState !== "live") return;
+
+  // Auto optics is a bootstrap, not a continuously active controller. Hardware
+  // AE gets enough time to establish scene brightness; a verified QR lock then
+  // lets us convert that brightness to a shorter manual shutter + compensating
+  // ISO exactly once. The manual state survives target/lattice loss.
+  if (autoOpticsRuntimeState !== "ae") return;
+  if (!gridLattice.locked) {
+    autoOpticsLockSince = 0;
+    return;
+  }
+  if (!autoOpticsLockSince) autoOpticsLockSince = now;
+  if (now - autoOpticsLockSince < AUTO_OPTICS_LOCK_SETTLE_MS || now < autoOpticsRetryAt) return;
+
   const settings = track.getSettings();
   const recentDecodes = qrReadTimes.reduce((count, at) => count + Number(at > now - AUTO_OPTICS_RECENT_DECODE_MS), 0);
   const recentQrRate = recentDecodes / (AUTO_OPTICS_RECENT_DECODE_MS / 1e3);
   const captureWindowMs = 800;
   const recentCaptureRate = captureTimes.reduce((count, at) => count + Number(at > now - captureWindowMs), 0) / (captureWindowMs / 1e3);
   const nominalFps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+  const decodeFresh = Boolean(lastStreamDecodeAt && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
 
-  if (gridLattice.locked) {
-    if (!autoOpticsLockSince) autoOpticsLockSince = now;
-    const decodeFresh = Boolean(lastStreamDecodeAt && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
-
-    // A healthy QR stream is stronger evidence than any static optics score.
-    // Do not disturb hardware AE just because a theoretically shorter shutter
-    // is available: several Android HALs stall frame delivery when entering
-    // manual sensor mode, which is much worse than a little extra blur.
-    if (autoOpticsRuntimeState === "ae" && decodeFresh &&
-        now - autoOpticsLockSince >= AUTO_OPTICS_LOCK_SETTLE_MS && now >= autoOpticsRetryAt) {
-      const motionSafeExposure = 1e4 / nominalFps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
-      const longAeShutter = Number.isFinite(settings.exposureTime) && settings.exposureTime > motionSafeExposure * 1.35;
-      const struggling = recentQrRate >= AUTO_OPTICS_MIN_STRUGGLING_QR_PER_SECOND &&
-        recentQrRate <= AUTO_OPTICS_MAX_STRUGGLING_QR_PER_SECOND;
-      if (longAeShutter && struggling && recentCaptureRate >= nominalFps * 0.82) {
-        autoOpticsBaselineQrRate = recentQrRate;
-        void settleAutomaticQrOptics(track, now);
-      }
-    } else if (autoOpticsRuntimeState === "manual" && autoOpticsValidationAt && now >= autoOpticsValidationAt) {
-      autoOpticsValidationAt = 0;
-      const fpsCollapsed = recentCaptureRate < nominalFps * 0.72;
-      const yieldCollapsed = autoOpticsBaselineQrRate > 0 && recentQrRate < Math.max(3, autoOpticsBaselineQrRate * 0.58);
-      if (fpsCollapsed || yieldCollapsed) {
-        autoOpticsRetryAt = 0;
-        void releaseAutomaticQrOptics(track, now);
-      } else {
-        autoOpticsBaselineQrRate = 0;
-      }
-    }
-    return;
-  }
-  autoOpticsLockSince = 0;
-  if (autoOpticsRuntimeState === "manual" &&
-      (!lastStreamDecodeAt || now - lastStreamDecodeAt >= AUTO_OPTICS_RELEASE_SILENCE_MS) &&
-      now >= autoOpticsRetryAt) {
-    void releaseAutomaticQrOptics(track, now);
+  if (decodeFresh && recentQrRate >= AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND && recentCaptureRate >= nominalFps * 0.78) {
+    void settleAutomaticQrOptics(track, now);
   }
 }
 
@@ -2588,7 +2564,7 @@ function renderFocusDiagnostics() {
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
-    `AutoOptics ${automaticOptics ? autoOpticsRuntimeState : "off"}${autoOpticsRuntimeState === "manual" ? " · QR exposure held" : autoOpticsRuntimeState === "ae" ? " · hardware AE" : ""}`,
+    `AutoOptics ${automaticOptics ? autoOpticsRuntimeState : "off"}${autoOpticsRuntimeState === "manual" ? " · locked for session" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : ""}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
