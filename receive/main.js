@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.92";
+const RECEIVER_RUNTIME_BUILD = "v0.5.93";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2653,7 +2653,6 @@ function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
   };
 }
 function processSourceFrame(frame, gen) {
-  framePumpLastFrameAt = performance.now();
   if (done || gen !== captureGen) {
     frame.videoFrame?.close();
     return;
