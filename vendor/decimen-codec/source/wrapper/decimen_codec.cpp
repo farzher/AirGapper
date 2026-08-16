@@ -151,6 +151,33 @@ std::vector<DecimenResult> readFull(int bufferPtr, int width, int height, bool t
 	}
 }
 
+std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int stride, bool tryHarder,
+                                      int maxSymbols, bool returnErrors)
+{
+    try {
+        ImageView iv(reinterpret_cast<uint8_t*>(bufferPtr), width, height, ImageFormat::Lum, stride, 1);
+        auto opts = ReaderOptions()
+                        .formats(BarcodeFormat::QRCode)
+                        .tryHarder(tryHarder)
+                        .tryRotate(false)
+                        .tryInvert(false)
+                        .tryDownscale(tryHarder)
+                        .returnErrors(returnErrors)
+                        .maxNumberOfSymbols(maxSymbols);
+        auto barcodes = ReadBarcodes(iv, opts);
+        std::vector<DecimenResult> results;
+        results.reserve(barcodes.size());
+        for (auto&& barcode : barcodes)
+            results.push_back({barcode.isValid(), ToString(barcode.error()), toUint8Array(barcode.bytes()),
+                               barcode.position(), barcode.symbol().width()});
+        return results;
+    } catch (const std::exception& e) {
+        return {{false, e.what(), {}, {}}};
+    } catch (...) {
+        return {{false, "unknown error", {}, {}}};
+    }
+}
+
 /** How well the three finder patterns match at a candidate offset: sampled
  *  through the transform, compared against the ideal 7×7 template. Max 147.
  *  This is the cheap anchor — 147 point samples per candidate versus a full
@@ -1638,6 +1665,7 @@ EMSCRIPTEN_BINDINGS(DecimenCodec)
 	function("version", &codecVersion);
 	function("build", &codecBuild);
 	function("readFull", &readFull);
+	function("readFullY", &readFullY);
 	function("readTracked", &readTracked);
 	function("trackedMatrix", &trackedMatrix);
 	function("projectPoint", &projectPoint);

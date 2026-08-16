@@ -276,7 +276,7 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const copyAsRgba = robustLaneFirst || pixelFormat !== "y8";
+      const copyAsRgba = pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
@@ -450,7 +450,10 @@ ctx.onmessage = async (e) => {
     }
     if (!full && tracks?.length && robustLaneFirst) {
       readFullAttempts++;
-      const decoded = zx.readFull(ptr + inputOffset, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
+      const robustMax = Math.min(16, Math.max(1, tracks.length));
+      const decoded = decodePixelFormat === "y8"
+        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
+        : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
         for (let i = 0; i < decoded.size(); i++) {

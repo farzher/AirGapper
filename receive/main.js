@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.84";
+const RECEIVER_RUNTIME_BUILD = "v0.5.86";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3614,7 +3614,7 @@ async function captureFrame(source) {
     crc32: Boolean(region.crc32)
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
-const laneCount = lockedLayout ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1 ? Math.max(lockedLayout.cols, lockedLayout.rows) : Math.min(lockedLayout.cols, lockedLayout.rows)) : 0;
+const laneCount = strictHotPathActive() && lockedLayout ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1 ? Math.max(lockedLayout.cols, lockedLayout.rows) : Math.min(lockedLayout.cols, lockedLayout.rows)) : 0;
 const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
 if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >= 1 && pool.size >= laneCount) {
   const groups = Array.from(
