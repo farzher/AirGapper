@@ -24,7 +24,10 @@ for name in ['index.html', 'main.js', 'receive/main.js']:
 main.write_text(s)
 
 w = worker.read_text()
-# Dense robust search beyond eight symbols has poor marginal value at 30 fps:\n# eight useful QRs/frame is already ~240 QR/s and roughly the observed 0.7 MB/s\n# ceiling, while 15-18-symbol searches create 0.5-2.7 s latency tails.
+# Dense robust search beyond eight symbols has poor marginal value at 30 fps:
+# eight useful QRs/frame is already ~240 QR/s and roughly the observed 0.7 MB/s
+# ceiling, while 15-18-symbol searches create 0.5-2.7 s latency tails.
+assert 'const NATIVE_BATCH_MAX_TRACKS = 18;' in w
 w = w.replace('const NATIVE_BATCH_MAX_TRACKS = 18;', 'const NATIVE_BATCH_MAX_TRACKS = 18;\nconst ROBUST_BATCH_MAX_RESULTS = 8;', 1)
 old = '''      const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));'''
 new = '''      const robustMax = Math.min(ROBUST_BATCH_MAX_RESULTS, Math.max(1, tracks.length));'''
@@ -38,5 +41,5 @@ worker.write_text(w)
 
 sw = root / 'sw.js'
 text = sw.read_text()
-assert 'airgapper-static-js-v107' in text
-sw.write_text(text.replace('airgapper-static-js-v107', 'airgapper-static-js-v108', 1))
+assert 'airgapper-static-js-v108' in text
+sw.write_text(text.replace('airgapper-static-js-v108', 'airgapper-static-js-v109', 1))
