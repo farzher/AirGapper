@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.142";
+const RECEIVER_RUNTIME_BUILD = "v0.5.143";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1766,8 +1766,13 @@ const ACQUISITION_SCAN_MS = 45;
 const ACQUISITION_FULL_EVERY = 4;
 const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
+const LOCKED_RECOVERY_SCAN_MS = 220;
 const GEOMETRY_PROBE_SILENCE_MS = 650;
 const GEOMETRY_COLD_MISSES = 3;
+// A short synchronized miss burst is common when a camera exposure crosses a
+// display transition. Keep proven geometry alive long enough for tracked
+// decoding and occasional generic rescue probes to recover it.
+const GEOMETRY_HARD_RESET_MS = 2800;
 const CAMERA_MUTATION_SETTLE_MS = 350;
 const EXPECTED_REGIONS_DECAY_MS = 1e4;
 const MAX_REGIONS = 15;
@@ -4236,8 +4241,15 @@ async function captureFrame(source) {
     lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS;
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
-  if (allLockedCandidatesCold) {
-    enterGeometryRecovery("all tracked slots cold; fresh acquisition", now, true);
+  // Three tracked misses are evidence for a rescue probe, not evidence that the
+  // wall geometry vanished. Previously this destroyed a good lattice after
+  // roughly 0.9 s of optical misses and forced dense generic reacquisition.
+  // Preserve the hot geometry while rescue scans run in parallel; only abandon
+  // it after sustained decoder silence.
+  const hardGeometryResetDue = allLockedCandidatesCold &&
+    lockedDecodeSilenceMs >= GEOMETRY_HARD_RESET_MS;
+  if (hardGeometryResetDue) {
+    enterGeometryRecovery("tracked lattice silent too long; fresh acquisition", now, true);
     if (trace) trace.stateAfter = gridLattice.state;
     activeBenchmarkFrame = void 0;
     return;
@@ -4276,7 +4288,13 @@ async function captureFrame(source) {
     !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
     now - lastFullScan > GEOMETRY_PROBE_SILENCE_MS
   );
-  const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
+  // Once geometry has been proven, never let a transient zero-output window
+  // turn recovery into a 22 Hz stream of expensive full-frame finder scans.
+  // Keep most camera frames available to the tracked decoder and inject only
+  // a few generic rescue probes per second.
+  const scanInterval = gridLattice.locked
+    ? LOCKED_RECOVERY_SCAN_MS
+    : live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
   const fullScanDue = strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
