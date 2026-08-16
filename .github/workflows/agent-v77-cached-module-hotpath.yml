@@ -1,0 +1,36 @@
+name: Agent v77 cached module hot path
+on:
+  push:
+    branches: [agent/v77-cached-module-hotpath]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v77-cached-module-hotpath
+      - name: Apply patch
+        run: python3 .github/v77_patch.py
+      - name: Build SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          ./build.sh
+      - name: Build scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../decimen-codec-android ./build.sh
+      - name: Commit build
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git checkout -- vendor/decimen-codec/source/build-simd vendor/decimen-codec/source/build-scalar || true
+          git rm -f .github/v77_patch.py .github/workflows/agent-v77-cached-module-hotpath.yml
+          git add index.html main.js sw.js receive/main.js receive/worker.js \
+            vendor/decimen-codec/source/VERSION \
+            vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+            vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+            vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
+          git commit -m "cache distortion-corrected QR module maps"
+          git push origin HEAD:agent/v77-cached-module-hotpath
