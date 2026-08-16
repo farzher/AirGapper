@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.136";
+const RECEIVER_RUNTIME_BUILD = "v0.5.137";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -800,7 +800,7 @@ const workerLoadSamples = [];
 const pendingLaneReplaceTimes = [];
 let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
-const GUIDED_MIN_TRACKS = 12;
+const GUIDED_MIN_TRACKS = 6;
 const guidedRollout = {
   state: "warmup",
   inFlight: 0,
@@ -852,7 +852,7 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (!stage) return;
   const baseline = guidedBaselineP50();
-  const minOutput = Math.max(4, Math.ceil(Math.max(1, tracks) / 3));
+  const minOutput = Math.max(2, Math.ceil(Math.max(1, tracks) / 3));
   const fastEnough = !baseline || latencyMs <= Math.max(180, baseline * 0.85);
   const good = outputSymbols >= minOutput && fastEnough;
   if (stage === "probe") {

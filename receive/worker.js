@@ -85,7 +85,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
     guidedTracksPtr, tracks.length,
     guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
     guidedOutputPtr, GUIDED_OUTPUT_BYTES,
-    Math.min(12, tracks.length), guidedMetricsPtr
+    tracks.length, guidedMetricsPtr
   );
   const metricsView = new DataView(zx.HEAPU8.buffer, guidedMetricsPtr, GUIDED_METRICS_BYTES);
   const metrics = {
@@ -545,7 +545,7 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
-      if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 12) {
+      if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 6) {
         const guided = decodeGuidedBatch(zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks);
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();
