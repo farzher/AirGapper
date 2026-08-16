@@ -522,8 +522,46 @@ async function startStream(revealStage = false) {
   let scale = 1;
   const staging = document.createElement("canvas");
   const fitStaging = fitScaling ? document.createElement("canvas") : null;
+  const fitFiltered = fitScaling ? document.createElement("canvas") : null;
   const queue = [];
   const cells = new Array(gridCodes).fill(null);
+  const renderFitCanvas = () => {
+    if (!fitStaging || !fitFiltered || !fitStaging.width || !fitStaging.height) return;
+    const landscape = landscapeGrid();
+    const targetW = landscape ? canvas.height : canvas.width;
+    const targetH = landscape ? canvas.width : canvas.height;
+    const sourceW = fitStaging.width;
+    const sourceH = fitStaging.height;
+    const midW = Math.min(sourceW, Math.max(targetW, Math.round(targetW * 2)));
+    const midH = Math.min(sourceH, Math.max(targetH, Math.round(targetH * 2)));
+    let filtered = fitStaging;
+    if (midW !== sourceW || midH !== sourceH) {
+      if (fitFiltered.width !== midW || fitFiltered.height !== midH) {
+        fitFiltered.width = midW;
+        fitFiltered.height = midH;
+      }
+      const filterCtx = fitFiltered.getContext("2d");
+      filterCtx.setTransform(1, 0, 0, 1, 0, 0);
+      filterCtx.globalCompositeOperation = "copy";
+      filterCtx.imageSmoothingEnabled = true;
+      filterCtx.imageSmoothingQuality = "high";
+      filterCtx.drawImage(fitStaging, 0, 0, sourceW, sourceH, 0, 0, midW, midH);
+      filterCtx.globalCompositeOperation = "source-over";
+      filtered = fitFiltered;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "copy";
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    if (landscape) {
+      ctx.setTransform(0, 1, -1, 0, canvas.width, 0);
+      ctx.drawImage(filtered, 0, 0, filtered.width, filtered.height, 0, 0, canvas.height, canvas.width);
+    } else {
+      ctx.drawImage(filtered, 0, 0, filtered.width, filtered.height, 0, 0, canvas.width, canvas.height);
+    }
+    ctx.globalCompositeOperation = "source-over";
+  };
   stage.hidden = false;
   if (sendStart) sendStart.hidden = true;
   showStreamPanels(true);
@@ -567,18 +605,17 @@ async function startStream(revealStage = false) {
       const fitCtx = fitStaging.getContext("2d");
       fitCtx.imageSmoothingEnabled = false;
       fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
-    }
-    const ctx = canvas.getContext("2d");
-    ctx.imageSmoothingEnabled = fitScaling;
-    if (fitScaling) ctx.imageSmoothingQuality = "high";
-    const sourceW = fitStaging ? fitStaging.width : totalW;
-    const sourceH = fitStaging ? fitStaging.height : totalH;
-    if (landscape) {
-      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
+      renderFitCanvas();
     } else {
-      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      if (landscape) {
+        ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+      } else {
+        ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+      }
+      ctx.drawImage(staging, 0, 0);
     }
-    ctx.drawImage(fitStaging || staging, 0, 0);
   };
   const makeCode = () => {
     if (plainSnippet !== null) {
@@ -709,21 +746,18 @@ async function startStream(revealStage = false) {
         cell * FIT_SUPERSAMPLE, cell * FIT_SUPERSAMPLE
       );
     }
-    const ctx = canvas.getContext("2d");
-    ctx.imageSmoothingEnabled = fitScaling;
-    if (fitScaling) ctx.imageSmoothingQuality = "high";
-    const totalW = staging.width;
-    const totalH = staging.height;
-    const sourceW = fitStaging ? fitStaging.width : totalW;
-    const sourceH = fitStaging ? fitStaging.height : totalH;
-    if (landscapeGrid()) {
-      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
-    } else {
-      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
-    }
     if (fitStaging) {
-      ctx.drawImage(fitStaging, 0, 0);
+      renderFitCanvas();
     } else {
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      const totalW = staging.width;
+      const totalH = staging.height;
+      if (landscapeGrid()) {
+        ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+      } else {
+        ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+      }
       ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
     }
     if (entry.ordinal !== null && activeTransportCursor?.key === transportKey) {
