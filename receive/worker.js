@@ -250,6 +250,97 @@ function projectedNeighbor(q, dx, dy, stride) {
   const x = dx * stride, y = dy * stride;
   return { topLeft: project(x, y), topRight: project(x + 1, y), bottomRight: project(x + 1, y + 1), bottomLeft: project(x, y + 1) };
 }
+function robustTrackBands(tracks, ox, oy, pw, ph) {
+  const entries = [];
+  for (const track of tracks) {
+    if (!validQuad(track?.quad)) continue;
+    const local = localQuad(track.quad, ox, oy);
+    const box = boundsOf(local, 0, 0);
+    if (!box || box.w < 8 || box.h < 8) continue;
+    entries.push({
+      track,
+      box,
+      cx: box.x + box.w / 2,
+      cy: box.y + box.h / 2,
+      edge: Math.max(box.w, box.h)
+    });
+  }
+  // Small grids are already cheap and are a protected stable baseline.
+  if (entries.length < 12) return [{ x: 0, y: 0, w: pw, h: ph, entries }];
+  const minCx = Math.min(...entries.map((entry) => entry.cx));
+  const maxCx = Math.max(...entries.map((entry) => entry.cx));
+  const minCy = Math.min(...entries.map((entry) => entry.cy));
+  const maxCy = Math.max(...entries.map((entry) => entry.cy));
+  const axis = maxCx - minCx >= maxCy - minCy ? "x" : "y";
+  const sorted = [...entries].sort((a, b) => axis === "x" ? a.cx - b.cx : a.cy - b.cy);
+  const bandCount = 3;
+  const bands = [];
+  for (let band = 0; band < bandCount; band++) {
+    const begin = Math.floor(sorted.length * band / bandCount);
+    const end = Math.floor(sorted.length * (band + 1) / bandCount);
+    const group = sorted.slice(begin, end);
+    if (!group.length) continue;
+    const typicalEdge = group.map((entry) => entry.edge).sort((a, b) => a - b)[group.length >> 1];
+    // The group already includes each QR's full quad. Padding is for finder
+    // quiet-zone context and modest frame-to-frame drift, not another QR lane.
+    const pad = Math.max(8, Math.round(typicalEdge * 0.18));
+    const x = Math.max(0, Math.floor(Math.min(...group.map((entry) => entry.box.x)) - pad));
+    const y = Math.max(0, Math.floor(Math.min(...group.map((entry) => entry.box.y)) - pad));
+    const right = Math.min(pw, Math.ceil(Math.max(...group.map((entry) => entry.box.x + entry.box.w)) + pad));
+    const bottom = Math.min(ph, Math.ceil(Math.max(...group.map((entry) => entry.box.y + entry.box.h)) + pad));
+    if (right - x >= 32 && bottom - y >= 32) bands.push({ x, y, w: right - x, h: bottom - y, entries: group });
+  }
+  return bands.length === bandCount ? bands : [{ x: 0, y: 0, w: pw, h: ph, entries }];
+}
+
+function decodeRobustTrackedY(zx, basePtr, pw, ph, stride, tracks, ox, oy) {
+  const startedAt = performance.now();
+  const bands = robustTrackBands(tracks, ox, oy, pw, ph);
+  const symbols = [];
+  const seenSlots = new Set();
+  let attempts = 0;
+  for (const band of bands) {
+    const expectedSlots = new Set(band.entries.flatMap((entry) => entry.track.slot === void 0 ? [] : [entry.track.slot]));
+    attempts++;
+    const maxSymbols = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, band.entries.length + 2));
+    const decoded = zx.readFullY(
+      basePtr + band.y * stride + band.x,
+      band.w,
+      band.h,
+      stride,
+      true,
+      maxSymbols,
+      false
+    );
+    try {
+      for (let i = 0; i < decoded.size(); i++) {
+        const result = decoded.get(i);
+        if (!result.valid || !result.bytes.length || !validQuad(result.position)) continue;
+        const packet = parseFrame(result.bytes);
+        const slot = packet?.header.slotIndex;
+        if (!packet || slot === void 0 || expectedSlots.size && !expectedSlots.has(slot) || seenSlots.has(slot)) continue;
+        seenSlots.add(slot);
+        symbols.push({
+          bytes: result.bytes,
+          box: boundsOf(result.position, ox + band.x, oy + band.y),
+          quad: shifted(result.position, ox + band.x, oy + band.y),
+          modules: result.modules,
+          tracked: false,
+          header: packet.header
+        });
+      }
+    } finally {
+      decoded.delete();
+    }
+  }
+  return {
+    symbols,
+    attempts,
+    bands: bands.length,
+    searchMs: performance.now() - startedAt
+  };
+}
+
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
   const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap } = e.data;
@@ -452,30 +543,42 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
-      readFullAttempts++;
-      const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
-      const decoded = decodePixelFormat === "y8"
-        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
-        : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
-      try {
-        const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
-        for (let i = 0; i < decoded.size(); i++) {
-          const result = decoded.get(i);
-          if (!result.valid || !result.bytes.length || !validQuad(result.position)) continue;
-          const packet = parseFrame(result.bytes);
-          const slot = packet?.header.slotIndex;
-          if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
-          symbols.push({
-            bytes: result.bytes,
-            box: boundsOf(result.position, ox, oy),
-            quad: shifted(result.position, ox, oy),
-            modules: result.modules,
-            tracked: false,
-            header: packet.header
-          });
+      let robustBands = 1;
+      let robustSearchMs = 0;
+      if (decodePixelFormat === "y8" && tracks.length >= 12) {
+        const robust = decodeRobustTrackedY(zx, ptr + inputOffset, pw, ph, inputStride, tracks, ox, oy);
+        symbols.push(...robust.symbols);
+        readFullAttempts += robust.attempts;
+        robustBands = robust.bands;
+        robustSearchMs = robust.searchMs;
+      } else {
+        readFullAttempts++;
+        const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
+        const robustStarted = performance.now();
+        const decoded = decodePixelFormat === "y8"
+          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
+          : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
+        robustSearchMs = performance.now() - robustStarted;
+        try {
+          const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
+          for (let i = 0; i < decoded.size(); i++) {
+            const result = decoded.get(i);
+            if (!result.valid || !result.bytes.length || !validQuad(result.position)) continue;
+            const packet = parseFrame(result.bytes);
+            const slot = packet?.header.slotIndex;
+            if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
+            symbols.push({
+              bytes: result.bytes,
+              box: boundsOf(result.position, ox, oy),
+              quad: shifted(result.position, ox, oy),
+              modules: result.modules,
+              tracked: false,
+              header: packet.header
+            });
+          }
+        } finally {
+          decoded.delete();
         }
-      } finally {
-        decoded.delete();
       }
       mapOutputToDisplay();
       ctx.postMessage({
@@ -492,6 +595,8 @@ ctx.onmessage = async (e) => {
         frameCopyMs,
         pixelPath: decodePixelFormat,
         robustFirst: true,
+        robustBands,
+        robustSearchMs,
         latencyMs: performance.now() - startedAt
       });
       return;

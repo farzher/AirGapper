@@ -64,6 +64,8 @@ class DecodeWorkerPool {
           exactSameFrameOracleSuccesses: message.exactSameFrameOracleSuccesses ?? 0,
           nativeMs: message.nativeMs ?? 0,
           robustMs: message.robustMs ?? 0,
+          robustBands: message.robustBands ?? 1,
+          robustSearchMs: message.robustSearchMs ?? 0,
           exactFastPath: Boolean(message.exactFastPath),
           directFrameFailed: Boolean(message.directFrameFailed),
           symbols,

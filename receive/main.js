@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.109";
+const RECEIVER_RUNTIME_BUILD = "v0.5.110";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1270,7 +1270,9 @@ function noteDecodeCompleted(id, completion) {
       full: auditMode.full,
       latencyMs: completion.latencyMs || 0,
       nativeMs: completion.nativeMetrics?.totalMs || 0,
-      copyMs: completion.frameCopyMs || 0
+      copyMs: completion.frameCopyMs || 0,
+      robustBands: completion.robustBands || 1,
+      robustSearchMs: completion.robustSearchMs || 0
     });
   }
   hotPathJobMode.delete(id);
@@ -2051,6 +2053,8 @@ function renderFocusDiagnostics() {
   const averageJobMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.latencyMs, 0) / trackedCompletions.length : 0;
   const averageNativeMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.nativeMs, 0) / trackedCompletions.length : 0;
   const averageCopyMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.copyMs, 0) / trackedCompletions.length : 0;
+  const averageRobustBands = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustBands, 0) / trackedCompletions.length : 0;
+  const averageRobustSearchMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustSearchMs, 0) / trackedCompletions.length : 0;
   const visibleSlotCount = regions.reduce((count, region) => count + Number(region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN"), 0);
   const qrOpportunityRate = sourceCaptureRate * visibleSlotCount;
   const attemptCoverage = qrOpportunityRate > 0 ? attemptedQrRate / qrOpportunityRate : 0;
@@ -2076,7 +2080,7 @@ function renderFocusDiagnostics() {
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · decode frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
