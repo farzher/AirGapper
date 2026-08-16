@@ -39,6 +39,7 @@ import {
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
 const startBtn = document.getElementById("start");
+const cameraDevice = document.getElementById("camera-device");
 const cameraResolution = document.getElementById("camera-resolution");
 const cameraResolutionLabel = document.getElementById("camera-resolution-label");
 const decodeWorkers = document.getElementById("decode-workers");
@@ -372,6 +373,7 @@ function formatCameraMode(width, height, fps) {
 const browserModeResults = loadBrowserModeResults();
 let browserModes = [];
 let automaticBrowserMode;
+let preferredCameraDeviceId = "";
 function loadBrowserModeResults() {
   var _a;
   try {
@@ -412,6 +414,7 @@ function restoreCameraSettings() {
   try {
     const saved = JSON.parse((_a = localStorage.getItem(CAMERA_SETTINGS_KEY)) != null ? _a : "null");
     if (!saved) return;
+    if (typeof saved.deviceId === "string") preferredCameraDeviceId = saved.deviceId;
     if (saved.resolution && [...cameraResolution.options].some((option) => option.value === saved.resolution)) {
       cameraResolution.value = saved.resolution;
     }
@@ -429,6 +432,7 @@ function restoreCameraSettings() {
 function saveCameraSettings() {
   try {
     localStorage.setItem(CAMERA_SETTINGS_KEY, JSON.stringify({
+      deviceId: preferredCameraDeviceId,
       resolution: cameraResolution.value,
       automaticOptics,
       automaticExposureAxis,
@@ -441,6 +445,40 @@ function saveCameraSettings() {
     }));
   } catch {
   }
+}
+async function refreshCameraDevices(activeTrack) {
+  if (!cameraDevice || !navigator.mediaDevices?.enumerateDevices) return;
+  let devices = [];
+  try {
+    devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+  } catch {
+    return;
+  }
+  const activeId = activeTrack?.getSettings?.().deviceId ?? "";
+  const options = [new Option("Default camera", "")];
+  devices.forEach((device, index) => options.push(new Option(device.label || `Camera ${index + 1}`, device.deviceId)));
+  cameraDevice.replaceChildren(...options);
+  const preferredExists = preferredCameraDeviceId && devices.some((device) => device.deviceId === preferredCameraDeviceId);
+  const activeExists = activeId && devices.some((device) => device.deviceId === activeId);
+  if (preferredExists) {
+    cameraDevice.value = preferredCameraDeviceId;
+  } else if (activeExists) {
+    // Once Chrome has granted a concrete camera, pin that exact device for the
+    // rest of the session. Desktop facingMode is only a preference and can
+    // otherwise select a different camera when constraints are retried.
+    preferredCameraDeviceId = activeId;
+    cameraDevice.value = activeId;
+    saveCameraSettings();
+  } else {
+    preferredCameraDeviceId = "";
+    cameraDevice.value = "";
+  }
+  cameraDevice.disabled = devices.length <= 1;
+}
+function cameraDeviceConstraint() {
+  return preferredCameraDeviceId
+    ? { deviceId: { exact: preferredCameraDeviceId } }
+    : { facingMode: "environment" };
 }
 function readRequestedCameraSettings() {
   const browserMode = browserModes.find((mode) => mode.key === cameraResolution.value);
@@ -731,7 +769,7 @@ function optimizerAttributionComplete(scanId) {
   scanCandidateEpoch.delete(scanId);
 }
 function snapshotOptimizerGeometry() {
-  optimizerFixedTargets = regions.filter((region) => region.decoded && region.quad && region.dim && region.visibleFraction >= 0.85).slice(0, 15).map((region) => ({
+  optimizerFixedTargets = regions.filter((region) => region.decoded && validQuadObject(region.quad) && region.dim && region.visibleFraction >= 0.85).slice(0, 15).map((region) => ({
     id: region.id,
     slot: region.gridSlot,
     misses: 0,
@@ -1413,6 +1451,7 @@ function syncGrid(snapshot, now, decodedSlot, info) {
   for (let i = regions.length - 1; i >= 0; i--) if (regions[i].gridSlot === void 0) regions.splice(i, 1);
   let decodedRegion;
   for (const slot of snapshot.slots) {
+    if (!slot?.box || !validQuadObject(slot.quad)) continue;
     let region = regions.find((candidate) => candidate.gridSlot === slot.index);
     if (!region) {
       region = {
@@ -1702,7 +1741,7 @@ function captureQualityRate(region, now) {
   return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
 }
 function hasDensityHeadroom(region) {
-  if (!region.quad || !region.dim || region.dim >= MAX_QR_MODULES) return false;
+  if (!validQuadObject(region.quad) || !region.dim || region.dim >= MAX_QR_MODULES) return false;
   const corners = [
     region.quad.topLeft,
     region.quad.topRight,
@@ -1836,14 +1875,16 @@ function drawOverlay(now) {
 function focusGeometry() {
   const snapshot = lastGridSnapshot;
   if (!snapshot || !receiverFrameWidth || !receiverFrameHeight || !snapshot.slots.length) return void 0;
-  const points = snapshot.slots.flatMap((slot) => [slot.quad.topLeft, slot.quad.topRight, slot.quad.bottomRight, slot.quad.bottomLeft]);
+  const validSlots = snapshot.slots.filter((slot) => slot && validQuadObject(slot.quad));
+  if (!validSlots.length) return void 0;
+  const points = validSlots.flatMap((slot) => [slot.quad.topLeft, slot.quad.topRight, slot.quad.bottomRight, slot.quad.bottomLeft]);
   const left = Math.min(...points.map((point) => point.x));
   const right = Math.max(...points.map((point) => point.x));
   const top = Math.min(...points.map((point) => point.y));
   const bottom = Math.max(...points.map((point) => point.y));
-  const tracked = regions.filter((region) => region.gridSlot !== void 0);
+  const tracked = regions.filter((region) => region.gridSlot !== void 0 && validQuadObject(region.quad));
   const quality = tracked.length ? tracked.reduce((sum, region) => sum + region.decodeConfidence, 0) / tracked.length : snapshot.confidence;
-  const representative = snapshot.slots[Math.floor(snapshot.slots.length / 2)].quad;
+  const representative = validSlots[Math.floor(validSlots.length / 2)].quad;
   const topEdge = Math.hypot(representative.topRight.x - representative.topLeft.x, representative.topRight.y - representative.topLeft.y);
   const bottomEdge = Math.hypot(representative.bottomRight.x - representative.bottomLeft.x, representative.bottomRight.y - representative.bottomLeft.y);
   const leftEdge = Math.hypot(representative.bottomLeft.x - representative.topLeft.x, representative.bottomLeft.y - representative.topLeft.y);
@@ -1908,7 +1949,7 @@ function renderFocusDiagnostics() {
   const sourceTrack = stream?.getVideoTracks()[0];
   const sourceSettings = sourceTrack?.getSettings();
   const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > receiverNow() - STATS_WINDOW_MS), 0) / (STATS_WINDOW_MS / 1e3);
-  const sourceLine = sourceSettings ? `track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
+  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
     return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
@@ -2041,6 +2082,16 @@ const changeCameraSettings = async () => {
   }
 };
 cameraResolution.addEventListener("change", () => void changeCameraSettings());
+cameraDevice?.addEventListener("change", () => {
+  preferredCameraDeviceId = cameraDevice.value;
+  saveCameraSettings();
+  if (!stream || done) return;
+  stopReceiver();
+  void start();
+});
+navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+  void refreshCameraDevices(stream?.getVideoTracks()[0]);
+});
 cameraExposureAuto.addEventListener("change", () => {
   automaticOptics = cameraExposureAuto.checked;
   clearTimeout(exposureApplyTimer);
@@ -2161,6 +2212,7 @@ function stopReceiver() {
   document.body.classList.remove("receive-complete");
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
+  video.srcObject = null;
   clearInterval(statsTimer);
   statsTimer = void 0;
   clearPendingGridLanes();
@@ -2183,6 +2235,11 @@ function stopReceiver() {
   localReacquireIds.clear();
   scanCapturedAt.clear();
   scanOutcomes.clear();
+  hotPathJobMode.clear();
+  scanCandidateEpoch.clear();
+  optimizerJobIds.clear();
+  optimizerValidEvents.clear();
+  benchmarkJobFrames.clear();
   captureTimes.length = 0;
   qrReadTimes.length = 0;
   uniqueQrTimes.length = 0;
@@ -2330,8 +2387,9 @@ async function start() {
   const captureFps = requestedFps;
   startBtn.disabled = true;
   startBtn.style.display = "none";
+  const cameraChoice = cameraDeviceConstraint();
   const base = {
-    facingMode: "environment",
+    ...cameraChoice,
     width: { exact: captureWidth },
     height: { exact: captureHeight }
   };
@@ -2341,7 +2399,7 @@ async function start() {
       acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: "environment",
+          ...cameraChoice,
           width: { ideal: captureWidth },
           height: { ideal: captureHeight }
         }
@@ -2349,7 +2407,7 @@ async function start() {
     } else if (cameraResolution.value === "auto") {
       acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
+        video: { ...cameraChoice, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
       });
     } else if (isAndroidApp()) {
       try {
@@ -2357,7 +2415,7 @@ async function start() {
       } catch {
         acquiredStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
+          video: { ...cameraChoice, width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
         });
       }
     } else {
@@ -2369,7 +2427,7 @@ async function start() {
       } catch {
         acquiredStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { facingMode: "environment", width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
+          video: { ...cameraChoice, width: { ideal: captureWidth }, height: { ideal: captureHeight }, frameRate: { ideal: captureFps } }
         });
       }
     }
@@ -2393,6 +2451,7 @@ async function start() {
   preview.classList.remove("camera-loading");
   const activeTrack = stream.getVideoTracks()[0];
   if (activeTrack) {
+    await refreshCameraDevices(activeTrack);
     populateBrowserCapabilities(activeTrack);
     showNegotiatedWebMode(activeTrack);
     if (!legacyAndroidApp) attachCameraController(activeTrack);
@@ -2601,9 +2660,14 @@ scanDialog.addEventListener("click", (event) => {
 scanDialog.addEventListener("close", () => {
   if (captureNextScan || pendingScanCapture) cancelScanCapture();
 });
-function trackedQuadBounds(quad) {
+function validQuadObject(quad) {
+  if (!quad) return false;
   const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
-  if (points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+  return points.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+function trackedQuadBounds(quad) {
+  if (!validQuadObject(quad)) return null;
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
   return {
     left: Math.min(...points.map((point) => point.x)),
     top: Math.min(...points.map((point) => point.y)),

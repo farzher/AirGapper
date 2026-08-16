@@ -20,7 +20,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.57</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.58</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -93,6 +93,7 @@
                 <span class="speed-feedback" id="speed-feedback"><strong id="m-rate">👀</strong></span>
               </summary>
               <div class="row">
+            <label id="camera-device-control"><span>Camera</span><select id="camera-device"><option value="">Default camera</option></select></label>
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <div id="camera-optics-manual" class="optics-manual" hidden>
