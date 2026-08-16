@@ -155,21 +155,23 @@ class GridLattice {
       // One QR is enough to create a provisional homography but not enough to
       // trust a multi-QR wall. Stay in SEARCH/REACQUIRE so full acquisition
       // continues until distinct observed slots constrain the declared grid.
-      if (!lockReady(declaredLayout, this.candidate.observations)) return null;
-      this.transition("GRID_LOCK", "multi-slot geometry confirmed", detection.at);
+      if (lockReady(declaredLayout, this.candidate.observations)) {
+        this.transition("GRID_LOCK", "multi-slot geometry confirmed", detection.at);
+      }
     }
     return this.snapshot();
   }
   tick(now) {
-    if (this.active && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
+    if (this.candidate && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
       this.transition("REACQUIRE", "whole lattice expired without a valid packet", now);
       this.candidate = void 0;
       this.observations = [];
       return null;
     }
-    // Never publish a provisional one-QR grid through tick(). Acquisition
-    // owns SEARCH/REACQUIRE until accept() has satisfied the lock quorum.
-    return this.active && this.candidate ? this.snapshot() : null;
+    // Provisional geometry remains publishable for overlays, visibility,
+    // cropping and exact observed-slot tracking. Only `active` means the whole
+    // predicted wall is trusted enough to replace acquisition.
+    return this.candidate ? this.snapshot() : null;
   }
   noteMissing(anyMissing, now = this.lastHitAt) {
     if (!this.locked) return;
@@ -253,7 +255,7 @@ class GridLattice {
       slots.push({ index, quad, box, decoded: decoded.has(index), observed: Boolean(observation) });
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
-    return { state: this.state, confidence, layout: candidate.layout, modules, slots, observedSlots: observed.size, fitError: candidate.error };
+    return { state: this.state, provisional: !this.active, confidence, layout: candidate.layout, modules, slots, observedSlots: observed.size, fitError: candidate.error };
   }
 }
 export {

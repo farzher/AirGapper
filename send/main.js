@@ -245,26 +245,10 @@ function stopTransfer() {
   setStatus("");
 }
 let scrollBeforeFullscreen = 0;
-let cursorIdleTimer;
-const CURSOR_IDLE_MS = 1200;
-function armFullscreenCursor() {
-  clearTimeout(cursorIdleTimer);
-  document.body.classList.remove("qr-cursor-hidden");
-  if (!document.body.classList.contains("qr-full")) return;
-  cursorIdleTimer = setTimeout(() => {
-    if (document.body.classList.contains("qr-full")) document.body.classList.add("qr-cursor-hidden");
-  }, CURSOR_IDLE_MS);
-}
-window.addEventListener("mousemove", armFullscreenCursor, { passive: true });
 function setStageFullscreen(on) {
   if (on === document.body.classList.contains("qr-full")) return;
   if (on) scrollBeforeFullscreen = window.scrollY;
   document.body.classList.toggle("qr-full", on);
-  if (on) armFullscreenCursor();
-  else {
-    clearTimeout(cursorIdleTimer);
-    document.body.classList.remove("qr-cursor-hidden");
-  }
   if (!on && document.fullscreenElement) void document.exitFullscreen().catch(() => void 0);
   resizeDisplay == null ? void 0 : resizeDisplay();
   window.scrollTo(0, on ? 0 : scrollBeforeFullscreen);

@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.131";
+const RECEIVER_RUNTIME_BUILD = "v0.5.132";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3994,15 +3994,23 @@ async function captureFrame(source) {
   const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
     ? geometryProbeDue || allLockedCandidatesCold || trackingUnhealthy
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
-  // SEARCH/REACQUIRE is acquisition regardless of whether one seed QR has
-  // already decoded. Keep the fast acquisition cadence until lattice geometry
-  // actually exists.
-  const scanInterval = preLatticeDiscovery || live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
+  const provisionalUnknownVisible = preLatticeDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
+    !region.decoded && region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
+  ) : [];
+  const acquisitionInFlight = [...fullScanJobs.values()].reduce((count, job) => count + Number(job.acquisition), 0);
+  const acquisitionLimit = captureHasTrackedWork ? 1 : 2;
+  // No exact QR yet: acquire as fast as two workers can finish. Once a known
+  // subsection is producing data, keep one discovery worker if another
+  // predicted slot is visible. If the rest of the declared wall is offscreen,
+  // preserve tracked throughput and only issue an occasional global probe.
+  const scanInterval = preLatticeDiscovery
+    ? captureHasTrackedWork ? provisionalUnknownVisible.length ? 0 : GEOMETRY_PROBE_SILENCE_MS : 0
+    : live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
   const fullScanDue = strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
-    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
+    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && acquisitionInFlight < acquisitionLimit && (scanInterval === 0 || now - lastFullScan > scanInterval);
   if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
     if (trace) {
       trace.decision = "full scan throttled";
@@ -4065,18 +4073,21 @@ async function captureFrame(source) {
     // fresher and avoids the old multi-second double scan.
     const acquisitionMode = captureNextScan ? "thorough" : fullScans % 8 === 0 ? "deep" : "fast";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
-    // During a still-trusted lock, even recovery is bounded to the only place
-    // the declared grid can exist. Give it generous motion headroom, but never
-    // pay a generic finder to inspect unrelated camera pixels.
-    if (!captureNextScan && lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold) {
-      const points = lockedGeometryCandidates.flatMap((region) => [
+    // A provisional seed already tells us where the declared neighbors
+    // should roughly be. Search visible unknown slots there while continuing
+    // to track exact observed slots; do not spend a full-frame finder pass on
+    // camera pixels that cannot contain the declared wall.
+    const provisionalCrop = preLatticeDiscovery && provisionalUnknownVisible.length > 0;
+    const boundedScanCandidates = provisionalCrop ? provisionalUnknownVisible : lockedGeometryCandidates;
+    if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
+      const points = boundedScanCandidates.flatMap((region) => [
         region.quad.topLeft,
         region.quad.topRight,
         region.quad.bottomRight,
         region.quad.bottomLeft
       ]);
-      const typicalEdge = Math.max(...lockedGeometryCandidates.map((region) => Math.max(region.w, region.h)));
-      const pad = Math.max(24, Math.round(typicalEdge * 0.7));
+      const typicalEdge = Math.max(...boundedScanCandidates.map((region) => Math.max(region.w, region.h)));
+      const pad = Math.max(24, Math.round(typicalEdge * (provisionalCrop ? 0.9 : 0.7)));
       const quantum = 16;
       scanX = Math.max(0, Math.floor((Math.min(...points.map((point) => point.x)) - pad) / quantum) * quantum);
       scanY = Math.max(0, Math.floor((Math.min(...points.map((point) => point.y)) - pad) / quantum) * quantum);
@@ -5647,7 +5658,7 @@ Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fast
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
-Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
+Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
