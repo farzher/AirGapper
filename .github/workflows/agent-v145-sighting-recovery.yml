@@ -1,0 +1,31 @@
+name: Agent v145 sighting-guided recovery
+on:
+  push:
+    paths:
+      - '.github/v145_patch.py'
+      - '.github/workflows/agent-v145-sighting-recovery.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v145_patch.py
+      - name: Smoke check
+        run: |
+          node --check receive/main.js
+          node --check receive/grid-lattice.js
+          grep -q 'v0.5.145' receive/main.js
+          grep -q 'airgapper-static-js-v108' sw.js
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add receive/main.js receive/grid-lattice.js index.html main.js sw.js
+          git commit -m 'v0.5.145 recenter locked lattice from finder sightings'
+          git push origin master
