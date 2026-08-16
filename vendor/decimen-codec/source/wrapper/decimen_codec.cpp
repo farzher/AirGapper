@@ -205,6 +205,12 @@ static double guidedNowMs()
     return emscripten_get_now();
 }
 
+// Defined by the persistent decoder below. Guided decoding uses the exact
+// current-frame BitMatrix produced by SampleQR, so the cheap no-RS parser is
+// safe to try here without reviving any cached/stale module-map machinery.
+static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits);
+static bool hasValidCRC32(const ByteArray& bytes);
+
 static float guidedModuleSize(const DecimenGuidedTrack& track)
 {
     const auto edge = [](float ax, float ay, float bx, float by) {
@@ -367,15 +373,36 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 metrics->sampleAttempts++;
                 if (!detected.isValid() || detected.bits().width() != track.dimension)
                     continue;
-                const double decodeStart = guidedNowMs();
-                auto decoded = QRCode::Decode(detected.bits());
-                const double decodeElapsed = guidedNowMs() - decodeStart;
-                decodeSpent += decodeElapsed;
-                metrics->decodeMs += decodeElapsed;
-                if (!decoded.isValid() || decoded.content().bytes.empty())
-                    continue;
+                ByteArray bytes;
 
-                const auto& bytes = decoded.content().bytes;
+                // SampleQR has already done the expensive current-frame geometry
+                // and alignment-pattern work. Most clean AirGapper matrices do not
+                // need QR Reed-Solomon after that. Parse/deinterleave without RS,
+                // require our own CRC32, and only pay generic QRCode::Decode when
+                // the cheap path cannot prove the payload pristine.
+                ++metrics->fastDecodeAttempts;
+                const double fastStart = guidedNowMs();
+                auto fast = decodeWithoutErrorCorrection(detected.bits());
+                const double fastElapsed = guidedNowMs() - fastStart;
+                metrics->fastDecodeMs += fastElapsed;
+                metrics->decodeMs += fastElapsed;
+                decodeSpent += fastElapsed;
+                if (fast.isValid() && !fast.content().bytes.empty() && hasValidCRC32(fast.content().bytes)) {
+                    bytes = fast.content().bytes;
+                    ++metrics->fastDecodeSuccesses;
+                } else {
+                    ++metrics->genericDecodeAttempts;
+                    const double genericStart = guidedNowMs();
+                    auto decoded = QRCode::Decode(detected.bits());
+                    const double genericElapsed = guidedNowMs() - genericStart;
+                    metrics->genericDecodeMs += genericElapsed;
+                    metrics->decodeMs += genericElapsed;
+                    decodeSpent += genericElapsed;
+                    if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
+                        continue;
+                    bytes = decoded.content().bytes;
+                }
+
                 if (outputUsed + int(bytes.size()) > outputCapacity)
                     break;
                 std::memcpy(output + outputUsed, bytes.data(), bytes.size());

@@ -52,6 +52,11 @@ struct DecimenGuidedMetrics {
 	uint32_t sampleAttempts;
 	uint32_t successful;
 	uint32_t misses;
+	uint32_t fastDecodeAttempts;
+	uint32_t fastDecodeSuccesses;
+	uint32_t genericDecodeAttempts;
+	double fastDecodeMs;
+	double genericDecodeMs;
 };
 
 struct DecimenBatchMetrics {
