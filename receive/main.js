@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.132";
+const RECEIVER_RUNTIME_BUILD = "v0.5.133";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1788,6 +1788,7 @@ function syncGrid(snapshot, now, decodedSlot, info) {
         crc32: true,
         consecutiveMisses: 0,
         gridSlot: slot.index,
+        observed: Boolean(slot.observed),
         detectionConfidence: 0,
         decodeConfidence: 0,
         globalGridConfidence: snapshot.confidence,
@@ -1802,6 +1803,7 @@ function syncGrid(snapshot, now, decodedSlot, info) {
     Object.assign(region, slot.box, {
       quad: slot.quad,
       dim: snapshot.modules,
+      observed: Boolean(slot.observed),
       globalGridConfidence: snapshot.confidence
     });
     if (slot.index === decodedSlot) {
@@ -3998,19 +4000,25 @@ async function captureFrame(source) {
   const provisionalUnknownVisible = preLatticeDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
     !region.decoded && region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
   ) : [];
-  const acquisitionInFlight = [...fullScanJobs.values()].reduce((count, job) => count + Number(job.acquisition), 0);
+  const acquisitionInFlight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
   const acquisitionLimit = captureHasTrackedWork ? 1 : 2;
-  // No exact QR yet: acquire as fast as two workers can finish. Once a known
-  // subsection is producing data, keep one discovery worker if another
-  // predicted slot is visible. If the rest of the declared wall is offscreen,
-  // preserve tracked throughput and only issue an occasional global probe.
-  const scanInterval = preLatticeDiscovery
-    ? captureHasTrackedWork ? provisionalUnknownVisible.length ? 0 : GEOMETRY_PROBE_SILENCE_MS : 0
-    : live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
+  // SEARCH/REACQUIRE has a hard liveness invariant: if the camera is producing
+  // frames and an acquisition worker is free, stale scheduler bookkeeping may
+  // never stop discovery. With useful provisional geometry, keep one discovery
+  // worker on visible unknown neighbors; if every unknown is offscreen, probe
+  // globally only occasionally while tracked subsection throughput continues.
+  const provisionalNeedsDiscovery = preLatticeDiscovery && (
+    !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
+    now - lastFullScan > GEOMETRY_PROBE_SILENCE_MS
+  );
+  const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
   const fullScanDue = strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
-    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && acquisitionInFlight < acquisitionLimit && (scanInterval === 0 || now - lastFullScan > scanInterval);
+    : captureNextScan ? !captureHasTrackedWork
+      : preLatticeDiscovery
+        ? provisionalNeedsDiscovery && acquisitionInFlight < acquisitionLimit
+        : needsRecoveryScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
     if (trace) {
       trace.decision = "full scan throttled";
@@ -4042,7 +4050,7 @@ async function captureFrame(source) {
   }
   if (acquisitionSeedScan) {
     const acquisitionInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
-    const acquisitionInflightLimit = Math.min(2, pool.size);
+    const acquisitionInflightLimit = Math.min(acquisitionLimit, pool.size);
     if (acquisitionInflight >= acquisitionInflightLimit) {
       capturesDropped++;
       poolBusyTimes.push(now);
@@ -4162,7 +4170,7 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchRegions = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
+  const batchRegions = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
@@ -4363,7 +4371,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     activeBenchmarkFrame = void 0;
     return;
   }
-  const eligible = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate).sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : [...regions];
+  const eligible = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate).sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : regions.filter((region) => region.observed && region.decoded);
   activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);

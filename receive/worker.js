@@ -570,9 +570,12 @@ ctx.onmessage = async (e) => {
       }
       readFullAttempts++;
       const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
+      const singleLocalQr = tracks.length === 1;
       const decoded = decodePixelFormat === "y8"
-        ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, robustMax)
-        : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
+        ? singleLocalQr
+          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, false, 1, false)
+          : zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, robustMax)
+        : zx.readFull(ptr + inputOffset, pw, ph, !singleLocalQr, robustMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
         for (let i = 0; i < decoded.size(); i++) {
