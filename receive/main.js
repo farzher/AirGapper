@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.134";
+const RECEIVER_RUNTIME_BUILD = "v0.5.135";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -212,6 +212,7 @@ let manualFocusMode = "camera-auto";
 let preferredFocusDistance;
 let preferredIso;
 let exposureApplyGeneration = 0;
+let manualOpticsReapplyGeneration = 0;
 let cameraMutationQueue = Promise.resolve();
 let desiredCamera = {};
 let lastCameraMutation;
@@ -550,6 +551,61 @@ const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track) {
   focusController.attach(track);
   if (!automaticOptics) void applyExposureSetting(track);
+}
+async function reapplyManualOpticsAfterFreshFrames(track, reason) {
+  const generation = ++manualOpticsReapplyGeneration;
+  if (!track || automaticOptics) return;
+  const firstSequence = latestSourceFrameSequence;
+  const startedAt = performance.now();
+  while (generation === manualOpticsReapplyGeneration && !automaticOptics &&
+      stream?.getVideoTracks()[0] === track && track.readyState === "live" &&
+      (latestSourceFrameSequence - firstSequence < 3 || frameModeSync) &&
+      performance.now() - startedAt < 1200) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
+      stream?.getVideoTracks()[0] !== track || track.readyState !== "live") return;
+
+  // Mode/camera renegotiation can silently put the sensor back in continuous
+  // exposure after our immediate attach-time write. Force a fresh manual-mode
+  // transaction once the new frame stream is real, then verify the axes the
+  // user actually pinned.
+  manualSensorSessionActive = false;
+  await applyExposureSetting(track);
+  if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
+      stream?.getVideoTracks()[0] !== track || track.readyState !== "live") return;
+
+  const appliedSequence = latestSourceFrameSequence;
+  const settleStartedAt = performance.now();
+  while (generation === manualOpticsReapplyGeneration &&
+      latestSourceFrameSequence - appliedSequence < 2 && performance.now() - settleStartedAt < 400) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
+      stream?.getVideoTracks()[0] !== track || track.readyState !== "live") return;
+
+  const actual = track.getSettings();
+  const caps = track.getCapabilities?.();
+  const close = (value, target, step) => {
+    if (target === undefined) return true;
+    if (!Number.isFinite(value)) return false;
+    const tolerance = Math.max((step ?? 0) * 0.75, Math.abs(target) * 0.02, 1e-6);
+    return Math.abs(value - target) <= tolerance;
+  };
+  const exposureWrong = !automaticExposureAxis && preferredExposureTime !== undefined &&
+    !close(actual.exposureTime, preferredExposureTime, caps?.exposureTime?.step);
+  const isoWrong = !automaticIsoAxis && preferredIso !== undefined &&
+    !close(actual.iso, preferredIso, caps?.iso?.step);
+  if (exposureWrong || isoWrong) {
+    manualSensorSessionActive = false;
+    await applyExposureSetting(track);
+    if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
+        stream?.getVideoTracks()[0] !== track || track.readyState !== "live") return;
+    notePipelineEvent("manual-optics-reapplied", 2);
+  } else {
+    notePipelineEvent("manual-optics-reapplied", 1);
+  }
+  lastRecoveryReason = `${reason}; manual optics restored`;
 }
 focusMode.value = manualFocusMode;
 const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
@@ -2628,6 +2684,7 @@ function stopFramePump() {
 }
 function stopReceiver() {
   cameraStartGen++;
+  manualOpticsReapplyGeneration++;
   focusController.detach();
   captureGen++;
   receiverPaused = false;
@@ -2901,6 +2958,7 @@ async function start() {
   resetLivePipeline(cameraStartedTs);
   captureGen++;
   startFramePump(captureGen, activeTrack);
+  if (activeTrack && !automaticOptics) void reapplyManualOpticsAfterFreshFrames(activeTrack, "camera started");
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
   await requestScreenWakeLock();
 }
@@ -3065,6 +3123,7 @@ function restartFramePumpForCameraMode(track, reason = "camera mode changed") {
     reason
   } : void 0;
   startFramePump(captureGen, track);
+  if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(track, reason);
   notePipelineEvent("frame-pump-mode-restart");
 }
 
