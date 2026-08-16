@@ -25,6 +25,7 @@ import { GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
 const HEADER_MARGIN = 0;
 const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
+const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 function selectedLayout() {
@@ -520,6 +521,7 @@ async function startStream(revealStage = false) {
   let modules = 0;
   let scale = 1;
   const staging = document.createElement("canvas");
+  const fitStaging = fitScaling ? document.createElement("canvas") : null;
   const queue = [];
   const cells = new Array(gridCodes).fill(null);
   stage.hidden = false;
@@ -554,19 +556,29 @@ async function startStream(revealStage = false) {
     const cssNativeH = displayH * scale / dpr;
     canvas.style.width = `${cssNativeW}px`;
     canvas.style.height = `${cssNativeH}px`;
-    canvas.style.imageRendering = "pixelated";
+    canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
     const stagingCtx = staging.getContext("2d");
     cells.forEach((img, i) => {
       if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
     });
-    const ctx = canvas.getContext("2d");
-    ctx.imageSmoothingEnabled = false;
-    if (landscape) {
-      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
-    } else {
-      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    if (fitStaging) {
+      fitStaging.width = totalW * FIT_SUPERSAMPLE;
+      fitStaging.height = totalH * FIT_SUPERSAMPLE;
+      const fitCtx = fitStaging.getContext("2d");
+      fitCtx.imageSmoothingEnabled = false;
+      fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
     }
-    ctx.drawImage(staging, 0, 0);
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = fitScaling;
+    if (fitScaling) ctx.imageSmoothingQuality = "high";
+    const sourceW = fitStaging ? fitStaging.width : totalW;
+    const sourceH = fitStaging ? fitStaging.height : totalH;
+    if (landscape) {
+      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
+    }
+    ctx.drawImage(fitStaging || staging, 0, 0);
   };
   const makeCode = () => {
     if (plainSnippet !== null) {
@@ -687,17 +699,30 @@ async function startStream(revealStage = false) {
     const cy = Math.floor(cellCursor / gridCols) * stride;
     cells[cellCursor] = img;
     staging.getContext("2d").putImageData(img, cx, cy);
+    if (fitStaging) {
+      const fitCtx = fitStaging.getContext("2d");
+      fitCtx.imageSmoothingEnabled = false;
+      fitCtx.drawImage(
+        staging,
+        cx, cy, cell, cell,
+        cx * FIT_SUPERSAMPLE, cy * FIT_SUPERSAMPLE,
+        cell * FIT_SUPERSAMPLE, cell * FIT_SUPERSAMPLE
+      );
+    }
     const ctx = canvas.getContext("2d");
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = fitScaling;
+    if (fitScaling) ctx.imageSmoothingQuality = "high";
     const totalW = staging.width;
     const totalH = staging.height;
+    const sourceW = fitStaging ? fitStaging.width : totalW;
+    const sourceH = fitStaging ? fitStaging.height : totalH;
     if (landscapeGrid()) {
-      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
     } else {
-      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
     }
-    if (fitScaling) {
-      ctx.drawImage(staging, 0, 0);
+    if (fitStaging) {
+      ctx.drawImage(fitStaging, 0, 0);
     } else {
       ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
     }
