@@ -151,8 +151,9 @@ std::vector<DecimenResult> readFull(int bufferPtr, int width, int height, bool t
 	}
 }
 
-std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int stride, bool tryHarder,
-                                      int maxSymbols, bool returnErrors)
+static std::vector<DecimenResult> readFullYWithOptions(int bufferPtr, int width, int height, int stride,
+                                                    bool tryHarder, bool tryDownscale,
+                                                    int maxSymbols, bool returnErrors)
 {
     try {
         ImageView iv(reinterpret_cast<uint8_t*>(bufferPtr), width, height, ImageFormat::Lum, stride, 1);
@@ -161,7 +162,7 @@ std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int s
                         .tryHarder(tryHarder)
                         .tryRotate(false)
                         .tryInvert(false)
-                        .tryDownscale(tryHarder)
+                        .tryDownscale(tryDownscale)
                         .returnErrors(returnErrors)
                         .maxNumberOfSymbols(maxSymbols);
         auto barcodes = ReadBarcodes(iv, opts);
@@ -176,6 +177,22 @@ std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int s
     } catch (...) {
         return {{false, "unknown error", {}, {}}};
     }
+}
+
+std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int stride, bool tryHarder,
+                                    int maxSymbols, bool returnErrors)
+{
+    return readFullYWithOptions(bufferPtr, width, height, stride, tryHarder, tryHarder, maxSymbols, returnErrors);
+}
+
+// Dense tracked AirGapper walls need tryHarder's 3-row QR finder stride for
+// v40 symbols, but not ReadBarcodes' image pyramid. With maxSymbols=18 the
+// generic API otherwise keeps scanning 1/3 and 1/9 scale copies whenever the
+// full-resolution pass finds fewer than all 18 symbols. Those copies cannot
+// preserve enough pixels/module for our dense v40 wall and only burn CPU.
+std::vector<DecimenResult> readDenseY(int bufferPtr, int width, int height, int stride, int maxSymbols)
+{
+    return readFullYWithOptions(bufferPtr, width, height, stride, true, false, maxSymbols, false);
 }
 
 /** How well the three finder patterns match at a candidate offset: sampled
@@ -1666,6 +1683,7 @@ EMSCRIPTEN_BINDINGS(DecimenCodec)
 	function("build", &codecBuild);
 	function("readFull", &readFull);
 	function("readFullY", &readFullY);
+	function("readDenseY", &readDenseY);
 	function("readTracked", &readTracked);
 	function("trackedMatrix", &trackedMatrix);
 	function("projectPoint", &projectPoint);

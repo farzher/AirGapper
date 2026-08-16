@@ -455,7 +455,7 @@ ctx.onmessage = async (e) => {
       readFullAttempts++;
       const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
       const decoded = decodePixelFormat === "y8"
-        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
+        ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, robustMax)
         : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
