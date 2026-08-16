@@ -1310,7 +1310,6 @@ function noteDecodeCompleted(id, completion) {
     if (auditMode.reacquire || fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
     else if (auditMode.acquisition || fullJob?.acquisition) hotPathAudit.acquisitionFullScans++;
   }
-  if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
   if (completion.error) {
     decodeExceptions++;
     lastDecodeError = completion.error;
@@ -2869,8 +2868,8 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       fullScanJobs.set(message.id, {
         thorough: Boolean(message.thorough),
         native: true,
-        reacquire: gridLattice.state === "REACQUIRE",
-        acquisition: !gridLattice.active
+        reacquire: gridLattice.locked,
+        acquisition: !gridLattice.locked
       });
     }
   }

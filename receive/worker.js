@@ -197,7 +197,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
   });
   return { symbols, attempted: true, metrics, outputBuffer: output.buffer };
 }
-let qrGeneratorPromise;
 function localQuad(q, ox, oy) {
   if (!validQuad(q)) return null;
   const move = (point) => ({ x: point.x - ox, y: point.y - oy });
@@ -207,99 +206,6 @@ function localQuad(q, ox, oy) {
     bottomRight: move(q.bottomRight),
     bottomLeft: move(q.bottomLeft)
   };
-}
-function globalQuad(q, ox, oy) {
-  return shifted(q, ox, oy);
-}
-function quadMaxDelta(a, b) {
-  if (!validQuad(a) || !validQuad(b)) return null;
-  return Math.max(...["topLeft", "topRight", "bottomRight", "bottomLeft"].map((name) =>
-    Math.hypot(a[name].x - b[name].x, a[name].y - b[name].y)
-  ));
-}
-function sampledMatrixStats(sampled, expected, dim) {
-  if (!sampled || sampled.length !== expected.length) {
-    return { valid: false, mismatches: expected.length, total: expected.length, percent: 100, bounds: null };
-  }
-  let mismatches = 0;
-  let minX = dim, minY = dim, maxX = -1, maxY = -1;
-  for (let index = 0; index < expected.length; index++) {
-    if (Number(Boolean(sampled[index])) === expected[index]) continue;
-    mismatches++;
-    const x = index % dim;
-    const y = Math.floor(index / dim);
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  }
-  return {
-    valid: true,
-    mismatches,
-    total: expected.length,
-    percent: mismatches / Math.max(1, expected.length) * 100,
-    bounds: mismatches ? [minX, minY, maxX, maxY] : null
-  };
-}
-async function diagnoseTrackedSampler(zx, ptr, width, height, ox, oy, track, nativeSlot, result) {
-  try {
-    const version = (result.modules - 17) / 4;
-    if (!Number.isInteger(version) || version < 1 || version > 40 || typeof zx.trackedMatrix !== "function") return null;
-    qrGeneratorPromise ??= import("../vendor/qrcode.js");
-    const { default: QRCode } = await qrGeneratorPromise;
-    const bytes = Uint8Array.from(result.bytes);
-    const expectedQr = QRCode.create([{ data: bytes, mode: "byte" }], {
-      errorCorrectionLevel: "L",
-      version,
-      maskPattern: 4
-    });
-    const dim = expectedQr.modules.size;
-    if (dim !== result.modules) return { slot: track.slot, dim: result.modules, error: `regenerated dimension ${dim}` };
-    const expected = Uint8Array.from(expectedQr.modules.data, (value) => value ? 1 : 0);
-    if (!validQuad(result.position) || !validQuad(track.quad)) {
-      return { slot: track.slot, dim: result.modules, error: "decoder returned incomplete position" };
-    }
-    const freshGlobal = globalQuad(result.position, ox, oy);
-    const cachedGlobal = nativeConfigured[nativeSlot]?.baseQuad ?? track.quad;
-    const currentGlobal = track.quad;
-    const sample = (quad) => sampledMatrixStats(
-      zx.trackedMatrix(
-        ptr,
-        width,
-        height,
-        dim,
-        quad.topLeft.x,
-        quad.topLeft.y,
-        quad.topRight.x,
-        quad.topRight.y,
-        quad.bottomRight.x,
-        quad.bottomRight.y,
-        quad.bottomLeft.x,
-        quad.bottomLeft.y
-      ),
-      expected,
-      dim
-    );
-    const cached = sample(localQuad(cachedGlobal, ox, oy));
-    const current = sample(localQuad(currentGlobal, ox, oy));
-    const fresh = sample(result.position);
-    let classification = "frame/sampler mismatch";
-    if (fresh.mismatches === 0 && current.mismatches === 0 && cached.mismatches > 0) classification = "stale native geometry";
-    else if (fresh.mismatches === 0 && current.mismatches > 0) classification = "lattice geometry mismatch";
-    else if (fresh.mismatches === 0 && current.mismatches === 0 && cached.mismatches === 0) classification = "native fast-path mismatch";
-    return {
-      slot: track.slot,
-      dim,
-      classification,
-      cached,
-      current,
-      fresh,
-      cachedDeltaPx: quadMaxDelta(cachedGlobal, freshGlobal),
-      currentDeltaPx: quadMaxDelta(currentGlobal, freshGlobal)
-    };
-  } catch (error) {
-    return { slot: track.slot, dim: result.modules, error: error instanceof Error ? error.message : String(error) };
-  }
 }
 function projectedNeighbor(q, dx, dy, stride) {
   if (!validQuad(q)) return null;
@@ -374,14 +280,13 @@ ctx.onmessage = async (e) => {
     const ph = h;
     const symbols = [];
     const sightings = [];
-    const samplerDiagnostics = [];
-    const mapOutputToDisplay = () => {
+    const mapOutputToDisplay = (decodedSymbols = symbols, decodedSightings = sightings) => {
       if (!outputMap || !Number.isFinite(outputMap.scaleX) || outputMap.scaleX <= 0 || !Number.isFinite(outputMap.scaleY) || outputMap.scaleY <= 0) return;
       const mapPoint = (point) => ({
         x: (point.x - outputMap.offsetX) / outputMap.scaleX,
         y: (point.y - outputMap.offsetY) / outputMap.scaleY
       });
-      for (const symbol of symbols) {
+      for (const symbol of decodedSymbols) {
         if (!validQuad(symbol.quad)) continue;
         symbol.quad = {
           topLeft: mapPoint(symbol.quad.topLeft),
@@ -391,7 +296,7 @@ ctx.onmessage = async (e) => {
         };
         symbol.box = boundsOf(symbol.quad, 0, 0);
       }
-      for (const box of sightings) {
+      for (const box of decodedSightings) {
         box.x = (box.x - outputMap.offsetX) / outputMap.scaleX;
         box.y = (box.y - outputMap.offsetY) / outputMap.scaleY;
         box.w /= outputMap.scaleX;
@@ -537,7 +442,7 @@ ctx.onmessage = async (e) => {
         ownedVideoFrame?.close();
         ownedVideoFrame = null;
         const directFrameFailed = usedDirectFrame && !native;
-        mapOutputToDisplay();
+        mapOutputToDisplay(nativeSymbols);
         const reply = {
           id,
           symbols: nativeSymbols,
@@ -602,10 +507,6 @@ ctx.onmessage = async (e) => {
             // The robust decoder just gave us a fresh quad. Never keep using a
             // native sample map built from the geometry that needed recovery.
             nativeRefresh.add(trackIndex);
-            if (diagnoseSampler) {
-              const diagnostic = await diagnoseTrackedSampler(zx, ptr, pw, ph, ox, oy, tracks[trackIndex], trackIndex, result);
-              if (diagnostic) samplerDiagnostics.push(diagnostic);
-            }
           }
           const recoveredPosition = validQuad(result.position)
             ? result.position
@@ -637,7 +538,6 @@ ctx.onmessage = async (e) => {
         frameCopyMs,
         nativeMetrics: native?.metrics,
         pixelPath: decodePixelFormat,
-        samplerDiagnostics,
         latencyMs: performance.now() - startedAt
       });
       return;
