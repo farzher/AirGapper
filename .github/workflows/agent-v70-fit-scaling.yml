@@ -1,0 +1,143 @@
+name: Agent v70 fit scaling
+on:
+  push:
+    branches: [agent/v70-fit-scaling]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v70-fit-scaling
+      - name: Improve fit-screen QR scaling
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('send/main.js')
+          s = p.read_text()
+
+          s = s.replace('const LOOKAHEAD = 3;\n', 'const LOOKAHEAD = 3;\nconst FIT_SUPERSAMPLE = 4;\n', 1)
+
+          old = '''  const staging = document.createElement("canvas");
+  const queue = [];
+'''
+          new = '''  const staging = document.createElement("canvas");
+  const fitStaging = fitScaling ? document.createElement("canvas") : null;
+  const queue = [];
+'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    canvas.style.width = `${cssNativeW}px`;
+    canvas.style.height = `${cssNativeH}px`;
+    canvas.style.imageRendering = "pixelated";
+    const stagingCtx = staging.getContext("2d");
+    cells.forEach((img, i) => {
+      if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
+    });
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    if (landscape) {
+      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    }
+    ctx.drawImage(staging, 0, 0);'''
+          new = '''    canvas.style.width = `${cssNativeW}px`;
+    canvas.style.height = `${cssNativeH}px`;
+    canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
+    const stagingCtx = staging.getContext("2d");
+    cells.forEach((img, i) => {
+      if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
+    });
+    if (fitStaging) {
+      fitStaging.width = totalW * FIT_SUPERSAMPLE;
+      fitStaging.height = totalH * FIT_SUPERSAMPLE;
+      const fitCtx = fitStaging.getContext("2d");
+      fitCtx.imageSmoothingEnabled = false;
+      fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = fitScaling;
+    if (fitScaling) ctx.imageSmoothingQuality = "high";
+    const sourceW = fitStaging ? fitStaging.width : totalW;
+    const sourceH = fitStaging ? fitStaging.height : totalH;
+    if (landscape) {
+      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
+    }
+    ctx.drawImage(fitStaging || staging, 0, 0);'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    cells[cellCursor] = img;
+    staging.getContext("2d").putImageData(img, cx, cy);
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    const totalW = staging.width;
+    const totalH = staging.height;
+    if (landscapeGrid()) {
+      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    }
+    if (fitScaling) {
+      ctx.drawImage(staging, 0, 0);
+    } else {
+      ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
+    }'''
+          new = '''    cells[cellCursor] = img;
+    staging.getContext("2d").putImageData(img, cx, cy);
+    if (fitStaging) {
+      const fitCtx = fitStaging.getContext("2d");
+      fitCtx.imageSmoothingEnabled = false;
+      fitCtx.drawImage(
+        staging,
+        cx, cy, cell, cell,
+        cx * FIT_SUPERSAMPLE, cy * FIT_SUPERSAMPLE,
+        cell * FIT_SUPERSAMPLE, cell * FIT_SUPERSAMPLE
+      );
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = fitScaling;
+    if (fitScaling) ctx.imageSmoothingQuality = "high";
+    const totalW = staging.width;
+    const totalH = staging.height;
+    const sourceW = fitStaging ? fitStaging.width : totalW;
+    const sourceH = fitStaging ? fitStaging.height : totalH;
+    if (landscapeGrid()) {
+      ctx.setTransform(0, canvas.height / sourceW, -canvas.width / sourceH, 0, canvas.width, 0);
+    } else {
+      ctx.setTransform(canvas.width / sourceW, 0, 0, canvas.height / sourceH, 0, 0);
+    }
+    if (fitStaging) {
+      ctx.drawImage(fitStaging, 0, 0);
+    } else {
+      ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
+    }'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('index.html')
+          s = p.read_text()
+          assert s.count('v0.5.69') == 1
+          p.write_text(s.replace('v0.5.69', 'v0.5.70', 1))
+
+          p = Path('sw.js')
+          s = p.read_text()
+          assert s.count('airgapper-static-js-v32') == 1
+          p.write_text(s.replace('airgapper-static-js-v32', 'airgapper-static-js-v33', 1))
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/workflows/agent-v70-fit-scaling.yml
+          git add send/main.js index.html sw.js
+          git commit -m "supersample fit-screen QR rendering"
+          git push origin HEAD:agent/v70-fit-scaling
