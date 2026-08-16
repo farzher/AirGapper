@@ -514,26 +514,34 @@ struct PersistentTrack
 
 struct AffineMotion
 {
-	double a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0;
+	// Full planar projective motion. The legacy name is kept because this is
+	// an internal ABI-neutral implementation detail. g=h=0 is ordinary affine.
+	double a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0, g = 0, h = 0;
 
 	PointF apply(PointF p) const
 	{
-		return {a * p.x + b * p.y + tx, c * p.x + d * p.y + ty};
+		const double z = g * p.x + h * p.y + 1.0;
+		if (std::abs(z) < 1e-9)
+			return {1e30, 1e30};
+		return {(a * p.x + b * p.y + tx) / z, (c * p.x + d * p.y + ty) / z};
 	}
 
 	std::optional<AffineMotion> inverse() const
 	{
-		const double det = a * d - b * c;
-		if (std::abs(det) < 1e-9)
+		// Invert [a b tx; c d ty; g h 1], then renormalize m22 to 1.
+		const double A = d - ty * h;
+		const double B = tx * h - b;
+		const double C = b * ty - tx * d;
+		const double D = ty * g - c;
+		const double E = a - tx * g;
+		const double F = tx * c - a * ty;
+		const double G = c * h - d * g;
+		const double H = b * g - a * h;
+		const double I = a * d - b * c;
+		const double det = a * A + b * D + tx * G;
+		if (std::abs(det) < 1e-9 || std::abs(I) < 1e-9)
 			return {};
-		AffineMotion out;
-		out.a = d / det;
-		out.b = -b / det;
-		out.c = -c / det;
-		out.d = a / det;
-		out.tx = -(out.a * tx + out.b * ty);
-		out.ty = -(out.c * tx + out.d * ty);
-		return out;
+		return AffineMotion{A / I, B / I, D / I, E / I, C / I, F / I, G / I, H / I};
 	}
 };
 
@@ -1090,71 +1098,104 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 				if (x || y)
 					test(coarseX + x * 0.5f, coarseY + y * 0.5f);
 	}
+	if (best.score < 125 || best.contrast < 24) {
+		// A worker normally sees every ~6th camera frame. A quick hand motion can
+		// therefore move an otherwise healthy wall beyond ±8 px. Search a sparse
+		// ±24 px field only on failure; it is still tiny beside a 3.6 MP finder pass.
+		for (int y = -24; y <= 24; y += 4)
+			for (int x = -24; x <= 24; x += 4)
+				if (std::abs(x) > 8 || std::abs(y) > 8)
+					test(float(x), float(y));
+		const float wideX = bestDx, wideY = bestDy;
+		for (int y = -2; y <= 2; ++y)
+			for (int x = -2; x <= 2; ++x)
+				if (x || y)
+					test(wideX + float(x), wideY + float(y));
+	}
 	if (best.score < 125 || best.contrast < 24)
 		return false;
 	observation = {&track, base, PointF{predicted.x + bestDx, predicted.y + bestDy}};
 	return true;
 }
 
-static bool solve3x3(double m[3][3], double rhs[3], double out[3])
+static bool solve8x8(double m[8][8], double rhs[8], double out[8])
 {
-	for (int col = 0; col < 3; ++col) {
+	for (int col = 0; col < 8; ++col) {
 		int pivot = col;
-		for (int row = col + 1; row < 3; ++row)
+		for (int row = col + 1; row < 8; ++row)
 			if (std::abs(m[row][col]) > std::abs(m[pivot][col]))
 				pivot = row;
-		if (std::abs(m[pivot][col]) < 1e-9)
+		if (std::abs(m[pivot][col]) < 1e-10)
 			return false;
 		if (pivot != col) {
-			for (int k = col; k < 3; ++k) std::swap(m[col][k], m[pivot][k]);
+			for (int k = col; k < 8; ++k) std::swap(m[col][k], m[pivot][k]);
 			std::swap(rhs[col], rhs[pivot]);
 		}
 		const double inv = 1.0 / m[col][col];
-		for (int k = col; k < 3; ++k) m[col][k] *= inv;
+		for (int k = col; k < 8; ++k) m[col][k] *= inv;
 		rhs[col] *= inv;
-		for (int row = 0; row < 3; ++row) {
+		for (int row = 0; row < 8; ++row) {
 			if (row == col) continue;
 			const double f = m[row][col];
-			for (int k = col; k < 3; ++k) m[row][k] -= f * m[col][k];
+			if (std::abs(f) < 1e-15) continue;
+			for (int k = col; k < 8; ++k) m[row][k] -= f * m[col][k];
 			rhs[row] -= f * rhs[col];
 		}
 	}
-	for (int i = 0; i < 3; ++i) out[i] = rhs[i];
+	for (int i = 0; i < 8; ++i) out[i] = rhs[i];
 	return true;
 }
 
-static bool fitAffine(const std::vector<MotionObservation>& observations, AffineMotion& fitted)
+static bool fitProjective(const std::vector<MotionObservation>& observations, AffineMotion& fitted)
 {
-	if (observations.size() < 3)
+	// registerGlobalMotion deliberately supplies exactly four widely separated
+	// anchors. Solve those eight projective equations directly; forming normal
+	// equations squares the condition number for no benefit here.
+	if (observations.size() != 4)
 		return false;
-	double normal[3][3]{};
-	double bx[3]{}, by[3]{};
-	for (const auto& o : observations) {
-		const double v[3] = {o.base.x, o.base.y, 1.0};
-		for (int r = 0; r < 3; ++r) {
-			for (int c = 0; c < 3; ++c) normal[r][c] += v[r] * v[c];
-			bx[r] += v[r] * o.current.x;
-			by[r] += v[r] * o.current.y;
-		}
+	double matrix[8][8]{};
+	double rhs[8]{};
+	for (int i = 0; i < 4; ++i) {
+		const auto& o = observations[i];
+		const double x = o.base.x, y = o.base.y, u = o.current.x, v = o.current.y;
+		double* rx = matrix[i * 2];
+		double* ry = matrix[i * 2 + 1];
+		rx[0] = x; rx[1] = y; rx[4] = 1; rx[6] = -u * x; rx[7] = -u * y;
+		ry[2] = x; ry[3] = y; ry[5] = 1; ry[6] = -v * x; ry[7] = -v * y;
+		rhs[i * 2] = u;
+		rhs[i * 2 + 1] = v;
 	}
-	double mx[3][3], my[3][3];
-	std::memcpy(mx, normal, sizeof(normal));
-	std::memcpy(my, normal, sizeof(normal));
-	double sx[3], sy[3];
-	if (!solve3x3(mx, bx, sx) || !solve3x3(my, by, sy))
+	double solution[8];
+	if (!solve8x8(matrix, rhs, solution))
 		return false;
-	AffineMotion candidate{sx[0], sx[1], sy[0], sy[1], sx[2], sy[2]};
-	const double det = candidate.a * candidate.d - candidate.b * candidate.c;
-	const double scaleX = std::hypot(candidate.a, candidate.c);
-	const double scaleY = std::hypot(candidate.b, candidate.d);
-	if (det <= 0.35 || det >= 2.25 || scaleX < 0.55 || scaleX > 1.6 || scaleY < 0.55 || scaleY > 1.6)
+	AffineMotion candidate{solution[0], solution[1], solution[2], solution[3],
+	                       solution[4], solution[5], solution[6], solution[7]};
+	if (!candidate.inverse())
 		return false;
+
 	double error2 = 0;
+	PointF centroid{};
 	for (const auto& o : observations) {
+		const double z = candidate.g * o.base.x + candidate.h * o.base.y + 1.0;
+		if (z < 0.35 || z > 2.85)
+			return false;
 		const auto q = candidate.apply(o.base);
+		if (!std::isfinite(q.x) || !std::isfinite(q.y))
+			return false;
 		const double dx = q.x - o.current.x, dy = q.y - o.current.y;
 		error2 += dx * dx + dy * dy;
+		centroid += o.base;
 	}
+	centroid = centroid / double(observations.size());
+	const auto p = candidate.apply(centroid);
+	const auto px = candidate.apply(centroid + PointF{1, 0});
+	const auto py = candidate.apply(centroid + PointF{0, 1});
+	const double ux = px.x - p.x, uy = px.y - p.y;
+	const double vx = py.x - p.x, vy = py.y - p.y;
+	const double scaleX = std::hypot(ux, uy), scaleY = std::hypot(vx, vy);
+	const double orientation = ux * vy - uy * vx;
+	if (scaleX < 0.55 || scaleX > 1.6 || scaleY < 0.55 || scaleY > 1.6 || orientation <= 0.3 || orientation >= 2.6)
+		return false;
 	const double rms = std::sqrt(error2 / observations.size());
 	if (rms > 2.5)
 		return false;
@@ -1169,7 +1210,7 @@ static bool registerGlobalMotion(TrackedDecoder& decoder, const LumAt& lumAt, De
 	for (auto& track : decoder.tracks)
 		if (track.active && track.calibrated && !track.samples.empty())
 			candidates.push_back(&track);
-	if (candidates.size() < 3)
+	if (candidates.size() < 4)
 		return false;
 
 	auto baseCenter = [](const PersistentTrack& track) {
@@ -1214,7 +1255,7 @@ static bool registerGlobalMotion(TrackedDecoder& decoder, const LumAt& lumAt, De
 		}
 	}
 	AffineMotion fitted;
-	const bool ok = fitAffine(observations, fitted);
+	const bool ok = fitProjective(observations, fitted);
 	measured.anchorMs += emscripten_get_now() - started;
 	if (!ok)
 		return false;
@@ -1262,8 +1303,9 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 	// probes are much cheaper than sampling even one V40 symbol. If registration
 	// fails, return erasures immediately and let the worker-level robust pass
 	// recover/re-anchor instead of sampling 18 known-stale maps.
-	const bool poseCurrent = poseAlreadyCurrent ||
-		(calibratedTracks >= std::min(3, activeTracks) && registerGlobalMotion(decoder, lumAt, measured));
+	const AffineMotion trustedMotion = decoder.motion;
+	const bool fittedThisFrame = !poseAlreadyCurrent && calibratedTracks >= std::min(4, activeTracks);
+	const bool poseCurrent = poseAlreadyCurrent || (fittedThisFrame && registerGlobalMotion(decoder, lumAt, measured));
 
 	auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
 		if (!poseCurrent || !track.calibrated || !track.crc32Payload)
@@ -1306,6 +1348,16 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 
 	for (int i = 0; i < resultCount && i < int(resultTracks.size()); ++i)
 		fillResultGeometry(decoder, *resultTracks[i], results[i]);
+
+	if (fittedThisFrame && poseCurrent) {
+		const int commitThreshold = std::max(2, (calibratedTracks + 4) / 5);
+		if (measured.successful < commitThreshold) {
+			// Keep any CRC-valid packets from this frame, but do not let a false
+			// four-anchor fit become the next frame's search origin.
+			decoder.motion = trustedMotion;
+			if (measured.translationSuccesses > 0) --measured.translationSuccesses;
+		}
+	}
 
 	measured.totalMs = emscripten_get_now() - totalStart;
 	if (metrics)
@@ -1891,7 +1943,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		// Before a common reference frame exists, never carry 1-2 calibrated maps
 		// into a later camera frame. Three non-collinear maps establish the base;
 		// after that, every late map is inverse-warped back into that same base.
-		if (!decoder->calibrationEstablished && calibratedBefore > 0 && calibratedBefore < std::min(3, activeTracks)) {
+		if (!decoder->calibrationEstablished && calibratedBefore > 0 && calibratedBefore < std::min(4, activeTracks)) {
 			for (auto& track : decoder->tracks) {
 				if (!track.active) continue;
 				track.calibrated = false;
@@ -1955,7 +2007,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		for (const auto& track : decoder->tracks)
 			if (track.active && track.calibrated)
 				++calibratedTracks;
-		const int requiredForMotion = std::min(3, activeTracks);
+		const int requiredForMotion = std::min(4, activeTracks);
 		if (activeTracks == 0 || calibratedTracks < requiredForMotion) {
 			decoder->calibrationEstablished = false;
 			poseCurrent = false;
