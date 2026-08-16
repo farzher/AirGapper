@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.100";
+const RECEIVER_RUNTIME_BUILD = "v0.5.101";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3246,12 +3246,40 @@ function cloneDirectDecodeFrame(source) {
 }
 function cloneDirectFullScanFrame(source) {
   if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
-  const direct = cloneVideoFrame(source, true);
-  if (!direct || !direct.sameGrid) {
+  // Full acquisition/reacquisition must stay on the same TrackProcessor Y plane
+  // as locked decoding. A coded frame may have a non-zero visibleRect origin
+  // (e.g. 1920x2560 I420 with a 240px left crop for a 1440x2560 display), so
+  // map the display frame into coded coordinates instead of requiring sameGrid.
+  const direct = cloneVideoFrame(source, false);
+  if (!direct || direct.pixelFormat !== "y8") {
     direct?.frame.close();
     return null;
   }
-  return direct;
+  const pixelXf = direct.visibleX;
+  const pixelYf = direct.visibleY;
+  const pixelRf = direct.visibleX + source.width * direct.scaleX;
+  const pixelBf = direct.visibleY + source.height * direct.scaleY;
+  const pixelX = Math.round(pixelXf), pixelY = Math.round(pixelYf);
+  const pixelRight = Math.round(pixelRf), pixelBottom = Math.round(pixelBf);
+  if ([pixelXf - pixelX, pixelYf - pixelY, pixelRf - pixelRight, pixelBf - pixelBottom].some((delta) => Math.abs(delta) > 1e-4)) {
+    direct.frame.close();
+    return null;
+  }
+  return {
+    ...direct,
+    cropX: pixelX,
+    cropY: pixelY,
+    w: pixelRight - pixelX,
+    h: pixelBottom - pixelY,
+    ox: pixelX,
+    oy: pixelY,
+    outputMap: {
+      offsetX: direct.visibleX,
+      offsetY: direct.visibleY,
+      scaleX: direct.scaleX,
+      scaleY: direct.scaleY
+    }
+  };
 }
 
 function captureOptimizerOpticalSample(source) {
@@ -3561,19 +3589,43 @@ async function captureFrame(source) {
       scanW = Math.max(32, scanRight - scanX);
       scanH = Math.max(32, scanBottom - scanY);
     }
-    const directFull = scanX === 0 && scanY === 0 && scanW === vw && scanH === vh && !lockedGeometryTrusted
-      ? cloneDirectFullScanFrame(source)
-      : null;
+    const wantsDirectFull = scanX === 0 && scanY === 0 && scanW === vw && scanH === vh && !lockedGeometryTrusted;
+    const directFull = wantsDirectFull ? cloneDirectFullScanFrame(source) : null;
     if (directFull) {
       const id = frameId++;
       if (!submitReceiverJob(
-        { id, videoFrame: directFull.frame, cropX: 0, cropY: 0, w: vw, h: vh, ox: 0, oy: 0, full: true, pixelFormat: "video-rgba" },
+        {
+          id,
+          videoFrame: directFull.frame,
+          cropX: directFull.cropX,
+          cropY: directFull.cropY,
+          w: directFull.w,
+          h: directFull.h,
+          ox: directFull.ox,
+          oy: directFull.oy,
+          full: true,
+          pixelFormat: "y8",
+          outputMap: directFull.outputMap
+        },
         [directFull.frame],
-        "DIRECT FULL FRAME",
+        "DIRECT FULL Y8",
         trace,
         source.sequence
       )) directFull.frame.close();
       if (trace) trace.stateAfter = gridLattice.state;
+      activeBenchmarkFrame = void 0;
+      return;
+    }
+    // A TrackProcessor frame exists, but direct Y-plane mapping was unavailable.
+    // Do not fall through to drawImage(video)/getImageData during acquisition or
+    // reacquisition: that live-video readback is the operation correlated with
+    // the Android camera wedge. Skip this scan and retry on the next camera frame.
+    if (wantsDirectFull && source.videoFrame && !source.image) {
+      notePipelineEvent("direct-full-y8-unavailable");
+      if (trace) {
+        trace.decision = "direct full Y8 unavailable; recovery scan skipped";
+        trace.stateAfter = gridLattice.state;
+      }
       activeBenchmarkFrame = void 0;
       return;
     }

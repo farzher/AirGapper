@@ -663,11 +663,17 @@ ctx.onmessage = async (e) => {
         }
       };
       if (full) {
+        // Full acquisition/reacquisition can arrive as the camera's direct Y
+        // plane. Stay in luminance all the way through the robust detector;
+        // never convert a live TrackProcessor frame to RGBA just to reacquire.
+        const readFull = (maxSymbols, returnErrors) => decodePixelFormat === "y8"
+          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, maxSymbols, returnErrors)
+          : zx.readFull(ptr, pw, ph, true, maxSymbols, returnErrors);
         readFullAttempts++;
-        appendResults(zx.readFull(ptr, pw, ph, true, 16, false), false);
+        appendResults(readFull(16, false), false);
         if (symbols.length === 0) {
           readFullAttempts++;
-          appendResults(zx.readFull(ptr, pw, ph, true, 24, true), true);
+          appendResults(readFull(24, true), true);
         }
       } else {
         readFullAttempts++;
