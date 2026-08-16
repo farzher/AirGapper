@@ -1,0 +1,16 @@
+name: Agent v81 cached RS
+on:
+  push:
+    branches: [agent/v81-cached-rs]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v81-cached-rs
+      - name: Apply patch
+        shell: bash
+        run: echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwID0gUGF0aCgidmVuZG9yL2RlY2ltZW4tY29kZWMvc291cmNlL3dyYXBwZXIvZGVjaW1lbl9jb2RlYy5jcHAiKQpzID0gcC5yZWFkX3RleHQoKQoKc3RhcnQgPSBzLmluZGV4KCJ0ZW1wbGF0ZSA8Y2xhc3MgTHVtQXQ+XG5zdGF0aWMgQnl0ZUFycmF5IGRlY29kZUNhY2hlZFRyYWNrKCIpCmVuZCA9IHMuaW5kZXgoIlxudGVtcGxhdGUgPGNsYXNzIEx1bUF0Plxuc3RhdGljIGludCBkZWNvZGVCYXRjaENhY2hlZFkoIiwgc3RhcnQpCm5ld19jYWNoZWQgPSByIiIi...TRUNCATED...
