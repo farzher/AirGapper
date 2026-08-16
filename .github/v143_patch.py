@@ -27,7 +27,7 @@ g = grid.read_text()
 assert 'const WHOLE_GRID_LOSS_MS = 1400;' in g
 g = g.replace(
     'const WHOLE_GRID_LOSS_MS = 1400;',
-    '// Preserve a proven wall through short optical/display-phase miss bursts.\\nconst WHOLE_GRID_LOSS_MS = 3200;',
+    '// Preserve a proven wall through short optical/display-phase miss bursts.\nconst WHOLE_GRID_LOSS_MS = 3200;',
     1
 )
 grid.write_text(g)
@@ -41,7 +41,7 @@ for name in ['index.html', 'main.js', 'receive/main.js']:
 
 sw = root / 'sw.js'
 text = sw.read_text()
-m = re.search(r'airgapper-static-js-v(\\d+)', text)
+m = re.search(r'airgapper-static-js-v(\d+)', text)
 assert m
 text = text[:m.start(1)] + str(int(m.group(1)) + 1) + text[m.end(1):]
 sw.write_text(text)
