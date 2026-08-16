@@ -1,0 +1,30 @@
+name: Agent v75 per-slot geometry
+on:
+  push:
+    branches: [agent/v75-per-slot-geometry]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v75-per-slot-geometry
+      - name: Apply patch
+        run: python3 .github/v75_patch.py
+      - name: Smoke check
+        run: |
+          node --check receive/grid-lattice.js
+          node --check receive/main.js
+          grep -q 'v0.5.75' index.html
+          grep -q 'observedSlots: observed.size' receive/grid-lattice.js
+          grep -q 'Geometry .* exact' receive/main.js
+      - name: Commit patch
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v75_patch.py .github/workflows/agent-v75-per-slot-geometry.yml
+          git add index.html sw.js receive/grid-lattice.js receive/main.js
+          git commit -m "preserve exact per-slot tracked geometry"
+          git push origin HEAD:agent/v75-per-slot-geometry
