@@ -1,0 +1,31 @@
+name: Agent v146 seamless optics
+on:
+  push:
+    paths:
+      - '.github/v146_patch.py'
+      - '.github/workflows/agent-v146-seamless-optics.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v146_patch.py
+      - name: Smoke check
+        run: |
+          grep -q 'v0.5.146' receive/main.js
+          grep -q 'ROBUST_BATCH_MAX_RESULTS = 8' receive/worker.js
+          grep -q 'auto-optics-seamless-handoff' receive/main.js
+          grep -q 'airgapper-static-js-v108' sw.js
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add receive/main.js receive/worker.js index.html main.js sw.js
+          git commit -m 'v0.5.146 make optics handoff seamless and bound robust tail'
+          git push origin master
