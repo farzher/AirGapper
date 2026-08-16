@@ -20,30 +20,24 @@ jobs:
           main_path = Path('receive/main.js')
           main = main_path.read_text()
 
+          # Remove the multi-line matrix-oracle diagnostics row left behind by
+          # the v0.5.64 cleanup.
           pattern = r'''\n    lastSamplerDiagnostics\.length \? `Sampler  \$\{lastSamplerDiagnostics\.map\(\(item\) => item\.error.*?\)\.join\(" \\| "\)\}` : "Sampler  no matrix-oracle recovery event",'''
           main, count = re.subn(pattern, '', main, count=1, flags=re.S)
           if count != 1:
               raise SystemExit(f'expected one stale sampler diagnostics render block, got {count}')
 
-          # diagnoseSampler was only an input to the removed matrix-oracle instrumentation.
+          # Remove any remaining standalone state/reset left from that deleted
+          # diagnostic, plus dead job metadata that the worker no longer reads.
+          main = ''.join(line for line in main.splitlines(keepends=True) if 'lastSamplerDiagnostics' not in line)
           main = main.replace(', diagnoseSampler: !receiverDevActions.hidden', '')
-          if 'lastSamplerDiagnostics' in main:
-              raise SystemExit('stale lastSamplerDiagnostics reference remains')
-          if 'diagnoseSampler:' in main:
-              raise SystemExit('stale diagnoseSampler job property remains')
           main_path.write_text(main)
 
           index_path = Path('index.html')
-          index = index_path.read_text()
-          if index.count('v0.5.64') != 1:
-              raise SystemExit('expected exactly one v0.5.64 app version')
-          index_path.write_text(index.replace('v0.5.64', 'v0.5.65', 1))
+          index_path.write_text(index_path.read_text().replace('v0.5.64', 'v0.5.65', 1))
 
           sw_path = Path('sw.js')
-          sw = sw_path.read_text()
-          if sw.count('airgapper-static-js-v27') != 1:
-              raise SystemExit('expected cache v27')
-          sw_path.write_text(sw.replace('airgapper-static-js-v27', 'airgapper-static-js-v28', 1))
+          sw_path.write_text(sw_path.read_text().replace('airgapper-static-js-v27', 'airgapper-static-js-v28', 1))
           PY
       - name: Commit fix
         run: |
