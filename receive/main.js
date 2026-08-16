@@ -23,7 +23,7 @@ import {
 } from "../shared/protocol.js";
 import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
-import { applyAdvancedConstraint } from "../shared/platform.js";
+import { applyAdvancedConstraint, isAndroid, isIOS } from "../shared/platform.js";
 import {
   FocusController,
   CAMERA_TUNING
@@ -40,6 +40,7 @@ import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
+const cameraDeviceControl = document.getElementById("camera-device-control");
 const cameraResolution = document.getElementById("camera-resolution");
 const cameraResolutionLabel = document.getElementById("camera-resolution-label");
 const decodeWorkers = document.getElementById("decode-workers");
@@ -65,6 +66,8 @@ const recordCorpusBtn = document.getElementById("record-corpus");
 const loadCorpusBtn = document.getElementById("load-corpus");
 const receiverSettings = document.querySelector(".receiver-settings");
 const receiverDevActions = document.querySelector(".receiver-dev-actions");
+const mobileCameraUi = isAndroid || isIOS || navigator.userAgentData?.mobile === true;
+if (mobileCameraUi && cameraDeviceControl && receiverDevActions) receiverDevActions.prepend(cameraDeviceControl);
 const focusDev = document.getElementById("focus-dev");
 const focusMode = document.getElementById("focus-mode");
 const focusAxisName = document.getElementById("focus-axis-name");
@@ -157,7 +160,7 @@ strictHotPathToggle.addEventListener("change", () => {
 function strictHotPathActive() {
   return strictHotPathEnabled || replayRunning && replayMode.value === "correctness";
 }
-const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v8";
+const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v9";
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480],
@@ -455,17 +458,23 @@ async function refreshCameraDevices(activeTrack) {
     return;
   }
   const activeId = activeTrack?.getSettings?.().deviceId ?? "";
-  const options = [new Option("Default camera", "")];
+  const options = [new Option(mobileCameraUi ? "Rear camera (auto)" : "Default camera", "")];
   devices.forEach((device, index) => options.push(new Option(device.label || `Camera ${index + 1}`, device.deviceId)));
   cameraDevice.replaceChildren(...options);
   const preferredExists = preferredCameraDeviceId && devices.some((device) => device.deviceId === preferredCameraDeviceId);
   const activeExists = activeId && devices.some((device) => device.deviceId === activeId);
   if (preferredExists) {
     cameraDevice.value = preferredCameraDeviceId;
+  } else if (mobileCameraUi) {
+    // Mobile's normal receiver always asks for the rear/environment camera.
+    // Do not turn the camera Chrome happened to grant into a persistent exact
+    // device choice. The selector is developer-only on mobile; selecting an
+    // explicit device there still overrides this default.
+    preferredCameraDeviceId = "";
+    cameraDevice.value = activeExists ? activeId : "";
   } else if (activeExists) {
-    // Once Chrome has granted a concrete camera, pin that exact device for the
-    // rest of the session. Desktop facingMode is only a preference and can
-    // otherwise select a different camera when constraints are retried.
+    // Desktop has no meaningful facingMode. Once Chrome grants a concrete
+    // device, pin it for retries so a resolution fallback cannot jump webcams.
     preferredCameraDeviceId = activeId;
     cameraDevice.value = activeId;
     saveCameraSettings();
@@ -627,7 +636,9 @@ function drainPendingGridLane(workerSlot) {
     oy: pending.y,
     full: false,
     tracks: pending.tracks,
-    pixelFormat: pending.direct.pixelFormat
+    pixelFormat: pending.direct.pixelFormat,
+    strictHotPath: pending.strictHotPath,
+    diagnoseSampler: pending.diagnoseSampler
   };
   const accepted = submitReceiverJob(
     message,
@@ -1135,6 +1146,7 @@ function regionInflightCount(region) {
 let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
+let lastDirectPixelPath = "—";
 let lastSamplerDiagnostics = [];
 const hotPathAudit = {
   trackedJobs: 0,
@@ -1269,6 +1281,7 @@ function noteDecodeCompleted(id, completion) {
   if (completion.nativeMetrics) {
     lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
   }
+  if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
   if (auditThisCompletion && completion.nativeMetrics) {
     hotPathAudit.trackedJobs++;
     hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
@@ -2253,6 +2266,7 @@ function stopReceiver() {
   decodeExceptions = 0;
   lastDecodeError = "";
   lastNativeMetrics = void 0;
+  lastDirectPixelPath = "—";
   resetHotPathAudit();
   strictHotPathLockSeen = false;
   trackingInvalidations = 0;
@@ -3356,7 +3370,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const w = right - x;
       const h = bottom - y;
       if (w < 32 || h < 32) continue;
-      const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount };
+      const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount, strictHotPath: strictHotPathActive(), diagnoseSampler: !receiverDevActions.hidden };
       if (workerSlot === void 0) {
         queuePendingGridLane(groupIndex, source, geometry);
         continue;
@@ -4703,7 +4717,7 @@ Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fast
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
 Sampler HybridBinarizer · plain-grid CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts} · alignment-fit CRC ${hotPathAudit.alignmentFitSuccesses}/${hotPathAudit.alignmentFitAttempts}
-Pixel A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
+Pixel path ${lastDirectPixelPath.toUpperCase()} · A/B Y8-miss → isolated RGBA CRC ${hotPathAudit.pixelAuditCrcFast}/${hotPathAudit.pixelAuditTracks} · misses ${hotPathAudit.pixelAuditMisses} (anchor ${hotPathAudit.pixelAuditAnchorMisses} · frame ${hotPathAudit.pixelAuditFrameMisses} · bits ${hotPathAudit.pixelAuditBitstreamFailures} · CRC ${hotPathAudit.pixelAuditCrcFailures})
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
 Sampler ${samplerLine}`;
 }

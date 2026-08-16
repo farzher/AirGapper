@@ -49,7 +49,10 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
-let directPixelAuditDone = false;
+let directPixelMode = "y8";
+let directPixelAuditAttempts = 0;
+let directPixelRgbaWins = 0;
+const DIRECT_PIXEL_AUDIT_LIMIT = 3;
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -392,7 +395,9 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const copyAsRgba = pixelFormat !== "y8";
+      const sourceHasDirectY = pixelFormat === "y8";
+      const selectedRgba = sourceHasDirectY && directPixelMode === "rgba" && !full && Boolean(tracks?.length);
+      const copyAsRgba = pixelFormat !== "y8" || selectedRgba;
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
@@ -561,13 +566,16 @@ ctx.onmessage = async (e) => {
       let rgbaRecoveryPtr = 0;
       let rgbaRecoveryStride = 0;
 
-      // One-shot developer A/B: after a real Y8 miss, feed the exact same
-      // VideoFrame crop to an isolated temporary native decoder as RGBA. Never
-      // accept its symbols or mutate persistent tracking. This tells us whether
-      // the direct Y plane itself is the difference without rescuing Strict mode.
-      if (nativeSymbols.length === 0 && strictHotPath && diagnoseSampler && usedDirectFrame &&
-          pixelFormat === "y8" && ownedVideoFrame && !directPixelAuditDone) {
-        directPixelAuditDone = true;
+      // Same-frame representation A/B. A Y8 miss gets a bounded number of
+      // isolated RGBA retries using the exact same VideoFrame crop and geometry.
+      // The probe result is NEVER accepted for this frame and never mutates the
+      // persistent native decoder. If RGBA independently wins twice, however,
+      // that is strong evidence the browser's direct Y representation is the
+      // problem, so subsequent frames on this worker use RGBA as their normal
+      // tracked input. This is pixel-format adaptation, not a per-frame rescue.
+      if (nativeSymbols.length === 0 && usedDirectFrame && pixelFormat === "y8" &&
+          decodePixelFormat === "y8" && ownedVideoFrame && directPixelAuditAttempts < DIRECT_PIXEL_AUDIT_LIMIT) {
+        directPixelAuditAttempts++;
         const rect = { x: cropX, y: cropY, width: w, height: h };
         const options = { rect, format: "RGBA" };
         const bytes = ownedVideoFrame.allocationSize(options);
@@ -576,7 +584,28 @@ ctx.onmessage = async (e) => {
         const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(rgbaRecoveryPtr, rgbaRecoveryPtr + bytes), options);
         frameCopyMs += performance.now() - copyStarted;
         rgbaRecoveryStride = planes[0]?.stride ?? w * 4;
-        pixelAudit = decodeNativeAuditRGBA(zx, rgbaRecoveryPtr + (planes[0]?.offset ?? 0), pw, ph, ox, oy, tracks, rgbaRecoveryStride);
+        const measured = decodeNativeAuditRGBA(zx, rgbaRecoveryPtr + (planes[0]?.offset ?? 0), pw, ph, ox, oy, tracks, rgbaRecoveryStride);
+        if (measured?.crcFastSuccesses > 0) directPixelRgbaWins++;
+        if (directPixelRgbaWins >= 2) directPixelMode = "rgba";
+        pixelAudit = measured ? {
+          ...measured,
+          attempt: directPixelAuditAttempts,
+          rgbaWins: directPixelRgbaWins,
+          selectedPath: directPixelMode
+        } : {
+          tracks: 0,
+          successful: 0,
+          misses: 0,
+          crcFastSuccesses: 0,
+          rsFallbacks: 0,
+          anchorMisses: 0,
+          outOfFrameMisses: 0,
+          bitstreamFailures: 0,
+          crcFailures: 0,
+          attempt: directPixelAuditAttempts,
+          rgbaWins: directPixelRgbaWins,
+          selectedPath: directPixelMode
+        };
       }
 
       const robustFallback = robustTrackedRecovery && nativeSymbols.length === 0;
@@ -601,6 +630,7 @@ ctx.onmessage = async (e) => {
           frameCopyMs,
           nativeMetrics: native?.metrics,
           pixelAudit,
+          pixelPath: decodePixelFormat,
           directFrameFailed,
           latencyMs: performance.now() - startedAt
         };
@@ -681,6 +711,8 @@ ctx.onmessage = async (e) => {
         workerWaitMs,
         frameCopyMs,
         nativeMetrics: native?.metrics,
+        pixelAudit,
+        pixelPath: decodePixelFormat,
         samplerDiagnostics,
         latencyMs: performance.now() - startedAt
       });
