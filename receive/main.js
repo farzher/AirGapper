@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.104";
+const RECEIVER_RUNTIME_BUILD = "v0.5.105";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3675,14 +3675,22 @@ async function captureFrame(source) {
     crc32: Boolean(region.crc32)
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
-const laneCount = strictHotPathActive() && lockedLayout ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1 ? Math.max(lockedLayout.cols, lockedLayout.rows) : Math.min(lockedLayout.cols, lockedLayout.rows)) : 0;
+// Once the lattice is healthy, search small spatial strips in parallel instead
+// of making one worker run the generic finder across the entire QR wall. Search
+// cost is dominated by pixels, while RaptorQ only cares about aggregate useful
+// symbols. Partition along the larger grid dimension so 3x5 becomes five 3-QR
+// jobs and 2x3 becomes three 2-QR jobs. This is the normal production hot path;
+// Strict mode still changes decoder fallback policy, not the scheduler shape.
+const laneCount = lockedLayout
+  ? Math.min(pool.size, Math.max(lockedLayout.cols, lockedLayout.rows))
+  : 0;
 const healthyTrackedGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
 if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >= 1 && pool.size >= laneCount) {
   const groups = Array.from(
     { length: laneCount },
     () => ({ tracks: [], regions: [] })
   );
-  const splitByColumns = lockedLayout.cols <= lockedLayout.rows;
+  const splitByColumns = lockedLayout.cols >= lockedLayout.rows;
   for (let index = 0; index < batchTracks.length; index++) {
     const track = batchTracks[index];
     const region = batchRegions[index];
