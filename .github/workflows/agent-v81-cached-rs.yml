@@ -13,4 +13,24 @@ jobs:
           ref: agent/v81-cached-rs
       - name: Apply patch
         shell: bash
-        run: echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwID0gUGF0aCgidmVuZG9yL2RlY2ltZW4tY29kZWMvc291cmNlL3dyYXBwZXIvZGVjaW1lbl9jb2RlYy5jcHAiKQpzID0gcC5yZWFkX3RleHQoKQoKc3RhcnQgPSBzLmluZGV4KCJ0ZW1wbGF0ZSA8Y2xhc3MgTHVtQXQ+XG5zdGF0aWMgQnl0ZUFycmF5IGRlY29kZUNhY2hlZFRyYWNrKCIpCmVuZCA9IHMuaW5kZXgoIlxudGVtcGxhdGUgPGNsYXNzIEx1bUF0Plxuc3RhdGljIGludCBkZWNvZGVCYXRjaENhY2hlZFkoIiwgc3RhcnQpCm5ld19jYWNoZWQgPSByIiIi...TRUNCATED...
+        run: python3 .github/agent-v81-patch.py
+      - name: Build SIMD codec
+        shell: bash
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. ./build.sh
+      - name: Build scalar codec
+        shell: bash
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit build
+        shell: bash
+        run: |
+          rm .github/workflows/agent-v81-cached-rs.yml .github/agent-v81-patch.py
+          git checkout HEAD -- vendor/decimen-codec/source/build-simd vendor/decimen-codec/source/build-scalar || true
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js receive/worker.js sw.js vendor/decimen-codec vendor/decimen-codec-android .github/workflows/agent-v81-cached-rs.yml .github/agent-v81-patch.py
+          git commit -m 'use cached matrix correction without calibration churn'
+          git push origin HEAD:agent/v81-cached-rs
