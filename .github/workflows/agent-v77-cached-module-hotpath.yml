@@ -12,7 +12,18 @@ jobs:
         with:
           ref: agent/v77-cached-module-hotpath
       - name: Apply patch
-        run: python3 .github/v77_patch.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/v77_patch.py')
+          s = p.read_text()
+          s = s.replace(
+              "replace_exact('index.html', 'v0.5.76', 'v0.5.77')",
+              "replace_exact('index.html', '<span class=\"brand\">AirGapper <span class=\"app-version\">v0.5.76</span></span>', '<span class=\"brand\">AirGapper <span class=\"app-version\">v0.5.77</span></span>')"
+          )
+          p.write_text(s)
+          PY
+          python3 .github/v77_patch.py
       - name: Build SIMD codec
         run: |
           cd vendor/decimen-codec/source
