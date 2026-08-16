@@ -1322,15 +1322,15 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.pixelAuditBitstreamFailures += completion.pixelAudit.bitstreamFailures ?? 0;
     hotPathAudit.pixelAuditCrcFailures += completion.pixelAudit.crcFailures ?? 0;
   }
-  if (auditThisCompletion && completion.fallbackAttempted) {
+  if (auditThisCompletion && !auditMode?.full && completion.fallbackAttempted) {
     hotPathAudit.localRecoveryAttempts++;
     if (completion.fallbackSucceeded) hotPathAudit.localRecoverySuccesses++;
   }
-  if (auditThisCompletion && completion.full) {
+  if (auditThisCompletion && auditMode?.full) {
     hotPathAudit.fullScanJobs++;
     if (completion.symbolCount > 0) hotPathAudit.fullScanSuccesses++;
-    if (fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
-    else if (fullJob?.acquisition) hotPathAudit.acquisitionFullScans++;
+    if (auditMode.reacquire || fullJob?.reacquire) hotPathAudit.reacquireFullScans++;
+    else if (auditMode.acquisition || fullJob?.acquisition) hotPathAudit.acquisitionFullScans++;
   }
   if (completion.samplerDiagnostics?.length) lastSamplerDiagnostics = completion.samplerDiagnostics;
   if (completion.error) {
@@ -2827,7 +2827,19 @@ function readBoundedVideoCrop(source, x, y, w, h) {
 }
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   if (message.strictHotPath === void 0) message.strictHotPath = strictHotPathActive();
-  const auditMode = { generation: hotPathAuditGeneration, strict: Boolean(message.strictHotPath) };
+  if (message.strictHotPath && !strictHotPathLockSeen && !message.full) {
+    notePipelineEvent("strict-prelock-job-rejected");
+    if (trace) trace.decision = "strict pre-lock: only full acquisition allowed";
+    return false;
+  }
+  const auditMode = {
+    generation: hotPathAuditGeneration,
+    strict: Boolean(message.strictHotPath),
+    full: Boolean(message.full),
+    acquisition: Boolean(message.full && !gridLattice.active),
+    reacquire: Boolean(message.full && gridLattice.state === "REACQUIRE"),
+    kind
+  };
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
     hotPathJobMode.set(message.id, auditMode);
@@ -2971,7 +2983,23 @@ function cloneVideoFrame(source, forceRgba = false) {
       return null;
     }
   }
-  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"}`;
+  const visible = frame.visibleRect;
+  const rotation = Number(frame.rotation ?? 0) % 360;
+  const displaySafe = Boolean(
+    visible &&
+    visible.x === 0 && visible.y === 0 &&
+    visible.width === source.width && visible.height === source.height &&
+    frame.displayWidth === source.width && frame.displayHeight === source.height &&
+    rotation === 0 && !frame.flip
+  );
+  lastVideoFrameInfo = `${frame.codedWidth || "—"}×${frame.codedHeight || "—"} coded · ${visible ? `${visible.x},${visible.y} ${visible.width}×${visible.height}` : "—"} visible · ${frame.displayWidth || "—"}×${frame.displayHeight || "—"} display · ${frame.format || "—"} · ${displaySafe ? "direct" : "canvas coordinate fallback"}`;
+  if (!displaySafe) {
+    // copyTo(rect) addresses VideoFrame pixels, while all AirGapper geometry is
+    // expressed in the rendered <video> coordinate system. A scaled/cropped/
+    // rotated frame therefore cannot safely share our display-space quads.
+    directFrameDisabled = true;
+    return null;
+  }
   try {
     return { frame: frame.clone(), pixelFormat: forceRgba ? "video-rgba" : DIRECT_LUMA_FORMATS.has(frame.format) ? "y8" : "video-rgba" };
   } catch {
@@ -4723,7 +4751,8 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
       : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} · lattice ${item.current.mismatches}/${item.current.total} · fresh ${item.fresh.mismatches}/${item.fresh.total}`
     ).join(" | ")
     : "no matrix-oracle recovery event";
-  transportDiagnostics.textContent = `Transport
+  transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"}
+Transport
 Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
 Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
 ${totals}
