@@ -1,0 +1,31 @@
+name: Agent v76 update integrity
+on:
+  push:
+    branches: [agent/v76-update-integrity]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v76-update-integrity
+      - name: Apply patch
+        run: python3 .github/v76_patch.py
+      - name: Smoke check
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          node --check sw.js
+          grep -q 'v0.5.76' index.html
+          grep -q 'Runtime .*RECEIVER_RUNTIME_BUILD' receive/main.js
+          grep -q 'cache: "no-store"' sw.js
+      - name: Commit patch
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v76_patch.py .github/workflows/agent-v76-update-integrity.yml
+          git add index.html main.js sw.js receive/main.js
+          git commit -m "make PWA updates build-consistent"
+          git push origin HEAD:agent/v76-update-integrity
