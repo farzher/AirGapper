@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.93";
+const RECEIVER_RUNTIME_BUILD = "v0.5.94";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2720,6 +2720,10 @@ function scheduleFrame(gen) {
 }
 const grab = document.createElement("canvas");
 const replaySourceCanvas = document.createElement("canvas");
+const LOCKED_BITMAP_CAPTURE = typeof createImageBitmap === "function" && typeof OffscreenCanvas !== "undefined";
+let lockedBitmapPending = 0;
+let lockedBitmapSubmitted = 0;
+let lockedBitmapDropped = 0;
 let minimumAcceptedScanId = 0;
 let captureNextScan = false;
 let scanCaptureTimer;
@@ -2918,6 +2922,60 @@ function finishScanCapture(id, completion) {
   if (gridSummary) scanDialogStatus.textContent += ` · ${gridSummary}`;
   scanSightingLegend.hidden = tracked && !completion.fallbackAttempted;
   if (!scanDialog.open) scanDialog.showModal();
+}
+function cloneTrackSnapshot(track) {
+  const clonePoint = (point) => ({ x: point.x, y: point.y });
+  return {
+    ...track,
+    quad: {
+      topLeft: clonePoint(track.quad.topLeft),
+      topRight: clonePoint(track.quad.topRight),
+      bottomRight: clonePoint(track.quad.bottomRight),
+      bottomLeft: clonePoint(track.quad.bottomLeft)
+    }
+  };
+}
+function submitLockedBitmapCrop(source, x, y, w, h, tracks, trackedRegions) {
+  if (!LOCKED_BITMAP_CAPTURE || replayRunning || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source)) return "ineligible";
+  const freeWorkers = Math.max(0, pool.size - pool.busyCount);
+  if (freeWorkers <= lockedBitmapPending) return "busy";
+  const generation = captureGen;
+  const sourceSequence = source.sequence;
+  const trackSnapshot = tracks.map(cloneTrackSnapshot);
+  const regionSnapshot = [...trackedRegions];
+  const attemptSnapshot = regionSnapshot.map((region, index) => ({ region, quad: trackSnapshot[index]?.quad ?? region.quad }));
+  const strictHotPath = strictHotPathActive();
+  lockedBitmapPending++;
+  void createImageBitmap(video, x, y, w, h).then((bitmap) => {
+    lockedBitmapPending = Math.max(0, lockedBitmapPending - 1);
+    if (done || generation !== captureGen) {
+      lockedBitmapDropped++;
+      bitmap.close();
+      return;
+    }
+    const id = frameId++;
+    cropAttempts.set(id, attemptSnapshot);
+    const accepted = submitReceiverJob(
+      { id, bitmap, w, h, ox: x, oy: y, full: false, tracks: trackSnapshot, strictHotPath },
+      [bitmap],
+      "BITMAP TRACKED GRID",
+      void 0,
+      sourceSequence,
+      regionSnapshot
+    );
+    if (!accepted) {
+      cropAttempts.delete(id);
+      lockedBitmapDropped++;
+      poolBusyTimes.push(receiverNow());
+      bitmap.close();
+      return;
+    }
+    lockedBitmapSubmitted++;
+  }).catch(() => {
+    lockedBitmapPending = Math.max(0, lockedBitmapPending - 1);
+    lockedBitmapDropped++;
+  });
+  return "submitted";
 }
 function readBoundedVideoCrop(source, x, y, w, h) {
   if (grab.width < w) grab.width = w;
@@ -3663,6 +3721,22 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       }
       let shared;
       const sharedDirect = healthyGrid ? mappedDirectTrackedFrame(source, x, y, w, h, batchTracks) : null;
+      if (healthyGrid && !sharedDirect) {
+        const bitmapStatus = submitLockedBitmapCrop(source, x, y, w, h, batchTracks, batchRegions);
+        if (bitmapStatus === "submitted") {
+          activeDecodeBudget = batchTracks.length;
+          cropRotate++;
+          if (trace) trace.stateAfter = gridLattice.state;
+          activeBenchmarkFrame = void 0;
+          return;
+        }
+        if (bitmapStatus === "busy") {
+          poolBusyTimes.push(now);
+          if (trace) trace.decision = "not scheduled: bitmap workers reserved";
+          activeBenchmarkFrame = void 0;
+          return;
+        }
+      }
       if (!sharedDirect) {
         shared = readBoundedVideoCrop(source, x, y, w, h);
         inspectStaticQrOptics(source, shared, x, y);
@@ -4936,7 +5010,7 @@ QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySu
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
-Pixel path ${lastDirectPixelPath.toUpperCase()}
+Pixel path ${lastDirectPixelPath.toUpperCase()} · bitmap pending ${lockedBitmapPending} · submitted ${lockedBitmapSubmitted} · dropped ${lockedBitmapDropped}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;

@@ -30,6 +30,7 @@ function shifted(p, ox, oy) {
 }
 let inputPtr = 0;
 let inputCapacity = 0;
+let bitmapCanvas;
 function inputBuffer(zx, bytes) {
   if (bytes <= inputCapacity) return inputPtr;
   if (inputPtr) zx._free(inputPtr);
@@ -252,13 +253,14 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap } = e.data;
+  const { id, buf, bitmap, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
+    const usedBitmap = Boolean(bitmap);
+    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || usedBitmap || pixelFormat === "rgba");
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
@@ -274,7 +276,29 @@ ctx.onmessage = async (e) => {
     let pixels;
     const zx = await ready;
     let ptr;
-    if (ownedVideoFrame) {
+    if (bitmap) {
+      const bw = bitmap.width;
+      const bh = bitmap.height;
+      if (!bitmapCanvas || bitmapCanvas.width !== bw || bitmapCanvas.height !== bh) {
+        bitmapCanvas = new OffscreenCanvas(bw, bh);
+      }
+      const bitmapCtx = bitmapCanvas.getContext("2d", { willReadFrequently: true });
+      if (!bitmapCtx) throw new Error("Worker bitmap canvas unavailable");
+      const copyStarted = performance.now();
+      try {
+        bitmapCtx.drawImage(bitmap, 0, 0);
+      } finally {
+        bitmap.close();
+      }
+      const image = bitmapCtx.getImageData(0, 0, bw, bh);
+      frameCopyMs = performance.now() - copyStarted;
+      pixels = new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+      ptr = inputBuffer(zx, pixels.byteLength);
+      zx.HEAPU8.set(pixels, ptr);
+      inputOffset = 0;
+      inputStride = bw * 4;
+      decodePixelFormat = "rgba";
+    } else if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
       const copyAsRgba = pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
@@ -487,7 +511,7 @@ ctx.onmessage = async (e) => {
         readFullAttempts,
         workerWaitMs,
         frameCopyMs,
-        pixelPath: decodePixelFormat,
+        pixelPath: usedBitmap ? "bitmap-rgba" : decodePixelFormat,
         robustFirst: true,
         latencyMs: performance.now() - startedAt
       });
@@ -528,7 +552,7 @@ ctx.onmessage = async (e) => {
           targetedSuccesses: 0,
           frameCopyMs,
           nativeMetrics: native?.metrics,
-          pixelPath: decodePixelFormat,
+          pixelPath: usedBitmap ? "bitmap-rgba" : decodePixelFormat,
           directFrameFailed,
           latencyMs: performance.now() - startedAt
         };
@@ -602,7 +626,7 @@ ctx.onmessage = async (e) => {
         workerWaitMs,
         frameCopyMs,
         nativeMetrics: native?.metrics,
-        pixelPath: decodePixelFormat,
+        pixelPath: usedBitmap ? "bitmap-rgba" : decodePixelFormat,
         latencyMs: performance.now() - startedAt
       });
       return;
