@@ -1,0 +1,32 @@
+name: Agent v64 hot cleanup
+on:
+  push:
+    branches: [agent/frame-coordinate-v63]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/frame-coordinate-v63
+          fetch-depth: 0
+      - name: Apply cleanup
+        run: python3 .github/agent-v64.py
+      - name: Rebuild SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. ./build.sh
+      - name: Rebuild scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit result
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/agent-v64.py .github/workflows/agent-v64.yml
+          git add receive/main.js receive/worker.js shared/worker-pool.js vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm index.html sw.js
+          git commit -m "clean and map tracked hot path"
+          git push origin HEAD:agent/frame-coordinate-v63
