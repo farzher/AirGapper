@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.133";
+const RECEIVER_RUNTIME_BUILD = "v0.5.134";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1550,7 +1550,7 @@ function noteDecodeCompleted(id, completion) {
   scanCompletionTimes.push(receiverNow());
   focusController.noteDecoderCompletion(id);
   if (completion.directFrameFailed) {
-    directFrameDisabled = true;
+    notePipelineEvent("direct-frame-drop");
     finishScanCapture(id, completion);
     scanOutcomes.delete(id);
     cropAttempts.delete(id);
@@ -2800,7 +2800,6 @@ const localCameraMessage = "This browser does not allow camera access from a loc
 async function start() {
   var _a;
   const startAttempt = cameraStartGen;
-  directFrameDisabled = false;
   clearPendingGridLanes();
   try {
     await prepareRaptorQ();
@@ -3569,7 +3568,6 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
 }
 
 const DIRECT_LUMA_FORMATS = new Set(["I420", "I420A", "I422", "I422A", "I444", "I444A", "NV12"]);
-let directFrameDisabled = false;
 function opticalSampleDue(source) {
   if (replayRunning || source.sequence === lastOpticalSourceSequence) return false;
   const interval = focusController.opticalIntervalMs;
@@ -3619,7 +3617,7 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
   // path for every receiver state. Never decline direct Y8 because an optics
   // sample is due; doing so used to fall through to live <video> canvas readback.
-  if (directFrameDisabled || optimizerPipelineActive || source.image || !source.videoFrame || typeof VideoFrame !== "function") return null;
+  if (optimizerPipelineActive || source.image || !source.videoFrame || typeof VideoFrame !== "function") return null;
   const direct = cloneVideoFrame(source, false);
   if (!direct || direct.pixelFormat !== "y8") {
     direct?.frame.close();
@@ -3666,11 +3664,11 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   };
 }
 function cloneDirectDecodeFrame(source) {
-  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  if (optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
   return cloneVideoFrame(source, false);
 }
 function cloneDirectFullScanFrame(source) {
-  if (directFrameDisabled || optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
+  if (optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
   // Full acquisition/reacquisition must stay on the same TrackProcessor Y plane
   // as locked decoding. A coded frame may have a non-zero visibleRect origin
   // (e.g. 1920x2560 I420 with a 240px left crop for a 1440x2560 display), so
