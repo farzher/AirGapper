@@ -1,0 +1,55 @@
+name: Agent v65 sampler cleanup fix
+on:
+  push:
+    branches: [agent/fix-v65-sampler-ref]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-v65-sampler-ref
+      - name: Remove stale sampler diagnostics references
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          main_path = Path('receive/main.js')
+          main = main_path.read_text()
+
+          pattern = r'''\n    lastSamplerDiagnostics\.length \? `Sampler  \$\{lastSamplerDiagnostics\.map\(\(item\) => item\.error.*?\)\.join\(" \\| "\)\}` : "Sampler  no matrix-oracle recovery event",'''
+          main, count = re.subn(pattern, '', main, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'expected one stale sampler diagnostics render block, got {count}')
+
+          # diagnoseSampler was only an input to the removed matrix-oracle instrumentation.
+          main = main.replace(', diagnoseSampler: !receiverDevActions.hidden', '')
+          if 'lastSamplerDiagnostics' in main:
+              raise SystemExit('stale lastSamplerDiagnostics reference remains')
+          if 'diagnoseSampler:' in main:
+              raise SystemExit('stale diagnoseSampler job property remains')
+          main_path.write_text(main)
+
+          index_path = Path('index.html')
+          index = index_path.read_text()
+          if index.count('v0.5.64') != 1:
+              raise SystemExit('expected exactly one v0.5.64 app version')
+          index_path.write_text(index.replace('v0.5.64', 'v0.5.65', 1))
+
+          sw_path = Path('sw.js')
+          sw = sw_path.read_text()
+          if sw.count('airgapper-static-js-v27') != 1:
+              raise SystemExit('expected cache v27')
+          sw_path.write_text(sw.replace('airgapper-static-js-v27', 'airgapper-static-js-v28', 1))
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/workflows/agent-v65-fix.yml
+          git add receive/main.js index.html sw.js
+          git commit -m "fix stale sampler diagnostics reference"
+          git push origin HEAD:agent/fix-v65-sampler-ref
