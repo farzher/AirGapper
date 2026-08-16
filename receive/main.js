@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.128";
+const RECEIVER_RUNTIME_BUILD = "v0.5.129";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2342,7 +2342,7 @@ function renderFocusDiagnostics() {
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -2459,7 +2459,10 @@ const changeCameraSettings = async () => {
 cameraResolution.addEventListener("change", () => {
   holdDecoderForCameraMutation("camera mode changing", 2500);
   void changeCameraSettings().finally(() => {
-    if (stream && !done) enterGeometryRecovery("camera mode changed", receiverNow(), true);
+    const track = stream?.getVideoTracks()[0];
+    if (!track || done) return;
+    restartFramePumpForCameraMode(track, "camera mode changed");
+    enterGeometryRecovery("camera mode changed", receiverNow(), true);
   });
 });
 cameraDevice?.addEventListener("change", () => {
@@ -2593,6 +2596,10 @@ let framePumpProcessorTotal = 0;
 let framePumpProcessorDiscarded = 0;
 let rvfcLastPresentedFrames = 0;
 let rvfcSkippedFrames = 0;
+let frameModeSync;
+let frameModeMismatchDrops = 0;
+let frameModeSyncTimeouts = 0;
+const FRAME_MODE_SYNC_TIMEOUT_MS = 900;
 let overlayDrawQueued = false;
 function queueOverlayDraw() {
   if (overlayDrawQueued) return;
@@ -2685,6 +2692,9 @@ function stopReceiver() {
   lastRecoveryReason = "—";
   decoderFreshnessHoldUntil = 0;
   decoderFreshnessHoldActive = false;
+  frameModeSync = void 0;
+  frameModeMismatchDrops = 0;
+  frameModeSyncTimeouts = 0;
   maxSequenceGapMs = 0;
   pipelineEvents.length = 0;
   usefulFrameTimes.length = 0;
@@ -2937,8 +2947,12 @@ async function finishCorpusRecording(recorder) {
 }
 function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
   const timestamp = Number(videoFrame?.timestamp);
-  const width = video.videoWidth || videoFrame?.displayWidth || videoFrame?.visibleRect?.width || videoFrame?.codedWidth || 0;
-  const height = video.videoHeight || videoFrame?.displayHeight || videoFrame?.visibleRect?.height || videoFrame?.codedHeight || 0;
+  const width = videoFrame
+    ? videoFrame.displayWidth || videoFrame.visibleRect?.width || videoFrame.codedWidth || video.videoWidth || 0
+    : video.videoWidth || 0;
+  const height = videoFrame
+    ? videoFrame.displayHeight || videoFrame.visibleRect?.height || videoFrame.codedHeight || video.videoHeight || 0
+    : video.videoHeight || 0;
   const sequence = benchmarkRecordingSequence++;
   latestSourceFrameSequence = sequence;
   return {
@@ -2957,6 +2971,21 @@ function processSourceFrame(frame, gen) {
   if (done || gen !== captureGen) {
     frame.videoFrame?.close();
     return;
+  }
+  if (frameModeSync) {
+    const matches = sameModeSize(frame, frameModeSync);
+    if (!matches && performance.now() - frameModeSync.startedAt < FRAME_MODE_SYNC_TIMEOUT_MS) {
+      frameModeMismatchDrops++;
+      frame.videoFrame?.close();
+      return;
+    }
+    if (!matches) {
+      frameModeSyncTimeouts++;
+      notePipelineEvent("frame-mode-sync-timeout", frameModeMismatchDrops);
+    } else {
+      notePipelineEvent("frame-mode-synced", frameModeMismatchDrops);
+    }
+    frameModeSync = void 0;
   }
   if (optimizerPipelineActive && !activeOptimizerEpoch) {
     optimizerTransitionFramesDiscarded++;
@@ -3023,6 +3052,21 @@ async function pumpTrackFrames(gen, reader, processor) {
     scheduleFrame(gen);
   }
 }
+function restartFramePumpForCameraMode(track, reason = "camera mode changed") {
+  if (!track || done) return;
+  const settings = track.getSettings();
+  captureGen++;
+  frameModeMismatchDrops = 0;
+  frameModeSync = settings.width && settings.height ? {
+    width: Number(settings.width),
+    height: Number(settings.height),
+    startedAt: performance.now(),
+    reason
+  } : void 0;
+  startFramePump(captureGen, track);
+  notePipelineEvent("frame-pump-mode-restart");
+}
+
 function startFramePump(gen, track) {
   stopFramePump();
   if (track && typeof MediaStreamTrackProcessor === "function") {
