@@ -2513,6 +2513,12 @@ function scheduleFrame(gen) {
   const next = (callbackTime = performance.now(), metadata = {}) => {
     var _a, _b, _c, _d, _e, _f;
     if (done || gen !== captureGen) return;
+    // Keep camera delivery continuously armed. Previously the next
+    // requestVideoFrameCallback was registered only after captureFrame() and
+    // overlay work completed, so a few milliseconds of main-thread work could
+    // miss the next 60 Hz presentation entirely. Decoding is allowed to drop
+    // work when workers are busy; frame delivery itself must never wait for it.
+    scheduleFrame(gen);
     const width = video.videoWidth;
     const height = video.videoHeight;
     const sequence = benchmarkRecordingSequence++;
@@ -2556,7 +2562,6 @@ function scheduleFrame(gen) {
       recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
       drawOverlay(receiverNow());
       if (recorder.complete) void finishCorpusRecording(recorder);
-      scheduleFrame(gen);
       return;
     }
     void captureFrame(frame).catch((error) => {
@@ -2567,7 +2572,6 @@ function scheduleFrame(gen) {
       frame.videoFrame?.close();
       if (done || gen !== captureGen) return;
       drawOverlay(receiverNow());
-      scheduleFrame(gen);
     });
   };
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);
