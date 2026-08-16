@@ -118,7 +118,7 @@ const cfgLayout = document.getElementById("cfg-layout");
 const cfgOrientation = document.getElementById("cfg-orientation");
 function selectedFps() {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
-  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 15;
+  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 30;
 }
 function selectFps(fps) {
   var _a;
