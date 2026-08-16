@@ -4,7 +4,14 @@ import { gridLayoutById } from "../shared/grid-layout.js";
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 const ready = import(scalarCodec ? "../vendor/decimen-codec-android/decimen_codec.js" : "../vendor/decimen-codec/decimen_codec.js").then(({ default: DecimenCodec }) => DecimenCodec());
 const ctx = self;
+function validQuad(p) {
+  if (!p) return false;
+  return [p.topLeft, p.topRight, p.bottomRight, p.bottomLeft].every((point) =>
+    point && Number.isFinite(point.x) && Number.isFinite(point.y)
+  );
+}
 function boundsOf(p, ox, oy) {
+  if (!validQuad(p)) return null;
   const xs = [p.topLeft.x, p.topRight.x, p.bottomRight.x, p.bottomLeft.x];
   const ys = [p.topLeft.y, p.topRight.y, p.bottomRight.y, p.bottomLeft.y];
   const x = Math.min(...xs);
@@ -12,6 +19,7 @@ function boundsOf(p, ox, oy) {
   return { x: ox + x, y: oy + y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
 }
 function shifted(p, ox, oy) {
+  if (!validQuad(p)) return null;
   const s = (pt) => ({ x: pt.x + ox, y: pt.y + oy });
   return {
     topLeft: s(p.topLeft),
@@ -53,6 +61,7 @@ function ensureNativeBatch(zx) {
   return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
 }
 function translatedQuad(q, dx, dy) {
+  if (!validQuad(q)) return null;
   const move = (p) => ({ x: p.x + dx, y: p.y + dy });
   return {
     topLeft: move(q.topLeft),
@@ -74,6 +83,7 @@ function configureNativeBatch(zx, tracks, ox, oy) {
     const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
     if (mustConfigure) {
       const q = track.quad;
+      if (!validQuad(q)) return void 0;
       const accepted = zx._setTrackedDecoderTrack(
         nativeBatchHandle,
         slot,
@@ -200,6 +210,7 @@ function decodeNativeAuditRGBA(zx, ptr, width, height, ox, oy, tracks, stride = 
     for (let slot = 0; slot < count; slot++) {
       const track = tracks[slot];
       const q = track.quad;
+      if (!validQuad(q)) return null;
       const id = track.slot ?? track.id;
       if (!zx._setTrackedDecoderTrack(handle, slot, id, track.dim,
         q.topLeft.x - ox, q.topLeft.y - oy,
@@ -235,6 +246,7 @@ function decodeNativeAuditRGBA(zx, ptr, width, height, ox, oy, tracks, stride = 
 }
 let qrGeneratorPromise;
 function localQuad(q, ox, oy) {
+  if (!validQuad(q)) return null;
   const move = (point) => ({ x: point.x - ox, y: point.y - oy });
   return {
     topLeft: move(q.topLeft),
@@ -247,7 +259,7 @@ function globalQuad(q, ox, oy) {
   return shifted(q, ox, oy);
 }
 function quadMaxDelta(a, b) {
-  if (!a || !b) return null;
+  if (!validQuad(a) || !validQuad(b)) return null;
   return Math.max(...["topLeft", "topRight", "bottomRight", "bottomLeft"].map((name) =>
     Math.hypot(a[name].x - b[name].x, a[name].y - b[name].y)
   ));
@@ -291,6 +303,9 @@ async function diagnoseTrackedSampler(zx, ptr, width, height, ox, oy, track, nat
     const dim = expectedQr.modules.size;
     if (dim !== result.modules) return { slot: track.slot, dim: result.modules, error: `regenerated dimension ${dim}` };
     const expected = Uint8Array.from(expectedQr.modules.data, (value) => value ? 1 : 0);
+    if (!validQuad(result.position) || !validQuad(track.quad)) {
+      return { slot: track.slot, dim: result.modules, error: "decoder returned incomplete position" };
+    }
     const freshGlobal = globalQuad(result.position, ox, oy);
     const cachedGlobal = nativeConfigured[nativeSlot]?.baseQuad ?? track.quad;
     const currentGlobal = track.quad;
@@ -334,6 +349,7 @@ async function diagnoseTrackedSampler(zx, ptr, width, height, ox, oy, track, nat
   }
 }
 function projectedNeighbor(q, dx, dy, stride) {
+  if (!validQuad(q)) return null;
   const p0 = q.topLeft, p1 = q.topRight, p2 = q.bottomRight, p3 = q.bottomLeft;
   const sx = p0.x - p1.x + p2.x - p3.x;
   const sy = p0.y - p1.y + p2.y - p3.y;
@@ -448,6 +464,7 @@ ctx.onmessage = async (e) => {
           const dx = slot % layout.cols - sx;
           const dy = Math.floor(slot / layout.cols) - sy;
           const predicted = projectedNeighbor(seed.quad, dx, dy, ratio);
+          if (!predicted) continue;
           const result = zx.readTracked(
             ptr,
             pw,
@@ -636,10 +653,14 @@ ctx.onmessage = async (e) => {
               if (diagnostic) samplerDiagnostics.push(diagnostic);
             }
           }
+          const recoveredPosition = validQuad(result.position)
+            ? result.position
+            : trackIndex >= 0 ? localQuad(tracks[trackIndex].quad, ox, oy) : null;
+          if (!recoveredPosition) continue;
           symbols.push({
             bytes: result.bytes,
-            box: boundsOf(result.position, ox, oy),
-            quad: shifted(result.position, ox, oy),
+            box: boundsOf(recoveredPosition, ox, oy),
+            quad: shifted(recoveredPosition, ox, oy),
             modules: result.modules,
             tracked: false
           });
@@ -685,14 +706,17 @@ ctx.onmessage = async (e) => {
         quad.bottomLeft.y - oy
       );
       if (r.valid && r.bytes.length > 0) {
-        symbols.push({
-          bytes: r.bytes,
-          box: boundsOf(r.position, ox, oy),
-          quad: shifted(r.position, ox, oy),
-          modules: r.modules,
-          tracked: true
-        });
-        trackedHit = true;
+        const trackedPosition = validQuad(r.position) ? r.position : localQuad(quad, ox, oy);
+        if (trackedPosition) {
+          symbols.push({
+            bytes: r.bytes,
+            box: boundsOf(trackedPosition, ox, oy),
+            quad: shifted(trackedPosition, ox, oy),
+            modules: r.modules,
+            tracked: true
+          });
+          trackedHit = true;
+        }
       }
     }
     if (!strictHotPath && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
@@ -701,7 +725,7 @@ ctx.onmessage = async (e) => {
         try {
           for (let i = 0; i < vec.size(); i++) {
             const r = vec.get(i);
-            if (r.valid && r.bytes.length > 0) {
+            if (r.valid && r.bytes.length > 0 && validQuad(r.position)) {
               symbols.push({
                 bytes: r.bytes,
                 box: boundsOf(r.position, ox, oy),
@@ -711,7 +735,7 @@ ctx.onmessage = async (e) => {
               });
             } else if (includeErrors) {
               const box = boundsOf(r.position, ox, oy);
-              if (box.w > 0 && box.h > 0) sightings.push(box);
+              if (box && box.w > 0 && box.h > 0) sightings.push(box);
             }
           }
         } finally {
