@@ -1176,6 +1176,8 @@ const hotPathAudit = {
   rsFallbacks: 0,
   anchorSuccesses: 0,
   anchorMisses: 0,
+  fastSamplerAttempts: 0,
+  fastSamplerSuccesses: 0,
   outOfFrameMisses: 0,
   bitstreamFailures: 0,
   crcFailures: 0,
@@ -1310,6 +1312,8 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
     hotPathAudit.anchorSuccesses += completion.nativeMetrics.anchorSuccesses ?? 0;
     hotPathAudit.anchorMisses += completion.nativeMetrics.anchorMisses ?? 0;
+    hotPathAudit.fastSamplerAttempts += completion.nativeMetrics.fastSamplerAttempts ?? 0;
+    hotPathAudit.fastSamplerSuccesses += completion.nativeMetrics.fastSamplerSuccesses ?? 0;
     hotPathAudit.outOfFrameMisses += completion.nativeMetrics.outOfFrameMisses ?? 0;
     hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
     hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
@@ -3615,7 +3619,10 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       if (w < 32 || h < 32) continue;
       const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount, strictHotPath: strictHotPathActive() };
       if (workerSlot === void 0) {
-        queuePendingGridLane(groupIndex, source, geometry);
+        // A stale camera frame is less useful than the next camera frame.
+        // RaptorQ is designed to absorb this erasure, so never retain a live
+        // VideoFrame clone waiting for a worker and starve the camera pool.
+        poolBusyTimes.push(now);
         continue;
       }
       discardPendingGridLane(groupIndex);
@@ -4958,7 +4965,7 @@ Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "es
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Misses   anchor ${hotPathAudit.anchorMisses} · frame ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
-Sampler HybridBinarizer + SampleGrid · CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Sampler sparse CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · Hybrid fallback CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
