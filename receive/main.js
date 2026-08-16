@@ -894,7 +894,11 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (!stage) return;
   const baseline = guidedBaselineP50();
-  const minOutput = Math.max(2, Math.ceil(Math.max(1, tracks) / 3));
+  // Guided decode is dramatically cheaper than dense robust search. Requiring
+  // one third of a large wall made a 4/15 guided result fail rollout even when
+  // it completed in a few tens of milliseconds. Four fresh symbols per frame
+  // is already a strong throughput contribution; let the fast path stay active.
+  const minOutput = Math.max(2, Math.ceil(Math.max(1, tracks) / 4));
   const fastEnough = !baseline || latencyMs <= Math.max(180, baseline * 0.85);
   const good = outputSymbols >= minOutput && fastEnough;
   if (stage === "probe") {
@@ -2135,7 +2139,12 @@ async function settleAutomaticQrOptics(track, now) {
   iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "settling";
-  holdDecoderForCameraMutation("automatic QR optics settling", 280);
+  // Exposure changes do not invalidate already captured QR payloads or lattice
+  // geometry. Keep decoding through the one-time AE -> manual handoff instead
+  // of throwing away work and restarting every worker. The HAL may emit a few
+  // transitional frames; those are ordinary erasures and RaptorQ can absorb
+  // them without an artificial receiver blackout.
+  notePipelineEvent("auto-optics-seamless-handoff");
   try {
     const accepted = await applyCameraConstraint(track, {
       exposureMode: "manual",
