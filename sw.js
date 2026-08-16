@@ -1,5 +1,5 @@
 (() => {
-  const CACHE = "airgapper-static-js-v40";
+  const CACHE = "airgapper-static-js-v41";
   const PRECACHE = [
     "./main.js",
     "./icon-192.png",
@@ -50,14 +50,15 @@
         if (!response.ok) throw new Error(`Precache failed ${response.status}: ${url}`);
         await cache.put(url, response);
       }));
-    }).then(() => self.skipWaiting()));
+    }));
   });
   self.addEventListener("activate", (event) => {
-    event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
-  });
-  self.addEventListener("message", (event) => {
-    var _a;
-    if (((_a = event.data) == null ? void 0 : _a.type) === "SKIP_WAITING") self.skipWaiting();
+    // Normal service-worker lifecycle only: an update cannot activate while
+    // any page is still controlled by the previous worker. Do not claim an
+    // already-open page; it keeps the exact build it started with.
+    event.waitUntil(caches.keys().then((keys) => Promise.all(
+      keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key))
+    )));
   });
   async function rangeResponse(request, response) {
     const range = request.headers.get("range");
