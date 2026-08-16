@@ -38,7 +38,7 @@ function inputBuffer(zx, bytes) {
   return inputPtr;
 }
 const NATIVE_BATCH_MAX_TRACKS = 18;
-const NATIVE_TRACK_RESULT_BYTES = 32;
+const NATIVE_TRACK_RESULT_BYTES = 64;
 const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
@@ -53,12 +53,21 @@ function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
   if (!nativeBatchHandle) return false;
-  nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
-  nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
-  nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
+  if (!nativeResultsPtr) nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
+  if (!nativeOutputPtr) nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
+  if (!nativeMetricsPtr) nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
   zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
   return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
 }
+function resetNativeBatch(zx) {
+  if (nativeBatchHandle) zx._destroyTrackedDecoder(nativeBatchHandle);
+  nativeBatchHandle = 0;
+  nativeConfigured = [];
+  nativeCropOrigin = "";
+  nativeRefresh.clear();
+}
+let denseNativeCooldown = 0;
+let denseNativeBadStreak = 0;
 function translatedQuad(q, dx, dy) {
   if (!validQuad(q)) return null;
   const move = (p) => ({ x: p.x + dx, y: p.y + dy });
@@ -188,6 +197,12 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const bytesLength = view.getInt32(at + 12, true);
     const dx = view.getFloat32(at + 24, true);
     const dy = view.getFloat32(at + 28, true);
+    const nativeQuad = {
+      topLeft: { x: view.getFloat32(at + 32, true), y: view.getFloat32(at + 36, true) },
+      topRight: { x: view.getFloat32(at + 40, true), y: view.getFloat32(at + 44, true) },
+      bottomRight: { x: view.getFloat32(at + 48, true), y: view.getFloat32(at + 52, true) },
+      bottomLeft: { x: view.getFloat32(at + 56, true), y: view.getFloat32(at + 60, true) }
+    };
     const mapped = byId.get(id);
     if (!mapped) continue;
     const slot = mapped.nativeSlot;
@@ -199,11 +214,11 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
       continue;
     }
     outputEnd = Math.max(outputEnd, bytesOffset + bytesLength);
-    pending.push({ mapped, bytesOffset, bytesLength, dx, dy, header: packet.header });
+    pending.push({ mapped, bytesOffset, bytesLength, dx, dy, nativeQuad, header: packet.header });
   }
   const output = outputEnd ? zx.HEAPU8.slice(nativeOutputPtr, nativeOutputPtr + outputEnd) : new Uint8Array(0);
-  const symbols = pending.map(({ mapped, bytesOffset, bytesLength, dx, dy, header }) => {
-    const quad = translatedQuad(mapped.configured.baseQuad, dx, dy);
+  const symbols = pending.map(({ mapped, bytesOffset, bytesLength, dx, dy, nativeQuad, header }) => {
+    const quad = validQuad(nativeQuad) ? shifted(nativeQuad, ox, oy) : translatedQuad(mapped.configured.baseQuad, dx, dy);
     return {
       bytes: output.subarray(bytesOffset, bytesOffset + bytesLength),
       box: boundsOf(quad, 0, 0),
@@ -453,6 +468,58 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
+      const denseNativeEligible = decodePixelFormat === "y8" && tracks.length >= 12;
+      let productionNative;
+      if (denseNativeEligible && denseNativeCooldown <= 0) {
+        productionNative = decodeNativeBatch(
+          zx,
+          ptr + inputOffset,
+          pw,
+          ph,
+          ox,
+          oy,
+          tracks,
+          decodePixelFormat,
+          inputStride
+        );
+        const nativeSymbols = productionNative?.symbols ?? [];
+        const usefulThreshold = Math.ceil(tracks.length * 2 / 3);
+        if (nativeSymbols.length >= usefulThreshold) {
+          denseNativeBadStreak = 0;
+          mapOutputToDisplay(nativeSymbols);
+          const reply = {
+            id,
+            symbols: nativeSymbols,
+            sightings,
+            full: false,
+            trackedAttempted: true,
+            trackedHit: true,
+            fallbackAttempted: false,
+            fallbackSucceeded: false,
+            readFullAttempts: 0,
+            workerWaitMs,
+            frameCopyMs,
+            robustMs: 0,
+            robustBands: 0,
+            nativeMetrics: productionNative?.metrics,
+            pixelPath: decodePixelFormat,
+            affineNative: true,
+            latencyMs: performance.now() - startedAt
+          };
+          const transfer = productionNative?.outputBuffer && nativeSymbols.length ? [productionNative.outputBuffer] : [];
+          ctx.postMessage(reply, transfer);
+          return;
+        }
+        denseNativeBadStreak++;
+        if (denseNativeBadStreak >= 2) {
+          denseNativeCooldown = 6;
+          denseNativeBadStreak = 0;
+          resetNativeBatch(zx);
+        }
+      } else if (denseNativeEligible && denseNativeCooldown > 0) {
+        denseNativeCooldown--;
+      }
+
       readFullAttempts++;
       const robustMax = Math.min(NATIVE_BATCH_MAX_TRACKS, Math.max(1, tracks.length));
       const robustStarted = performance.now();
@@ -486,8 +553,8 @@ ctx.onmessage = async (e) => {
         symbols,
         sightings,
         full: false,
-        trackedAttempted: false,
-        trackedHit: false,
+        trackedAttempted: Boolean(productionNative),
+        trackedHit: Boolean(productionNative?.symbols?.length),
         fallbackAttempted: true,
         fallbackSucceeded: symbols.length > 0,
         readFullAttempts,
@@ -495,8 +562,9 @@ ctx.onmessage = async (e) => {
         frameCopyMs,
         robustMs,
         robustBands: 1,
+        nativeMetrics: productionNative?.metrics,
         pixelPath: decodePixelFormat,
-        robustFirst: true,
+        affineNative: Boolean(productionNative),
         latencyMs: performance.now() - startedAt
       });
       return;
