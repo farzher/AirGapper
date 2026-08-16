@@ -1,0 +1,33 @@
+name: Agent v141 acquisition optics
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/v141_patch.py'
+      - '.github/workflows/agent-v141-acquisition-optics.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v141_patch.py
+      - name: Smoke check
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check receive/focus-controller.js
+          node --check sw.js
+      - name: Commit patch
+        run: |
+          rm .github/v141_patch.py .github/workflows/agent-v141-acquisition-optics.yml
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add -A
+          git commit -m 'v0.5.141 improve acquisition and automatic optics'
+          git push
