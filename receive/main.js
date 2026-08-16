@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.88";
+const RECEIVER_RUNTIME_BUILD = "v0.5.89";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3402,11 +3402,34 @@ function captureOptimizerProbe(source, trace) {
     source.opticsEpoch
   );
 }
+function resetTrackingForSourceGeometryChange() {
+  minimumAcceptedScanId = frameId;
+  regions.length = 0;
+  gridLattice.reset();
+  gridShape = "";
+  lastGridSnapshot = void 0;
+  activeDecodeBudget = 0;
+  expectedRegions = 0;
+  expectedRegionsAt = 0;
+  lastDecodedRegionSize = 0;
+  lastFullScan = -Infinity;
+  cropAttempts.clear();
+  fullScanIds.clear();
+  fullScanJobs.clear();
+  localReacquireIds.clear();
+  scanCapturedAt.clear();
+  scanOutcomes.clear();
+  clearPendingGridLanes();
+  notePipelineEvent("source-geometry-reset", 0);
+}
 async function captureFrame(source) {
   var _a, _b, _c, _d, _e;
   const vw = source.width;
   const vh = source.height;
   if (!vw || !vh) return;
+  if (receiverFrameWidth && receiverFrameHeight && (receiverFrameWidth !== vw || receiverFrameHeight !== vh)) {
+    resetTrackingForSourceGeometryChange();
+  }
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   const now = receiverNow();
@@ -3516,9 +3539,10 @@ async function captureFrame(source) {
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
-  const fullScanDue = strictAcquiring
+  const orphanedAcquisitionDue = !captureHasTrackedWork && now - lastFullScan > ACQUISITION_SCAN_MS;
+  const fullScanDue = orphanedAcquisitionDue || (strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
-    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
+    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval);
   if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
     if (trace) {
       trace.decision = "full scan throttled";
