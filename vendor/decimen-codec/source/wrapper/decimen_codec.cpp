@@ -519,6 +519,21 @@ struct AffineMotion
 	{
 		return {a * p.x + b * p.y + tx, c * p.x + d * p.y + ty};
 	}
+
+	std::optional<AffineMotion> inverse() const
+	{
+		const double det = a * d - b * c;
+		if (std::abs(det) < 1e-9)
+			return {};
+		AffineMotion out;
+		out.a = d / det;
+		out.b = -b / det;
+		out.c = -c / det;
+		out.d = a / det;
+		out.tx = -(out.a * tx + out.b * ty);
+		out.ty = -(out.c * tx + out.d * ty);
+		return out;
+	}
 };
 
 struct TrackedDecoder
@@ -814,20 +829,11 @@ static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& tra
 		++measured.bitstreamFailures;
 	}
 
-	if (!track.calibrated)
-		return {};
-
-	const double rsStarted = emscripten_get_now();
-	auto corrected = QRCode::Decode(track.sampled);
-	measured.rsFallbackMs += emscripten_get_now() - rsStarted;
-	++measured.rsFallbacks;
-	if (!corrected.isValid())
-		return {};
-
-	auto packet = packetFromBytes(corrected.content().bytes);
-	if (!packet.empty())
-		++measured.alignmentFitSuccesses;
-	return packet;
+	// Locked transfer is an erasure channel. A cached-map CRC miss is cheaper
+	// to drop than to run a full QR Reed-Solomon decode for this one symbol;
+	// the worker-level robust fallback already rescues the frame when aggregate
+	// native yield falls below the useful threshold.
+	return {};
 }
 
 // A local finder-pattern search is tens of thousands of point reads, not a
@@ -1065,21 +1071,35 @@ static void fillResultGeometry(const TrackedDecoder& decoder, const PersistentTr
 template <class LumAt>
 static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
                               DecimenTrackedResult* results, int resultCapacity,
-                              uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+                              uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics,
+                              bool poseAlreadyCurrent = false)
 {
 	DecimenBatchMetrics measured{};
 	const double totalStart = emscripten_get_now();
 	int resultCount = 0;
 	int outputUsed = 0;
-
-	struct PendingTrack { PersistentTrack* track; DecimenTrackedResult* result; };
-	std::vector<PendingTrack> pending;
 	std::vector<PersistentTrack*> resultTracks;
-	pending.reserve(decoder.tracks.size());
 	resultTracks.reserve(decoder.tracks.size());
 
+	int activeTracks = 0, calibratedTracks = 0;
+	for (const auto& track : decoder.tracks) {
+		if (!track.active) continue;
+		++activeTracks;
+		if (track.calibrated) ++calibratedTracks;
+	}
+
+	// A worker can be several camera frames behind. Register the rigid wall in
+	// THIS frame before paying to sample any 177x177 QR matrix. The four finder
+	// probes are much cheaper than sampling even one V40 symbol. If registration
+	// fails, return erasures immediately and let the worker-level robust pass
+	// recover/re-anchor instead of sampling 18 known-stale maps.
+	const bool poseCurrent = poseAlreadyCurrent ||
+		(calibratedTracks >= std::min(3, activeTracks) && registerGlobalMotion(decoder, lumAt, measured));
+
 	auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
-		ByteArray packet = track.crc32Payload ? decodeCachedTrack(decoder, track, lumAt, measured) : ByteArray{};
+		if (!poseCurrent || !track.calibrated || !track.crc32Payload)
+			return false;
+		ByteArray packet = decodeCachedTrack(decoder, track, lumAt, measured);
 		if (packet.empty())
 			return false;
 		if (outputUsed + int(packet.size()) > outputCapacity) {
@@ -1099,8 +1119,6 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 		return true;
 	};
 
-	// First use the previous CRC-confirmed screen pose. With a stable handheld
-	// frame this is the entire hot path: point sample + bit extraction + CRC.
 	for (auto& track : decoder.tracks) {
 		if (!track.active || resultCount >= resultCapacity)
 			continue;
@@ -1110,30 +1128,13 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 		          track.framesSinceReacquire, 0, 0};
 		resultTracks.push_back(&track);
-		if (!tryTrack(track, result))
-			pending.push_back({&track, &result});
-	}
-
-	// A miss means the screen pose may have changed. Register four distributed
-	// known finder templates in this SAME frame, fit one affine, then retry only
-	// the erasures. No generic QR detector is involved.
-	if (!pending.empty() && registerGlobalMotion(decoder, lumAt, measured)) {
-		std::vector<PendingTrack> stillPending;
-		stillPending.reserve(pending.size());
-		for (auto& candidate : pending) {
-			if (!tryTrack(*candidate.track, *candidate.result))
-				stillPending.push_back(candidate);
+		if (!tryTrack(track, result)) {
+			++track.consecutiveMisses;
+			++measured.misses;
+			result.consecutiveMisses = track.consecutiveMisses;
 		}
-		pending = std::move(stillPending);
 	}
 
-	for (auto& candidate : pending) {
-		auto& track = *candidate.track;
-		auto& result = *candidate.result;
-		++track.consecutiveMisses;
-		++measured.misses;
-		result.consecutiveMisses = track.consecutiveMisses;
-	}
 	for (int i = 0; i < resultCount && i < int(resultTracks.size()); ++i)
 		fillResultGeometry(decoder, *resultTracks[i], results[i]);
 
@@ -1150,6 +1151,17 @@ static PerspectiveTransform trackedTransform(const PersistentTrack& track, float
 	return PerspectiveTransform(
 		QuadrilateralF{PointF{0, 0}, PointF{dim, 0}, PointF{dim, dim}, PointF{0, dim}},
 		QuadrilateralF{track.topLeft + off, track.topRight + off, track.bottomRight + off, track.bottomLeft + off});
+}
+
+static PerspectiveTransform currentTrackedTransform(const TrackedDecoder& decoder, const PersistentTrack& track)
+{
+	const double dim = track.dimension;
+	return PerspectiveTransform(
+		QuadrilateralF{PointF{0, 0}, PointF{dim, 0}, PointF{dim, dim}, PointF{0, dim}},
+		QuadrilateralF{
+			decoder.motion.apply(track.topLeft), decoder.motion.apply(track.topRight),
+			decoder.motion.apply(track.bottomRight), decoder.motion.apply(track.bottomLeft)
+		});
 }
 
 
@@ -1171,9 +1183,9 @@ static std::optional<PointF> locateAlignmentPatternForCache(const BitMatrix& ima
 }
 
 static const QRCode::FinderPatternSet* finderSetForTrack(
-	const PersistentTrack& track, const QRCode::FinderPatternSets& sets)
+	const TrackedDecoder& decoder, const PersistentTrack& track, const QRCode::FinderPatternSets& sets)
 {
-	auto expected = trackedTransform(track, track.dx, track.dy);
+	auto expected = currentTrackedTransform(decoder, track);
 	if (!expected.isValid())
 		return nullptr;
 	const double dim = track.dimension;
@@ -1203,8 +1215,8 @@ static const QRCode::FinderPatternSet* finderSetForTrack(
 // coordinates. Calibration is seeded by zxing-cpp's REAL finder detections,
 // not finder patterns synthesized back from an already-warped outer quad.
 // This preserves the information SampleQR uses to survive lens distortion.
-static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& image,
-										 const QRCode::FinderPatternSet& fp)
+static bool calibrateTrackSampleMap(const TrackedDecoder& decoder, PersistentTrack& track, const BitMatrix& image,
+										 const QRCode::FinderPatternSet& fp, const AffineMotion* currentToBase)
 {
 	const int dim = track.dimension;
 	const int versionNumber = (dim - 17) / 4;
@@ -1219,7 +1231,7 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 	// pattern. The transform itself is then rebuilt from the three measured
 	// finder patterns plus that measured alignment point, matching SampleQR's
 	// geometry convention (bottom-right is three modules inward).
-	auto seed = trackedTransform(track, track.dx, track.dy);
+	auto seed = currentTrackedTransform(decoder, track);
 	if (!seed.isValid())
 		return false;
 	const int N = int(apM.size()) - 1;
@@ -1345,6 +1357,14 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 	}
 	if (!calibrationValid)
 		return false;
+
+	if (currentToBase) {
+		for (auto& cached : candidate) {
+			const auto p = currentToBase->apply(PointF{cached.x, cached.y});
+			cached.x = float(p.x);
+			cached.y = float(p.y);
+		}
+	}
 
 	auto pointAt = [&](int x, int y) { return PointF{candidate[size_t(y) * dim + x].x, candidate[size_t(y) * dim + x].y}; };
 	const auto c00 = pointAt(0, 0), c10 = pointAt(1, 0), c01 = pointAt(0, 1);
@@ -1686,46 +1706,77 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		};
 
 		DecimenBatchMetrics measured{};
-		int activeTracks = 0;
+		int activeTracks = 0, calibratedBefore = 0;
 		bool calibrationDue = false;
 		for (auto& track : decoder->tracks) {
 			if (!track.active)
 				continue;
 			++activeTracks;
+			if (track.calibrated) ++calibratedBefore;
 			if (track.calibrationCooldown > 0)
 				--track.calibrationCooldown;
 			if (!track.calibrated && track.calibrationCooldown == 0)
 				calibrationDue = true;
 		}
 
-		if (calibrationDue && activeTracks > 0) {
-			// One full-image binarization/finder scan serves every still-missing
-			// map in this worker. This is setup/reconfiguration work only.
-			const double binStarted = emscripten_get_now();
-			ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
-			HybridBinarizer binarized(lumView);
-			auto bits = binarized.getBitMatrix();
-			measured.anchorMs += emscripten_get_now() - binStarted;
-			if (bits) {
-				const double finderStarted = emscripten_get_now();
-				auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
-				auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
-				measured.anchorMs += emscripten_get_now() - finderStarted;
+		// Before a common reference frame exists, never carry 1-2 calibrated maps
+		// into a later camera frame. Three non-collinear maps establish the base;
+		// after that, every late map is inverse-warped back into that same base.
+		if (!decoder->calibrationEstablished && calibratedBefore > 0 && calibratedBefore < std::min(3, activeTracks)) {
+			for (auto& track : decoder->tracks) {
+				if (!track.active) continue;
+				track.calibrated = false;
+				track.calibrationCooldown = 0;
+			}
+			calibratedBefore = 0;
+			calibrationDue = activeTracks > 0;
+		}
 
-				for (auto& track : decoder->tracks) {
-					if (!track.active || track.calibrated || track.calibrationCooldown > 0)
-						continue;
-					++measured.calibrationAttempts;
-					const double calibrationStarted = emscripten_get_now();
-					const auto* finderSet = finderSetForTrack(track, finderSets);
-					const bool ok = finderSet && calibrateTrackSampleMap(track, *bits, *finderSet);
-					measured.anchorMs += emscripten_get_now() - calibrationStarted;
-					if (ok) {
-						++measured.anchorSuccesses;
-						++measured.calibrationSuccesses;
-					} else {
-						++measured.anchorMisses;
-						track.calibrationCooldown = 4;
+		bool poseCurrent = false;
+		std::optional<AffineMotion> currentToBase;
+		if (calibrationDue && activeTracks > 0) {
+			bool calibrationPoseReady = true;
+			if (decoder->calibrationEstablished && calibratedBefore >= std::min(3, activeTracks)) {
+				calibrationPoseReady = registerGlobalMotion(*decoder, lumAt, measured);
+				poseCurrent = calibrationPoseReady;
+				if (calibrationPoseReady)
+					currentToBase = decoder->motion.inverse();
+				if (!currentToBase)
+					calibrationPoseReady = false;
+			} else {
+				// The first successful calibration frame becomes the common base.
+				decoder->motion = {};
+				poseCurrent = true;
+			}
+
+			if (calibrationPoseReady) {
+				const double binStarted = emscripten_get_now();
+				ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
+				HybridBinarizer binarized(lumView);
+				auto bits = binarized.getBitMatrix();
+				measured.anchorMs += emscripten_get_now() - binStarted;
+				if (bits) {
+					const double finderStarted = emscripten_get_now();
+					auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
+					auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
+					measured.anchorMs += emscripten_get_now() - finderStarted;
+
+					for (auto& track : decoder->tracks) {
+						if (!track.active || track.calibrated || track.calibrationCooldown > 0)
+							continue;
+						++measured.calibrationAttempts;
+						const double calibrationStarted = emscripten_get_now();
+						const auto* finderSet = finderSetForTrack(*decoder, track, finderSets);
+						const bool ok = finderSet && calibrateTrackSampleMap(
+							*decoder, track, *bits, *finderSet, currentToBase ? &*currentToBase : nullptr);
+						measured.anchorMs += emscripten_get_now() - calibrationStarted;
+						if (ok) {
+							++measured.anchorSuccesses;
+							++measured.calibrationSuccesses;
+						} else {
+							++measured.anchorMisses;
+							track.calibrationCooldown = 4;
+						}
 					}
 				}
 			}
@@ -1738,21 +1789,20 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		const int requiredForMotion = std::min(3, activeTracks);
 		if (activeTracks == 0 || calibratedTracks < requiredForMotion) {
 			decoder->calibrationEstablished = false;
+			poseCurrent = false;
 		} else if (!decoder->calibrationEstablished) {
-			// First qualified anchor set defines the calibration coordinate frame.
 			decoder->motion = {};
 			decoder->calibrationEstablished = true;
+			poseCurrent = true;
 		}
 
 		int count = 0;
 		if (decoder->calibrationEstablished) {
 			DecimenBatchMetrics decoded{};
-			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &decoded);
+			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &decoded, poseCurrent);
 			addBatchMetrics(measured, decoded);
 		}
 
-		// Snapshot state, not cumulative counters. The worker uses this to avoid
-		// throwing away partially completed calibration after an ordinary miss.
 		measured.activeTracks = activeTracks;
 		measured.calibratedTracks = calibratedTracks;
 		measured.totalMs = emscripten_get_now() - totalStart;

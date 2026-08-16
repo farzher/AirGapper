@@ -757,7 +757,7 @@ ctx.onmessage = async (e) => {
           return result;
         };
         readFullAttempts++;
-        appendResults(readFull(16, false), false);
+        appendResults(readFull(NATIVE_BATCH_MAX_TRACKS, false), false);
         if (symbols.length === 0) {
           readFullAttempts++;
           appendResults(readFull(24, true), true);
