@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.89";
+const RECEIVER_RUNTIME_BUILD = "v0.5.90";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2060,7 +2060,7 @@ function renderFocusDiagnostics() {
   const transportSourceBytes = decoder ? decoder.blockLen - packetInternalBytes : 0;
   const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
-    : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
+    : `${framePumpMode}${framePumpFallbackReason ? ` · ${framePumpFallbackReason}` : ""}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
   const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
@@ -2320,6 +2320,11 @@ let frameTrackReader = null;
 let framePumpMode = "—";
 let framePumpProcessorTotal = 0;
 let framePumpProcessorDiscarded = 0;
+const FRAME_PUMP_STALL_MS = 1200;
+let framePumpLastFrameAt = 0;
+let framePumpWatchdogTimer;
+let framePumpFallbackReason = "";
+let framePumpFallbacks = 0;
 let rvfcLastPresentedFrames = 0;
 let rvfcSkippedFrames = 0;
 let overlayDrawQueued = false;
@@ -2338,6 +2343,11 @@ function stopFramePump() {
   framePumpMode = "—";
   framePumpProcessorTotal = 0;
   framePumpProcessorDiscarded = 0;
+  framePumpLastFrameAt = 0;
+  framePumpFallbackReason = "";
+  framePumpFallbacks = 0;
+  clearInterval(framePumpWatchdogTimer);
+  framePumpWatchdogTimer = void 0;
   rvfcLastPresentedFrames = 0;
   rvfcSkippedFrames = 0;
   if (reader) {
@@ -2673,6 +2683,7 @@ function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
   };
 }
 function processSourceFrame(frame, gen) {
+  framePumpLastFrameAt = performance.now();
   if (done || gen !== captureGen) {
     frame.videoFrame?.close();
     return;
@@ -2718,11 +2729,46 @@ function processSourceFrame(frame, gen) {
     queueOverlayDraw();
   });
 }
+function fallBackFramePump(gen, reader, reason) {
+  if (done || gen !== captureGen || framePumpMode !== "MediaStreamTrackProcessor") return;
+  if (reader && frameTrackReader !== reader) return;
+  const activeReader = frameTrackReader;
+  frameTrackReader = null;
+  frameTrackProcessor = null;
+  framePumpMode = "rVFC fallback";
+  framePumpFallbackReason = reason;
+  framePumpFallbacks++;
+  clearInterval(framePumpWatchdogTimer);
+  framePumpWatchdogTimer = void 0;
+  notePipelineEvent("frame-pump-fallback", framePumpFallbacks);
+  if (activeReader) {
+    void activeReader.cancel().catch(() => void 0).finally(() => {
+      try { activeReader.releaseLock(); } catch {}
+    });
+  }
+  console.warn(`MediaStreamTrackProcessor ${reason}; falling back to requestVideoFrameCallback`);
+  scheduleFrame(gen);
+}
+function armFramePumpWatchdog(gen, reader) {
+  clearInterval(framePumpWatchdogTimer);
+  framePumpLastFrameAt = performance.now();
+  framePumpWatchdogTimer = setInterval(() => {
+    if (done || gen !== captureGen || framePumpMode !== "MediaStreamTrackProcessor" || frameTrackReader !== reader) return;
+    const track = stream?.getVideoTracks()[0];
+    if (!track || track.readyState !== "live") return;
+    if (performance.now() - framePumpLastFrameAt >= FRAME_PUMP_STALL_MS) {
+      fallBackFramePump(gen, reader, "read stalled");
+    }
+  }, 250);
+}
 async function pumpTrackFrames(gen, reader, processor) {
   try {
     while (!done && gen === captureGen && frameTrackReader === reader) {
       const { value, done: ended } = await reader.read();
-      if (ended) break;
+      if (ended) {
+        fallBackFramePump(gen, reader, "stream ended");
+        return;
+      }
       if (!value) continue;
       if (done || gen !== captureGen || frameTrackReader !== reader) {
         value.close();
@@ -2734,12 +2780,8 @@ async function pumpTrackFrames(gen, reader, processor) {
     }
   } catch (error) {
     if (done || gen !== captureGen || frameTrackReader !== reader) return;
-    console.warn("MediaStreamTrackProcessor frame pump failed; falling back to requestVideoFrameCallback", error);
-    try { reader.releaseLock(); } catch {}
-    frameTrackReader = null;
-    frameTrackProcessor = null;
-    framePumpMode = "rVFC fallback";
-    scheduleFrame(gen);
+    console.warn("MediaStreamTrackProcessor frame pump failed", error);
+    fallBackFramePump(gen, reader, "read failed");
   }
 }
 function startFramePump(gen, track) {
@@ -2751,10 +2793,13 @@ function startFramePump(gen, track) {
       frameTrackProcessor = processor;
       frameTrackReader = reader;
       framePumpMode = "MediaStreamTrackProcessor";
+      armFramePumpWatchdog(gen, reader);
       void pumpTrackFrames(gen, reader, processor);
       return;
     } catch (error) {
       console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);
+      framePumpFallbackReason = "processor unavailable";
+      framePumpFallbacks++;
     }
   }
   framePumpMode = "rVFC fallback";
@@ -5035,10 +5080,11 @@ Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · a
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
-  const stalled = cameraStartedTs > 0 && now - cameraStartedTs > STATS_WINDOW_MS && completionRate === 0 && pool.busyCount > 0;
+  const cameraPumpStalled = cameraStartedTs > 0 && now - cameraStartedTs > FRAME_PUMP_STALL_MS && cameraRate === 0 && framePumpLastFrameAt > 0 && now - framePumpLastFrameAt >= FRAME_PUMP_STALL_MS;
+  const decoderStalled = cameraRate > 0 && completionRate === 0 && pool.busyCount > 0;
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : stalled ? "Scanner stalled" : "";
-  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
+  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : cameraPumpStalled ? "Camera pump stalled" : decoderStalled ? "Decoder stalled" : "";
+  limit.classList.toggle("scanner-bound", cameraPumpStalled || decoderStalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;
   const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
