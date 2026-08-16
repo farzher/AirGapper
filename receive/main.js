@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.90";
+const RECEIVER_RUNTIME_BUILD = "v0.5.91";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2321,10 +2321,20 @@ let framePumpMode = "—";
 let framePumpProcessorTotal = 0;
 let framePumpProcessorDiscarded = 0;
 const FRAME_PUMP_STALL_MS = 1200;
+const FRAME_PUMP_REOPEN_MS = 1800;
+const CAMERA_PUMP_REOPEN_COOLDOWN_MS = 1800;
+const DECODER_STALL_RECOVERY_MS = 2500;
 let framePumpLastFrameAt = 0;
 let framePumpWatchdogTimer;
 let framePumpFallbackReason = "";
 let framePumpFallbacks = 0;
+let frameProcessorFailures = 0;
+let cameraPumpReopens = 0;
+let cameraPumpRecoveryInFlight = false;
+let cameraPumpLastReopenAt = -Infinity;
+let cameraPumpLastRecoveryReason = "";
+let decoderStalledSince = 0;
+let decoderWorkerRestarts = 0;
 let rvfcLastPresentedFrames = 0;
 let rvfcSkippedFrames = 0;
 let overlayDrawQueued = false;
@@ -2424,6 +2434,13 @@ function stopReceiver() {
   peakRegions = 0;
   capturesDropped = 0;
   cameraStartedTs = 0;
+  frameProcessorFailures = 0;
+  cameraPumpReopens = 0;
+  cameraPumpRecoveryInFlight = false;
+  cameraPumpLastReopenAt = -Infinity;
+  cameraPumpLastRecoveryReason = "";
+  decoderStalledSince = 0;
+  decoderWorkerRestarts = 0;
   lastOpticalSampleAt = -Infinity;
   lastOpticalSourceSequence = -1;
   opticalAnalyzeCount = 0;
@@ -2729,6 +2746,50 @@ function processSourceFrame(frame, gen) {
     queueOverlayDraw();
   });
 }
+async function reopenCameraAfterPumpStall(gen, reason) {
+  if (cameraPumpRecoveryInFlight || done || receiverPaused || gen !== captureGen) return;
+  const now = performance.now();
+  if (now - cameraPumpLastReopenAt < CAMERA_PUMP_REOPEN_COOLDOWN_MS) return;
+  cameraPumpRecoveryInFlight = true;
+  cameraPumpLastReopenAt = now;
+  cameraPumpReopens++;
+  cameraPumpLastRecoveryReason = reason;
+  notePipelineEvent("camera-pump-reopen", cameraPumpReopens);
+  console.warn(`Camera frame delivery ${reason}; reopening camera stream`);
+  try {
+    const oldStream = stream;
+    cameraStartGen++;
+    captureGen++;
+    focusController.detach();
+    clearInterval(statsTimer);
+    statsTimer = void 0;
+    stopFramePump();
+    stream = null;
+    video.srcObject = null;
+    oldStream?.getTracks().forEach((track) => track.stop());
+    pool.resize(0);
+    resetTrackingForSourceGeometryChange();
+    lastDirectPixelPath = "—";
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    if (done || receiverPaused) return;
+    await start();
+  } finally {
+    cameraPumpRecoveryInFlight = false;
+  }
+}
+function recoverDecoderWorkers(reason) {
+  if (done || receiverPaused || replayRunning || cameraPumpRecoveryInFlight) return;
+  decoderWorkerRestarts++;
+  decoderStalledSince = 0;
+  notePipelineEvent("decoder-worker-restart", decoderWorkerRestarts);
+  console.warn(`Decoder workers ${reason}; rebuilding worker pool`);
+  pool.resize(0);
+  resetTrackingForSourceGeometryChange();
+  lastNativeMetrics = void 0;
+  lastDirectPixelPath = "—";
+  lastDecodeError = "";
+  pool.resize(selectedWorkerCount());
+}
 function fallBackFramePump(gen, reader, reason) {
   if (done || gen !== captureGen || framePumpMode !== "MediaStreamTrackProcessor") return;
   if (reader && frameTrackReader !== reader) return;
@@ -2738,8 +2799,10 @@ function fallBackFramePump(gen, reader, reason) {
   framePumpMode = "rVFC fallback";
   framePumpFallbackReason = reason;
   framePumpFallbacks++;
-  clearInterval(framePumpWatchdogTimer);
-  framePumpWatchdogTimer = void 0;
+  frameProcessorFailures++;
+  // Give the fallback its own grace period. The previous processor may already
+  // have been silent for longer than the normal stall threshold.
+  framePumpLastFrameAt = performance.now();
   notePipelineEvent("frame-pump-fallback", framePumpFallbacks);
   if (activeReader) {
     void activeReader.cancel().catch(() => void 0).finally(() => {
@@ -2753,11 +2816,18 @@ function armFramePumpWatchdog(gen, reader) {
   clearInterval(framePumpWatchdogTimer);
   framePumpLastFrameAt = performance.now();
   framePumpWatchdogTimer = setInterval(() => {
-    if (done || gen !== captureGen || framePumpMode !== "MediaStreamTrackProcessor" || frameTrackReader !== reader) return;
+    if (done || gen !== captureGen) return;
     const track = stream?.getVideoTracks()[0];
     if (!track || track.readyState !== "live") return;
-    if (performance.now() - framePumpLastFrameAt >= FRAME_PUMP_STALL_MS) {
-      fallBackFramePump(gen, reader, "read stalled");
+    const silence = performance.now() - framePumpLastFrameAt;
+    if (framePumpMode === "MediaStreamTrackProcessor") {
+      if (frameTrackReader === reader && silence >= FRAME_PUMP_STALL_MS) {
+        fallBackFramePump(gen, reader, "read stalled");
+      }
+      return;
+    }
+    if (framePumpMode === "rVFC fallback" && silence >= FRAME_PUMP_REOPEN_MS) {
+      void reopenCameraAfterPumpStall(gen, "video callbacks stalled");
     }
   }, 250);
 }
@@ -2786,7 +2856,7 @@ async function pumpTrackFrames(gen, reader, processor) {
 }
 function startFramePump(gen, track) {
   stopFramePump();
-  if (track && typeof MediaStreamTrackProcessor === "function") {
+  if (track && typeof MediaStreamTrackProcessor === "function" && frameProcessorFailures < 2) {
     try {
       const processor = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 });
       const reader = processor.readable.getReader();
@@ -2800,9 +2870,13 @@ function startFramePump(gen, track) {
       console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);
       framePumpFallbackReason = "processor unavailable";
       framePumpFallbacks++;
+      frameProcessorFailures++;
     }
+  } else if (frameProcessorFailures >= 2) {
+    framePumpFallbackReason = "processor disabled after repeated stalls";
   }
   framePumpMode = "rVFC fallback";
+  armFramePumpWatchdog(gen, null);
   scheduleFrame(gen);
 }
 function scheduleFrame(gen) {
@@ -3464,6 +3538,8 @@ function resetTrackingForSourceGeometryChange() {
   localReacquireIds.clear();
   scanCapturedAt.clear();
   scanOutcomes.clear();
+  hotPathJobMode.clear();
+  benchmarkJobFrames.clear();
   clearPendingGridLanes();
   notePipelineEvent("source-geometry-reset", 0);
 }
@@ -5076,14 +5152,24 @@ Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} 
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
-Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
+Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}
+Recovery processor failures ${frameProcessorFailures} · camera reopens ${cameraPumpReopens}${cameraPumpLastRecoveryReason ? ` (${cameraPumpLastRecoveryReason})` : ""} · worker restarts ${decoderWorkerRestarts}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const cameraPumpStalled = cameraStartedTs > 0 && now - cameraStartedTs > FRAME_PUMP_STALL_MS && cameraRate === 0 && framePumpLastFrameAt > 0 && now - framePumpLastFrameAt >= FRAME_PUMP_STALL_MS;
-  const decoderStalled = cameraRate > 0 && completionRate === 0 && pool.busyCount > 0;
+  const decoderBlocked = cameraRate > 0 && completionRate === 0 && pool.busyCount > 0;
+  if (decoderBlocked) {
+    if (!decoderStalledSince) decoderStalledSince = now;
+  } else {
+    decoderStalledSince = 0;
+  }
+  const decoderStalled = decoderBlocked && now - decoderStalledSince >= STATS_WINDOW_MS;
+  if (!cameraPumpStalled && decoderBlocked && now - decoderStalledSince >= DECODER_STALL_RECOVERY_MS) {
+    recoverDecoderWorkers("stopped completing jobs");
+  }
   const limit = metric("m-limit");
-  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : cameraPumpStalled ? "Camera pump stalled" : decoderStalled ? "Decoder stalled" : "";
+  limit.textContent = lastDecodeError ? `Scanner error: ${lastDecodeError}` : cameraPumpStalled ? cameraPumpRecoveryInFlight ? "Reopening camera…" : "Camera pump stalled" : decoderStalled ? "Decoder stalled" : "";
   limit.classList.toggle("scanner-bound", cameraPumpStalled || decoderStalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;
