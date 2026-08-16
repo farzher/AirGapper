@@ -1992,9 +1992,6 @@ ${optimizerTrace.slice(-20).map(
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
-      ? `s${item.slot ?? "?"} error ${item.error}`
-      : `s${item.slot} ${item.classification} · cache ${item.cached.mismatches}/${item.cached.total} (${item.cached.percent.toFixed(2)}%) Δ${item.cachedDeltaPx?.toFixed(2) ?? "?"}px · lattice ${item.current.mismatches}/${item.current.total} (${item.current.percent.toFixed(2)}%) Δ${item.currentDeltaPx?.toFixed(2) ?? "?"}px · fresh ${item.fresh.mismatches}/${item.fresh.total} (${item.fresh.percent.toFixed(2)}%)`
-    ).join(" |
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
