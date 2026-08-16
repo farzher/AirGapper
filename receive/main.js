@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.81";
+const RECEIVER_RUNTIME_BUILD = "v0.5.82";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -612,14 +612,47 @@ function purgeReceivedData() {
 }
 purgeReceivedData();
 const pendingGridLanes = [null, null, null];
+const lockedLaneCrops = [null, null, null];
+let laneCropRecentersTotal = 0;
 function discardPendingGridLane(groupIndex) {
   const pending = pendingGridLanes[groupIndex];
   if (!pending) return;
   pending.direct.frame.close();
   pendingGridLanes[groupIndex] = null;
 }
+function clearLockedLaneCrops() {
+  lockedLaneCrops.fill(null);
+  laneCropRecentersTotal = 0;
+}
 function clearPendingGridLanes() {
   for (let index = 0; index < pendingGridLanes.length; index++) discardPendingGridLane(index);
+  clearLockedLaneCrops();
+}
+function stableLockedLaneCrop(groupIndex, key, laneCount, vw, vh, minX, minY, maxX, maxY, typicalEdge) {
+  const cropQuantum = 16;
+  const guard = Math.max(8, Math.round(typicalEdge * 0.06));
+  const pad = Math.max(16, Math.round(typicalEdge * 0.24));
+  const current = lockedLaneCrops[groupIndex];
+  if (current && current.key === key && current.laneCount === laneCount && current.vw === vw && current.vh === vh) {
+    const leftGuard = current.x === 0 ? 0 : guard;
+    const topGuard = current.y === 0 ? 0 : guard;
+    const rightGuard = current.x + current.w === vw ? 0 : guard;
+    const bottomGuard = current.y + current.h === vh ? 0 : guard;
+    if (
+      minX >= current.x + leftGuard && minY >= current.y + topGuard &&
+      maxX <= current.x + current.w - rightGuard &&
+      maxY <= current.y + current.h - bottomGuard
+    ) return current;
+  }
+  const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
+  const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
+  const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
+  const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
+  const next = { key, laneCount, vw, vh, x, y, w: right - x, h: bottom - y };
+  if (!current || current.x !== next.x || current.y !== next.y || current.w !== next.w || current.h !== next.h || current.key !== key)
+    laneCropRecentersTotal++;
+  lockedLaneCrops[groupIndex] = next;
+  return next;
 }
 function queuePendingGridLane(groupIndex, source, geometry) {
   const direct = mappedDirectTrackedFrame(source, geometry.x, geometry.y, geometry.w, geometry.h, geometry.tracks);
@@ -2043,7 +2076,7 @@ function renderFocusDiagnostics() {
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · decode frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · avg job ${averageJobMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
@@ -3616,15 +3649,11 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const maxX = Math.max(...points.map((point) => point.x));
       const maxY = Math.max(...points.map((point) => point.y));
       const typicalEdge = Math.max(...group.regions.map((region) => Math.max(region.w, region.h)));
-      const worstMisses = Math.max(...group.regions.map((region) => region.consecutiveMisses));
-      const pad = Math.max(8, Math.round(typicalEdge * (0.08 + Math.min(0.16, worstMisses * 0.03))));
-      const cropQuantum = 16;
-      const x = Math.max(0, Math.floor((minX - pad) / cropQuantum) * cropQuantum);
-      const y = Math.max(0, Math.floor((minY - pad) / cropQuantum) * cropQuantum);
-      const right = Math.min(vw, Math.ceil((maxX + pad) / cropQuantum) * cropQuantum);
-      const bottom = Math.min(vh, Math.ceil((maxY + pad) / cropQuantum) * cropQuantum);
-      const w = right - x;
-      const h = bottom - y;
+      const cropKey = `${lockedLayout.id}:${group.tracks.map((track) => track.slot).join(",")}`;
+      const stableCrop = stableLockedLaneCrop(
+        groupIndex, cropKey, laneCount, vw, vh, minX, minY, maxX, maxY, typicalEdge
+      );
+      const { x, y, w, h } = stableCrop;
       if (w < 32 || h < 32) continue;
       const geometry = { x, y, w, h, tracks: group.tracks, regions: group.regions, sourceSequence: source.sequence, laneCount, strictHotPath: strictHotPathActive() };
       if (workerSlot === void 0) {
