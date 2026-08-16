@@ -1,0 +1,40 @@
+name: Agent v66 sampler remnant fix
+on:
+  push:
+    branches: [agent/fix-v66-sampler-remnant]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-v66-sampler-remnant
+      - name: Remove orphaned sampler template
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main_path = Path('receive/main.js')
+          main = main_path.read_text()
+          start = main.find('\n      ? `s${item.slot ??')
+          end = main.find('\n    `Analyzer ', start)
+          if start < 0 or end < 0:
+              raise SystemExit('orphaned sampler block not found')
+          main_path.write_text(main[:start] + main[end:])
+
+          index_path = Path('index.html')
+          index_path.write_text(index_path.read_text().replace('v0.5.65', 'v0.5.66', 1))
+
+          sw_path = Path('sw.js')
+          sw_path.write_text(sw_path.read_text().replace('airgapper-static-js-v28', 'airgapper-static-js-v29', 1))
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/workflows/agent-v66-fix.yml
+          git add receive/main.js index.html sw.js
+          git commit -m "remove orphaned sampler diagnostics template"
+          git push origin HEAD:agent/fix-v66-sampler-remnant
