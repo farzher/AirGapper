@@ -39,7 +39,7 @@ function inputBuffer(zx, bytes) {
 }
 const NATIVE_BATCH_MAX_TRACKS = 18;
 const NATIVE_TRACK_RESULT_BYTES = 64;
-const NATIVE_BATCH_METRICS_BYTES = 128;
+const NATIVE_BATCH_METRICS_BYTES = 144;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
 let nativeBatchHandle = 0;
@@ -185,7 +185,9 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     translationAttempts: view.getUint32(nativeMetricsPtr + 108, true),
     translationSuccesses: view.getUint32(nativeMetricsPtr + 112, true),
     calibrationAttempts: view.getUint32(nativeMetricsPtr + 116, true),
-    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true)
+    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true),
+    activeTracks: view.getUint32(nativeMetricsPtr + 124, true),
+    calibratedTracks: view.getUint32(nativeMetricsPtr + 128, true)
   };
   const pending = [];
   let outputEnd = 0;
@@ -510,11 +512,19 @@ ctx.onmessage = async (e) => {
           ctx.postMessage(reply, transfer);
           return;
         }
-        denseNativeBadStreak++;
-        if (denseNativeBadStreak >= 2) {
-          denseNativeCooldown = 6;
+        const calibrationIncomplete = (productionNative?.metrics?.activeTracks ?? 0) > 0
+          && (productionNative?.metrics?.calibratedTracks ?? 0) < productionNative.metrics.activeTracks;
+        if (calibrationIncomplete) {
+          // A losing frame while maps are still being built is setup progress,
+          // not evidence that the native state is poisoned. Preserve it.
           denseNativeBadStreak = 0;
-          resetNativeBatch(zx);
+        } else {
+          denseNativeBadStreak++;
+          if (denseNativeBadStreak >= 2) {
+            denseNativeCooldown = 6;
+            denseNativeBadStreak = 0;
+            resetNativeBatch(zx);
+          }
         }
       } else if (denseNativeEligible && denseNativeCooldown > 0) {
         denseNativeCooldown--;

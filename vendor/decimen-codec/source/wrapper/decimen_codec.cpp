@@ -750,6 +750,8 @@ template <class LumAt>
 static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& track, const LumAt& lumAt,
                                    DecimenBatchMetrics& measured)
 {
+	if (!track.calibrated)
+		return {};
 	++measured.alignmentFitAttempts;
 	const auto thresholds = buildFastThresholds(decoder, track, lumAt);
 	if (!thresholds.ok) {
@@ -1667,8 +1669,8 @@ EMSCRIPTEN_KEEPALIVE void setTrackedDecoderFallbackBudget(int handle, int maxRSF
 }
 
 EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
-											 DecimenTrackedResult* results, int resultCapacity,
-											 uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+                                             DecimenTrackedResult* results, int resultCapacity,
+                                             uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
 {
 	auto* decoder = trackedDecoder(handle);
 	if (!decoder || !yPlane || width <= 0 || height <= 0 || stride < width || !results || resultCapacity < 0 ||
@@ -1684,87 +1686,78 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		};
 
 		DecimenBatchMetrics measured{};
-		int count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &measured);
-		if (measured.tracks > 0 && measured.successful == measured.tracks) {
-			measured.totalMs = emscripten_get_now() - totalStart;
-			if (metrics) *metrics = measured;
-			return count;
-		}
-
-		bool calibrationDue = false;
 		int activeTracks = 0;
+		bool calibrationDue = false;
 		for (auto& track : decoder->tracks) {
 			if (!track.active)
 				continue;
 			++activeTracks;
 			if (track.calibrationCooldown > 0)
 				--track.calibrationCooldown;
-			if (!decoder->calibrationEstablished && !track.calibrated && track.calibrationCooldown == 0)
+			if (!track.calibrated && track.calibrationCooldown == 0)
 				calibrationDue = true;
 		}
-		if (!calibrationDue || activeTracks == 0) {
-			measured.totalMs = emscripten_get_now() - totalStart;
-			if (metrics) *metrics = measured;
-			return count;
-		}
 
-		// Calibration is initialization/reconfiguration work only. Ordinary CRC
-		// misses are packet erasures; they must never trigger repeated expensive
-		// geometry rebuilding on the steady-state camera path.
-		const double binStarted = emscripten_get_now();
-		ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
-		HybridBinarizer binarized(lumView);
-		auto bits = binarized.getBitMatrix();
-		measured.anchorMs += emscripten_get_now() - binStarted;
-		if (!bits) {
-			measured.totalMs = emscripten_get_now() - totalStart;
-			if (metrics) *metrics = measured;
-			return count;
-		}
+		if (calibrationDue && activeTracks > 0) {
+			// One full-image binarization/finder scan serves every still-missing
+			// map in this worker. This is setup/reconfiguration work only.
+			const double binStarted = emscripten_get_now();
+			ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
+			HybridBinarizer binarized(lumView);
+			auto bits = binarized.getBitMatrix();
+			measured.anchorMs += emscripten_get_now() - binStarted;
+			if (bits) {
+				const double finderStarted = emscripten_get_now();
+				auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
+				auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
+				measured.anchorMs += emscripten_get_now() - finderStarted;
 
-		// Do the expensive finder scan once per lane calibration pass. Each track
-		// then binds to the nearby real finder triplet instead of reconstructing
-		// finder geometry from its outer quad.
-		const double finderStarted = emscripten_get_now();
-		auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
-		auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
-		measured.anchorMs += emscripten_get_now() - finderStarted;
-
-		bool calibratedAny = false;
-		for (auto& track : decoder->tracks) {
-			if (!track.active || track.calibrationCooldown > 0 || track.calibrated)
-				continue;
-			++measured.calibrationAttempts;
-			const double calibrationStarted = emscripten_get_now();
-			const auto* finderSet = finderSetForTrack(track, finderSets);
-			const bool ok = finderSet && calibrateTrackSampleMap(track, *bits, *finderSet);
-			measured.anchorMs += emscripten_get_now() - calibrationStarted;
-			if (ok) {
-				++measured.anchorSuccesses;
-				++measured.calibrationSuccesses;
-				calibratedAny = true;
-			} else {
-				++measured.anchorMisses;
-				track.calibrationCooldown = 4;
+				for (auto& track : decoder->tracks) {
+					if (!track.active || track.calibrated || track.calibrationCooldown > 0)
+						continue;
+					++measured.calibrationAttempts;
+					const double calibrationStarted = emscripten_get_now();
+					const auto* finderSet = finderSetForTrack(track, finderSets);
+					const bool ok = finderSet && calibrateTrackSampleMap(track, *bits, *finderSet);
+					measured.anchorMs += emscripten_get_now() - calibrationStarted;
+					if (ok) {
+						++measured.anchorSuccesses;
+						++measured.calibrationSuccesses;
+					} else {
+						++measured.anchorMisses;
+						track.calibrationCooldown = 4;
+					}
+				}
 			}
 		}
 
-		if (calibratedAny) {
-			int calibratedTracks = 0;
-			for (const auto& track : decoder->tracks)
-				if (track.active && track.calibrated)
-					++calibratedTracks;
-			const int required = std::min(3, activeTracks);
-			if (calibratedTracks >= required) {
-				decoder->motion = {};
-				decoder->calibrationEstablished = true;
-			}
-			DecimenBatchMetrics retry{};
-			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &retry);
-			addBatchMetrics(measured, retry);
+		int calibratedTracks = 0;
+		for (const auto& track : decoder->tracks)
+			if (track.active && track.calibrated)
+				++calibratedTracks;
+		const int requiredForMotion = std::min(3, activeTracks);
+		if (activeTracks == 0 || calibratedTracks < requiredForMotion) {
+			decoder->calibrationEstablished = false;
+		} else if (!decoder->calibrationEstablished) {
+			// First qualified anchor set defines the calibration coordinate frame.
+			decoder->motion = {};
+			decoder->calibrationEstablished = true;
 		}
+
+		int count = 0;
+		if (decoder->calibrationEstablished) {
+			DecimenBatchMetrics decoded{};
+			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &decoded);
+			addBatchMetrics(measured, decoded);
+		}
+
+		// Snapshot state, not cumulative counters. The worker uses this to avoid
+		// throwing away partially completed calibration after an ordinary miss.
+		measured.activeTracks = activeTracks;
+		measured.calibratedTracks = calibratedTracks;
 		measured.totalMs = emscripten_get_now() - totalStart;
-		if (metrics) *metrics = measured;
+		if (metrics)
+			*metrics = measured;
 		return count;
 	} catch (...) {
 		return -1;
