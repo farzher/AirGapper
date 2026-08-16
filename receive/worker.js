@@ -818,6 +818,9 @@ ctx.onmessage = async (e) => {
             readFullAttempts++;
             appendResults(readFull(true, 24, true), true);
           }
+        } else if (fullMode === "seed") {
+          readFullAttempts++;
+          appendResults(readFull(true, 2, false), false);
         } else {
           readFullAttempts++;
           appendResults(readFull(fullMode === "deep", 4, false), false);

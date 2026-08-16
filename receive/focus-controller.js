@@ -850,6 +850,12 @@ class FocusController {
   noteUsefulDecode(scanId, now = performance.now()) {
     if (scanId !== void 0 && scanId >= this.decodeBoundary) this.lastUsefulDecodeAt = now;
   }
+  adoptAutomaticCameraState(reason) {
+    this.commitSettings(this.settings());
+    this.beginDecodeGeneration();
+    this.lastReason = reason;
+    this.changed();
+  }
   observe(id, geometry, metrics, totalTiles = 1, now = performance.now(), captureFps = 0) {
     var _a, _b;
     const observation = { id, at: now, geometry, metrics, totalTiles, captureFps };

@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.140";
+const RECEIVER_RUNTIME_BUILD = "v0.5.141";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -207,6 +207,15 @@ const AUTO_QR_EV_BIAS = -0.7;
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
+const AUTO_OPTICS_LOCK_SETTLE_MS = 650;
+const AUTO_OPTICS_RELEASE_SILENCE_MS = 2400;
+const AUTO_OPTICS_RECENT_DECODE_MS = 700;
+const AUTO_OPTICS_MIN_RECENT_DECODES = 4;
+const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.30;
+let autoOpticsRuntimeState = "ae";
+let autoOpticsMutationRunning = false;
+let autoOpticsLockSince = 0;
+let autoOpticsRetryAt = 0;
 let preferredExposureTime;
 let manualFocusMode = "camera-auto";
 let preferredFocusDistance;
@@ -1007,6 +1016,7 @@ function livePercentile(values, fraction) {
 let totalCaptures = 0;
 let totalDecodes = 0;
 let fullScans = 0;
+let acquisitionTileCursor = 0;
 let peakRegions = 0;
 let capturesDropped = 0;
 const candidateEvidenceWindows = /* @__PURE__ */ new Map();
@@ -1748,7 +1758,9 @@ function noteDecodeCompleted(id, completion) {
 }
 const REGION_TTL_MS = 5e3;
 const SIGHTING_REGION_TTL_MS = 3e3;
-const ACQUISITION_SCAN_MS = 100;
+const ACQUISITION_SCAN_MS = 45;
+const ACQUISITION_FULL_EVERY = 4;
+const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
 const GEOMETRY_PROBE_SILENCE_MS = 650;
 const GEOMETRY_COLD_MISSES = 3;
@@ -2062,8 +2074,110 @@ async function applyExposureSetting(track) {
     cameraIsoValue.value = String(Number(requestedIso.toPrecision(4)));
   }
 }
+function resetAutomaticOpticsRuntime() {
+  autoOpticsRuntimeState = "ae";
+  autoOpticsMutationRunning = false;
+  autoOpticsLockSince = 0;
+  autoOpticsRetryAt = 0;
+}
+function quantizeCameraRange(value, range) {
+  const clamped = Math.max(range.min, Math.min(range.max, value));
+  if (!range.step || range.step <= 0) return clamped;
+  return Math.max(range.min, Math.min(range.max,
+    range.min + Math.round((clamped - range.min) / range.step) * range.step
+  ));
+}
+async function settleAutomaticQrOptics(track, now) {
+  if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
+  const caps = track.getCapabilities?.() ?? {};
+  const exposureRange = caps.exposureTime;
+  const isoRange = caps.iso;
+  const settings = track.getSettings();
+  if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") ||
+      !exposureRange || !isoRange || !Number.isFinite(settings.exposureTime) ||
+      !Number.isFinite(settings.iso) || settings.exposureTime <= 0 || settings.iso <= 0) {
+    autoOpticsRetryAt = now + 2500;
+    return;
+  }
+  const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+  // exposureTime is reported in 0.1 ms units on Chromium camera controls.
+  // 30% of a frame is 10 ms at 30 fps / 5 ms at 60 fps: short enough to cut
+  // handheld/display-transition blur without demanding extreme gain.
+  const motionSafeExposure = 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
+  const exposureProduct = settings.exposureTime * settings.iso;
+  const maxAutoIso = Math.min(isoRange.max, Math.max(isoRange.min, settings.iso * 4));
+  let exposure = quantizeCameraRange(Math.min(settings.exposureTime, motionSafeExposure), exposureRange);
+  let iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
+  if (iso > maxAutoIso) {
+    iso = quantizeCameraRange(maxAutoIso, isoRange);
+    exposure = quantizeCameraRange(exposureProduct / Math.max(isoRange.min, iso), exposureRange);
+  }
+  // Re-quantize gain after shutter quantization so brightness remains close to
+  // the hardware-AE baseline rather than accidentally changing EV.
+  iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
+  autoOpticsMutationRunning = true;
+  autoOpticsRuntimeState = "settling";
+  holdDecoderForCameraMutation("automatic QR optics settling", 280);
+  try {
+    const accepted = await applyCameraConstraint(track, {
+      exposureMode: "manual",
+      exposureTime: exposure,
+      iso
+    });
+    if (!accepted || track.readyState !== "live") {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsRetryAt = receiverNow() + 2200;
+      return;
+    }
+    autoOpticsRuntimeState = "manual";
+    autoOpticsRetryAt = receiverNow() + 1500;
+    preferredExposureTime = track.getSettings().exposureTime ?? exposure;
+    preferredIso = track.getSettings().iso ?? iso;
+    focusController.adoptAutomaticCameraState("automatic QR exposure settled to motion-safe shutter + ISO");
+  } finally {
+    autoOpticsMutationRunning = false;
+  }
+}
+async function releaseAutomaticQrOptics(track, now) {
+  if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
+  autoOpticsMutationRunning = true;
+  autoOpticsRuntimeState = "settling";
+  holdDecoderForCameraMutation("automatic optics returning to hardware AE", 280);
+  try {
+    await applyExposureSetting(track);
+    autoOpticsRuntimeState = "ae";
+    autoOpticsLockSince = 0;
+    autoOpticsRetryAt = receiverNow() + 900;
+    focusController.adoptAutomaticCameraState("target lost; hardware AE restored for reacquisition");
+  } finally {
+    autoOpticsMutationRunning = false;
+  }
+}
+function maintainAutomaticQrOptics(now) {
+  if (!automaticOptics || replayRunning || optimizerPipelineActive || optimizeRunning || autoOpticsMutationRunning) return;
+  const track = stream?.getVideoTracks()[0];
+  if (!track || track.readyState !== "live") return;
+  if (gridLattice.locked) {
+    if (!autoOpticsLockSince) autoOpticsLockSince = now;
+    const recentDecodes = qrReadTimes.reduce((count, at) => count + Number(at > now - AUTO_OPTICS_RECENT_DECODE_MS), 0);
+    const decodeFresh = Boolean(lastStreamDecodeAt && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
+    if (autoOpticsRuntimeState === "ae" && decodeFresh && recentDecodes >= AUTO_OPTICS_MIN_RECENT_DECODES &&
+        now - autoOpticsLockSince >= AUTO_OPTICS_LOCK_SETTLE_MS && now >= autoOpticsRetryAt) {
+      void settleAutomaticQrOptics(track, now);
+    }
+    return;
+  }
+  autoOpticsLockSince = 0;
+  if (autoOpticsRuntimeState === "manual" &&
+      (!lastStreamDecodeAt || now - lastStreamDecodeAt >= AUTO_OPTICS_RELEASE_SILENCE_MS) &&
+      now >= autoOpticsRetryAt) {
+    void releaseAutomaticQrOptics(track, now);
+  }
+}
+
 function populateBrowserCapabilities(track) {
   var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+  resetAutomaticOpticsRuntime();
   seedDesiredCamera(track);
   const caps = (_a = track.getCapabilities) == null ? void 0 : _a.call(track);
   cameraResolutionLabel.textContent = "Mode";
@@ -2432,6 +2546,7 @@ function renderFocusDiagnostics() {
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
+    `AutoOptics ${automaticOptics ? autoOpticsRuntimeState : "off"}${autoOpticsRuntimeState === "manual" ? " · QR exposure held" : autoOpticsRuntimeState === "ae" ? " · hardware AE" : ""}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
@@ -2569,6 +2684,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 });
 cameraExposureAuto.addEventListener("change", () => {
   automaticOptics = cameraExposureAuto.checked;
+  resetAutomaticOpticsRuntime();
   clearTimeout(exposureApplyTimer);
   syncExposureControls();
   saveCameraSettings();
@@ -2795,6 +2911,7 @@ function stopReceiver() {
   totalCaptures = 0;
   totalDecodes = 0;
   fullScans = 0;
+  acquisitionTileCursor = 0;
   peakRegions = 0;
   capturesDropped = 0;
   cameraStartedTs = 0;
@@ -3761,6 +3878,24 @@ function cloneDirectDecodeFrame(source) {
   if (optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
   return cloneVideoFrame(source, false);
 }
+function acquisitionSeedWindow(index, width, height) {
+  // 3x3 overlapping windows work for both portrait 3xN and landscape Nx3 QR
+  // walls. A window is deliberately larger than one cell so a QR that lands on
+  // a tile boundary is still whole in a neighboring attempt.
+  const cols = 3, rows = 3;
+  const col = index % cols;
+  const row = Math.floor(index / cols) % rows;
+  const cellW = width / cols;
+  const cellH = height / rows;
+  const padX = cellW * 0.28;
+  const padY = cellH * 0.28;
+  const quantum = 16;
+  const x = Math.max(0, Math.floor((col * cellW - padX) / quantum) * quantum);
+  const y = Math.max(0, Math.floor((row * cellH - padY) / quantum) * quantum);
+  const right = Math.min(width, Math.ceil(((col + 1) * cellW + padX) / quantum) * quantum);
+  const bottom = Math.min(height, Math.ceil(((row + 1) * cellH + padY) / quantum) * quantum);
+  return { x, y, w: Math.max(32, right - x), h: Math.max(32, bottom - y) };
+}
 function cloneDirectFullScanFrame(source) {
   if (optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
   // Full acquisition/reacquisition must stay on the same TrackProcessor Y plane
@@ -3954,6 +4089,7 @@ async function captureFrame(source) {
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   const now = receiverNow();
+  maintainAutomaticQrOptics(now);
   const trace = replayRunning ? {
     sequence: source.sequence,
     timestampMs: now,
@@ -4168,11 +4304,24 @@ async function captureFrame(source) {
       geometryRecoveryProbes++;
       notePipelineEvent("global-recovery-probe", geometryRecoveryProbes);
     }
-    // Seven cheap seed attempts for every deep tryHarder attempt. Never run a
-    // cheap miss and a deep retry on the same frame: the next camera frame is
-    // fresher and avoids the old multi-second double scan.
-    const acquisitionMode = captureNextScan ? "thorough" : fullScans % 8 === 0 ? "deep" : "fast";
+    // A dense 18-QR wall can present 54 finder patterns to the generic
+    // detector. That is a bad acquisition problem even when every QR is sharp.
+    // Keep the first and every fourth attempt full-frame (important for 1-QR
+    // senders), but rotate the intervening attempts through overlapping 3x3
+    // seed windows. Any verified packet declares layout + slot and immediately
+    // gives the lattice useful provisional geometry.
+    const fullFrameSeed = captureNextScan || (fullScans - 1) % ACQUISITION_FULL_EVERY === 0;
+    let acquisitionMode = captureNextScan ? "thorough" : fullFrameSeed
+      ? fullScans % ACQUISITION_DEEP_EVERY === 0 ? "deep" : "fast"
+      : "seed";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
+    if (!captureNextScan && preLatticeDiscovery && !lastGridSnapshot && !fullFrameSeed) {
+      const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
+      scanX = seed.x;
+      scanY = seed.y;
+      scanW = seed.w;
+      scanH = seed.h;
+    }
     // A provisional seed already tells us where the declared neighbors
     // should roughly be. Search visible unknown slots there while continuing
     // to track exact observed slots; do not spend a full-frame finder pass on
