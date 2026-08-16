@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.101";
+const RECEIVER_RUNTIME_BUILD = "v0.5.102";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3198,8 +3198,15 @@ function cloneVideoFrame(source, forceRgba = false) {
   }
 }
 function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
-  const direct = cloneDirectDecodeFrame(source);
-  if (!direct) return null;
+  // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
+  // path for every receiver state. Never decline direct Y8 because an optics
+  // sample is due; doing so used to fall through to live <video> canvas readback.
+  if (directFrameDisabled || optimizerPipelineActive || source.image || !source.videoFrame || typeof VideoFrame !== "function") return null;
+  const direct = cloneVideoFrame(source, false);
+  if (!direct || direct.pixelFormat !== "y8") {
+    direct?.frame.close();
+    return null;
+  }
   const pixelXf = direct.visibleX + x * direct.scaleX;
   const pixelYf = direct.visibleY + y * direct.scaleY;
   const pixelRf = direct.visibleX + (x + w) * direct.scaleX;
@@ -3589,8 +3596,9 @@ async function captureFrame(source) {
       scanW = Math.max(32, scanRight - scanX);
       scanH = Math.max(32, scanBottom - scanY);
     }
-    const wantsDirectFull = scanX === 0 && scanY === 0 && scanW === vw && scanH === vh && !lockedGeometryTrusted;
-    const directFull = wantsDirectFull ? cloneDirectFullScanFrame(source) : null;
+    const directFull = source.videoFrame && !source.image && !captureNextScan
+      ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, [])
+      : null;
     if (directFull) {
       const id = frameId++;
       if (!submitReceiverJob(
@@ -3608,7 +3616,7 @@ async function captureFrame(source) {
           outputMap: directFull.outputMap
         },
         [directFull.frame],
-        "DIRECT FULL Y8",
+        "DIRECT RECOVERY Y8",
         trace,
         source.sequence
       )) directFull.frame.close();
@@ -3616,14 +3624,12 @@ async function captureFrame(source) {
       activeBenchmarkFrame = void 0;
       return;
     }
-    // A TrackProcessor frame exists, but direct Y-plane mapping was unavailable.
-    // Do not fall through to drawImage(video)/getImageData during acquisition or
-    // reacquisition: that live-video readback is the operation correlated with
-    // the Android camera wedge. Skip this scan and retry on the next camera frame.
-    if (wantsDirectFull && source.videoFrame && !source.image) {
-      notePipelineEvent("direct-full-y8-unavailable");
+    // A TrackProcessor source is never allowed to switch to the live <video>
+    // canvas path. Drop this recovery attempt and use the next camera frame.
+    if (source.videoFrame && !source.image) {
+      notePipelineEvent("direct-recovery-y8-unavailable");
       if (trace) {
-        trace.decision = "direct full Y8 unavailable; recovery scan skipped";
+        trace.decision = "direct recovery Y8 unavailable; frame dropped";
         trace.stateAfter = gridLattice.state;
       }
       activeBenchmarkFrame = void 0;
@@ -3718,6 +3724,10 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       let laneImage;
       const direct = mappedDirectTrackedFrame(source, x, y, w, h, group.tracks);
       if (!direct) {
+        if (source.videoFrame && !source.image) {
+          notePipelineEvent("direct-lane-y8-unavailable");
+          continue;
+        }
         laneImage = readBoundedVideoCrop(source, x, y, w, h);
         if (laneJobsSubmitted === 0) inspectStaticQrOptics(source, laneImage, x, y);
       }
@@ -3783,13 +3793,18 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         return;
       }
       let shared;
-      const sharedDirect = healthyGrid ? mappedDirectTrackedFrame(source, x, y, w, h, batchTracks) : null;
+      const sharedDirect = mappedDirectTrackedFrame(source, x, y, w, h, batchTracks);
       if (!sharedDirect) {
+        if (source.videoFrame && !source.image) {
+          notePipelineEvent("direct-shared-y8-unavailable");
+          activeBenchmarkFrame = void 0;
+          return;
+        }
         shared = readBoundedVideoCrop(source, x, y, w, h);
         inspectStaticQrOptics(source, shared, x, y);
         captureSubmittedScan(shared, x, y, false, batchTracks.map((track) => track.quad));
       }
-      if (healthyGrid) {
+      if (healthyGrid || sharedDirect) {
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
@@ -3860,11 +3875,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     const w = Math.ceil(right + pad) - x;
     const h = Math.ceil(bottom + pad) - y;
     if (w < 32 || h < 32) continue;
-    const img = readBoundedVideoCrop(source, x, y, w, h);
-    inspectStaticQrOptics(source, img, x, y);
-    captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
-    const id = frameId++;
-    cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     const individualTrack = {
       id: r.id,
       slot: r.gridSlot,
@@ -3873,14 +3883,32 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       dim: r.dim,
       crc32: Boolean(r.crc32)
     };
+    const direct = mappedDirectTrackedFrame(source, x, y, w, h, [individualTrack]);
+    let img;
+    if (!direct) {
+      if (source.videoFrame && !source.image) {
+        notePipelineEvent("direct-individual-y8-unavailable");
+        continue;
+      }
+      img = readBoundedVideoCrop(source, x, y, w, h);
+      inspectStaticQrOptics(source, img, x, y);
+      captureSubmittedScan(img, x, y, false, r.quad ? [r.quad] : []);
+    }
+    const id = frameId++;
+    cropAttempts.set(id, [{ region: r, quad: r.quad }]);
+    const message = direct
+      ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: "y8", outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
+      : { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive() };
+    const transfer = direct ? [direct.frame] : [img.data.buffer];
     if (!submitReceiverJob(
-      { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive() },
-      [img.data.buffer],
-      "INDIVIDUAL TRACKED CROP",
+      message,
+      transfer,
+      direct ? "Y8 INDIVIDUAL TRACKED" : "INDIVIDUAL TRACKED CROP",
       trace,
       source.sequence,
       [r]
     )) {
+      direct?.frame.close();
       cropAttempts.delete(id);
       if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
       poolBusyTimes.push(receiverNow());
