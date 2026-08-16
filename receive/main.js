@@ -40,13 +40,14 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.112";
+const RECEIVER_RUNTIME_BUILD = "v0.5.113";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
 const cameraResolution = document.getElementById("camera-resolution");
 const cameraResolutionLabel = document.getElementById("camera-resolution-label");
 const decodeWorkers = document.getElementById("decode-workers");
+const deviceLabel = document.getElementById("device-label");
 const decodeWorkersControl = document.getElementById("decode-workers-control");
 const strictHotPathToggle = document.getElementById("strict-hot-path");
 const cameraActual = document.getElementById("camera-actual");
@@ -177,6 +178,18 @@ function strictHotPathActive() {
   return strictHotPathEnabled || replayRunning && replayMode.value === "correctness";
 }
 const CAMERA_SETTINGS_KEY = "airgapper:camera-settings:v9";
+const DEVICE_LABEL_KEY = "airgapper:device-label:v1";
+if (deviceLabel) {
+  try { deviceLabel.value = localStorage.getItem(DEVICE_LABEL_KEY) ?? ""; } catch {}
+  deviceLabel.addEventListener("change", () => {
+    try {
+      const value = deviceLabel.value.trim().slice(0, 80);
+      deviceLabel.value = value;
+      if (value) localStorage.setItem(DEVICE_LABEL_KEY, value);
+      else localStorage.removeItem(DEVICE_LABEL_KEY);
+    } catch {}
+  });
+}
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480],
@@ -1363,7 +1376,7 @@ function noteDecodeCompleted(id, completion) {
       nativeMs: completion.nativeMetrics?.totalMs || 0,
       copyMs: completion.frameCopyMs || 0,
       robustBands: completion.robustBands || 1,
-      robustSearchMs: completion.robustSearchMs || 0
+      robustSearchMs: completion.robustMs || completion.robustSearchMs || 0
     });
   }
   hotPathJobMode.delete(id);
@@ -5135,7 +5148,7 @@ async function runReceiverBenchmark() {
       format: "AirGapper receiver benchmark",
       version: (_e = document.querySelector(".app-version")) == null ? void 0 : _e.textContent,
       corpus: corpus.header,
-      replay: { mode: replayMode.value, workers: pool.size, device: navigator.userAgent },
+      replay: { mode: replayMode.value, workers: pool.size, deviceLabel: deviceLabel?.value.trim() || null, device: navigator.userAgent },
       acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference].sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction].sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction].timestampMs - benchmarkTraces[firstReference].timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout].sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock].sequence },
       recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss].sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery].sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery].sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered].sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored].sequence },
       throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
@@ -5247,7 +5260,13 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
     : "none";
   const lastCompletionAgeMs = livePipeline.lastCompletedAt ? now - livePipeline.lastCompletedAt : pipelineSeconds * 1e3;
   const lastSubmitAgeMs = livePipeline.lastSubmittedAt ? now - livePipeline.lastSubmittedAt : pipelineSeconds * 1e3;
-  transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"}
+  const diagnosticP95Ms = Math.max(trackedP95, fullP95);
+  const diagnosticStallThresholdMs = Math.max(5e3, Math.min(9e3, diagnosticP95Ms * 4 || 5e3));
+  const diagnosticStalled = activeJobs.length > 0 && oldestActiveMs >= diagnosticStallThresholdMs && lastCompletionAgeMs >= diagnosticStallThresholdMs;
+  const diagnosticSaturated = !diagnosticStalled && cameraRate > 0 && pool.size > 0 && pool.busyCount === pool.size;
+  const pipelineState = diagnosticStalled ? "STALLED" : diagnosticSaturated ? "SATURATED" : activeJobs.length ? "ACTIVE" : "IDLE";
+  const diagnosticDevice = deviceLabel?.value.trim() || "unlabeled";
+  transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"} · Device ${diagnosticDevice}
 Transport
 Run ${runSeconds ? formatDuration(runSeconds) : "waiting for first packet"}${cameraSeconds ? ` · camera ${formatDuration(cameraSeconds)}` : ""} · recent window ${(STATS_WINDOW_MS / 1e3).toFixed(1)}s
 Average unique ${runUniqueRate.toFixed(1)} QR/s · duplicate ${runDuplicateRate.toFixed(1)} QR/s (${runDuplicatePercent.toFixed(0)}%) · useful ${runUsefulRate.toFixed(1)} QR/s · ${runGoodputKbs.toFixed(1)} KB/s
@@ -5255,7 +5274,7 @@ Recent  unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixe
 Recent  useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
 ${totals}
 
-Pipeline
+Pipeline · ${pipelineState}
 Camera ${pipelineSeconds ? formatDuration(pipelineSeconds) : "—"} · delivered ${livePipeline.captures} (${pipelineSeconds ? (livePipeline.captures / pipelineSeconds).toFixed(1) : "0.0"}/s) · processor ${processorTotal || "—"} source / ${processorDiscarded} discarded (${processorDropPercent.toFixed(1)}%)
 Schedule ${livePipeline.submittedFrames} frames · ${livePipeline.submittedJobs} jobs = ${livePipeline.submittedTracked} tracked + ${livePipeline.submittedFull} full (${livePipeline.submittedAcquisition} acquire / ${livePipeline.submittedReacquire} reacquire) · ${busyDrops} worker-busy drops · ${activeJobs.length} in flight
 Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.trackedOutputSymbols} tracked outputs (${trackedYield.toFixed(1)}%) · full outputs ${livePipeline.fullOutputSymbols} · ${livePipeline.readFullAttempts} readFull calls
@@ -5290,10 +5309,8 @@ Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · a
     ? `Scanner error: ${lastDecodeError}`
     : stalled
       ? `Scanner stalled · oldest job ${(oldestActiveMs / 1e3).toFixed(1)}s`
-      : saturated
-        ? `Scanner saturated · oldest job ${(oldestActiveMs / 1e3).toFixed(1)}s`
-        : "";
-  limit.classList.toggle("scanner-bound", stalled || saturated || Boolean(lastDecodeError));
+      : "";
+  limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
   const elapsed = (now - startTs) / 1e3;
   const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
