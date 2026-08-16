@@ -751,7 +751,7 @@ ctx.onmessage = async (e) => {
         }
       }
     }
-    if (!strictHotPath && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+    if ((full || !strictHotPath) && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       fallbackAttempted = !full;
       const appendResults = (vec, includeErrors) => {
         try {

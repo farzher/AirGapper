@@ -147,15 +147,28 @@ for (let count = 1; count <= hardwareThreadCount; count++) {
 function selectedWorkerCount() {
   return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
 }
-let strictHotPathEnabled = false;
+let strictHotPathEnabled = strictHotPathToggle.checked;
 let strictHotPathLockSeen = false;
 let hotPathAuditGeneration = 0;
 const hotPathJobMode = new Map();
 strictHotPathToggle.addEventListener("change", () => {
   strictHotPathEnabled = strictHotPathToggle.checked;
-  strictHotPathLockSeen = false;
   hotPathAuditGeneration++;
+  hotPathJobMode.clear();
   resetHotPathAudit();
+  lastDirectPixelPath = "—";
+  minimumAcceptedScanId = frameId;
+  clearPendingGridLanes();
+  cropAttempts.clear();
+  // Plain/sighting regions are acquisition hints, never persistent Strict tracks.
+  for (let i = regions.length - 1; i >= 0; i--) {
+    if (regions[i].gridSlot === void 0) regions.splice(i, 1);
+  }
+  strictHotPathLockSeen = Boolean(gridLattice.locked);
+  // Worker-local native geometry and direct pixel-mode adaptation are session state.
+  // Recreate workers at this mode boundary so the audit starts from a known state.
+  pool.resize(0);
+  if (stream && !done) pool.resize(selectedWorkerCount());
 });
 function strictHotPathActive() {
   return strictHotPathEnabled || replayRunning && replayMode.value === "correctness";
@@ -2813,6 +2826,7 @@ function readBoundedVideoCrop(source, x, y, w, h) {
   return ctx.getImageData(0, 0, w, h);
 }
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
+  if (message.strictHotPath === void 0) message.strictHotPath = strictHotPathActive();
   const auditMode = { generation: hotPathAuditGeneration, strict: Boolean(message.strictHotPath) };
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
@@ -3229,8 +3243,11 @@ async function captureFrame(source) {
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const scanInterval = live === 0 ? ACQUISITION_SCAN_MS : FULL_SCAN_DEGRADED_MS;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
-  const fullScanDue = captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
-  if (!fullScanDue && regions.length === 0) {
+  const strictAcquiring = strictHotPathActive() && !gridLattice.locked;
+  const fullScanDue = strictAcquiring
+    ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
+    : captureNextScan ? !captureHasTrackedWork : needsRecoveryScan && now - lastFullScan > scanInterval;
+  if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
     if (trace) {
       trace.decision = "full scan throttled";
       trace.stateAfter = gridLattice.state;
@@ -3623,7 +3640,6 @@ function onDecoded(bytes, box, info) {
     if (decoder) return;
     try {
       const text = plainQrDecoder.decode(bytes);
-      if (box && !optimizerAttribution) noteRegion(box, decodedAt, true, info);
       const settled = plainQrPolicy.addPlain(text, (_a = info == null ? void 0 : info.scanId) != null ? _a : -1);
       if (settled) finishPlainQr(settled);
     } catch {
