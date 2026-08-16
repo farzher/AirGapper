@@ -16,11 +16,13 @@ import { isSnippet, snippetText } from "../shared/snippet.js";
 import {
   fnv1a,
   frameHeaderLength,
+  frameOverhead,
   parseFrame,
   streamIdentity,
   unpackFile,
   verifyFile
 } from "../shared/protocol.js";
+import { RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
 import { applyAdvancedConstraint, isAndroid, isIOS } from "../shared/platform.js";
@@ -621,6 +623,7 @@ function clearPendingGridLanes() {
 function queuePendingGridLane(groupIndex, source, geometry) {
   const direct = mappedDirectTrackedFrame(source, geometry.x, geometry.y, geometry.w, geometry.h, geometry.tracks);
   if (!direct) return false;
+  if (pendingGridLanes[groupIndex]) pendingLaneReplaceTimes.push(receiverNow());
   discardPendingGridLane(groupIndex);
   pendingGridLanes[groupIndex] = { ...geometry, direct };
   return true;
@@ -688,6 +691,10 @@ const duplicateQrTimes = [];
 const poolBusyTimes = [];
 const scanCompletionTimes = [];
 const decodeFrameTimes = [];
+const hotJobSubmitSamples = [];
+const hotJobCompletionSamples = [];
+const workerLoadSamples = [];
+const pendingLaneReplaceTimes = [];
 let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
 let totalCaptures = 0;
@@ -1216,6 +1223,16 @@ function noteSequence(region, seq, now) {
 function noteDecodeCompleted(id, completion) {
   var _a;
   const auditMode = hotPathJobMode.get(id);
+  if (auditMode) {
+    hotJobCompletionSamples.push({
+      at: receiverNow(),
+      tracks: auditMode.tracks || 0,
+      full: auditMode.full,
+      latencyMs: completion.latencyMs || 0,
+      nativeMs: completion.nativeMetrics?.totalMs || 0,
+      copyMs: completion.frameCopyMs || 0
+    });
+  }
   hotPathJobMode.delete(id);
   const auditThisCompletion = Boolean(auditMode && auditMode.generation === hotPathAuditGeneration && auditMode.strict === strictHotPathEnabled);
   const benchmarkTrace = benchmarkJobFrames.get(id);
@@ -1736,34 +1753,17 @@ video.addEventListener("loadedmetadata", syncPreviewAspect);
 window.addEventListener("resize", syncPreviewAspect);
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
-const MAX_QR_MODULES = 177;
-const BLUE_MIN_PIXELS_PER_MODULE = 4.5;
 const overlayCtx = overlay.getContext("2d");
 function captureQualityRate(region, now) {
   pruneSequenceSamples(region, now);
   return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
 }
-function hasDensityHeadroom(region) {
-  if (!validQuadObject(region.quad) || !region.dim || region.dim >= MAX_QR_MODULES) return false;
-  const corners = [
-    region.quad.topLeft,
-    region.quad.topRight,
-    region.quad.bottomRight,
-    region.quad.bottomLeft
-  ];
-  let shortestEdge = Infinity;
-  for (let i = 0; i < corners.length; i++) {
-    const a = corners[i];
-    const b = corners[(i + 1) % corners.length];
-    shortestEdge = Math.min(shortestEdge, Math.hypot(a.x - b.x, a.y - b.y));
-  }
-  return shortestEdge / region.dim >= BLUE_MIN_PIXELS_PER_MODULE;
-}
 function captureQualityColor(region, rate) {
-  const headroom = hasDensityHeadroom(region);
+  // Overlay color is decode reliability only. Spatial density, FPS, and
+  // layout headroom are separate throughput questions.
   let level = 0;
-  if ((rate >= 0.95 || region.qualityLevel === 5 && rate >= 0.9) && headroom) level = 5;
-  else if ((rate >= 0.8 || region.qualityLevel >= 4 && rate >= 0.72) && headroom) level = 4;
+  if (rate >= 0.95 || region.qualityLevel === 5 && rate >= 0.9) level = 5;
+  else if (rate >= 0.8 || region.qualityLevel >= 4 && rate >= 0.72) level = 4;
   else if (rate >= 0.6 || region.qualityLevel >= 3 && rate >= 0.52) level = 3;
   else if (rate >= 0.35 || region.qualityLevel >= 2 && rate >= 0.28) level = 2;
   else if (rate >= 0.12 || region.qualityLevel >= 1 && rate >= 0.08) level = 1;
@@ -1951,7 +1951,37 @@ function renderFocusDiagnostics() {
   const manualVerdict = manualCandidate ? manualCandidate.distance > 0.35 ? "manual configuration coarse-search result: NOT TESTED" : manualMeasured && manualMeasured.performance.perQrAttemptSuccessRate > manualCandidate.candidate.successRate + 0.15 ? `TESTED AS ${manualCandidate.candidate.candidateId} · Optimize ${(manualCandidate.candidate.successRate * 100).toFixed(0)}% vs live manual ${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}% → MEASUREMENT BUG` : `TESTED AS ${manualCandidate.candidate.candidateId}` : "";
   const sourceTrack = stream?.getVideoTracks()[0];
   const sourceSettings = sourceTrack?.getSettings();
-  const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > receiverNow() - STATS_WINDOW_MS), 0) / (STATS_WINDOW_MS / 1e3);
+  const perfNow = receiverNow();
+  const windowStart = perfNow - STATS_WINDOW_MS;
+  const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  for (const samples of [hotJobSubmitSamples, hotJobCompletionSamples, workerLoadSamples]) {
+    while (samples.length && samples[0].at <= windowStart) samples.shift();
+  }
+  while (pendingLaneReplaceTimes.length && pendingLaneReplaceTimes[0] <= windowStart) pendingLaneReplaceTimes.shift();
+  const trackedSubmits = hotJobSubmitSamples.filter((sample) => !sample.full);
+  const trackedCompletions = hotJobCompletionSamples.filter((sample) => !sample.full);
+  const submittedJobsRate = trackedSubmits.length / (STATS_WINDOW_MS / 1e3);
+  const completedJobsRate = trackedCompletions.length / (STATS_WINDOW_MS / 1e3);
+  const attemptedQrRate = trackedSubmits.reduce((sum, sample) => sum + sample.tracks, 0) / (STATS_WINDOW_MS / 1e3);
+  const completedQrRate = trackedCompletions.reduce((sum, sample) => sum + sample.tracks, 0) / (STATS_WINDOW_MS / 1e3);
+  const decodeSourceRate = decodeFrameTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  const validQrRate = qrReadTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  const uniqueQrRate = uniqueQrTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  const duplicateQrRate = duplicateQrTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  const workerBusyEventRate = poolBusyTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
+  const workerUtilization = workerLoadSamples.length
+    ? workerLoadSamples.reduce((sum, sample) => sum + (sample.size ? sample.busy / sample.size : 0), 0) / workerLoadSamples.length
+    : 0;
+  const averageJobMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.latencyMs, 0) / trackedCompletions.length : 0;
+  const averageNativeMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.nativeMs, 0) / trackedCompletions.length : 0;
+  const averageCopyMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.copyMs, 0) / trackedCompletions.length : 0;
+  const visibleSlotCount = regions.reduce((count, region) => count + Number(region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN"), 0);
+  const qrOpportunityRate = sourceCaptureRate * visibleSlotCount;
+  const attemptCoverage = qrOpportunityRate > 0 ? attemptedQrRate / qrOpportunityRate : 0;
+  const packetInternalBytes = decoder?.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
+  const transportMetadataBytes = decoder ? frameOverhead(decoder.mode) + packetInternalBytes : 0;
+  const transportFrameBytes = decoder ? decoder.blockLen + frameOverhead(decoder.mode) : 0;
+  const transportSourceBytes = decoder ? decoder.blockLen - packetInternalBytes : 0;
   const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
     : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
@@ -1967,6 +1997,11 @@ function renderFocusDiagnostics() {
     `3A       manual exposure ${manualExposureFocusPolicy === "requires-hold" ? "requires AF hold on this camera" : manualExposureFocusPolicy}`,
     `Camera   focus writes ${cameraFocusWritesTotal} · exposure writes ${cameraExposureWritesTotal}`,
     `Source   ${sourceLine}`,
+    `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · decode frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
+    `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
+    `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · lane replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · avg job ${averageJobMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
@@ -2907,12 +2942,19 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     full: Boolean(message.full),
     acquisition: Boolean(message.full && !gridLattice.locked),
     reacquire: Boolean(message.full && gridLattice.locked),
+    tracks: Array.isArray(message.tracks) ? message.tracks.length : 0,
     kind
   };
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (accepted) {
     hotPathJobMode.set(message.id, auditMode);
     const submittedAt = receiverNow();
+    hotJobSubmitSamples.push({
+      at: submittedAt,
+      tracks: auditMode.tracks,
+      full: auditMode.full,
+      pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0)
+    });
     scanCapturedAt.set(message.id, submittedAt);
     if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
       lastDecodeSubmittedSourceSequence = sourceSequence;
@@ -3311,6 +3353,7 @@ async function captureFrame(source) {
     activeBenchmarkFrame = trace;
   }
   captureTimes.push(now);
+  workerLoadSamples.push({ at: now, busy: pool.busyCount, size: pool.size });
   totalCaptures++;
   if (optimizerPipelineActive) {
     captureOptimizerOpticalSample(source);
@@ -3752,6 +3795,10 @@ function resetActiveTransfer() {
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
   usefulFrameTimes.length = 0;
+  hotJobSubmitSamples.length = 0;
+  hotJobCompletionSamples.length = 0;
+  workerLoadSamples.length = 0;
+  pendingLaneReplaceTimes.length = 0;
   resetHotPathAudit();
   strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
