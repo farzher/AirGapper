@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.108";
+const RECEIVER_RUNTIME_BUILD = "v0.5.109";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5091,11 +5091,21 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   const transportRate = uniqueRate + duplicateRate;
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
+  const runSeconds = decoder && startTs ? Math.max(1e-3, (now - startTs) / 1e3) : 0;
+  const cameraSeconds = cameraStartedTs ? Math.max(0, (now - cameraStartedTs) / 1e3) : 0;
+  const runUniqueRate = decoder && runSeconds ? decoder.framesNew / runSeconds : 0;
+  const runDuplicateRate = decoder && runSeconds ? decoder.framesDup / runSeconds : 0;
+  const runUsefulRate = decoder && runSeconds ? decoder.usefulSymbols / runSeconds : 0;
+  const runTransportRate = runUniqueRate + runDuplicateRate;
+  const runDuplicatePercent = runTransportRate > 0 ? runDuplicateRate / runTransportRate * 100 : 0;
+  const runGoodputKbs = decoder && runSeconds ? decoder.usefulSymbols * decoder.blockLen / expectedCodingOverhead() / 1024 / runSeconds : 0;
   const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
   transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"}
 Transport
-Unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
-Useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
+Run ${runSeconds ? formatDuration(runSeconds) : "waiting for first packet"}${cameraSeconds ? ` · camera ${formatDuration(cameraSeconds)}` : ""} · recent window ${(STATS_WINDOW_MS / 1e3).toFixed(1)}s
+Average unique ${runUniqueRate.toFixed(1)} QR/s · duplicate ${runDuplicateRate.toFixed(1)} QR/s (${runDuplicatePercent.toFixed(0)}%) · useful ${runUsefulRate.toFixed(1)} QR/s · ${runGoodputKbs.toFixed(1)} KB/s
+Recent  unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
+Recent  useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
 ${totals}
 
 Runtime ${RECEIVER_RUNTIME_BUILD}
