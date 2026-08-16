@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.138";
+const RECEIVER_RUNTIME_BUILD = "v0.5.139";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -791,6 +791,40 @@ const captureTimes = [];
 const qrReadTimes = [];
 const uniqueQrTimes = [];
 const duplicateQrTimes = [];
+const sourceSequencesByEsi = new Map();
+const duplicateSourceDelta = { same: 0, one: 0, two: 0, later: 0, unknown: 0 };
+function resetDuplicateAttribution() {
+  sourceSequencesByEsi.clear();
+  duplicateSourceDelta.same = 0;
+  duplicateSourceDelta.one = 0;
+  duplicateSourceDelta.two = 0;
+  duplicateSourceDelta.later = 0;
+  duplicateSourceDelta.unknown = 0;
+}
+function noteDuplicateAttribution(esi, sourceSequence, duplicate) {
+  const sequence = Number(sourceSequence);
+  const prior = sourceSequencesByEsi.get(esi) ?? [];
+  if (duplicate) {
+    if (!Number.isFinite(sequence) || !prior.length) {
+      duplicateSourceDelta.unknown++;
+    } else {
+      const delta = prior.reduce((best, item) => Math.min(best, Math.abs(sequence - item)), Infinity);
+      if (delta === 0) duplicateSourceDelta.same++;
+      else if (delta === 1) duplicateSourceDelta.one++;
+      else if (delta === 2) duplicateSourceDelta.two++;
+      else duplicateSourceDelta.later++;
+    }
+  }
+  if (Number.isFinite(sequence) && !prior.includes(sequence)) {
+    prior.push(sequence);
+    if (prior.length > 6) prior.shift();
+    sourceSequencesByEsi.set(esi, prior);
+  }
+}
+function duplicateSourceDeltaSummary() {
+  const d = duplicateSourceDelta;
+  return `Duplicate source Δ same ${d.same} · +1 ${d.one} · +2 ${d.two} · 3+ ${d.later} · unknown ${d.unknown}`;
+}
 const poolBusyTimes = [];
 const scanCompletionTimes = [];
 const decodeFrameTimes = [];
@@ -2726,6 +2760,7 @@ function stopReceiver() {
   qrReadTimes.length = 0;
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
+  resetDuplicateAttribution();
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
   decodeFrameTimes.length = 0;
@@ -4530,6 +4565,7 @@ function resetActiveTransfer() {
   qrReadTimes.length = 0;
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
+  resetDuplicateAttribution();
   usefulFrameTimes.length = 0;
   hotJobSubmitSamples.length = 0;
   hotJobCompletionSamples.length = 0;
@@ -4694,6 +4730,7 @@ function onDecoded(bytes, box, info) {
     usefulFrameTimes.length = 0;
     uniqueQrTimes.length = 0;
     duplicateQrTimes.length = 0;
+  resetDuplicateAttribution();
     streamKey = identity;
     startTs = receiverNow();
     progressEl.style.display = "block";
@@ -4704,7 +4741,9 @@ function onDecoded(bytes, box, info) {
   const redundantBefore = decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = receiverNow();
-  (decoder.framesNew === framesNewBefore ? duplicateQrTimes : uniqueQrTimes).push(receivedAt);
+  const duplicateFrame = decoder.framesNew === framesNewBefore;
+  (duplicateFrame ? duplicateQrTimes : uniqueQrTimes).push(receivedAt);
+  noteDuplicateAttribution(header.seq, info?.sourceSequence, duplicateFrame);
   noteScanOutcome(
     info == null ? void 0 : info.scanId,
     decoder.framesNew === framesNewBefore ? "duplicate" : decoder.framesRedundant > redundantBefore ? "redundant" : "accepted"
@@ -5726,6 +5765,7 @@ Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAt
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
+  transportDiagnostics.textContent += `\n${duplicateSourceDeltaSummary()}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
