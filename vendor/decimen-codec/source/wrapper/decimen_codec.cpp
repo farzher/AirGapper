@@ -1067,9 +1067,18 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 		}
 
 	// Only cache a calibration that decodes the current AirGapper packet and
-	// passes its CRC. A bad alignment fit therefore cannot poison later frames.
+	// passes its CRC. At v40/high density, a geometrically correct sample can
+	// still contain a few bad modules, so requiring a bit-perfect no-RS parse
+	// here creates a catch-22: the map can never become calibrated and therefore
+	// never reaches the cached QR-RS path. Calibration is rare setup work, so
+	// validate with no-RS first, then QR Reed-Solomon before rejecting the map.
 	auto decoded = decodeWithoutErrorCorrection(sampled);
-	if (!decoded.isValid() || !hasValidCRC32(decoded.content().bytes))
+	bool calibrationValid = decoded.isValid() && hasValidCRC32(decoded.content().bytes);
+	if (!calibrationValid) {
+		auto corrected = QRCode::Decode(sampled);
+		calibrationValid = corrected.isValid() && hasValidCRC32(corrected.content().bytes);
+	}
+	if (!calibrationValid)
 		return false;
 
 	track.samples = std::move(candidate);
