@@ -1,0 +1,35 @@
+name: Agent v139 duplicate attribution
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Apply patch
+        run: python3 .github/v139_patch.py
+      - name: Smoke check
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check sw.js
+          grep -q 'Duplicate source Δ' receive/main.js
+          grep -q 'noteDuplicateAttribution' receive/main.js
+          grep -q 'v0.5.139' index.html
+          grep -q 'v0.5.139' main.js
+          grep -q 'v0.5.139' receive/main.js
+          grep -q 'airgapper-static-js-v102' sw.js
+      - name: Commit patch
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v139_patch.py .github/workflows/agent-v139-duplicate-attribution.yml
+          git add index.html main.js sw.js receive/main.js
+          git commit -m "v0.5.139 attribute duplicate QR source frames"
+          git push origin HEAD:master
