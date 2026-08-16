@@ -290,10 +290,13 @@ ctx.onmessage = async (e) => {
       decodePixelFormat = copyAsRgba ? "rgba" : "y8";
       if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
       if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
-      if (copyAsRgba || full || !(tracks?.length) || !robustTrackedRecovery) {
-        ownedVideoFrame.close();
-        ownedVideoFrame = null;
-      }
+      // The camera frame is only a transport into WASM memory. Never retain a
+      // TrackProcessor VideoFrame while QR decoding runs: when several workers
+      // pin camera buffers during target loss, Chromium can stop delivering new
+      // processor frames even though the <video> preview itself is still live.
+      // Robust recovery must operate on the copied Y plane below.
+      ownedVideoFrame.close();
+      ownedVideoFrame = null;
     } else {
       const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w) : buf.byteLength;
       pixels = new Uint8Array(buf, 0, byteLength);
@@ -536,24 +539,14 @@ ctx.onmessage = async (e) => {
         return;
       }
       symbols.push(...nativeSymbols);
-      if (ownedVideoFrame) {
-        const rect = { x: cropX, y: cropY, width: w, height: h };
-        const options = { rect, format: "RGBA" };
-        const bytes = ownedVideoFrame.allocationSize(options);
-        ptr = inputBuffer(zx, bytes);
-        const copyStarted = performance.now();
-        const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(ptr, ptr + bytes), options);
-        frameCopyMs += performance.now() - copyStarted;
-        const plane = planes[0];
-        if (!plane || plane.stride < w * 4) throw new Error("Camera RGBA recovery stride is invalid");
-        ptr += plane.offset;
-        inputStride = plane.stride;
-        decodePixelFormat = "rgba";
-        ownedVideoFrame.close();
-        ownedVideoFrame = null;
-      }
+      // Recovery uses the pixels already copied out of the camera frame. For
+      // direct camera input this is Y8, so keep recovery luminance-only instead
+      // of retaining/re-reading the live VideoFrame as RGBA.
       readFullAttempts++;
-      const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
+      const recoveryMax = Math.min(16, Math.max(1, tracks.length));
+      const decoded = decodePixelFormat === "y8"
+        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, recoveryMax, false)
+        : zx.readFull(ptr + inputOffset, pw, ph, true, recoveryMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
         const decodedSlots = /* @__PURE__ */ new Set(nativeSymbols.flatMap((symbol) => symbol.header?.slotIndex === void 0 ? [] : [symbol.header.slotIndex]));
