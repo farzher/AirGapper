@@ -15,12 +15,10 @@ replace_once(
 )
 
 replace_once("vendor/decimen-codec/source/VERSION", "0.1.8\n", "0.1.9\n")
-replace_once("index.html", "v0.5.82", "v0.5.83")
-# index.html contains both visible version and module query.
 p = Path("index.html")
 s = p.read_text()
-s = s.replace("v0.5.82", "v0.5.83")
-p.write_text(s)
+assert s.count("v0.5.82") == 2, f"index.html: expected two v0.5.82 strings, got {s.count('v0.5.82')}"
+p.write_text(s.replace("v0.5.82", "v0.5.83"))
 replace_once("main.js", 'const APP_BUILD = "v0.5.82";', 'const APP_BUILD = "v0.5.83";')
 replace_once("receive/main.js", 'const RECEIVER_RUNTIME_BUILD = "v0.5.82";', 'const RECEIVER_RUNTIME_BUILD = "v0.5.83";')
 replace_once("sw.js", 'const CACHE = "airgapper-static-js-v45";', 'const CACHE = "airgapper-static-js-v46";')
