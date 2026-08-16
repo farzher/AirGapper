@@ -108,6 +108,12 @@ class GridLattice {
     this.candidate = void 0;
     this.lastHitAt = 0;
   }
+  reacquire(at, reason = "whole lattice invalidated") {
+    this.transition("REACQUIRE", reason, at);
+    this.observations = [];
+    this.candidate = void 0;
+    this.lastHitAt = at;
+  }
   accept(detection, frameWidth, frameHeight) {
     var _a;
     if (!validGeometry(detection)) return null;
@@ -118,6 +124,10 @@ class GridLattice {
     this.frameWidth = Math.max(1, frameWidth);
     this.frameHeight = Math.max(1, frameHeight);
     this.lastHitAt = detection.at;
+    if (this.candidate && this.candidate.layout.id !== declaredLayout.id) {
+      this.observations = [];
+      this.candidate = void 0;
+    }
     this.observations.push(detection);
     this.observations = this.observations.filter((item) => detection.at - item.at < 2500 && item.modules === detection.modules).slice(-32);
     if (this.locked && this.candidate) {

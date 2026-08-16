@@ -285,7 +285,7 @@ function parseVerifiedFramePayload(bytes) {
   return parseFrameBody(bytes, false);
 }
 function streamIdentity(h) {
-  return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}:${h.layoutId}`;
+  return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}`;
 }
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);

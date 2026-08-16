@@ -172,6 +172,7 @@ let selectedFile = null;
 let generation = 0;
 let resizeDisplay = null;
 let activeTransportEncoder = null;
+let activeTransportCursor = null;
 const specsLine = statusLine(specs);
 const setStatus = specsLine.setStatus;
 function showError(message) {
@@ -220,6 +221,7 @@ function updateFilePicker() {
 function discardSelectedFile() {
   activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();
   activeTransportEncoder = null;
+  activeTransportCursor = null;
   selectedFile == null ? void 0 : selectedFile.payload.fill(0);
   selectedFile = null;
   resizeDisplay = null;
@@ -499,6 +501,13 @@ async function startStream(revealStage = false) {
   }
   const encoder = new TransportEncoder(payload, blockLen, payloadId, transport.mode);
   activeTransportEncoder = encoder;
+  // FPS, layout, orientation and visual scaling do not change the erasure
+  // code. Continue at the next symbol that was actually painted. A transport
+  // Size change changes blockLen/K/mode, so its key differs and correctly
+  // starts a fresh coding stream at ESI 0.
+  const transportKey = `${payloadId}:${encoder.mode}:${encoder.k}:${blockLen}:${payload.length}`;
+  let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;
+  activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };
   const header = {
     mode: encoder.mode,
     layoutId: gridLayoutId(gridCols, gridRows),
@@ -513,7 +522,6 @@ async function startStream(revealStage = false) {
   const staging = document.createElement("canvas");
   const queue = [];
   const cells = new Array(gridCodes).fill(null);
-  let symbolOrdinal = 0;
   stage.hidden = false;
   if (sendStart) sendStart.hidden = true;
   showStreamPanels(true);
@@ -562,27 +570,33 @@ async function startStream(revealStage = false) {
   };
   const makeCode = () => {
     if (plainSnippet !== null) {
-      return QRCode.create(plainSnippet, {
-        errorCorrectionLevel: ecc,
-        version,
-        maskPattern: 4
-      });
+      return {
+        qr: QRCode.create(plainSnippet, {
+          errorCorrectionLevel: ecc,
+          version,
+          maskPattern: 4
+        }),
+        ordinal: null
+      };
     }
-    const slotIndex = symbolOrdinal % gridCodes;
-    const seq = scheduledEsi(encoder.k, symbolOrdinal);
+    const ordinal = symbolOrdinal++;
+    const slotIndex = ordinal % gridCodes;
+    const seq = scheduledEsi(encoder.k, ordinal);
     const bytes = packFrame(
       { ...header, seq, slotIndex },
       encoder.encode(seq)
     );
-    symbolOrdinal++;
-    return QRCode.create([{ data: bytes, mode: "byte" }], {
-      errorCorrectionLevel: ecc,
-      version,
-      maskPattern: 4
-    });
+    return {
+      qr: QRCode.create([{ data: bytes, mode: "byte" }], {
+        errorCorrectionLevel: ecc,
+        version,
+        maskPattern: 4
+      }),
+      ordinal
+    };
   };
   const makeCell = () => {
-    const qr = makeCode();
+    const { qr, ordinal } = makeCode();
     if (version === void 0) {
       version = qr.version;
       modules = qr.modules.size;
@@ -646,7 +660,10 @@ async function startStream(revealStage = false) {
       }
     }
     const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);
-    return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);
+    return {
+      image: new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
+      ordinal
+    };
   };
   let generatorFailed = false;
   const lookahead = staticStream ? 1 : LOOKAHEAD * gridCodes;
@@ -659,9 +676,11 @@ async function startStream(revealStage = false) {
       showError(err instanceof Error ? err.message : String(err));
     }
   };
+  let cellCursor = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal % gridCodes : 0;
+  const sweepOrigin = cellCursor;
   pump();
-  let cellCursor = 0;
-  const paintCell = (img) => {
+  const paintCell = (entry) => {
+    const img = entry.image;
     const cell = modules + 2 * GRID_MARGIN;
     const stride = modules + GRID_MARGIN;
     const cx = cellCursor % gridCols * stride;
@@ -681,6 +700,9 @@ async function startStream(revealStage = false) {
       ctx.drawImage(staging, 0, 0);
     } else {
       ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);
+    }
+    if (entry.ordinal !== null && activeTransportCursor?.key === transportKey) {
+      activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, entry.ordinal + 1);
     }
     cellCursor = (cellCursor + 1) % gridCodes;
   };
@@ -725,7 +747,7 @@ async function startStream(revealStage = false) {
       }
       paintCell(img);
       nextAt += subInterval;
-      if (cellCursor === 0) {
+      if (cellCursor === sweepOrigin) {
         completedSweeps++;
         if (txFps === 30 && completedSweeps % 15 === 0) nextAt += interval / 2;
       }

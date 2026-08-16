@@ -3378,12 +3378,15 @@ async function captureFrame(source) {
   );
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= 5);
+  if (allLockedCandidatesCold) {
+    gridLattice.reacquire(now, "all tracked slots cold; reacquiring geometry");
+  }
   const gridNeedsDiscovery = lockedGeometryTrusted
     ? allLockedCandidatesCold
     : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST");
   const trackingUnhealthy = regions.some((region) => region.gridSlot === void 0 && region.decoded && region.consecutiveMisses >= 4);
   if (gridLattice.locked) strictHotPathLockSeen = true;
-  const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen;
+  const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen && gridLattice.locked;
   // Correctness/strict mode is allowed to use the generic detector to acquire
   // the grid once. After lock, it may not hide tracked failures by falling
   // back to local robust decode or by abandoning the grid and reacquiring it.
@@ -3423,7 +3426,7 @@ async function captureFrame(source) {
     // During a still-trusted lock, even recovery is bounded to the only place
     // the declared grid can exist. Give it generous motion headroom, but never
     // pay a generic finder to inspect unrelated camera pixels.
-    if (!captureNextScan && lockedGeometryTrusted) {
+    if (!captureNextScan && lockedGeometryTrusted && gridLattice.locked && !allLockedCandidatesCold) {
       const points = lockedGeometryCandidates.flatMap((region) => [
         region.quad.topLeft,
         region.quad.topRight,
@@ -3867,7 +3870,8 @@ function onDecoded(bytes, box, info) {
   });
   const identity = streamIdentity(header);
   if (decoder && streamKey !== identity) {
-    if (decodedAt - lastStreamDecodeAt < 1800) {
+    const samePayload = header.payloadId === decoder.streamSeed && header.totalLen === decoder.totalLen;
+    if (!samePayload && decodedAt - lastStreamDecodeAt < 1800) {
       noteScanOutcome(info == null ? void 0 : info.scanId, "otherStream");
       return;
     }
