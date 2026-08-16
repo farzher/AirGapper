@@ -4,12 +4,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
 import { gridLayoutById } from "../shared/grid-layout.js";
 const WHOLE_GRID_LOSS_MS = 2200;
 function corners(quad) {
-  return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  return quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];
+}
+function validPoints(points) {
+  return points.length === 4 && points.every((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
 }
 function validGeometry(detection) {
-  if (detection.modules < 21 || detection.modules > 177 || detection.modules % 4 !== 1) return false;
+  if (!detection || detection.modules < 21 || detection.modules > 177 || detection.modules % 4 !== 1) return false;
   const points = corners(detection.quad);
-  if (points.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
+  if (!validPoints(points)) return false;
   const edges = points.map((p, i) => Math.hypot(p.x - points[(i + 1) % 4].x, p.y - points[(i + 1) % 4].y));
   const shortest = Math.min(...edges);
   const longest = Math.max(...edges);
@@ -67,6 +70,7 @@ function slotWorld(layout, modules, slot) {
 }
 function bounds(quad) {
   const points = corners(quad);
+  if (!validPoints(points)) return null;
   const left = Math.min(...points.map((p) => p.x));
   const top = Math.min(...points.map((p) => p.y));
   const right = Math.max(...points.map((p) => p.x));
@@ -195,7 +199,9 @@ class GridLattice {
     for (let index = 0; index < count; index++) {
       const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
       const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
-      slots.push({ index, quad, box: bounds(quad), decoded: decoded.has(index) });
+      const box = bounds(quad);
+      if (!box) return null;
+      slots.push({ index, quad, box, decoded: decoded.has(index) });
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
     return { state: this.state, confidence, layout: candidate.layout, modules, slots };
