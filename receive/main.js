@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.99";
+const RECEIVER_RUNTIME_BUILD = "v0.5.100";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1201,11 +1201,6 @@ let decodeExceptions = 0;
 let lastDecodeError = "";
 let lastNativeMetrics;
 let lastDirectPixelPath = "—";
-let lastExactMapCoverage = "—";
-let lastExactMapsSeeded = 0;
-let lastExactSameFrameOracle = "—";
-let lastNativePhaseMs = 0;
-let lastRobustPhaseMs = 0;
 const hotPathAudit = {
   trackedJobs: 0,
   nativeTracks: 0,
@@ -1346,15 +1341,6 @@ function noteDecodeCompleted(id, completion) {
     lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
   }
   if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
-  if (completion.exactMapTotal) {
-    lastExactMapCoverage = `${completion.exactMapCoverage ?? 0}/${completion.exactMapTotal}`;
-    lastExactMapsSeeded = completion.exactMapsSeeded ?? 0;
-  }
-  if (completion.exactSameFrameOracleAttempts) {
-    lastExactSameFrameOracle = `${completion.exactSameFrameOracleSuccesses ?? 0}/${completion.exactSameFrameOracleAttempts}`;
-  }
-  if (Number.isFinite(completion.nativeMs)) lastNativePhaseMs = completion.nativeMs;
-  if (Number.isFinite(completion.robustMs)) lastRobustPhaseMs = completion.robustMs;
   if (auditThisCompletion && completion.nativeMetrics) {
     hotPathAudit.trackedJobs++;
     hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
@@ -3176,14 +3162,13 @@ function opticalSampleDue(source) {
   return Number.isFinite(interval) && receiverNow() - lastOpticalSampleAt >= interval;
 }
 function cloneVideoFrame(source, forceRgba = false) {
-  let frame = source.videoFrame;
-  if (!frame) {
-    try {
-      frame = source.videoFrame = new VideoFrame(video);
-    } catch {
-      return null;
-    }
-  }
+  const frame = source.videoFrame;
+  // Never construct a VideoFrame from the live <video>. This exact operation
+  // was previously observed to wedge the Android Chrome/PWA camera compositor.
+  // MediaStreamTrackProcessor frames remain the fast I420/Y8 path; if a source
+  // frame is unavailable, decline direct capture and let the existing bounded
+  // readback path handle that frame instead of touching the live compositor.
+  if (!frame) return null;
   const visible = frame.visibleRect;
   const rotation = Number(frame.rotation ?? 0) % 360;
   const scaleX = visible && source.width ? visible.width / source.width : 0;
@@ -5020,7 +5005,7 @@ QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySu
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
-Pixel path ${lastDirectPixelPath.toUpperCase()} · exact maps ${lastExactMapCoverage} · seeded +${lastExactMapsSeeded} · oracle ${lastExactSameFrameOracle} · native ${lastNativePhaseMs.toFixed(1)}ms · robust ${lastRobustPhaseMs.toFixed(1)}ms${lastNativeMetrics ? ` · bin ${Number(lastNativeMetrics.binarizeMs ?? 0).toFixed(1)}ms · exact ${lastNativeMetrics.exactMapSuccesses ?? 0}/${lastNativeMetrics.exactMapAttempts ?? 0}` : ""}
+Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
 }
   metric("m-cap").textContent = `${decodeFrameRate.toFixed(1)} fps`;

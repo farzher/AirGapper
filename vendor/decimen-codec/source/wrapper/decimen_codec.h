@@ -50,9 +50,6 @@ struct DecimenBatchMetrics {
 	uint32_t translationSuccesses;
 	uint32_t calibrationAttempts;
 	uint32_t calibrationSuccesses;
-	double binarizeMs;
-	uint32_t exactMapAttempts;
-	uint32_t exactMapSuccesses;
 };
 
 int createTrackedDecoder(int maxTracks, int maxDimension);

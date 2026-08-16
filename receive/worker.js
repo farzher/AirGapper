@@ -39,7 +39,7 @@ function inputBuffer(zx, bytes) {
 }
 const NATIVE_BATCH_MAX_TRACKS = 16;
 const NATIVE_TRACK_RESULT_BYTES = 32;
-const NATIVE_BATCH_METRICS_BYTES = 160;
+const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
 let nativeBatchHandle = 0;
@@ -49,142 +49,6 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
-const nativeExactMaps = /* @__PURE__ */ new Map();
-let nativeExactMapVersion = 1;
-let nativeSampleScratchPtr = 0;
-let nativeSampleScratchFloats = 0;
-let nativeLowYieldStreak = 0;
-let exactSameFrameOracleDone = false;
-let exactSameFrameOracleAttempts = 0;
-let exactSameFrameOracleSuccesses = 0;
-function nativeTrackId(track) {
-  return track.slot ?? track.id;
-}
-function copyQuad(q) {
-  return {
-    topLeft: { ...q.topLeft },
-    topRight: { ...q.topRight },
-    bottomRight: { ...q.bottomRight },
-    bottomLeft: { ...q.bottomLeft }
-  };
-}
-function maxQuadDelta(a, b) {
-  if (!validQuad(a) || !validQuad(b)) return Infinity;
-  return Math.max(
-    Math.hypot(a.topLeft.x - b.topLeft.x, a.topLeft.y - b.topLeft.y),
-    Math.hypot(a.topRight.x - b.topRight.x, a.topRight.y - b.topRight.y),
-    Math.hypot(a.bottomRight.x - b.bottomRight.x, a.bottomRight.y - b.bottomRight.y),
-    Math.hypot(a.bottomLeft.x - b.bottomLeft.x, a.bottomLeft.y - b.bottomLeft.y)
-  );
-}
-function squareToQuad(q) {
-  if (!validQuad(q)) return null;
-  const x0 = q.topLeft.x, y0 = q.topLeft.y;
-  const x1 = q.topRight.x, y1 = q.topRight.y;
-  const x2 = q.bottomRight.x, y2 = q.bottomRight.y;
-  const x3 = q.bottomLeft.x, y3 = q.bottomLeft.y;
-  const dx3 = x0 - x1 + x2 - x3;
-  const dy3 = y0 - y1 + y2 - y3;
-  let g = 0, h = 0;
-  if (Math.abs(dx3) > 1e-7 || Math.abs(dy3) > 1e-7) {
-    const dx1 = x1 - x2, dx2 = x3 - x2;
-    const dy1 = y1 - y2, dy2 = y3 - y2;
-    const denominator = dx1 * dy2 - dx2 * dy1;
-    if (Math.abs(denominator) < 1e-8) return null;
-    g = (dx3 * dy2 - dx2 * dy3) / denominator;
-    h = (dx1 * dy3 - dx3 * dy1) / denominator;
-  }
-  return {
-    a: x1 - x0 + g * x1,
-    b: x3 - x0 + h * x3,
-    c: x0,
-    d: y1 - y0 + g * y1,
-    e: y3 - y0 + h * y3,
-    f: y0,
-    g,
-    h
-  };
-}
-function projectUnitQuad(model, u, v) {
-  const denominator = model.g * u + model.h * v + 1;
-  if (Math.abs(denominator) < 1e-9) return null;
-  return {
-    x: (model.a * u + model.b * v + model.c) / denominator,
-    y: (model.d * u + model.e * v + model.f) / denominator
-  };
-}
-function invertProjective(model) {
-  const a = model.a, b = model.b, c = model.c;
-  const d = model.d, e = model.e, f = model.f;
-  const g = model.g, h = model.h, i = 1;
-  const A = e * i - f * h;
-  const B = c * h - b * i;
-  const C = b * f - c * e;
-  const D = f * g - d * i;
-  const E = a * i - c * g;
-  const F = c * d - a * f;
-  const G = d * h - e * g;
-  const H = b * g - a * h;
-  const I = a * e - b * d;
-  const det = a * A + b * D + c * G;
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-10) return null;
-  const inv = 1 / det;
-  return [A * inv, B * inv, C * inv, D * inv, E * inv, F * inv, G * inv, H * inv, I * inv];
-}
-function projectMatrix(model, x, y) {
-  const denominator = model[6] * x + model[7] * y + model[8];
-  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) return null;
-  return {
-    x: (model[0] * x + model[1] * y + model[2]) / denominator,
-    y: (model[3] * x + model[4] * y + model[5]) / denominator
-  };
-}
-function rememberExactSampleMap(id, dim, sampleMap, ox, oy, localQuad) {
-  if (!sampleMap || sampleMap.length !== dim * dim * 2 || !validQuad(localQuad)) return false;
-  const anchorQuad = shifted(localQuad, ox, oy);
-  const anchorModel = squareToQuad(anchorQuad);
-  const anchorInverse = anchorModel ? invertProjective(anchorModel) : null;
-  if (!anchorInverse) return false;
-  const points = new Float32Array(sampleMap.length);
-  for (let i = 0; i < sampleMap.length; i += 2) {
-    points[i] = sampleMap[i] + ox;
-    points[i + 1] = sampleMap[i + 1] + oy;
-  }
-  // Preserve the actual SampleQR point cloud. On later frames, transport each
-  // point through H(currentQuad) * inverse(H(acquisitionQuad)). This transforms
-  // the distortion-corrected geometry itself; adding an old screen-space
-  // residual to a new homography (v0.5.97/98) was not projectively valid.
-  nativeExactMaps.set(id, { dim, points, anchorInverse, version: nativeExactMapVersion++ });
-  return true;
-}
-function applyExactSampleMap(zx, nativeSlot, map, track, ox, oy) {
-  const pointCount = map.dim * map.dim;
-  const floats = pointCount * 2;
-  const currentModel = squareToQuad(track.quad);
-  if (!currentModel || !map.anchorInverse) return false;
-  if (floats > nativeSampleScratchFloats) {
-    if (nativeSampleScratchPtr) zx._free(nativeSampleScratchPtr);
-    nativeSampleScratchPtr = zx._malloc(floats * 4);
-    nativeSampleScratchFloats = floats;
-  }
-  if (!nativeSampleScratchPtr) return false;
-  const out = new Float32Array(zx.HEAPU8.buffer, nativeSampleScratchPtr, floats);
-  for (let i = 0; i < floats; i += 2) {
-    const uv = projectMatrix(map.anchorInverse, map.points[i], map.points[i + 1]);
-    if (!uv) return false;
-    const projected = projectUnitQuad(currentModel, uv.x, uv.y);
-    if (!projected || !Number.isFinite(projected.x) || !Number.isFinite(projected.y)) return false;
-    out[i] = projected.x - ox;
-    out[i + 1] = projected.y - oy;
-  }
-  return Boolean(zx._setTrackedDecoderSampleMap(nativeBatchHandle, nativeSlot, nativeSampleScratchPtr, pointCount));
-}
-function exactTracks(tracks) {
-  return tracks.filter((track) => {
-    const map = nativeExactMaps.get(nativeTrackId(track));
-    return map && map.dim === track.dim;
-  });
-}
 function ensureNativeBatch(zx) {
   if (nativeBatchHandle) return true;
   nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -236,10 +100,7 @@ function configureNativeBatch(zx, tracks, ox, oy) {
     const track = tracks[slot];
     const id = (_a = track.slot) != null ? _a : track.id;
     const previous = nativeConfigured[slot];
-    const exactMap = nativeExactMaps.get(id);
-    const exactVersion = exactMap?.dim === track.dim ? exactMap.version : 0;
-    const exactGeometryChanged = exactVersion && (!previous?.appliedQuad || maxQuadDelta(previous.appliedQuad, track.quad) > 0.25);
-    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32 || previous.exactVersion !== exactVersion || exactGeometryChanged;
+    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
     if (mustConfigure) {
       const q = track.quad;
       if (!validQuad(q)) return void 0;
@@ -259,15 +120,7 @@ function configureNativeBatch(zx, tracks, ox, oy) {
       );
       if (!accepted) return void 0;
       zx._setTrackedDecoderTrackCRC32(nativeBatchHandle, slot, track.crc32 ? 1 : 0);
-      const exactApplied = exactVersion ? applyExactSampleMap(zx, slot, exactMap, track, ox, oy) : false;
-      nativeConfigured[slot] = {
-        id,
-        dim: track.dim,
-        crc32: track.crc32,
-        baseQuad: copyQuad(track.quad),
-        appliedQuad: copyQuad(track.quad),
-        exactVersion: exactApplied ? exactVersion : 0
-      };
+      nativeConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad };
       nativeRefresh.delete(slot);
     }
     byId.set(id, { input: track, configured: nativeConfigured[slot], nativeSlot: slot });
@@ -279,11 +132,11 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   nativeCropOrigin = origin;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4, rsBudget = 0) {
+function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, rsBudget);
+  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
   const count = decode(
     nativeBatchHandle,
     ptr,
@@ -323,10 +176,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     translationAttempts: view.getUint32(nativeMetricsPtr + 108, true),
     translationSuccesses: view.getUint32(nativeMetricsPtr + 112, true),
     calibrationAttempts: view.getUint32(nativeMetricsPtr + 116, true),
-    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true),
-    binarizeMs: view.getFloat64(nativeMetricsPtr + 128, true),
-    exactMapAttempts: view.getUint32(nativeMetricsPtr + 136, true),
-    exactMapSuccesses: view.getUint32(nativeMetricsPtr + 140, true)
+    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true)
   };
   const pending = [];
   let outputEnd = 0;
@@ -408,8 +258,7 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0
-      && (usedDirectFrame || pixelFormat === "rgba" || pixelFormat === "y8");
+    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
@@ -600,193 +449,45 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
-      ownedVideoFrame?.close();
-      ownedVideoFrame = null;
-      const robustMax = Math.min(16, Math.max(1, tracks.length));
-      const seeded = exactTracks(tracks);
-      const requiredSeeded = Math.max(1, Math.ceil(tracks.length * 0.8));
-      let native;
-      let nativeSymbols = [];
-      let nativeMs = 0;
-      let robustMs = 0;
-
-      // Once this worker owns exact SampleQR maps for >=80% of the grid, the
-      // detector leaves the steady-state path. Missing symbols are erasures;
-      // RaptorQ is cheaper than re-running finder search every camera frame.
-      if (decodePixelFormat === "y8" && seeded.length >= requiredSeeded) {
-        const nativeStarted = performance.now();
-        native = decodeNativeBatch(
-          zx,
-          ptr + inputOffset,
-          pw,
-          ph,
-          ox,
-          oy,
-          seeded,
-          decodePixelFormat,
-          inputStride
-        );
-        nativeMs = performance.now() - nativeStarted;
-        nativeSymbols = native?.symbols ?? [];
-        const healthyYield = Math.max(1, Math.ceil(seeded.length * 0.6));
-        if (native && nativeSymbols.length >= healthyYield) {
-          nativeLowYieldStreak = 0;
-          mapOutputToDisplay(nativeSymbols);
-          ctx.postMessage({
-            id,
-            symbols: nativeSymbols,
-            sightings,
-            full: false,
-            trackedAttempted: true,
-            trackedHit: nativeSymbols.length > 0,
-            fallbackAttempted: false,
-            fallbackSucceeded: false,
-            readFullAttempts,
-            workerWaitMs,
-            frameCopyMs,
-            nativeMetrics: native.metrics,
-            pixelPath: decodePixelFormat,
-            exactMapCoverage: seeded.length,
-            exactMapTotal: tracks.length,
-            exactSameFrameOracleAttempts,
-            exactSameFrameOracleSuccesses,
-            nativeMs,
-            robustMs,
-            exactFastPath: true,
-            latencyMs: performance.now() - startedAt
-          }, native.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : []);
-          return;
-        }
-        nativeLowYieldStreak++;
-        // A single low-yield frame is a cheap erasure. Only pay robust search
-        // after two consecutive misses so motion/refresh phase cannot turn the
-        // detector back into the hot path.
-        if (native && nativeSymbols.length > 0 && nativeLowYieldStreak < 2) {
-          mapOutputToDisplay(nativeSymbols);
-          ctx.postMessage({
-            id,
-            symbols: nativeSymbols,
-            sightings,
-            full: false,
-            trackedAttempted: true,
-            trackedHit: true,
-            fallbackAttempted: false,
-            fallbackSucceeded: false,
-            readFullAttempts,
-            workerWaitMs,
-            frameCopyMs,
-            nativeMetrics: native.metrics,
-            pixelPath: decodePixelFormat,
-            exactMapCoverage: seeded.length,
-            exactMapTotal: tracks.length,
-            exactSameFrameOracleAttempts,
-            exactSameFrameOracleSuccesses,
-            nativeMs,
-            robustMs,
-            exactFastPath: true,
-            latencyMs: performance.now() - startedAt
-          }, native.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : []);
-          return;
-        }
-      }
-
       readFullAttempts++;
-      const robustStarted = performance.now();
-      let decoded;
-      let exactReader = false;
-      if (decodePixelFormat === "y8" && typeof zx.readFullYWithSampleMaps === "function") {
-        decoded = zx.readFullYWithSampleMaps(ptr + inputOffset, pw, ph, inputStride, true, robustMax);
-        exactReader = true;
-      } else {
-        decoded = decodePixelFormat === "y8"
-          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
-          : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
-      }
-      robustMs = performance.now() - robustStarted;
-      const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
-      const bySlot = /* @__PURE__ */ new Map();
-      for (const symbol of nativeSymbols) {
-        const slot = symbol.header?.slotIndex;
-        if (slot !== void 0) bySlot.set(slot, symbol);
-      }
-      let mapsSeeded = 0;
-      const sameFrameTracks = [];
+      const robustMax = Math.min(16, Math.max(1, tracks.length));
+      const decoded = decodePixelFormat === "y8"
+        ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, robustMax, false)
+        : zx.readFull(ptr + inputOffset, pw, ph, true, robustMax, false);
       try {
+        const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
           if (!result.valid || !result.bytes.length || !validQuad(result.position)) continue;
           const packet = parseFrame(result.bytes);
           const slot = packet?.header.slotIndex;
           if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
-          if (slot !== void 0 && exactReader && rememberExactSampleMap(slot, result.modules, result.sampleMap, ox, oy, result.position)) {
-            mapsSeeded++;
-            sameFrameTracks.push({
-              id: slot,
-              slot,
-              misses: 0,
-              quad: shifted(result.position, ox, oy),
-              dim: result.modules,
-              crc32: true
-            });
-          }
-          const symbol = {
+          symbols.push({
             bytes: result.bytes,
             box: boundsOf(result.position, ox, oy),
             quad: shifted(result.position, ox, oy),
             modules: result.modules,
-            tracked: false,
-            header: packet.header
-          };
-          if (slot !== void 0) bySlot.set(slot, symbol);
-          else symbols.push(symbol);
+            tracked: false
+          });
         }
       } finally {
         decoded.delete();
       }
-      symbols.push(...bySlot.values());
-      if (!exactSameFrameOracleDone && decodePixelFormat === "y8" && sameFrameTracks.length) {
-        exactSameFrameOracleDone = true;
-        const oracle = decodeNativeBatch(
-          zx,
-          ptr + inputOffset,
-          pw,
-          ph,
-          ox,
-          oy,
-          sameFrameTracks,
-          decodePixelFormat,
-          inputStride,
-          sameFrameTracks.length
-        );
-        exactSameFrameOracleAttempts = sameFrameTracks.length;
-        exactSameFrameOracleSuccesses = oracle?.symbols?.length ?? 0;
-      }
-      nativeLowYieldStreak = 0;
       mapOutputToDisplay();
-      const coverage = exactTracks(tracks).length;
       ctx.postMessage({
         id,
         symbols,
         sightings,
         full: false,
-        trackedAttempted: Boolean(native),
-        trackedHit: nativeSymbols.length > 0,
+        trackedAttempted: false,
+        trackedHit: false,
         fallbackAttempted: true,
         fallbackSucceeded: symbols.length > 0,
         readFullAttempts,
         workerWaitMs,
         frameCopyMs,
-        nativeMetrics: native?.metrics,
         pixelPath: decodePixelFormat,
-        robustFirst: !native,
-        exactMapCoverage: coverage,
-        exactMapTotal: tracks.length,
-        exactMapsSeeded: mapsSeeded,
-        exactSameFrameOracleAttempts,
-        exactSameFrameOracleSuccesses,
-        nativeMs,
-        robustMs,
-        exactFastPath: false,
+        robustFirst: true,
         latencyMs: performance.now() - startedAt
       });
       return;
