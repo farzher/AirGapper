@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.77";
+const RECEIVER_RUNTIME_BUILD = "v0.5.79";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1184,6 +1184,10 @@ const hotPathAudit = {
   crcFailures: 0,
   anchorBypassAttempts: 0,
   anchorBypassSuccesses: 0,
+  translationAttempts: 0,
+  translationSuccesses: 0,
+  calibrationAttempts: 0,
+  calibrationSuccesses: 0,
   localRecoveryAttempts: 0,
   localRecoverySuccesses: 0,
   fullScanJobs: 0,
@@ -1320,6 +1324,10 @@ function noteDecodeCompleted(id, completion) {
     hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
     hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;
     hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;
+    hotPathAudit.translationAttempts += completion.nativeMetrics.translationAttempts ?? 0;
+    hotPathAudit.translationSuccesses += completion.nativeMetrics.translationSuccesses ?? 0;
+    hotPathAudit.calibrationAttempts += completion.nativeMetrics.calibrationAttempts ?? 0;
+    hotPathAudit.calibrationSuccesses += completion.nativeMetrics.calibrationSuccesses ?? 0;
   }
   if (auditThisCompletion) hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
   if (auditThisCompletion && !auditMode?.full && completion.fallbackAttempted) {
@@ -4966,8 +4974,8 @@ Runtime ${RECEIVER_RUNTIME_BUILD}
 Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "established" : "acquiring"}` : "LIVE"}
 Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
-Calibration ${hotPathAudit.anchorSuccesses}/${hotPathAudit.anchorSuccesses + hotPathAudit.anchorMisses} · frame misses ${hotPathAudit.outOfFrameMisses} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures}
-Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · Hybrid fallback CRC ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
+Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
+Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
 Geometry ${lastGridSnapshot ? `${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} exact · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
