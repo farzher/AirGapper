@@ -252,7 +252,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 }
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -658,17 +658,25 @@ ctx.onmessage = async (e) => {
         }
       };
       if (full) {
-        // Full acquisition/reacquisition can arrive as the camera's direct Y
-        // plane. Stay in luminance all the way through the robust detector;
-        // never convert a live TrackProcessor frame to RGBA just to reacquire.
-        const readFull = (maxSymbols, returnErrors) => decodePixelFormat === "y8"
-          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, true, maxSymbols, returnErrors)
-          : zx.readFull(ptr, pw, ph, true, maxSymbols, returnErrors);
-        readFullAttempts++;
-        appendResults(readFull(16, false), false);
-        if (symbols.length === 0) {
+        // Acquisition only needs one valid AirGapper packet to learn the
+        // layout/slot and seed the lattice. Do not ask ZXing to rediscover an
+        // entire 18-QR wall before tracking can begin. Normal seed scans use
+        // the cheap finder pass; occasional deep scans enable tryHarder's
+        // downscale sweep. The expensive multi-symbol scan is developer-only.
+        const fullMode = acquisitionMode ?? (thorough ? "thorough" : "fast");
+        const readFull = (tryHarder, maxSymbols, returnErrors) => decodePixelFormat === "y8"
+          ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, tryHarder, maxSymbols, returnErrors)
+          : zx.readFull(ptr, pw, ph, tryHarder, maxSymbols, returnErrors);
+        if (fullMode === "thorough") {
           readFullAttempts++;
-          appendResults(readFull(24, true), true);
+          appendResults(readFull(true, 16, false), false);
+          if (symbols.length === 0) {
+            readFullAttempts++;
+            appendResults(readFull(true, 24, true), true);
+          }
+        } else {
+          readFullAttempts++;
+          appendResults(readFull(fullMode === "deep", 1, false), false);
         }
       } else {
         readFullAttempts++;

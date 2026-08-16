@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.123";
+const RECEIVER_RUNTIME_BUILD = "v0.5.124";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3703,6 +3703,25 @@ async function captureFrame(source) {
     grab.height = vh;
   }
   const ctx = grab.getContext("2d", { willReadFrequently: true });
+  // Before lock, six simultaneous 3.7 MP finder scans only contend for CPU
+  // and memory bandwidth. Two fresh-frame seed searches are enough to keep
+  // acquisition parallel without burying slower phones under duplicate work.
+  const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
+  if (acquisitionSeedScan) {
+    const acquisitionInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
+    const acquisitionInflightLimit = Math.min(2, pool.size);
+    if (acquisitionInflight >= acquisitionInflightLimit) {
+      capturesDropped++;
+      poolBusyTimes.push(now);
+      notePipelineEvent("acquisition-inflight-cap", acquisitionInflight);
+      if (trace) {
+        trace.decision = `acquisition capped at ${acquisitionInflightLimit} in-flight seed scans`;
+        trace.stateAfter = gridLattice.state;
+      }
+      activeBenchmarkFrame = void 0;
+      return;
+    }
+  }
   if (fullScanDue && pool.busyCount === pool.size) {
     capturesDropped++;
     poolBusyTimes.push(now);
@@ -3712,6 +3731,10 @@ async function captureFrame(source) {
   if (fullScanDue) {
     lastFullScan = now;
     fullScans++;
+    // Seven cheap seed attempts for every deep tryHarder attempt. Never run a
+    // cheap miss and a deep retry on the same frame: the next camera frame is
+    // fresher and avoids the old multi-second double scan.
+    const acquisitionMode = captureNextScan ? "thorough" : fullScans % 8 === 0 ? "deep" : "fast";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
     // During a still-trusted lock, even recovery is bounded to the only place
     // the declared grid can exist. Give it generous motion headroom, but never
@@ -3750,7 +3773,8 @@ async function captureFrame(source) {
           oy: directFull.oy,
           full: true,
           pixelFormat: "y8",
-          outputMap: directFull.outputMap
+          outputMap: directFull.outputMap,
+          acquisitionMode
         },
         [directFull.frame],
         "DIRECT RECOVERY Y8",
@@ -3781,7 +3805,7 @@ async function captureFrame(source) {
     captureSubmittedScan(img, scanX, scanY, true);
     const id = frameId++;
     if (submitReceiverJob(
-      { id, buf: img.data.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true },
+      { id, buf: img.data.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true, acquisitionMode },
       [img.data.buffer],
       "FULL FRAME",
       trace,
