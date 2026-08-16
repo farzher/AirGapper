@@ -437,7 +437,7 @@ ctx.onmessage = async (e) => {
         inputStride
       );
       const nativeSymbols = native?.symbols ?? [];
-      const robustFallback = robustTrackedRecovery && nativeSymbols.length === 0;
+      const robustFallback = robustTrackedRecovery && nativeSymbols.length < tracks.length;
       if (!robustFallback && (native || usedDirectFrame)) {
         ownedVideoFrame?.close();
         ownedVideoFrame = null;
@@ -468,6 +468,10 @@ ctx.onmessage = async (e) => {
         return;
       }
 
+      // Keep any cached-map successes and let the robust detector fill only
+      // the missing slots. One bad QR must never throw away four cheap wins.
+      symbols.push(...nativeSymbols);
+
       // The normal hot path already missed on Y8. Only now copy this exact
       // bounded crop as RGBA for the explicitly counted robust local recovery.
       // Do NOT retry native on RGBA as an unlabelled alternate hot path.
@@ -494,7 +498,7 @@ ctx.onmessage = async (e) => {
       const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
-        const decodedSlots = /* @__PURE__ */ new Set();
+        const decodedSlots = /* @__PURE__ */ new Set(nativeSymbols.flatMap((symbol) => symbol.header?.slotIndex === void 0 ? [] : [symbol.header.slotIndex]));
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
           if (!result.valid || !result.bytes.length) continue;
@@ -530,9 +534,9 @@ ctx.onmessage = async (e) => {
         sightings,
         full: false,
         trackedAttempted: true,
-        trackedHit: false,
+        trackedHit: nativeSymbols.length > 0,
         fallbackAttempted: true,
-        fallbackSucceeded: symbols.length > 0,
+        fallbackSucceeded: symbols.length > nativeSymbols.length,
         readFullAttempts,
         workerWaitMs,
         frameCopyMs,
