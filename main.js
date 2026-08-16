@@ -2,7 +2,7 @@ var _a;
 import { closeOnBackdropClick } from "./shared/dialog.js";
 import { isAndroid, isIOS } from "./shared/platform.js";
 
-const APP_BUILD = "v0.5.84";
+const APP_BUILD = "v0.5.85";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -22,9 +22,6 @@ await Promise.all([
 
 document.querySelector(".app-version").textContent = APP_BUILD;
 if (serviceWorkers) {
-  // Check for a newer worker without ever taking over or reloading this page.
-  // The new worker stays waiting while any client using the current build is
-  // open, then activates naturally after those clients are gone.
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
 }
 const installShell = document.querySelector(".install-shell");

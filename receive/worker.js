@@ -136,9 +136,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
   const byId = configureNativeBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
-  // The tracked hot path never spends CPU rescuing a QR with QR-level
-  // Reed-Solomon. AirGapper's RaptorQ transport is designed to tolerate whole
-  // packet loss; a sampled matrix that cannot pass the cheap CRC path is a miss.
   zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
   const count = decode(
     nativeBatchHandle,
@@ -189,7 +186,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const status = view.getInt32(at + 4, true);
     const bytesOffset = view.getInt32(at + 8, true);
     const bytesLength = view.getInt32(at + 12, true);
-    const misses = view.getInt32(at + 16, true);
     const dx = view.getFloat32(at + 24, true);
     const dy = view.getFloat32(at + 28, true);
     const mapped = byId.get(id);
@@ -262,9 +258,7 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    // A persistent native miss is a local decoder problem, not a reason to
-    // wait for a whole-grid recovery scan. After two misses, copy this same
-    // bounded crop as RGBA so the robust stock decoder can rescue/re-anchor it.
+    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
@@ -282,7 +276,7 @@ ctx.onmessage = async (e) => {
     let ptr;
     if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
-      const copyAsRgba = pixelFormat !== "y8";
+      const copyAsRgba = robustLaneFirst || pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
@@ -296,7 +290,6 @@ ctx.onmessage = async (e) => {
       decodePixelFormat = copyAsRgba ? "rgba" : "y8";
       if (decodePixelFormat === "y8" && inputStride < w) throw new Error("Camera Y stride is invalid");
       if (decodePixelFormat === "rgba" && inputStride < w * 4) throw new Error("Camera RGBA stride is invalid");
-      // Only LIVE local recovery needs the original Y frame after the native attempt.
       if (copyAsRgba || full || !(tracks?.length) || !robustTrackedRecovery) {
         ownedVideoFrame.close();
         ownedVideoFrame = null;
@@ -455,7 +448,48 @@ ctx.onmessage = async (e) => {
       });
       return;
     }
-    if (!full && (tracks == null ? void 0 : tracks.length)) {
+    if (!full && tracks?.length && robustLaneFirst) {
+      readFullAttempts++;
+      const decoded = zx.readFull(ptr + inputOffset, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
+      try {
+        const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
+        for (let i = 0; i < decoded.size(); i++) {
+          const result = decoded.get(i);
+          if (!result.valid || !result.bytes.length || !validQuad(result.position)) continue;
+          const packet = parseFrame(result.bytes);
+          const slot = packet?.header.slotIndex;
+          if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
+          symbols.push({
+            bytes: result.bytes,
+            box: boundsOf(result.position, ox, oy),
+            quad: shifted(result.position, ox, oy),
+            modules: result.modules,
+            tracked: false
+          });
+        }
+      } finally {
+        decoded.delete();
+      }
+      mapOutputToDisplay();
+      ctx.postMessage({
+        id,
+        symbols,
+        sightings,
+        full: false,
+        trackedAttempted: false,
+        trackedHit: false,
+        fallbackAttempted: true,
+        fallbackSucceeded: symbols.length > 0,
+        readFullAttempts,
+        workerWaitMs,
+        frameCopyMs,
+        pixelPath: decodePixelFormat,
+        robustFirst: true,
+        latencyMs: performance.now() - startedAt
+      });
+      return;
+    }
+    if (!full && tracks?.length) {
       const native = decodeNativeBatch(
         zx,
         ptr + inputOffset,
@@ -498,14 +532,7 @@ ctx.onmessage = async (e) => {
         ctx.postMessage(reply, transfer);
         return;
       }
-
-      // Keep any cached-map successes and let the robust detector fill only
-      // the missing slots. One bad QR must never throw away four cheap wins.
       symbols.push(...nativeSymbols);
-
-      // The normal hot path already missed on Y8. Only now copy this exact
-      // bounded crop as RGBA for the explicitly counted robust local recovery.
-      // Do NOT retry native on RGBA as an unlabelled alternate hot path.
       if (ownedVideoFrame) {
         const rect = { x: cropX, y: cropY, width: w, height: h };
         const options = { rect, format: "RGBA" };
@@ -522,9 +549,6 @@ ctx.onmessage = async (e) => {
         ownedVideoFrame.close();
         ownedVideoFrame = null;
       }
-      // Native tracking has repeatedly missed this known crop. Run the robust
-      // QR detector only inside the bounded lane crop, then feed its fresh quad
-      // back through the normal lattice update. This is deliberately local.
       readFullAttempts++;
       const decoded = zx.readFull(ptr, pw, ph, true, Math.min(16, Math.max(1, tracks.length)), false);
       try {
@@ -546,9 +570,6 @@ ctx.onmessage = async (e) => {
             const currentLocal = localQuad(tracks[trackIndex].quad, ox, oy);
             const moduleSize = quadModuleSize(currentLocal, tracks[trackIndex].dim);
             const refreshThreshold = Math.max(0.75, moduleSize * 0.45);
-            // Pure camera translation belongs in native dx/dy tracking. Only
-            // throw away an expensive distortion map when the robust quad says
-            // the QR's actual shape changed beyond sub-module jitter.
             if (quadShapeResidual(currentLocal, result.position) > refreshThreshold)
               nativeRefresh.add(trackIndex);
           }
