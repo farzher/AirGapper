@@ -43,6 +43,7 @@
 #include "qrcode/QRDetector.h"
 #include "qrcode/QRBitMatrixParser.h"
 #include "qrcode/QRDataBlock.h"
+#include "qrcode/QRDataMask.h"
 #include "qrcode/QRFormatInformation.h"
 #include "qrcode/QRVersion.h"
 #include "ByteArray.h"
@@ -761,12 +762,180 @@ static FastThresholdGrid buildFastThresholds(const TrackedDecoder& decoder, cons
 	return grid;
 }
 
+struct AirGapV40Sample
+{
+	uint32_t sampleIndex = 0;
+	bool mask = false;
+};
+
+struct AirGapV40Plan
+{
+	static constexpr int DIM = 177;
+	static constexpr int DATA_CODEWORDS = 2956;
+	static constexpr int DATA_BITS = DATA_CODEWORDS * 8;
+	std::vector<AirGapV40Sample> samples;
+	std::array<int16_t, DATA_CODEWORDS> rawToData{};
+	bool valid = false;
+};
+
+static const AirGapV40Plan& airGapV40Plan()
+{
+	static const AirGapV40Plan plan = [] {
+		AirGapV40Plan out;
+		out.rawToData.fill(-1);
+		const auto* version = QRCode::Version::Model2(40);
+		if (!version || version->dimension() != AirGapV40Plan::DIM)
+			return out;
+		const auto& ec = version->ecBlocksForLevel(QRCode::ErrorCorrectionLevel::Low);
+		std::vector<int> dataLengths;
+		for (const auto& group : ec.blockArray())
+			for (int i = 0; i < group.count; ++i)
+				dataLengths.push_back(group.dataCodewords);
+		if (dataLengths.empty())
+			return out;
+		std::vector<int> base(dataLengths.size());
+		int dataCodewords = 0, maxData = 0;
+		for (size_t i = 0; i < dataLengths.size(); ++i) {
+			base[i] = dataCodewords;
+			dataCodewords += dataLengths[i];
+			maxData = std::max(maxData, dataLengths[i]);
+		}
+		if (dataCodewords != AirGapV40Plan::DATA_CODEWORDS)
+			return out;
+		int raw = 0;
+		for (int i = 0; i < maxData; ++i)
+			for (size_t block = 0; block < dataLengths.size(); ++block)
+				if (i < dataLengths[block])
+					out.rawToData[raw++] = int16_t(base[block] + i);
+		if (raw != AirGapV40Plan::DATA_CODEWORDS)
+			return out;
+
+		const BitMatrix functionPattern = version->buildFunctionPattern();
+		out.samples.reserve(AirGapV40Plan::DATA_BITS);
+		bool readingUp = true;
+		const int dim = AirGapV40Plan::DIM;
+		for (int x = dim - 1; x > 0; x -= 2) {
+			if (x == 6)
+				--x;
+			for (int row = 0; row < dim; ++row) {
+				const int y = readingUp ? dim - 1 - row : row;
+				for (int col = 0; col < 2; ++col) {
+					const int xx = x - col;
+					if (functionPattern.get(xx, y) || int(out.samples.size()) >= AirGapV40Plan::DATA_BITS)
+						continue;
+					out.samples.push_back({uint32_t(y * dim + xx), ((y / 2) + (xx / 3)) % 2 == 0});
+				}
+			}
+			readingUp = !readingUp;
+		}
+		out.valid = int(out.samples.size()) == AirGapV40Plan::DATA_BITS;
+		return out;
+	}();
+	return plan;
+}
+
+template <class LumAt>
+static ByteArray decodeAirGapV40(TrackedDecoder& decoder, PersistentTrack& track, const LumAt& lumAt,
+                                 DecimenBatchMetrics& measured)
+{
+	ByteArray packet;
+	++measured.alignmentFitAttempts;
+	const auto& plan = airGapV40Plan();
+	if (!plan.valid || track.dimension != AirGapV40Plan::DIM || !track.calibrated || !track.crc32Payload) {
+		++measured.bitstreamFailures;
+		return packet;
+	}
+
+	const auto thresholds = buildFastThresholds(decoder, track, lumAt);
+	if (!thresholds.ok) {
+		++measured.bitstreamFailures;
+		return packet;
+	}
+
+	std::array<uint8_t, AirGapV40Plan::DATA_CODEWORDS> data{};
+	uint8_t currentByte = 0;
+	int bitsInByte = 0, rawByte = 0;
+	const double sampleStarted = emscripten_get_now();
+	for (const auto& entry : plan.samples) {
+		const int moduleY = int(entry.sampleIndex / AirGapV40Plan::DIM);
+		const int moduleX = int(entry.sampleIndex - uint32_t(moduleY * AirGapV40Plan::DIM));
+		const auto& cached = track.samples[entry.sampleIndex];
+		const auto q = decoder.motion.apply(PointF{cached.x, cached.y});
+		const int lum = lumAt(q.x, q.y);
+		if (lum < 0) {
+			measured.samplingMs += emscripten_get_now() - sampleStarted;
+			measured.samples += rawByte * 8 + bitsInByte;
+			++measured.outOfFrameMisses;
+			return packet;
+		}
+		const int threshold = thresholds.t[
+			std::clamp(moduleY * FAST_THRESH_TILES / AirGapV40Plan::DIM, 0, FAST_THRESH_TILES - 1)
+		][
+			std::clamp(moduleX * FAST_THRESH_TILES / AirGapV40Plan::DIM, 0, FAST_THRESH_TILES - 1)
+		];
+		const bool dark = lum <= threshold;
+		const bool dataBit = entry.mask != dark;
+		currentByte = uint8_t((currentByte << 1) | (dataBit ? 1 : 0));
+		if (++bitsInByte == 8) {
+			const int dst = plan.rawToData[rawByte++];
+			if (dst < 0 || dst >= AirGapV40Plan::DATA_CODEWORDS) {
+				measured.samplingMs += emscripten_get_now() - sampleStarted;
+				++measured.bitstreamFailures;
+				return packet;
+			}
+			data[dst] = currentByte;
+			currentByte = 0;
+			bitsInByte = 0;
+		}
+	}
+	measured.samples += plan.samples.size();
+	measured.samplingMs += emscripten_get_now() - sampleStarted;
+	if (rawByte != AirGapV40Plan::DATA_CODEWORDS || bitsInByte != 0) {
+		++measured.bitstreamFailures;
+		return packet;
+	}
+
+	const double bitsStarted = emscripten_get_now();
+	// AirGapper explicitly emits one QR byte-mode segment. At V40 the byte
+	// character count is 16 bits, so the payload begins at bit 20. That gives
+	// a very cheap nibble splice instead of the generic QR bitstream parser.
+	if ((data[0] >> 4) != 0x4) {
+		measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
+		++measured.bitstreamFailures;
+		return packet;
+	}
+	const int byteCount = ((data[0] & 0x0f) << 12) | (int(data[1]) << 4) | (data[2] >> 4);
+	constexpr int MAX_V40_L_BYTES = 2953;
+	if (byteCount <= 4 || byteCount > MAX_V40_L_BYTES || 20 + byteCount * 8 > AirGapV40Plan::DATA_BITS) {
+		measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
+		++measured.bitstreamFailures;
+		return packet;
+	}
+	ByteArray qrPayload(byteCount);
+	for (int i = 0; i < byteCount; ++i)
+		qrPayload[i] = uint8_t(((data[2 + i] & 0x0f) << 4) | (data[3 + i] >> 4));
+	measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
+
+	const double crcStarted = emscripten_get_now();
+	const bool crcOK = hasValidCRC32(qrPayload);
+	measured.crcMs += emscripten_get_now() - crcStarted;
+	if (!crcOK) {
+		++measured.crcFailures;
+		return packet;
+	}
+	packet.assign(qrPayload.begin(), qrPayload.end() - 4);
+	++measured.alignmentFitSuccesses;
+	return packet;
+}
+
 template <class LumAt>
 static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& track, const LumAt& lumAt,
                                    DecimenBatchMetrics& measured)
 {
 	if (!track.calibrated)
 		return {};
+	if (track.dimension == AirGapV40Plan::DIM && track.crc32Payload)
+		return decodeAirGapV40(decoder, track, lumAt, measured);
 	++measured.alignmentFitAttempts;
 	const auto thresholds = buildFastThresholds(decoder, track, lumAt);
 	if (!thresholds.ok) {
