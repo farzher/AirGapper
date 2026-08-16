@@ -1,0 +1,9 @@
+name: discard helper
+on:
+  push:
+    branches: [never]
+jobs:
+  none:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
