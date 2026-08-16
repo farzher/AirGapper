@@ -485,19 +485,9 @@ ctx.onmessage = async (e) => {
           inputStride
         );
         const nativeSymbols = productionNative?.symbols ?? [];
-        const activeNativeTracks = productionNative?.metrics?.activeTracks ?? 0;
-        const calibratedNativeTracks = productionNative?.metrics?.calibratedTracks ?? 0;
-        const calibrationComplete = activeNativeTracks > 0 && calibratedNativeTracks >= activeNativeTracks;
-        // Once geometry is fully calibrated, optimize symbols / wall-clock time,
-        // not per-frame perfection. RaptorQ wants erasures; nine CRC-valid QRs
-        // from an 18-QR frame are far more valuable than spending hundreds of
-        // milliseconds rerunning a generic finder merely to rescue the rest.
-        const usefulThreshold = calibrationComplete
-          ? Math.max(2, Math.ceil(tracks.length * 0.5))
-          : Math.ceil(tracks.length * 2 / 3);
+        const usefulThreshold = Math.ceil(tracks.length * 2 / 3);
         if (nativeSymbols.length >= usefulThreshold) {
           denseNativeBadStreak = 0;
-          denseNativeCooldown = 0;
           mapOutputToDisplay(nativeSymbols);
           const reply = {
             id,
@@ -522,20 +512,18 @@ ctx.onmessage = async (e) => {
           ctx.postMessage(reply, transfer);
           return;
         }
-        const calibrationIncomplete = activeNativeTracks > 0 && calibratedNativeTracks < activeNativeTracks;
+        const calibrationIncomplete = (productionNative?.metrics?.activeTracks ?? 0) > 0
+          && (productionNative?.metrics?.calibratedTracks ?? 0) < productionNative.metrics.activeTracks;
         if (calibrationIncomplete) {
           // A losing frame while maps are still being built is setup progress,
           // not evidence that the native state is poisoned. Preserve it.
           denseNativeBadStreak = 0;
         } else {
           denseNativeBadStreak++;
-          if (denseNativeBadStreak >= 3) {
-            // Do not destroy calibrated module maps. A short robust-only spell
-            // advances the camera and gives the projective tracker a fresh pose;
-            // then retry the same calibrated state. Individual slots can still
-            // be selectively refreshed from robust geometry when needed.
-            denseNativeCooldown = 2;
+          if (denseNativeBadStreak >= 2) {
+            denseNativeCooldown = 6;
             denseNativeBadStreak = 0;
+            resetNativeBatch(zx);
           }
         }
       } else if (denseNativeEligible && denseNativeCooldown > 0) {
@@ -769,7 +757,7 @@ ctx.onmessage = async (e) => {
           return result;
         };
         readFullAttempts++;
-        appendResults(readFull(NATIVE_BATCH_MAX_TRACKS, false), false);
+        appendResults(readFull(16, false), false);
         if (symbols.length === 0) {
           readFullAttempts++;
           appendResults(readFull(24, true), true);

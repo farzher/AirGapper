@@ -43,7 +43,6 @@
 #include "qrcode/QRDetector.h"
 #include "qrcode/QRBitMatrixParser.h"
 #include "qrcode/QRDataBlock.h"
-#include "qrcode/QRDataMask.h"
 #include "qrcode/QRFormatInformation.h"
 #include "qrcode/QRVersion.h"
 #include "ByteArray.h"
@@ -514,34 +513,11 @@ struct PersistentTrack
 
 struct AffineMotion
 {
-	// Full planar projective motion. The legacy name is kept because this is
-	// an internal ABI-neutral implementation detail. g=h=0 is ordinary affine.
-	double a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0, g = 0, h = 0;
+	double a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0;
 
 	PointF apply(PointF p) const
 	{
-		const double z = g * p.x + h * p.y + 1.0;
-		if (std::abs(z) < 1e-9)
-			return {1e30, 1e30};
-		return {(a * p.x + b * p.y + tx) / z, (c * p.x + d * p.y + ty) / z};
-	}
-
-	std::optional<AffineMotion> inverse() const
-	{
-		// Invert [a b tx; c d ty; g h 1], then renormalize m22 to 1.
-		const double A = d - ty * h;
-		const double B = tx * h - b;
-		const double C = b * ty - tx * d;
-		const double D = ty * g - c;
-		const double E = a - tx * g;
-		const double F = tx * c - a * ty;
-		const double G = c * h - d * g;
-		const double H = b * g - a * h;
-		const double I = a * d - b * c;
-		const double det = a * A + b * D + tx * G;
-		if (std::abs(det) < 1e-9 || std::abs(I) < 1e-9)
-			return {};
-		return AffineMotion{A / I, B / I, D / I, E / I, C / I, F / I, G / I, H / I};
+		return {a * p.x + b * p.y + tx, c * p.x + d * p.y + ty};
 	}
 };
 
@@ -770,180 +746,12 @@ static FastThresholdGrid buildFastThresholds(const TrackedDecoder& decoder, cons
 	return grid;
 }
 
-struct AirGapV40Sample
-{
-	uint32_t sampleIndex = 0;
-	bool mask = false;
-};
-
-struct AirGapV40Plan
-{
-	static constexpr int DIM = 177;
-	static constexpr int DATA_CODEWORDS = 2956;
-	static constexpr int DATA_BITS = DATA_CODEWORDS * 8;
-	std::vector<AirGapV40Sample> samples;
-	std::array<int16_t, DATA_CODEWORDS> rawToData{};
-	bool valid = false;
-};
-
-static const AirGapV40Plan& airGapV40Plan()
-{
-	static const AirGapV40Plan plan = [] {
-		AirGapV40Plan out;
-		out.rawToData.fill(-1);
-		const auto* version = QRCode::Version::Model2(40);
-		if (!version || version->dimension() != AirGapV40Plan::DIM)
-			return out;
-		const auto& ec = version->ecBlocksForLevel(QRCode::ErrorCorrectionLevel::Low);
-		std::vector<int> dataLengths;
-		for (const auto& group : ec.blockArray())
-			for (int i = 0; i < group.count; ++i)
-				dataLengths.push_back(group.dataCodewords);
-		if (dataLengths.empty())
-			return out;
-		std::vector<int> base(dataLengths.size());
-		int dataCodewords = 0, maxData = 0;
-		for (size_t i = 0; i < dataLengths.size(); ++i) {
-			base[i] = dataCodewords;
-			dataCodewords += dataLengths[i];
-			maxData = std::max(maxData, dataLengths[i]);
-		}
-		if (dataCodewords != AirGapV40Plan::DATA_CODEWORDS)
-			return out;
-		int raw = 0;
-		for (int i = 0; i < maxData; ++i)
-			for (size_t block = 0; block < dataLengths.size(); ++block)
-				if (i < dataLengths[block])
-					out.rawToData[raw++] = int16_t(base[block] + i);
-		if (raw != AirGapV40Plan::DATA_CODEWORDS)
-			return out;
-
-		const BitMatrix functionPattern = version->buildFunctionPattern();
-		out.samples.reserve(AirGapV40Plan::DATA_BITS);
-		bool readingUp = true;
-		const int dim = AirGapV40Plan::DIM;
-		for (int x = dim - 1; x > 0; x -= 2) {
-			if (x == 6)
-				--x;
-			for (int row = 0; row < dim; ++row) {
-				const int y = readingUp ? dim - 1 - row : row;
-				for (int col = 0; col < 2; ++col) {
-					const int xx = x - col;
-					if (functionPattern.get(xx, y) || int(out.samples.size()) >= AirGapV40Plan::DATA_BITS)
-						continue;
-					out.samples.push_back({uint32_t(y * dim + xx), ((y / 2) + (xx / 3)) % 2 == 0});
-				}
-			}
-			readingUp = !readingUp;
-		}
-		out.valid = int(out.samples.size()) == AirGapV40Plan::DATA_BITS;
-		return out;
-	}();
-	return plan;
-}
-
-template <class LumAt>
-static ByteArray decodeAirGapV40(TrackedDecoder& decoder, PersistentTrack& track, const LumAt& lumAt,
-                                 DecimenBatchMetrics& measured)
-{
-	ByteArray packet;
-	++measured.alignmentFitAttempts;
-	const auto& plan = airGapV40Plan();
-	if (!plan.valid || track.dimension != AirGapV40Plan::DIM || !track.calibrated || !track.crc32Payload) {
-		++measured.bitstreamFailures;
-		return packet;
-	}
-
-	const auto thresholds = buildFastThresholds(decoder, track, lumAt);
-	if (!thresholds.ok) {
-		++measured.bitstreamFailures;
-		return packet;
-	}
-
-	std::array<uint8_t, AirGapV40Plan::DATA_CODEWORDS> data{};
-	uint8_t currentByte = 0;
-	int bitsInByte = 0, rawByte = 0;
-	const double sampleStarted = emscripten_get_now();
-	for (const auto& entry : plan.samples) {
-		const int moduleY = int(entry.sampleIndex / AirGapV40Plan::DIM);
-		const int moduleX = int(entry.sampleIndex - uint32_t(moduleY * AirGapV40Plan::DIM));
-		const auto& cached = track.samples[entry.sampleIndex];
-		const auto q = decoder.motion.apply(PointF{cached.x, cached.y});
-		const int lum = lumAt(q.x, q.y);
-		if (lum < 0) {
-			measured.samplingMs += emscripten_get_now() - sampleStarted;
-			measured.samples += rawByte * 8 + bitsInByte;
-			++measured.outOfFrameMisses;
-			return packet;
-		}
-		const int threshold = thresholds.t[
-			std::clamp(moduleY * FAST_THRESH_TILES / AirGapV40Plan::DIM, 0, FAST_THRESH_TILES - 1)
-		][
-			std::clamp(moduleX * FAST_THRESH_TILES / AirGapV40Plan::DIM, 0, FAST_THRESH_TILES - 1)
-		];
-		const bool dark = lum <= threshold;
-		const bool dataBit = entry.mask != dark;
-		currentByte = uint8_t((currentByte << 1) | (dataBit ? 1 : 0));
-		if (++bitsInByte == 8) {
-			const int dst = plan.rawToData[rawByte++];
-			if (dst < 0 || dst >= AirGapV40Plan::DATA_CODEWORDS) {
-				measured.samplingMs += emscripten_get_now() - sampleStarted;
-				++measured.bitstreamFailures;
-				return packet;
-			}
-			data[dst] = currentByte;
-			currentByte = 0;
-			bitsInByte = 0;
-		}
-	}
-	measured.samples += plan.samples.size();
-	measured.samplingMs += emscripten_get_now() - sampleStarted;
-	if (rawByte != AirGapV40Plan::DATA_CODEWORDS || bitsInByte != 0) {
-		++measured.bitstreamFailures;
-		return packet;
-	}
-
-	const double bitsStarted = emscripten_get_now();
-	// AirGapper explicitly emits one QR byte-mode segment. At V40 the byte
-	// character count is 16 bits, so the payload begins at bit 20. That gives
-	// a very cheap nibble splice instead of the generic QR bitstream parser.
-	if ((data[0] >> 4) != 0x4) {
-		measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
-		++measured.bitstreamFailures;
-		return packet;
-	}
-	const int byteCount = ((data[0] & 0x0f) << 12) | (int(data[1]) << 4) | (data[2] >> 4);
-	constexpr int MAX_V40_L_BYTES = 2953;
-	if (byteCount <= 4 || byteCount > MAX_V40_L_BYTES || 20 + byteCount * 8 > AirGapV40Plan::DATA_BITS) {
-		measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
-		++measured.bitstreamFailures;
-		return packet;
-	}
-	ByteArray qrPayload(byteCount);
-	for (int i = 0; i < byteCount; ++i)
-		qrPayload[i] = uint8_t(((data[2 + i] & 0x0f) << 4) | (data[3 + i] >> 4));
-	measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
-
-	const double crcStarted = emscripten_get_now();
-	const bool crcOK = hasValidCRC32(qrPayload);
-	measured.crcMs += emscripten_get_now() - crcStarted;
-	if (!crcOK) {
-		++measured.crcFailures;
-		return packet;
-	}
-	packet.assign(qrPayload.begin(), qrPayload.end() - 4);
-	++measured.alignmentFitSuccesses;
-	return packet;
-}
-
 template <class LumAt>
 static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& track, const LumAt& lumAt,
                                    DecimenBatchMetrics& measured)
 {
 	if (!track.calibrated)
 		return {};
-	if (track.dimension == AirGapV40Plan::DIM && track.crc32Payload)
-		return decodeAirGapV40(decoder, track, lumAt, measured);
 	++measured.alignmentFitAttempts;
 	const auto thresholds = buildFastThresholds(decoder, track, lumAt);
 	if (!thresholds.ok) {
@@ -1006,15 +814,25 @@ static ByteArray decodeCachedTrack(TrackedDecoder& decoder, PersistentTrack& tra
 		++measured.bitstreamFailures;
 	}
 
-	// Locked transfer is an erasure channel. A cached-map CRC miss is cheaper
-	// to drop than to run a full QR Reed-Solomon decode for this one symbol;
-	// the worker-level robust fallback already rescues the frame when aggregate
-	// native yield falls below the useful threshold.
-	return {};
+	if (!track.calibrated)
+		return {};
+
+	const double rsStarted = emscripten_get_now();
+	auto corrected = QRCode::Decode(track.sampled);
+	measured.rsFallbackMs += emscripten_get_now() - rsStarted;
+	++measured.rsFallbacks;
+	if (!corrected.isValid())
+		return {};
+
+	auto packet = packetFromBytes(corrected.content().bytes);
+	if (!packet.empty())
+		++measured.alignmentFitSuccesses;
+	return packet;
 }
 
-// Four tiny finder-template searches replace a multi-megapixel QR detector.
-// Their real finder centers define the rigid screen's current projective pose.
+// A local finder-pattern search is tens of thousands of point reads, not a
+// multi-megapixel QR detector pass. Four spatially distributed QR anchors are
+// enough to fit the rigid screen's current affine pose.
 struct MotionObservation
 {
 	PersistentTrack* track = nullptr;
@@ -1023,39 +841,46 @@ struct MotionObservation
 };
 
 template <class LumAt>
-static AnchorReading readMotionFinder(const TrackedDecoder& decoder, const PersistentTrack& track,
+static AnchorReading readAffineAnchor(const TrackedDecoder& decoder, const PersistentTrack& track,
                                       float localDx, float localDy, const LumAt& lumAt)
 {
-	// One actual finder center is one projective point correspondence. Sampling
-	// all three finders here used 3x the pixels and implicitly assumed the whole
-	// QR moved by a translation before fitting the global screen transform.
+	const int dim = track.dimension;
+	const PointI corners[3] = {{0, 0}, {dim - 7, 0}, {0, dim - 7}};
 	AnchorReading out;
-	int blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
-	uint8_t values[49];
-	bool expected[49];
-	int count = 0;
-	for (int my = 0; my < 7; ++my)
-		for (int mx = 0; mx < 7; ++mx) {
-			const auto& p = track.samples[my * track.dimension + mx];
-			const auto q = decoder.motion.apply(PointF{p.x, p.y});
-			const int lum = lumAt(q.x + localDx, q.y + localDy);
-			if (lum < 0)
-				return {};
-			const bool black = finderIdeal(mx, my);
-			values[count] = static_cast<uint8_t>(lum);
-			expected[count++] = black;
-			if (black) { blackSum += lum; ++blackCount; }
-			else { whiteSum += lum; ++whiteCount; }
-		}
-	if (!blackCount || !whiteCount)
-		return {};
-	const int black = blackSum / blackCount;
-	const int white = whiteSum / whiteCount;
-	out.contrast = white - black;
-	out.threshold = (black + white) / 2;
-	if (out.contrast >= 24)
-		for (int i = 0; i < count; ++i)
-			out.score += (values[i] <= out.threshold) == expected[i];
+	out.contrast = 255;
+	int globalBlackSum = 0, globalWhiteSum = 0, globalBlackCount = 0, globalWhiteCount = 0;
+	for (auto corner : corners) {
+		uint8_t values[49];
+		bool expected[49];
+		int count = 0, blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
+		for (int my = 0; my < 7; ++my)
+			for (int mx = 0; mx < 7; ++mx) {
+				const auto& p = track.samples[(corner.y + my) * dim + corner.x + mx];
+				const auto q = decoder.motion.apply(PointF{p.x, p.y});
+				const int lum = lumAt(q.x + localDx, q.y + localDy);
+				if (lum < 0)
+					return {};
+				const bool black = finderIdeal(mx, my);
+				values[count] = static_cast<uint8_t>(lum);
+				expected[count++] = black;
+				if (black) { blackSum += lum; ++blackCount; }
+				else { whiteSum += lum; ++whiteCount; }
+			}
+		const int black = blackSum / blackCount;
+		const int white = whiteSum / whiteCount;
+		const int contrast = white - black;
+		out.contrast = std::min(out.contrast, contrast);
+		const int threshold = (black + white) / 2;
+		if (contrast >= 24)
+			for (int i = 0; i < count; ++i)
+				out.score += (values[i] <= threshold) == expected[i];
+		globalBlackSum += blackSum; globalBlackCount += blackCount;
+		globalWhiteSum += whiteSum; globalWhiteCount += whiteCount;
+	}
+	const int globalBlack = globalBlackSum / std::max(1, globalBlackCount);
+	const int globalWhite = globalWhiteSum / std::max(1, globalWhiteCount);
+	out.threshold = (globalBlack + globalWhite) / 2;
+	if (out.contrast == 255) out.contrast = 0;
 	return out;
 }
 
@@ -1065,23 +890,21 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 {
 	if (!track.calibrated || track.samples.empty())
 		return false;
-	// Use the center module of this QR's top-left finder as the actual fitted
-	// point. Four QRs distributed over the wall therefore provide four real
-	// screen points for the homography instead of inferred QR-center shifts.
-	const auto& fp = track.samples[3 * track.dimension + 3];
-	const PointF base{fp.x, fp.y};
+	const int center = track.dimension / 2;
+	const auto& cp = track.samples[center * track.dimension + center];
+	const PointF base{cp.x, cp.y};
 	const PointF predicted = decoder.motion.apply(base);
-	AnchorReading best = readMotionFinder(decoder, track, 0, 0, lumAt);
+	AnchorReading best = readAffineAnchor(decoder, track, 0, 0, lumAt);
 	float bestDx = 0, bestDy = 0;
 	auto test = [&](float dx, float dy) {
-		auto candidate = readMotionFinder(decoder, track, dx, dy, lumAt);
+		auto candidate = readAffineAnchor(decoder, track, dx, dy, lumAt);
 		if (candidate.score > best.score || (candidate.score == best.score && candidate.contrast > best.contrast)) {
 			best = candidate;
 			bestDx = dx;
 			bestDy = dy;
 		}
 	};
-	if (!(best.score >= 47 && best.contrast >= 32)) {
+	if (!(best.score >= 140 && best.contrast >= 32)) {
 		for (int y = -8; y <= 8; y += 2)
 			for (int x = -8; x <= 8; x += 2)
 				if (x || y)
@@ -1092,101 +915,71 @@ static bool locateAffineAnchor(TrackedDecoder& decoder, PersistentTrack& track, 
 				if (x || y)
 					test(coarseX + x * 0.5f, coarseY + y * 0.5f);
 	}
-	if (best.score < 42 || best.contrast < 24) {
-		for (int y = -24; y <= 24; y += 4)
-			for (int x = -24; x <= 24; x += 4)
-				if (std::abs(x) > 8 || std::abs(y) > 8)
-					test(float(x), float(y));
-		const float wideX = bestDx, wideY = bestDy;
-		for (int y = -2; y <= 2; ++y)
-			for (int x = -2; x <= 2; ++x)
-				if (x || y)
-					test(wideX + float(x), wideY + float(y));
-	}
-	if (best.score < 42 || best.contrast < 24)
+	if (best.score < 125 || best.contrast < 24)
 		return false;
 	observation = {&track, base, PointF{predicted.x + bestDx, predicted.y + bestDy}};
 	return true;
 }
 
-static bool solve8x8(double m[8][8], double rhs[8], double out[8])
+static bool solve3x3(double m[3][3], double rhs[3], double out[3])
 {
-	for (int col = 0; col < 8; ++col) {
+	for (int col = 0; col < 3; ++col) {
 		int pivot = col;
-		for (int row = col + 1; row < 8; ++row)
+		for (int row = col + 1; row < 3; ++row)
 			if (std::abs(m[row][col]) > std::abs(m[pivot][col]))
 				pivot = row;
-		if (std::abs(m[pivot][col]) < 1e-10)
+		if (std::abs(m[pivot][col]) < 1e-9)
 			return false;
 		if (pivot != col) {
-			for (int k = col; k < 8; ++k) std::swap(m[col][k], m[pivot][k]);
+			for (int k = col; k < 3; ++k) std::swap(m[col][k], m[pivot][k]);
 			std::swap(rhs[col], rhs[pivot]);
 		}
 		const double inv = 1.0 / m[col][col];
-		for (int k = col; k < 8; ++k) m[col][k] *= inv;
+		for (int k = col; k < 3; ++k) m[col][k] *= inv;
 		rhs[col] *= inv;
-		for (int row = 0; row < 8; ++row) {
+		for (int row = 0; row < 3; ++row) {
 			if (row == col) continue;
 			const double f = m[row][col];
-			if (std::abs(f) < 1e-15) continue;
-			for (int k = col; k < 8; ++k) m[row][k] -= f * m[col][k];
+			for (int k = col; k < 3; ++k) m[row][k] -= f * m[col][k];
 			rhs[row] -= f * rhs[col];
 		}
 	}
-	for (int i = 0; i < 8; ++i) out[i] = rhs[i];
+	for (int i = 0; i < 3; ++i) out[i] = rhs[i];
 	return true;
 }
 
-static bool fitProjective(const std::vector<MotionObservation>& observations, AffineMotion& fitted)
+static bool fitAffine(const std::vector<MotionObservation>& observations, AffineMotion& fitted)
 {
-	// registerGlobalMotion deliberately supplies exactly four widely separated
-	// anchors. Solve those eight projective equations directly; forming normal
-	// equations squares the condition number for no benefit here.
-	if (observations.size() != 4)
+	if (observations.size() < 3)
 		return false;
-	double matrix[8][8]{};
-	double rhs[8]{};
-	for (int i = 0; i < 4; ++i) {
-		const auto& o = observations[i];
-		const double x = o.base.x, y = o.base.y, u = o.current.x, v = o.current.y;
-		double* rx = matrix[i * 2];
-		double* ry = matrix[i * 2 + 1];
-		rx[0] = x; rx[1] = y; rx[4] = 1; rx[6] = -u * x; rx[7] = -u * y;
-		ry[2] = x; ry[3] = y; ry[5] = 1; ry[6] = -v * x; ry[7] = -v * y;
-		rhs[i * 2] = u;
-		rhs[i * 2 + 1] = v;
-	}
-	double solution[8];
-	if (!solve8x8(matrix, rhs, solution))
-		return false;
-	AffineMotion candidate{solution[0], solution[1], solution[2], solution[3],
-	                       solution[4], solution[5], solution[6], solution[7]};
-	if (!candidate.inverse())
-		return false;
-
-	double error2 = 0;
-	PointF centroid{};
+	double normal[3][3]{};
+	double bx[3]{}, by[3]{};
 	for (const auto& o : observations) {
-		const double z = candidate.g * o.base.x + candidate.h * o.base.y + 1.0;
-		if (z < 0.35 || z > 2.85)
-			return false;
+		const double v[3] = {o.base.x, o.base.y, 1.0};
+		for (int r = 0; r < 3; ++r) {
+			for (int c = 0; c < 3; ++c) normal[r][c] += v[r] * v[c];
+			bx[r] += v[r] * o.current.x;
+			by[r] += v[r] * o.current.y;
+		}
+	}
+	double mx[3][3], my[3][3];
+	std::memcpy(mx, normal, sizeof(normal));
+	std::memcpy(my, normal, sizeof(normal));
+	double sx[3], sy[3];
+	if (!solve3x3(mx, bx, sx) || !solve3x3(my, by, sy))
+		return false;
+	AffineMotion candidate{sx[0], sx[1], sy[0], sy[1], sx[2], sy[2]};
+	const double det = candidate.a * candidate.d - candidate.b * candidate.c;
+	const double scaleX = std::hypot(candidate.a, candidate.c);
+	const double scaleY = std::hypot(candidate.b, candidate.d);
+	if (det <= 0.35 || det >= 2.25 || scaleX < 0.55 || scaleX > 1.6 || scaleY < 0.55 || scaleY > 1.6)
+		return false;
+	double error2 = 0;
+	for (const auto& o : observations) {
 		const auto q = candidate.apply(o.base);
-		if (!std::isfinite(q.x) || !std::isfinite(q.y))
-			return false;
 		const double dx = q.x - o.current.x, dy = q.y - o.current.y;
 		error2 += dx * dx + dy * dy;
-		centroid += o.base;
 	}
-	centroid = centroid / double(observations.size());
-	const auto p = candidate.apply(centroid);
-	const auto px = candidate.apply(centroid + PointF{1, 0});
-	const auto py = candidate.apply(centroid + PointF{0, 1});
-	const double ux = px.x - p.x, uy = px.y - p.y;
-	const double vx = py.x - p.x, vy = py.y - p.y;
-	const double scaleX = std::hypot(ux, uy), scaleY = std::hypot(vx, vy);
-	const double orientation = ux * vy - uy * vx;
-	if (scaleX < 0.55 || scaleX > 1.6 || scaleY < 0.55 || scaleY > 1.6 || orientation <= 0.3 || orientation >= 2.6)
-		return false;
 	const double rms = std::sqrt(error2 / observations.size());
 	if (rms > 2.5)
 		return false;
@@ -1201,7 +994,7 @@ static bool registerGlobalMotion(TrackedDecoder& decoder, const LumAt& lumAt, De
 	for (auto& track : decoder.tracks)
 		if (track.active && track.calibrated && !track.samples.empty())
 			candidates.push_back(&track);
-	if (candidates.size() < 4)
+	if (candidates.size() < 3)
 		return false;
 
 	auto baseCenter = [](const PersistentTrack& track) {
@@ -1246,7 +1039,7 @@ static bool registerGlobalMotion(TrackedDecoder& decoder, const LumAt& lumAt, De
 		}
 	}
 	AffineMotion fitted;
-	const bool ok = fitProjective(observations, fitted);
+	const bool ok = fitAffine(observations, fitted);
 	measured.anchorMs += emscripten_get_now() - started;
 	if (!ok)
 		return false;
@@ -1272,36 +1065,21 @@ static void fillResultGeometry(const TrackedDecoder& decoder, const PersistentTr
 template <class LumAt>
 static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
                               DecimenTrackedResult* results, int resultCapacity,
-                              uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics,
-                              bool poseAlreadyCurrent = false)
+                              uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
 {
 	DecimenBatchMetrics measured{};
 	const double totalStart = emscripten_get_now();
 	int resultCount = 0;
 	int outputUsed = 0;
+
+	struct PendingTrack { PersistentTrack* track; DecimenTrackedResult* result; };
+	std::vector<PendingTrack> pending;
 	std::vector<PersistentTrack*> resultTracks;
+	pending.reserve(decoder.tracks.size());
 	resultTracks.reserve(decoder.tracks.size());
 
-	int activeTracks = 0, calibratedTracks = 0;
-	for (const auto& track : decoder.tracks) {
-		if (!track.active) continue;
-		++activeTracks;
-		if (track.calibrated) ++calibratedTracks;
-	}
-
-	// A worker can be several camera frames behind. Register the rigid wall in
-	// THIS frame before paying to sample any 177x177 QR matrix. The four finder
-	// probes are much cheaper than sampling even one V40 symbol. If registration
-	// fails, return erasures immediately and let the worker-level robust pass
-	// recover/re-anchor instead of sampling 18 known-stale maps.
-	const AffineMotion trustedMotion = decoder.motion;
-	const bool fittedThisFrame = !poseAlreadyCurrent && calibratedTracks >= std::min(4, activeTracks);
-	const bool poseCurrent = poseAlreadyCurrent || (fittedThisFrame && registerGlobalMotion(decoder, lumAt, measured));
-
 	auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
-		if (!poseCurrent || !track.calibrated || !track.crc32Payload)
-			return false;
-		ByteArray packet = decodeCachedTrack(decoder, track, lumAt, measured);
+		ByteArray packet = track.crc32Payload ? decodeCachedTrack(decoder, track, lumAt, measured) : ByteArray{};
 		if (packet.empty())
 			return false;
 		if (outputUsed + int(packet.size()) > outputCapacity) {
@@ -1321,6 +1099,8 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 		return true;
 	};
 
+	// First use the previous CRC-confirmed screen pose. With a stable handheld
+	// frame this is the entire hot path: point sample + bit extraction + CRC.
 	for (auto& track : decoder.tracks) {
 		if (!track.active || resultCount >= resultCapacity)
 			continue;
@@ -1330,25 +1110,32 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
 		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 		          track.framesSinceReacquire, 0, 0};
 		resultTracks.push_back(&track);
-		if (!tryTrack(track, result)) {
-			++track.consecutiveMisses;
-			++measured.misses;
-			result.consecutiveMisses = track.consecutiveMisses;
-		}
+		if (!tryTrack(track, result))
+			pending.push_back({&track, &result});
 	}
 
+	// A miss means the screen pose may have changed. Register four distributed
+	// known finder templates in this SAME frame, fit one affine, then retry only
+	// the erasures. No generic QR detector is involved.
+	if (!pending.empty() && registerGlobalMotion(decoder, lumAt, measured)) {
+		std::vector<PendingTrack> stillPending;
+		stillPending.reserve(pending.size());
+		for (auto& candidate : pending) {
+			if (!tryTrack(*candidate.track, *candidate.result))
+				stillPending.push_back(candidate);
+		}
+		pending = std::move(stillPending);
+	}
+
+	for (auto& candidate : pending) {
+		auto& track = *candidate.track;
+		auto& result = *candidate.result;
+		++track.consecutiveMisses;
+		++measured.misses;
+		result.consecutiveMisses = track.consecutiveMisses;
+	}
 	for (int i = 0; i < resultCount && i < int(resultTracks.size()); ++i)
 		fillResultGeometry(decoder, *resultTracks[i], results[i]);
-
-	if (fittedThisFrame && poseCurrent) {
-		const int commitThreshold = std::max(2, (calibratedTracks + 4) / 5);
-		if (measured.successful < commitThreshold) {
-			// Keep any CRC-valid packets from this frame, but do not let a false
-			// four-anchor fit become the next frame's search origin.
-			decoder.motion = trustedMotion;
-			if (measured.translationSuccesses > 0) --measured.translationSuccesses;
-		}
-	}
 
 	measured.totalMs = emscripten_get_now() - totalStart;
 	if (metrics)
@@ -1363,17 +1150,6 @@ static PerspectiveTransform trackedTransform(const PersistentTrack& track, float
 	return PerspectiveTransform(
 		QuadrilateralF{PointF{0, 0}, PointF{dim, 0}, PointF{dim, dim}, PointF{0, dim}},
 		QuadrilateralF{track.topLeft + off, track.topRight + off, track.bottomRight + off, track.bottomLeft + off});
-}
-
-static PerspectiveTransform currentTrackedTransform(const TrackedDecoder& decoder, const PersistentTrack& track)
-{
-	const double dim = track.dimension;
-	return PerspectiveTransform(
-		QuadrilateralF{PointF{0, 0}, PointF{dim, 0}, PointF{dim, dim}, PointF{0, dim}},
-		QuadrilateralF{
-			decoder.motion.apply(track.topLeft), decoder.motion.apply(track.topRight),
-			decoder.motion.apply(track.bottomRight), decoder.motion.apply(track.bottomLeft)
-		});
 }
 
 
@@ -1395,9 +1171,9 @@ static std::optional<PointF> locateAlignmentPatternForCache(const BitMatrix& ima
 }
 
 static const QRCode::FinderPatternSet* finderSetForTrack(
-	const TrackedDecoder& decoder, const PersistentTrack& track, const QRCode::FinderPatternSets& sets)
+	const PersistentTrack& track, const QRCode::FinderPatternSets& sets)
 {
-	auto expected = currentTrackedTransform(decoder, track);
+	auto expected = trackedTransform(track, track.dx, track.dy);
 	if (!expected.isValid())
 		return nullptr;
 	const double dim = track.dimension;
@@ -1427,8 +1203,8 @@ static const QRCode::FinderPatternSet* finderSetForTrack(
 // coordinates. Calibration is seeded by zxing-cpp's REAL finder detections,
 // not finder patterns synthesized back from an already-warped outer quad.
 // This preserves the information SampleQR uses to survive lens distortion.
-static bool calibrateTrackSampleMap(const TrackedDecoder& decoder, PersistentTrack& track, const BitMatrix& image,
-										 const QRCode::FinderPatternSet& fp, const AffineMotion* currentToBase)
+static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& image,
+										 const QRCode::FinderPatternSet& fp)
 {
 	const int dim = track.dimension;
 	const int versionNumber = (dim - 17) / 4;
@@ -1443,7 +1219,7 @@ static bool calibrateTrackSampleMap(const TrackedDecoder& decoder, PersistentTra
 	// pattern. The transform itself is then rebuilt from the three measured
 	// finder patterns plus that measured alignment point, matching SampleQR's
 	// geometry convention (bottom-right is three modules inward).
-	auto seed = currentTrackedTransform(decoder, track);
+	auto seed = trackedTransform(track, track.dx, track.dy);
 	if (!seed.isValid())
 		return false;
 	const int N = int(apM.size()) - 1;
@@ -1569,14 +1345,6 @@ static bool calibrateTrackSampleMap(const TrackedDecoder& decoder, PersistentTra
 	}
 	if (!calibrationValid)
 		return false;
-
-	if (currentToBase) {
-		for (auto& cached : candidate) {
-			const auto p = currentToBase->apply(PointF{cached.x, cached.y});
-			cached.x = float(p.x);
-			cached.y = float(p.y);
-		}
-	}
 
 	auto pointAt = [&](int x, int y) { return PointF{candidate[size_t(y) * dim + x].x, candidate[size_t(y) * dim + x].y}; };
 	const auto c00 = pointAt(0, 0), c10 = pointAt(1, 0), c01 = pointAt(0, 1);
@@ -1918,77 +1686,46 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		};
 
 		DecimenBatchMetrics measured{};
-		int activeTracks = 0, calibratedBefore = 0;
+		int activeTracks = 0;
 		bool calibrationDue = false;
 		for (auto& track : decoder->tracks) {
 			if (!track.active)
 				continue;
 			++activeTracks;
-			if (track.calibrated) ++calibratedBefore;
 			if (track.calibrationCooldown > 0)
 				--track.calibrationCooldown;
 			if (!track.calibrated && track.calibrationCooldown == 0)
 				calibrationDue = true;
 		}
 
-		// Before a common reference frame exists, never carry 1-2 calibrated maps
-		// into a later camera frame. Three non-collinear maps establish the base;
-		// after that, every late map is inverse-warped back into that same base.
-		if (!decoder->calibrationEstablished && calibratedBefore > 0 && calibratedBefore < std::min(4, activeTracks)) {
-			for (auto& track : decoder->tracks) {
-				if (!track.active) continue;
-				track.calibrated = false;
-				track.calibrationCooldown = 0;
-			}
-			calibratedBefore = 0;
-			calibrationDue = activeTracks > 0;
-		}
-
-		bool poseCurrent = false;
-		std::optional<AffineMotion> currentToBase;
 		if (calibrationDue && activeTracks > 0) {
-			bool calibrationPoseReady = true;
-			if (decoder->calibrationEstablished && calibratedBefore >= std::min(3, activeTracks)) {
-				calibrationPoseReady = registerGlobalMotion(*decoder, lumAt, measured);
-				poseCurrent = calibrationPoseReady;
-				if (calibrationPoseReady)
-					currentToBase = decoder->motion.inverse();
-				if (!currentToBase)
-					calibrationPoseReady = false;
-			} else {
-				// The first successful calibration frame becomes the common base.
-				decoder->motion = {};
-				poseCurrent = true;
-			}
+			// One full-image binarization/finder scan serves every still-missing
+			// map in this worker. This is setup/reconfiguration work only.
+			const double binStarted = emscripten_get_now();
+			ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
+			HybridBinarizer binarized(lumView);
+			auto bits = binarized.getBitMatrix();
+			measured.anchorMs += emscripten_get_now() - binStarted;
+			if (bits) {
+				const double finderStarted = emscripten_get_now();
+				auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
+				auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
+				measured.anchorMs += emscripten_get_now() - finderStarted;
 
-			if (calibrationPoseReady) {
-				const double binStarted = emscripten_get_now();
-				ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
-				HybridBinarizer binarized(lumView);
-				auto bits = binarized.getBitMatrix();
-				measured.anchorMs += emscripten_get_now() - binStarted;
-				if (bits) {
-					const double finderStarted = emscripten_get_now();
-					auto finderPatterns = QRCode::FindFinderPatterns(*bits, true);
-					auto finderSets = QRCode::GenerateFinderPatternSets(finderPatterns);
-					measured.anchorMs += emscripten_get_now() - finderStarted;
-
-					for (auto& track : decoder->tracks) {
-						if (!track.active || track.calibrated || track.calibrationCooldown > 0)
-							continue;
-						++measured.calibrationAttempts;
-						const double calibrationStarted = emscripten_get_now();
-						const auto* finderSet = finderSetForTrack(*decoder, track, finderSets);
-						const bool ok = finderSet && calibrateTrackSampleMap(
-							*decoder, track, *bits, *finderSet, currentToBase ? &*currentToBase : nullptr);
-						measured.anchorMs += emscripten_get_now() - calibrationStarted;
-						if (ok) {
-							++measured.anchorSuccesses;
-							++measured.calibrationSuccesses;
-						} else {
-							++measured.anchorMisses;
-							track.calibrationCooldown = 4;
-						}
+				for (auto& track : decoder->tracks) {
+					if (!track.active || track.calibrated || track.calibrationCooldown > 0)
+						continue;
+					++measured.calibrationAttempts;
+					const double calibrationStarted = emscripten_get_now();
+					const auto* finderSet = finderSetForTrack(track, finderSets);
+					const bool ok = finderSet && calibrateTrackSampleMap(track, *bits, *finderSet);
+					measured.anchorMs += emscripten_get_now() - calibrationStarted;
+					if (ok) {
+						++measured.anchorSuccesses;
+						++measured.calibrationSuccesses;
+					} else {
+						++measured.anchorMisses;
+						track.calibrationCooldown = 4;
 					}
 				}
 			}
@@ -1998,23 +1735,24 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		for (const auto& track : decoder->tracks)
 			if (track.active && track.calibrated)
 				++calibratedTracks;
-		const int requiredForMotion = std::min(4, activeTracks);
+		const int requiredForMotion = std::min(3, activeTracks);
 		if (activeTracks == 0 || calibratedTracks < requiredForMotion) {
 			decoder->calibrationEstablished = false;
-			poseCurrent = false;
 		} else if (!decoder->calibrationEstablished) {
+			// First qualified anchor set defines the calibration coordinate frame.
 			decoder->motion = {};
 			decoder->calibrationEstablished = true;
-			poseCurrent = true;
 		}
 
 		int count = 0;
 		if (decoder->calibrationEstablished) {
 			DecimenBatchMetrics decoded{};
-			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &decoded, poseCurrent);
+			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &decoded);
 			addBatchMetrics(measured, decoded);
 		}
 
+		// Snapshot state, not cumulative counters. The worker uses this to avoid
+		// throwing away partially completed calibration after an ordinary miss.
 		measured.activeTracks = activeTracks;
 		measured.calibratedTracks = calibratedTracks;
 		measured.totalMs = emscripten_get_now() - totalStart;
