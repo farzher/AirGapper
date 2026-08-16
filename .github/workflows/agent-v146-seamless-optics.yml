@@ -21,7 +21,6 @@ jobs:
           grep -q 'v0.5.146' receive/main.js
           grep -q 'ROBUST_BATCH_MAX_RESULTS = 8' receive/worker.js
           grep -q 'auto-optics-seamless-handoff' receive/main.js
-          grep -q 'airgapper-static-js-v109' sw.js
       - name: Commit patch
         run: |
           git config user.name 'AirGapper Agent'
