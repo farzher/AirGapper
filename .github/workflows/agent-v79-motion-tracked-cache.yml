@@ -1,0 +1,37 @@
+name: Agent v79 motion tracked cache
+on:
+  push:
+    branches: [agent/v79-motion-tracked-cache]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v79-motion-tracked-cache
+      - name: Apply patch
+        run: python3 .github/v79_patch.py
+      - name: Build SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          ./build.sh
+      - name: Build scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit build
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git checkout -- vendor/decimen-codec/source/build-simd vendor/decimen-codec/source/build-scalar || true
+          git rm -f .github/v79_patch.py .github/workflows/agent-v79-motion-tracked-cache.yml
+          git add index.html main.js sw.js receive/main.js receive/worker.js \
+            vendor/decimen-codec/source/VERSION \
+            vendor/decimen-codec/source/wrapper/decimen_codec.h \
+            vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+            vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+            vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
+          git commit -m "track cached QR maps across camera motion"
+          git push origin HEAD:agent/v79-motion-tracked-cache
