@@ -1,30 +1,60 @@
 var _a;
+import { closeOnBackdropClick } from "./shared/dialog.js";
+import { isAndroid, isIOS } from "./shared/platform.js";
 
+const APP_BUILD = "v0.5.76";
 const serviceWorkers = navigator.serviceWorker;
+let registration;
+let swBootComplete = false;
+let reloading = false;
+
+function waitForServiceWorkerState(worker, timeoutMs = 5000) {
+  if (!worker || worker.state === "installed" || worker.state === "activated" || worker.state === "redundant") return Promise.resolve();
+  return Promise.race([
+    new Promise((resolve) => worker.addEventListener("statechange", () => {
+      if (worker.state === "installed" || worker.state === "activated" || worker.state === "redundant") resolve();
+    })),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs))
+  ]);
+}
+
+async function prepareServiceWorker() {
+  if (!serviceWorkers) return;
+  const priorController = serviceWorkers.controller;
+  try {
+    registration = await serviceWorkers.register(`./sw.js?build=${APP_BUILD}`, { scope: "./", updateViaCache: "none" });
+    await registration.update().catch(() => void 0);
+    await waitForServiceWorkerState(registration.installing);
+    registration.waiting?.postMessage({ type: "SKIP_WAITING" });
+    if (priorController && serviceWorkers.controller === priorController && registration.waiting) {
+      await Promise.race([
+        new Promise((resolve) => serviceWorkers.addEventListener("controllerchange", resolve, { once: true })),
+        new Promise((resolve) => setTimeout(resolve, 3000))
+      ]);
+    }
+  } catch {
+  }
+}
+
+await prepareServiceWorker();
+await Promise.all([
+  import(`./send/main.js?build=${APP_BUILD}`),
+  import(`./receive/main.js?build=${APP_BUILD}`)
+]);
+
+document.querySelector(".app-version").textContent = APP_BUILD;
+swBootComplete = true;
 if (serviceWorkers) {
-  const hadController = Boolean(serviceWorkers.controller);
-  let reloading = false;
-  let registration;
   serviceWorkers.addEventListener("controllerchange", () => {
-    if (!hadController || reloading) return;
+    if (!swBootComplete || reloading) return;
     reloading = true;
     location.reload();
   });
-  window.addEventListener("load", () => {
-    void serviceWorkers.register("./sw.js", { scope: "./", updateViaCache: "none" }).then((current) => {
-      registration = current;
-      current.waiting?.postMessage({ type: "SKIP_WAITING" });
-      return current.update();
-    }).catch(() => void 0);
-  }, { once: true });
+  window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void registration?.update().catch(() => void 0);
   });
 }
-import "./send/main.js";
-import "./receive/main.js";
-import { closeOnBackdropClick } from "./shared/dialog.js";
-import { isAndroid, isIOS } from "./shared/platform.js";
 const installShell = document.querySelector(".install-shell");
 const installMenuButton = document.getElementById("install-menu-button");
 const installMenu = document.getElementById("install-menu");
