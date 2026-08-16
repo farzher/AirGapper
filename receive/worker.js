@@ -57,19 +57,82 @@ let nativeLowYieldStreak = 0;
 function nativeTrackId(track) {
   return track.slot ?? track.id;
 }
-function rememberExactSampleMap(id, dim, sampleMap, ox, oy) {
-  if (!sampleMap || sampleMap.length !== dim * dim * 2) return false;
-  const xy = new Float32Array(sampleMap.length);
-  for (let i = 0; i < sampleMap.length; i += 2) {
-    xy[i] = sampleMap[i] + ox;
-    xy[i + 1] = sampleMap[i + 1] + oy;
+function copyQuad(q) {
+  return {
+    topLeft: { ...q.topLeft },
+    topRight: { ...q.topRight },
+    bottomRight: { ...q.bottomRight },
+    bottomLeft: { ...q.bottomLeft }
+  };
+}
+function maxQuadDelta(a, b) {
+  if (!validQuad(a) || !validQuad(b)) return Infinity;
+  return Math.max(
+    Math.hypot(a.topLeft.x - b.topLeft.x, a.topLeft.y - b.topLeft.y),
+    Math.hypot(a.topRight.x - b.topRight.x, a.topRight.y - b.topRight.y),
+    Math.hypot(a.bottomRight.x - b.bottomRight.x, a.bottomRight.y - b.bottomRight.y),
+    Math.hypot(a.bottomLeft.x - b.bottomLeft.x, a.bottomLeft.y - b.bottomLeft.y)
+  );
+}
+function squareToQuad(q) {
+  if (!validQuad(q)) return null;
+  const x0 = q.topLeft.x, y0 = q.topLeft.y;
+  const x1 = q.topRight.x, y1 = q.topRight.y;
+  const x2 = q.bottomRight.x, y2 = q.bottomRight.y;
+  const x3 = q.bottomLeft.x, y3 = q.bottomLeft.y;
+  const dx3 = x0 - x1 + x2 - x3;
+  const dy3 = y0 - y1 + y2 - y3;
+  let g = 0, h = 0;
+  if (Math.abs(dx3) > 1e-7 || Math.abs(dy3) > 1e-7) {
+    const dx1 = x1 - x2, dx2 = x3 - x2;
+    const dy1 = y1 - y2, dy2 = y3 - y2;
+    const denominator = dx1 * dy2 - dx2 * dy1;
+    if (Math.abs(denominator) < 1e-8) return null;
+    g = (dx3 * dy2 - dx2 * dy3) / denominator;
+    h = (dx1 * dy3 - dx3 * dy1) / denominator;
   }
-  nativeExactMaps.set(id, { dim, xy, version: nativeExactMapVersion++ });
+  return {
+    a: x1 - x0 + g * x1,
+    b: x3 - x0 + h * x3,
+    c: x0,
+    d: y1 - y0 + g * y1,
+    e: y3 - y0 + h * y3,
+    f: y0,
+    g,
+    h
+  };
+}
+function projectUnitQuad(model, u, v) {
+  const denominator = model.g * u + model.h * v + 1;
+  return {
+    x: (model.a * u + model.b * v + model.c) / denominator,
+    y: (model.d * u + model.e * v + model.f) / denominator
+  };
+}
+function rememberExactSampleMap(id, dim, sampleMap, ox, oy, localQuad) {
+  if (!sampleMap || sampleMap.length !== dim * dim * 2 || !validQuad(localQuad)) return false;
+  const anchorQuad = shifted(localQuad, ox, oy);
+  const anchorModel = squareToQuad(anchorQuad);
+  if (!anchorModel) return false;
+  const residual = new Float32Array(sampleMap.length);
+  let i = 0;
+  for (let y = 0; y < dim; y++) {
+    const v = (y + 0.5) / dim;
+    for (let x = 0; x < dim; x++, i += 2) {
+      const u = (x + 0.5) / dim;
+      const projected = projectUnitQuad(anchorModel, u, v);
+      residual[i] = sampleMap[i] + ox - projected.x;
+      residual[i + 1] = sampleMap[i + 1] + oy - projected.y;
+    }
+  }
+  nativeExactMaps.set(id, { dim, residual, version: nativeExactMapVersion++ });
   return true;
 }
-function applyExactSampleMap(zx, nativeSlot, map, ox, oy) {
+function applyExactSampleMap(zx, nativeSlot, map, track, ox, oy) {
   const pointCount = map.dim * map.dim;
   const floats = pointCount * 2;
+  const currentModel = squareToQuad(track.quad);
+  if (!currentModel) return false;
   if (floats > nativeSampleScratchFloats) {
     if (nativeSampleScratchPtr) zx._free(nativeSampleScratchPtr);
     nativeSampleScratchPtr = zx._malloc(floats * 4);
@@ -77,9 +140,15 @@ function applyExactSampleMap(zx, nativeSlot, map, ox, oy) {
   }
   if (!nativeSampleScratchPtr) return false;
   const out = new Float32Array(zx.HEAPU8.buffer, nativeSampleScratchPtr, floats);
-  for (let i = 0; i < floats; i += 2) {
-    out[i] = map.xy[i] - ox;
-    out[i + 1] = map.xy[i + 1] - oy;
+  let i = 0;
+  for (let y = 0; y < map.dim; y++) {
+    const v = (y + 0.5) / map.dim;
+    for (let x = 0; x < map.dim; x++, i += 2) {
+      const u = (x + 0.5) / map.dim;
+      const projected = projectUnitQuad(currentModel, u, v);
+      out[i] = projected.x + map.residual[i] - ox;
+      out[i + 1] = projected.y + map.residual[i + 1] - oy;
+    }
   }
   return Boolean(zx._setTrackedDecoderSampleMap(nativeBatchHandle, nativeSlot, nativeSampleScratchPtr, pointCount));
 }
@@ -142,7 +211,8 @@ function configureNativeBatch(zx, tracks, ox, oy) {
     const previous = nativeConfigured[slot];
     const exactMap = nativeExactMaps.get(id);
     const exactVersion = exactMap?.dim === track.dim ? exactMap.version : 0;
-    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32 || previous.exactVersion !== exactVersion;
+    const exactGeometryChanged = exactVersion && (!previous?.appliedQuad || maxQuadDelta(previous.appliedQuad, track.quad) > 0.25);
+    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32 || previous.exactVersion !== exactVersion || exactGeometryChanged;
     if (mustConfigure) {
       const q = track.quad;
       if (!validQuad(q)) return void 0;
@@ -162,8 +232,15 @@ function configureNativeBatch(zx, tracks, ox, oy) {
       );
       if (!accepted) return void 0;
       zx._setTrackedDecoderTrackCRC32(nativeBatchHandle, slot, track.crc32 ? 1 : 0);
-      const exactApplied = exactVersion ? applyExactSampleMap(zx, slot, exactMap, ox, oy) : false;
-      nativeConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad, exactVersion: exactApplied ? exactVersion : 0 };
+      const exactApplied = exactVersion ? applyExactSampleMap(zx, slot, exactMap, track, ox, oy) : false;
+      nativeConfigured[slot] = {
+        id,
+        dim: track.dim,
+        crc32: track.crc32,
+        baseQuad: copyQuad(track.quad),
+        appliedQuad: copyQuad(track.quad),
+        exactVersion: exactApplied ? exactVersion : 0
+      };
       nativeRefresh.delete(slot);
     }
     byId.set(id, { input: track, configured: nativeConfigured[slot], nativeSlot: slot });
@@ -304,7 +381,8 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
+    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0
+      && (usedDirectFrame || pixelFormat === "rgba" || pixelFormat === "y8");
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
@@ -608,7 +686,7 @@ ctx.onmessage = async (e) => {
           const packet = parseFrame(result.bytes);
           const slot = packet?.header.slotIndex;
           if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot)) continue;
-          if (slot !== void 0 && exactReader && rememberExactSampleMap(slot, result.modules, result.sampleMap, ox, oy)) mapsSeeded++;
+          if (slot !== void 0 && exactReader && rememberExactSampleMap(slot, result.modules, result.sampleMap, ox, oy, result.position)) mapsSeeded++;
           const symbol = {
             bytes: result.bytes,
             box: boundsOf(result.position, ox, oy),

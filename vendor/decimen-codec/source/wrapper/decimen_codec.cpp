@@ -570,6 +570,7 @@ struct PersistentTrack
 	// measured, samples[] becomes a distortion-corrected per-module map and
 	// the hot path is just Y-plane point loads + threshold + bit extraction.
 	bool calibrated = false;
+	bool exactSampleMap = false;
 	int calibrationCooldown = 0;
 	PointF topLeft{};
 	PointF topRight{};
@@ -866,24 +867,11 @@ static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, D
 		++measured.bitstreamFailures;
 	}
 
-	// At high optical density a v40 matrix can contain a few bad modules even
-	// when its geometry is perfectly usable. Do not run a detector, re-sample,
-	// or recalibrate for that. Apply QR's own error correction directly to the
-	// already-cached matrix, then require the AirGapper CRC as the final oracle.
-	if (!track.calibrated)
-		return {};
-
-	const double rsStarted = emscripten_get_now();
-	auto corrected = QRCode::Decode(track.sampled);
-	measured.rsFallbackMs += emscripten_get_now() - rsStarted;
-	++measured.rsFallbacks;
-	if (!corrected.isValid())
-		return {};
-
-	auto packet = packetFromBytes(corrected.content().bytes);
-	if (!packet.empty())
-		++measured.alignmentFitSuccesses;
-	return packet;
+	// AirGapper cached-Y misses are erasures. v0.5.96 accidentally ran QR
+	// Reed-Solomon here for every calibrated miss even while the caller's
+	// fallback budget was zero. Hybrid/exact-map recovery below owns any
+	// optional RS budget; this first stage never does.
+	return {};
 }
 
 template <class LumAt>
@@ -1213,6 +1201,7 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 	track.sampled = std::move(sampled);
 	track.dx = track.dy = 0;
 	track.calibrated = true;
+	track.exactSampleMap = false;
 	track.calibrationCooldown = 0;
 	track.consecutiveMisses = 0;
 	return true;
@@ -1249,7 +1238,8 @@ static void addBatchMetrics(DecimenBatchMetrics& dst, const DecimenBatchMetrics&
 	dst.exactMapSuccesses += src.exactMapSuccesses;
 }
 
-static ByteArray decodeExactMapBits(PersistentTrack& track, const BitMatrix& imageBits, DecimenBatchMetrics& measured)
+static ByteArray decodeExactMapBits(PersistentTrack& track, const BitMatrix& imageBits,
+									 bool allowRS, DecimenBatchMetrics& measured)
 {
 	++measured.exactMapAttempts;
 	const int dim = track.dimension;
@@ -1296,6 +1286,9 @@ static ByteArray decodeExactMapBits(PersistentTrack& track, const BitMatrix& ima
 		++measured.bitstreamFailures;
 	}
 
+	if (!allowRS)
+		return {};
+
 	const double rsStarted = emscripten_get_now();
 	auto corrected = QRCode::Decode(track.sampled);
 	measured.rsFallbackMs += emscripten_get_now() - rsStarted;
@@ -1314,7 +1307,7 @@ static int decodeBatchExactMapBits(TrackedDecoder& decoder, const BitMatrix& ima
 {
 	DecimenBatchMetrics measured{};
 	const double totalStart = emscripten_get_now();
-	int resultCount = 0, outputUsed = 0;
+	int resultCount = 0, outputUsed = 0, budgetedFallbacks = 0;
 	for (auto& track : decoder.tracks) {
 		if (!track.active || resultCount >= resultCapacity)
 			continue;
@@ -1323,13 +1316,16 @@ static int decodeBatchExactMapBits(TrackedDecoder& decoder, const BitMatrix& ima
 		++track.framesSinceReacquire;
 		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 				  track.framesSinceReacquire, track.dx, track.dy};
-		if (!track.calibrated || !track.crc32Payload) {
+		if (!track.exactSampleMap || !track.crc32Payload) {
 			++track.consecutiveMisses;
 			++measured.misses;
 			result.consecutiveMisses = track.consecutiveMisses;
 			continue;
 		}
-		auto packet = decodeExactMapBits(track, imageBits, measured);
+		const bool allowRS = budgetedFallbacks < decoder.maxRSFallbacks;
+		if (allowRS)
+			++budgetedFallbacks;
+		auto packet = decodeExactMapBits(track, imageBits, allowRS, measured);
 		if (packet.empty()) {
 			++track.consecutiveMisses;
 			++measured.misses;
@@ -1581,6 +1577,7 @@ EMSCRIPTEN_KEEPALIVE int setTrackedDecoderTrack(int handle, int slot, int id, in
 		auto adjacent = transform(PointF{dimension / 2.0 + 1.0, dimension / 2.0});
 		track.multiSample = std::hypot(adjacent.x - center.x, adjacent.y - center.y) < 2.75;
 		track.calibrated = false;
+		track.exactSampleMap = false;
 		track.calibrationCooldown = 0;
 		track.sampled = BitMatrix(dimension, dimension);
 		track.id = id;
@@ -1615,6 +1612,7 @@ EMSCRIPTEN_KEEPALIVE int setTrackedDecoderSampleMap(int handle, int slot, const 
 	}
 	track.multiSample = false;
 	track.calibrated = true;
+	track.exactSampleMap = true;
 	track.calibrationCooldown = 0;
 	track.dx = track.dy = 0;
 	track.consecutiveMisses = track.framesSinceReacquire = 0;
@@ -1665,7 +1663,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		// same coordinates; never run finder/detector work for calibrated maps.
 		bool haveExactMaps = false;
 		for (const auto& track : decoder->tracks)
-			haveExactMaps = haveExactMaps || (track.active && track.calibrated);
+			haveExactMaps = haveExactMaps || (track.active && track.exactSampleMap);
 		if (haveExactMaps) {
 			const double binStarted = emscripten_get_now();
 			ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
@@ -1702,7 +1700,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 				continue;
 			if (track.calibrationCooldown > 0)
 				--track.calibrationCooldown;
-			if (!track.calibrated && track.calibrationCooldown == 0)
+			if (!track.crc32Payload && !track.calibrated && track.calibrationCooldown == 0)
 				calibrationDue = true;
 		}
 		if (!calibrationDue) {
