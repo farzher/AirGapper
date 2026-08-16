@@ -69,6 +69,27 @@ function translatedQuad(q, dx, dy) {
     bottomLeft: move(q.bottomLeft)
   };
 }
+function quadShapeResidual(a, b) {
+  if (!validQuad(a) || !validQuad(b)) return Infinity;
+  const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+  const deltas = names.map((name) => ({
+    x: b[name].x - a[name].x,
+    y: b[name].y - a[name].y
+  }));
+  const meanX = deltas.reduce((sum, p) => sum + p.x, 0) / deltas.length;
+  const meanY = deltas.reduce((sum, p) => sum + p.y, 0) / deltas.length;
+  return Math.max(...deltas.map((p) => Math.hypot(p.x - meanX, p.y - meanY)));
+}
+function quadModuleSize(q, dim) {
+  if (!validQuad(q) || !dim) return 0;
+  const edge = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  return Math.min(
+    edge(q.topLeft, q.topRight),
+    edge(q.topRight, q.bottomRight),
+    edge(q.bottomRight, q.bottomLeft),
+    edge(q.bottomLeft, q.topLeft)
+  ) / dim;
+}
 function configureNativeBatch(zx, tracks, ox, oy) {
   var _a;
   if (!ensureNativeBatch(zx) || tracks.length > NATIVE_BATCH_MAX_TRACKS) return void 0;
@@ -174,7 +195,6 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const mapped = byId.get(id);
     if (!mapped) continue;
     const slot = mapped.nativeSlot;
-    if (misses >= 3 && slot >= 0) nativeRefresh.add(slot);
     if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
     const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
     const packet = mapped.input.crc32 ? parseVerifiedFramePayload(rawView) : parseFrame(rawView);
@@ -245,7 +265,14 @@ ctx.onmessage = async (e) => {
     // A persistent native miss is a local decoder problem, not a reason to
     // wait for a whole-grid recovery scan. After two misses, copy this same
     // bounded crop as RGBA so the robust stock decoder can rescue/re-anchor it.
-    const robustTrackedRecovery = !strictHotPath && !full && Array.isArray(tracks) && tracks.some((track) => (track.misses ?? 0) >= 2);
+    const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
+      ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
+      : 0;
+    const robustTrackThreshold = Array.isArray(tracks) && tracks.length === 1
+      ? 1
+      : Math.max(2, Math.ceil((tracks?.length ?? 0) * 0.6));
+    const robustTrackedRecovery = !strictHotPath && !full && Array.isArray(tracks)
+      && coldTrackCount >= robustTrackThreshold;
     let frameCopyMs = 0;
     let inputOffset = pixelFormat === "y8" ? messageYOffset : 0;
     let inputStride = pixelFormat === "y8" ? messageYStride || w : w * 4;
@@ -511,15 +538,20 @@ ctx.onmessage = async (e) => {
           if (!packet || slot !== void 0 && expectedSlots.size && !expectedSlots.has(slot) || slot !== void 0 && decodedSlots.has(slot)) continue;
           if (slot !== void 0) decodedSlots.add(slot);
           const trackIndex = tracks.findIndex((track) => track.slot === slot);
-          if (trackIndex >= 0) {
-            // The robust decoder just gave us a fresh quad. Never keep using a
-            // native sample map built from the geometry that needed recovery.
-            nativeRefresh.add(trackIndex);
-          }
           const recoveredPosition = validQuad(result.position)
             ? result.position
             : trackIndex >= 0 ? localQuad(tracks[trackIndex].quad, ox, oy) : null;
           if (!recoveredPosition) continue;
+          if (trackIndex >= 0 && validQuad(result.position)) {
+            const currentLocal = localQuad(tracks[trackIndex].quad, ox, oy);
+            const moduleSize = quadModuleSize(currentLocal, tracks[trackIndex].dim);
+            const refreshThreshold = Math.max(0.75, moduleSize * 0.45);
+            // Pure camera translation belongs in native dx/dy tracking. Only
+            // throw away an expensive distortion map when the robust quad says
+            // the QR's actual shape changed beyond sub-module jitter.
+            if (quadShapeResidual(currentLocal, result.position) > refreshThreshold)
+              nativeRefresh.add(trackIndex);
+          }
           symbols.push({
             bytes: result.bytes,
             box: boundsOf(recoveredPosition, ox, oy),

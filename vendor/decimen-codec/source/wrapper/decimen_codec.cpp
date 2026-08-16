@@ -738,26 +738,54 @@ static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, D
 		return {};
 	}
 
+	auto packetFromBytes = [&](const ByteArray& bytes) {
+		ByteArray packet;
+		if (bytes.size() <= 4)
+			return packet;
+		const double crcStarted = emscripten_get_now();
+		const bool crcOK = hasValidCRC32(bytes);
+		measured.crcMs += emscripten_get_now() - crcStarted;
+		if (!crcOK) {
+			++measured.crcFailures;
+			return packet;
+		}
+		packet.resize(bytes.size() - 4);
+		std::copy_n(bytes.begin(), bytes.size() - 4, packet.begin());
+		return packet;
+	};
+
+	// Cheapest possible interpretation first: no QR Reed-Solomon. A pristine
+	// sampled matrix still exits here.
 	const double bitsStarted = emscripten_get_now();
-	auto decoded = decodeWithoutErrorCorrection(track.sampled);
+	auto fast = decodeWithoutErrorCorrection(track.sampled);
 	measured.bitExtractionMs += emscripten_get_now() - bitsStarted;
-	if (!decoded.isValid()) {
+	if (fast.isValid()) {
+		auto packet = packetFromBytes(fast.content().bytes);
+		if (!packet.empty()) {
+			++measured.alignmentFitSuccesses;
+			return packet;
+		}
+	} else {
 		++measured.bitstreamFailures;
-		return {};
 	}
 
-	const auto& bytes = decoded.content().bytes;
-	const double crcStarted = emscripten_get_now();
-	const bool crcOK = hasValidCRC32(bytes);
-	measured.crcMs += emscripten_get_now() - crcStarted;
-	if (!crcOK) {
-		++measured.crcFailures;
+	// At high optical density a v40 matrix can contain a few bad modules even
+	// when its geometry is perfectly usable. Do not run a detector, re-sample,
+	// or recalibrate for that. Apply QR's own error correction directly to the
+	// already-cached matrix, then require the AirGapper CRC as the final oracle.
+	if (!track.calibrated)
 		return {};
-	}
 
-	++measured.alignmentFitSuccesses;
-	ByteArray packet(int(bytes.size() - 4));
-	std::copy_n(bytes.begin(), bytes.size() - 4, packet.begin());
+	const double rsStarted = emscripten_get_now();
+	auto corrected = QRCode::Decode(track.sampled);
+	measured.rsFallbackMs += emscripten_get_now() - rsStarted;
+	++measured.rsFallbacks;
+	if (!corrected.isValid())
+		return {};
+
+	auto packet = packetFromBytes(corrected.content().bytes);
+	if (!packet.empty())
+		++measured.alignmentFitSuccesses;
 	return packet;
 }
 
@@ -819,7 +847,7 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
     // run the expensive +/-6px finder search for every QR. Pick the healthiest
     // missed calibrated track, estimate one translation, then move all cached
     // maps by that delta and retry only the misses.
-    if (!pending.empty()) {
+    if (!pending.empty() && pending.size() == measured.tracks) {
         PendingTrack* reference = nullptr;
         for (auto& candidate : pending) {
             if (!candidate.track->crc32Payload || !candidate.track->calibrated)
@@ -1388,7 +1416,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 				continue;
 			if (track.calibrationCooldown > 0)
 				--track.calibrationCooldown;
-			if ((!track.calibrated || track.consecutiveMisses >= 2) && track.calibrationCooldown == 0)
+			if (!track.calibrated && track.calibrationCooldown == 0)
 				calibrationDue = true;
 		}
 		if (!calibrationDue) {
@@ -1397,9 +1425,9 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 			return count;
 		}
 
-		// Calibration is off the steady-state path. It is paid only for a new
-		// track or after repeated CRC misses, then its distortion-corrected
-		// module map is reused by decodeBatchCachedY on following frames.
+		// Calibration is initialization/reconfiguration work only. Ordinary CRC
+		// misses are packet erasures; they must never trigger repeated expensive
+		// geometry rebuilding on the steady-state camera path.
 		const double binStarted = emscripten_get_now();
 		ImageView lumView(yPlane, width, height, ImageFormat::Lum, stride, 1);
 		HybridBinarizer binarized(lumView);
@@ -1413,7 +1441,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 
 		bool calibratedAny = false;
 		for (auto& track : decoder->tracks) {
-			if (!track.active || track.calibrationCooldown > 0 || (track.calibrated && track.consecutiveMisses < 2))
+			if (!track.active || track.calibrationCooldown > 0 || track.calibrated)
 				continue;
 			++measured.calibrationAttempts;
 			const double calibrationStarted = emscripten_get_now();
