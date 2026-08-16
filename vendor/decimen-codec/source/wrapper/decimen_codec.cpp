@@ -763,66 +763,122 @@ static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, D
 
 template <class LumAt>
 static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
-							  DecimenTrackedResult* results, int resultCapacity,
-							  uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+                                      DecimenTrackedResult* results, int resultCapacity,
+                                      uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
 {
-	DecimenBatchMetrics measured{};
-	const double totalStart = emscripten_get_now();
-	int resultCount = 0;
-	int outputUsed = 0;
+    DecimenBatchMetrics measured{};
+    const double totalStart = emscripten_get_now();
+    int resultCount = 0;
+    int outputUsed = 0;
 
-	for (auto& track : decoder.tracks) {
-		if (!track.active || resultCount >= resultCapacity)
-			continue;
+    struct PendingTrack {
+        PersistentTrack* track = nullptr;
+        DecimenTrackedResult* result = nullptr;
+    };
+    std::vector<PendingTrack> pending;
+    pending.reserve(decoder.tracks.size());
 
-		auto& result = results[resultCount++];
-		++measured.tracks;
-		++track.framesSinceReacquire;
-		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
-				  track.framesSinceReacquire, track.dx, track.dy};
+    auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
+        ByteArray packet = track.crc32Payload ? decodeCachedTrack(track, lumAt, measured) : ByteArray{};
+        if (packet.empty())
+            return false;
+        if (outputUsed + int(packet.size()) > outputCapacity) {
+            result.status = DECIMEN_TRACK_OUTPUT_FULL;
+            result.bytesOffset = -1;
+            return true;
+        }
+        std::memcpy(output + outputUsed, packet.data(), packet.size());
+        result.status = DECIMEN_TRACK_OK;
+        result.bytesOffset = outputUsed;
+        result.bytesLength = packet.size();
+        outputUsed += packet.size();
+        track.consecutiveMisses = 0;
+        result.consecutiveMisses = 0;
+        result.dx = track.dx;
+        result.dy = track.dy;
+        ++measured.successful;
+        ++measured.crcFastSuccesses;
+        return true;
+    };
 
-		// The distortion map is persistent, but a handheld camera is not. Before
-		// touching the full module grid, align the three invariant finder patterns
-		// and apply that cheap translation to every cached sample point. On a
-		// stable frame this is only 147 luminance reads.
-		if (track.crc32Payload) {
-			++measured.translationAttempts;
-			AnchorReading motion;
-			const double motionStarted = emscripten_get_now();
-			const bool tracked = refineAnchor(track, lumAt, motion);
-			measured.anchorMs += emscripten_get_now() - motionStarted;
-			if (tracked)
-				++measured.translationSuccesses;
-		}
+    // First try the last CRC-confirmed transform. Most frames should pay no
+    // finder-search cost at all. Only a lane with misses enters motion search.
+    for (auto& track : decoder.tracks) {
+        if (!track.active || resultCount >= resultCapacity)
+            continue;
+        auto& result = results[resultCount++];
+        ++measured.tracks;
+        ++track.framesSinceReacquire;
+        result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
+                  track.framesSinceReacquire, track.dx, track.dy};
+        if (!tryTrack(track, result))
+            pending.push_back({&track, &result});
+    }
 
-		ByteArray packet = track.crc32Payload ? decodeCachedTrack(track, lumAt, measured) : ByteArray{};
-		if (packet.empty()) {
-			++track.consecutiveMisses;
-			++measured.misses;
-			result.consecutiveMisses = track.consecutiveMisses;
-			continue;
-		}
+    // Handheld motion is shared by all QRs in a lane. Do not independently
+    // run the expensive +/-6px finder search for every QR. Pick the healthiest
+    // missed calibrated track, estimate one translation, then move all cached
+    // maps by that delta and retry only the misses.
+    if (!pending.empty()) {
+        PendingTrack* reference = nullptr;
+        for (auto& candidate : pending) {
+            if (!candidate.track->crc32Payload || !candidate.track->calibrated)
+                continue;
+            if (!reference || candidate.track->consecutiveMisses < reference->track->consecutiveMisses)
+                reference = &candidate;
+        }
 
-		if (outputUsed + int(packet.size()) > outputCapacity) {
-			result.status = DECIMEN_TRACK_OUTPUT_FULL;
-			result.bytesOffset = -1;
-			continue;
-		}
-		std::memcpy(output + outputUsed, packet.data(), packet.size());
-		result.status = DECIMEN_TRACK_OK;
-		result.bytesOffset = outputUsed;
-		result.bytesLength = packet.size();
-		outputUsed += packet.size();
-		track.consecutiveMisses = 0;
-		result.consecutiveMisses = 0;
-		++measured.successful;
-		++measured.crcFastSuccesses;
-	}
+        if (reference) {
+            auto& ref = *reference->track;
+            const float oldX = ref.dx, oldY = ref.dy;
+            AnchorReading motion;
+            ++measured.translationAttempts;
+            const double motionStarted = emscripten_get_now();
+            const bool tracked = refineAnchor(ref, lumAt, motion);
+            measured.anchorMs += emscripten_get_now() - motionStarted;
+            if (tracked) {
+                ++measured.translationSuccesses;
+                const float deltaX = ref.dx - oldX;
+                const float deltaY = ref.dy - oldY;
+                const bool moved = std::abs(deltaX) > 0.01f || std::abs(deltaY) > 0.01f;
+                if (moved) {
+                    for (auto& track : decoder.tracks) {
+                        if (!track.active || &track == &ref)
+                            continue;
+                        track.dx += deltaX;
+                        track.dy += deltaY;
+                    }
+                    std::vector<PendingTrack> stillPending;
+                    stillPending.reserve(pending.size());
+                    for (auto& candidate : pending) {
+                        if (!tryTrack(*candidate.track, *candidate.result))
+                            stillPending.push_back(candidate);
+                    }
+                    pending = std::move(stillPending);
+                }
+            } else {
+                ref.dx = oldX;
+                ref.dy = oldY;
+            }
+        }
+    }
 
-	measured.totalMs = emscripten_get_now() - totalStart;
-	if (metrics)
-		*metrics = measured;
-	return resultCount;
+    // Miss accounting is final-state only. A QR recovered by the shared motion
+    // retry is a success, not both a miss and a success in the same frame.
+    for (auto& candidate : pending) {
+        auto& track = *candidate.track;
+        auto& result = *candidate.result;
+        ++track.consecutiveMisses;
+        ++measured.misses;
+        result.consecutiveMisses = track.consecutiveMisses;
+        result.dx = track.dx;
+        result.dy = track.dy;
+    }
+
+    measured.totalMs = emscripten_get_now() - totalStart;
+    if (metrics)
+        *metrics = measured;
+    return resultCount;
 }
 
 static PerspectiveTransform trackedTransform(const PersistentTrack& track, float dx, float dy)
