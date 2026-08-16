@@ -1,0 +1,95 @@
+name: Agent v68 direct track frame pump
+on:
+  push:
+    branches: [agent/fix-v66-sampler-remnant]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-v66-sampler-remnant
+      - name: Install direct track frame pump
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('receive/main.js')
+          s = p.read_text()
+
+          # Add frame-pump state immediately before stopReceiver().
+          marker = '''function stopReceiver() {\n'''
+          insert = '''let frameTrackProcessor = null;\nlet frameTrackReader = null;\nlet framePumpMode = "—";\nlet framePumpProcessorTotal = 0;\nlet framePumpProcessorDiscarded = 0;\nlet rvfcLastPresentedFrames = 0;\nlet rvfcSkippedFrames = 0;\nlet overlayDrawQueued = false;\nfunction queueOverlayDraw() {\n  if (overlayDrawQueued) return;\n  overlayDrawQueued = true;\n  requestAnimationFrame(() => {\n    overlayDrawQueued = false;\n    if (!done && stream) drawOverlay(receiverNow());\n  });\n}\nfunction stopFramePump() {\n  const reader = frameTrackReader;\n  frameTrackReader = null;\n  frameTrackProcessor = null;\n  framePumpMode = "—";\n  framePumpProcessorTotal = 0;\n  framePumpProcessorDiscarded = 0;\n  rvfcLastPresentedFrames = 0;\n  rvfcSkippedFrames = 0;\n  if (reader) {\n    void reader.cancel().catch(() => void 0).finally(() => {\n      try { reader.releaseLock(); } catch {}\n    });\n  }\n}\nfunction stopReceiver() {\n'''
+          if s.count(marker) != 1:
+              raise SystemExit(f'stopReceiver marker count {s.count(marker)}')
+          s = s.replace(marker, insert, 1)
+
+          # Stop the frame source before stopping its MediaStreamTrack.
+          old = '''  releaseScreenWakeLock();\n  document.body.classList.remove("receive-complete");\n  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());'''
+          new = '''  releaseScreenWakeLock();\n  document.body.classList.remove("receive-complete");\n  stopFramePump();\n  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());'''
+          if s.count(old) != 1:
+              raise SystemExit(f'stop frame pump marker count {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          old = '''  captureGen++;\n  releaseScreenWakeLock();\n  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());'''
+          new = '''  captureGen++;\n  releaseScreenWakeLock();\n  stopFramePump();\n  stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());'''
+          if s.count(old) != 1:
+              raise SystemExit(f'pause frame pump marker count {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          # Start the direct track pump instead of the rendered-video callback pump.
+          old = '''  captureGen++;\n  scheduleFrame(captureGen);\n  statsTimer = setInterval(updateStats, STATS_TICK_MS);'''
+          new = '''  captureGen++;\n  startFramePump(captureGen, activeTrack);\n  statsTimer = setInterval(updateStats, STATS_TICK_MS);'''
+          if s.count(old) != 1:
+              raise SystemExit(f'start pump marker count {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          # Add source-frame handling and MediaStreamTrackProcessor before the rVFC fallback.
+          marker = '''function scheduleFrame(gen) {\n'''
+          direct = '''function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {\n  const timestamp = Number(videoFrame?.timestamp);\n  const width = video.videoWidth || videoFrame?.displayWidth || videoFrame?.visibleRect?.width || videoFrame?.codedWidth || 0;\n  const height = video.videoHeight || videoFrame?.displayHeight || videoFrame?.visibleRect?.height || videoFrame?.codedHeight || 0;\n  const sequence = benchmarkRecordingSequence++;\n  latestSourceFrameSequence = sequence;\n  return {\n    sequence,\n    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,\n    width,\n    height,\n    callbackTimeMs: callbackTime,\n    mediaTimeMs: Number.isFinite(timestamp) ? timestamp / 1e3 : callbackTime,\n    presentationTimeMs: callbackTime,\n    expectedDisplayTimeMs: callbackTime,\n    videoFrame\n  };\n}\nfunction processSourceFrame(frame, gen) {\n  if (done || gen !== captureGen) {\n    frame.videoFrame?.close();\n    return;\n  }\n  if (optimizerPipelineActive && !activeOptimizerEpoch) {\n    optimizerTransitionFramesDiscarded++;\n    traceOptimizer({\n      time: receiverNow(),\n      event: "TRANSITION_FRAME",\n      candidateId: optimizerTransition?.candidateId,\n      sourceSequence: frame.sequence,\n      requestedExposure: optimizerTransition?.requestedExposure,\n      requestedIso: optimizerTransition?.requestedIso\n    });\n  }\n  const recorder = benchmarkRecorder;\n  if (recorder && frame.width && frame.height) {\n    const orientation = screen.orientation?.type ?? `${window.orientation ?? 0}`;\n    recorder.addVideo({\n      sequence: frame.sequence,\n      mediaTimeMs: frame.mediaTimeMs,\n      presentationTimeMs: frame.presentationTimeMs,\n      expectedDisplayTimeMs: frame.expectedDisplayTimeMs,\n      callbackTimeMs: frame.callbackTimeMs,\n      width: frame.width,\n      height: frame.height,\n      stride: frame.width * 4,\n      orientation\n    }, video);\n    recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;\n    frame.videoFrame?.close();\n    queueOverlayDraw();\n    if (recorder.complete) void finishCorpusRecording(recorder);\n    return;\n  }\n  void captureFrame(frame).catch((error) => {\n    decodeExceptions++;\n    lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;\n    console.error("AirGapper captureFrame failed", error);\n  }).finally(() => {\n    frame.videoFrame?.close();\n    if (done || gen !== captureGen) return;\n    queueOverlayDraw();\n  });\n}\nasync function pumpTrackFrames(gen, reader, processor) {\n  try {\n    while (!done && gen === captureGen && frameTrackReader === reader) {\n      const { value, done: ended } = await reader.read();\n      if (ended) break;\n      if (!value) continue;\n      if (done || gen !== captureGen || frameTrackReader !== reader) {\n        value.close();\n        break;\n      }\n      framePumpProcessorTotal = Number(processor.totalFrames ?? framePumpProcessorTotal + 1);\n      framePumpProcessorDiscarded = Number(processor.discardedFrames ?? framePumpProcessorDiscarded);\n      processSourceFrame(sourceFrameMeta(value), gen);\n    }\n  } catch (error) {\n    if (done || gen !== captureGen || frameTrackReader !== reader) return;\n    console.warn("MediaStreamTrackProcessor frame pump failed; falling back to requestVideoFrameCallback", error);\n    try { reader.releaseLock(); } catch {}\n    frameTrackReader = null;\n    frameTrackProcessor = null;\n    framePumpMode = "rVFC fallback";\n    scheduleFrame(gen);\n  }\n}\nfunction startFramePump(gen, track) {\n  stopFramePump();\n  if (track && typeof MediaStreamTrackProcessor === "function") {\n    try {\n      const processor = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 });\n      const reader = processor.readable.getReader();\n      frameTrackProcessor = processor;\n      frameTrackReader = reader;\n      framePumpMode = "MediaStreamTrackProcessor";\n      void pumpTrackFrames(gen, reader, processor);\n      return;\n    } catch (error) {\n      console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);\n    }\n  }\n  framePumpMode = "rVFC fallback";\n  scheduleFrame(gen);\n}\nfunction scheduleFrame(gen) {\n'''
+          if s.count(marker) != 1:
+              raise SystemExit(f'scheduleFrame marker count {s.count(marker)}')
+          s = s.replace(marker, direct, 1)
+
+          # Replace the rVFC callback body with the common source-frame handler.
+          start = s.index('function scheduleFrame(gen) {')
+          end = s.index('\nconst grab = document.createElement("canvas");', start)
+          fallback = '''function scheduleFrame(gen) {\n  if (done || gen !== captureGen) return;\n  const v = video;\n  const next = (callbackTime = performance.now(), metadata = {}) => {\n    if (done || gen !== captureGen || framePumpMode === "MediaStreamTrackProcessor") return;\n    scheduleFrame(gen);\n    const presented = Number(metadata.presentedFrames);\n    if (Number.isFinite(presented) && presented > 0) {\n      if (rvfcLastPresentedFrames > 0 && presented > rvfcLastPresentedFrames + 1) rvfcSkippedFrames += presented - rvfcLastPresentedFrames - 1;\n      rvfcLastPresentedFrames = presented;\n    }\n    const frame = sourceFrameMeta(null, callbackTime);\n    frame.mediaTimeMs = Number.isFinite(Number(metadata.mediaTime)) ? Number(metadata.mediaTime) * 1e3 : callbackTime;\n    frame.presentationTimeMs = Number.isFinite(Number(metadata.presentationTime)) ? Number(metadata.presentationTime) : callbackTime;\n    frame.expectedDisplayTimeMs = Number.isFinite(Number(metadata.expectedDisplayTime)) ? Number(metadata.expectedDisplayTime) : callbackTime;\n    processSourceFrame(frame, gen);\n  };\n  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(next);\n  else requestAnimationFrame((now) => next(now));\n}'''
+          s = s[:start] + fallback + s[end:]
+
+          # Expose the source of frames in diagnostics so capture-rate questions are auditably answerable.
+          old = '''  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";'''
+          new = '''  const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"\n    ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`\n    : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;\n  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";'''
+          if s.count(old) != 1:
+              raise SystemExit(f'sourceLine marker count {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          index = Path('index.html')
+          t = index.read_text()
+          if t.count('v0.5.67') != 1:
+              raise SystemExit('expected v0.5.67 once')
+          index.write_text(t.replace('v0.5.67', 'v0.5.68', 1))
+
+          sw = Path('sw.js')
+          t = sw.read_text()
+          if t.count('airgapper-static-js-v30') != 1:
+              raise SystemExit('expected cache v30 once')
+          sw.write_text(t.replace('airgapper-static-js-v30', 'airgapper-static-js-v31', 1))
+          PY
+          node --check receive/main.js
+          grep -q 'MediaStreamTrackProcessor' receive/main.js
+          grep -q 'pump ${pumpDetail}' receive/main.js
+          grep -q 'v0.5.68' index.html
+          grep -q 'airgapper-static-js-v31' sw.js
+      - name: Commit fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/workflows/agent-v68-track-pump.yml
+          git add receive/main.js index.html sw.js
+          git commit -m "pull camera frames directly from media track"
+          git push origin HEAD:agent/fix-v66-sampler-remnant
