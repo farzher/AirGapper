@@ -1,0 +1,138 @@
+name: Agent v69 continuous sender
+on:
+  push:
+    branches: [agent/v69-continuous-sender]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v69-continuous-sender
+      - name: Preserve sender transport progress across compatible settings
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Sender: remember the next actually-painted transport ordinal. Queue
+          # lookahead is intentionally not committed so a settings restart
+          # resumes immediately after the last symbol that was really shown.
+          p = Path('send/main.js')
+          s = p.read_text()
+
+          old = 'let activeTransportEncoder = null;\n'
+          new = 'let activeTransportEncoder = null;\nlet activeTransportCursor = null;\n'
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();\n  activeTransportEncoder = null;\n  selectedFile == null ? void 0 : selectedFile.payload.fill(0);'''
+          new = '''  activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();\n  activeTransportEncoder = null;\n  activeTransportCursor = null;\n  selectedFile == null ? void 0 : selectedFile.payload.fill(0);'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  const encoder = new TransportEncoder(payload, blockLen, payloadId, transport.mode);\n  activeTransportEncoder = encoder;\n  const header = {'''
+          new = '''  const encoder = new TransportEncoder(payload, blockLen, payloadId, transport.mode);\n  activeTransportEncoder = encoder;\n  // FPS, layout, orientation and visual scaling do not change the erasure\n  // code. Continue at the next symbol that was actually painted. A transport\n  // Size change changes blockLen/K/mode, so its key differs and correctly\n  // starts a fresh coding stream at ESI 0.\n  const transportKey = `${payloadId}:${encoder.mode}:${encoder.k}:${blockLen}:${payload.length}`;\n  let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;\n  activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };\n  const header = {'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  const queue = [];\n  const cells = new Array(gridCodes).fill(null);\n  let symbolOrdinal = 0;\n  stage.hidden = false;'''
+          new = '''  const queue = [];\n  const cells = new Array(gridCodes).fill(null);\n  stage.hidden = false;'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  const makeCode = () => {\n    if (plainSnippet !== null) {\n      return QRCode.create(plainSnippet, {\n        errorCorrectionLevel: ecc,\n        version,\n        maskPattern: 4\n      });\n    }\n    const slotIndex = symbolOrdinal % gridCodes;\n    const seq = scheduledEsi(encoder.k, symbolOrdinal);\n    const bytes = packFrame(\n      { ...header, seq, slotIndex },\n      encoder.encode(seq)\n    );\n    symbolOrdinal++;\n    return QRCode.create([{ data: bytes, mode: "byte" }], {\n      errorCorrectionLevel: ecc,\n      version,\n      maskPattern: 4\n    });\n  };\n  const makeCell = () => {\n    const qr = makeCode();'''
+          new = '''  const makeCode = () => {\n    if (plainSnippet !== null) {\n      return {\n        qr: QRCode.create(plainSnippet, {\n          errorCorrectionLevel: ecc,\n          version,\n          maskPattern: 4\n        }),\n        ordinal: null\n      };\n    }\n    const ordinal = symbolOrdinal++;\n    const slotIndex = ordinal % gridCodes;\n    const seq = scheduledEsi(encoder.k, ordinal);\n    const bytes = packFrame(\n      { ...header, seq, slotIndex },\n      encoder.encode(seq)\n    );\n    return {\n      qr: QRCode.create([{ data: bytes, mode: "byte" }], {\n        errorCorrectionLevel: ecc,\n        version,\n        maskPattern: 4\n      }),\n      ordinal\n    };\n  };\n  const makeCell = () => {\n    const { qr, ordinal } = makeCode();'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);\n    return new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size);\n  };'''
+          new = '''    const raster = rasterizeQr(qr.modules.size, qr.modules.data, GRID_MARGIN);\n    return {\n      image: new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),\n      ordinal\n    };\n  };'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  pump();\n  let cellCursor = 0;\n  const paintCell = (img) => {\n    const cell = modules + 2 * GRID_MARGIN;'''
+          new = '''  let cellCursor = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal % gridCodes : 0;\n  const sweepOrigin = cellCursor;\n  pump();\n  const paintCell = (entry) => {\n    const img = entry.image;\n    const cell = modules + 2 * GRID_MARGIN;'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    if (fitScaling) {\n      ctx.drawImage(staging, 0, 0);\n    } else {\n      ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);\n    }\n    cellCursor = (cellCursor + 1) % gridCodes;'''
+          new = '''    if (fitScaling) {\n      ctx.drawImage(staging, 0, 0);\n    } else {\n      ctx.drawImage(staging, cx, cy, cell, cell, cx, cy, cell, cell);\n    }\n    if (entry.ordinal !== null && activeTransportCursor?.key === transportKey) {\n      activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, entry.ordinal + 1);\n    }\n    cellCursor = (cellCursor + 1) % gridCodes;'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          s = s.replace('if (cellCursor === 0) {\n        completedSweeps++;', 'if (cellCursor === sweepOrigin) {\n        completedSweeps++;', 1)
+          p.write_text(s)
+
+          # Transport identity is coding identity, not optical layout identity.
+          p = Path('shared/protocol.js')
+          s = p.read_text()
+          old = '  return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}:${h.layoutId}`;'
+          new = '  return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}`;'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
+
+          # Grid tracking can reacquire geometry without throwing away the
+          # transport decoder, and a declared layout change switches lattice
+          # geometry immediately once any packet from the new layout is seen.
+          p = Path('receive/grid-lattice.js')
+          s = p.read_text()
+          old = '''  reset() {\n    this.transition("SEARCH", "reset", this.lastHitAt);\n    this.identity = "";\n    this.observations = [];\n    this.candidate = void 0;\n    this.lastHitAt = 0;\n  }\n  accept(detection, frameWidth, frameHeight) {'''
+          new = '''  reset() {\n    this.transition("SEARCH", "reset", this.lastHitAt);\n    this.identity = "";\n    this.observations = [];\n    this.candidate = void 0;\n    this.lastHitAt = 0;\n  }\n  reacquire(at, reason = "whole lattice invalidated") {\n    this.transition("REACQUIRE", reason, at);\n    this.observations = [];\n    this.candidate = void 0;\n    this.lastHitAt = at;\n  }\n  accept(detection, frameWidth, frameHeight) {'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    this.frameWidth = Math.max(1, frameWidth);\n    this.frameHeight = Math.max(1, frameHeight);\n    this.lastHitAt = detection.at;\n    this.observations.push(detection);'''
+          new = '''    this.frameWidth = Math.max(1, frameWidth);\n    this.frameHeight = Math.max(1, frameHeight);\n    this.lastHitAt = detection.at;\n    if (this.candidate && this.candidate.layout.id !== declaredLayout.id) {\n      this.observations = [];\n      this.candidate = void 0;\n    }\n    this.observations.push(detection);'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # Receiver: whole-grid loss is a geometry reacquisition, even in
+          # Strict. It must not reset RaptorQ progress. Also, a deliberate Size
+          # change for the same payload is an incompatible transport and should
+          # restart immediately instead of being suppressed as another stream.
+          p = Path('receive/main.js')
+          s = p.read_text()
+
+          old = '''  const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&\n    lockedGeometryCandidates.every((region) => region.consecutiveMisses >= 5);\n  const gridNeedsDiscovery = lockedGeometryTrusted'''
+          new = '''  const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&\n    lockedGeometryCandidates.every((region) => region.consecutiveMisses >= 5);\n  if (allLockedCandidatesCold) {\n    gridLattice.reacquire(now, "all tracked slots cold; reacquiring geometry");\n  }\n  const gridNeedsDiscovery = lockedGeometryTrusted'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '  const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen;'
+          new = '  const strictLockedAudit = strictHotPathActive() && strictHotPathLockSeen && gridLattice.locked;'
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '    if (!captureNextScan && lockedGeometryTrusted) {'
+          new = '    if (!captureNextScan && lockedGeometryTrusted && gridLattice.locked && !allLockedCandidatesCold) {'
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''  const identity = streamIdentity(header);\n  if (decoder && streamKey !== identity) {\n    if (decodedAt - lastStreamDecodeAt < 1800) {\n      noteScanOutcome(info == null ? void 0 : info.scanId, "otherStream");\n      return;\n    }\n    resetActiveTransfer();\n  }'''
+          new = '''  const identity = streamIdentity(header);\n  if (decoder && streamKey !== identity) {\n    const samePayload = header.payloadId === decoder.streamSeed && header.totalLen === decoder.totalLen;\n    if (!samePayload && decodedAt - lastStreamDecodeAt < 1800) {\n      noteScanOutcome(info == null ? void 0 : info.scanId, "otherStream");\n      return;\n    }\n    resetActiveTransfer();\n  }'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # Version/cache bump.
+          p = Path('index.html')
+          s = p.read_text()
+          assert s.count('v0.5.68') == 1
+          p.write_text(s.replace('v0.5.68', 'v0.5.69', 1))
+
+          p = Path('sw.js')
+          s = p.read_text()
+          assert s.count('airgapper-static-js-v31') == 1
+          p.write_text(s.replace('airgapper-static-js-v31', 'airgapper-static-js-v32', 1))
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/workflows/agent-v69-continuous-sender.yml
+          git add send/main.js shared/protocol.js receive/grid-lattice.js receive/main.js index.html sw.js
+          git commit -m "preserve sender progress across compatible settings"
+          git push origin HEAD:agent/v69-continuous-sender
