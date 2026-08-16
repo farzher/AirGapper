@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.122";
+const RECEIVER_RUNTIME_BUILD = "v0.5.123";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1338,8 +1338,9 @@ function noteDecodeCompleted(id, completion) {
   if (!replayRunning && livePipeline.startedAt && auditMode) {
     const latencyMs = Math.max(0, Number(completion.latencyMs) || 0);
     const copyMs = Math.max(0, Number(completion.frameCopyMs) || 0);
-    const robustMs = Math.max(0, Number(completion.robustMs) || 0);
     const nativeMs = Math.max(0, Number(completion.nativeMetrics?.totalMs ?? completion.nativeMs) || 0);
+    const reportedRobustMs = Math.max(0, Number(completion.robustMs) || 0);
+    const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
@@ -1376,7 +1377,7 @@ function noteDecodeCompleted(id, completion) {
       nativeMs: completion.nativeMetrics?.totalMs || 0,
       copyMs: completion.frameCopyMs || 0,
       robustBands: completion.robustBands || 1,
-      robustSearchMs: completion.robustMs || completion.robustSearchMs || 0
+      robustSearchMs: completion.robustMs || completion.robustSearchMs || (completion.readFullAttempts ? Math.max(0, (completion.latencyMs || 0) - (completion.frameCopyMs || 0) - (completion.nativeMetrics?.totalMs || 0)) : 0)
     });
   }
   hotPathJobMode.delete(id);

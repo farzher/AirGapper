@@ -1,12 +1,12 @@
 const NO_SIGNAL_HINT_FRAME_BYTES = 1465;
 const NO_SIGNAL_HINT_TX_FPS = 10;
-const DEFAULT_TX_FPS = 30;
+const DEFAULT_TX_FPS = 15;
 const DEFAULT_FRAME_BYTES = 2953;
 const TX_FPS_OPTIONS = [
   10,
-  15,
-  20,
   DEFAULT_TX_FPS,
+  20,
+  30,
   60
 ];
 const FRAME_BYTES_OPTIONS = [

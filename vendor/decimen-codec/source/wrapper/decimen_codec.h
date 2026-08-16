@@ -22,14 +22,6 @@ struct DecimenTrackedResult {
 	int32_t framesSinceReacquire;
 	float dx;
 	float dy;
-	float x0;
-	float y0;
-	float x1;
-	float y1;
-	float x2;
-	float y2;
-	float x3;
-	float y3;
 };
 
 struct DecimenBatchMetrics {
@@ -58,8 +50,6 @@ struct DecimenBatchMetrics {
 	uint32_t translationSuccesses;
 	uint32_t calibrationAttempts;
 	uint32_t calibrationSuccesses;
-	uint32_t activeTracks;
-	uint32_t calibratedTracks;
 };
 
 int createTrackedDecoder(int maxTracks, int maxDimension);
