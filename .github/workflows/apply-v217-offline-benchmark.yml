@@ -3,26 +3,38 @@ name: v217 fast receiver regression
 on:
   push:
     paths:
-      - .github/v217_offline_patch.py
+      - receive/**
+      - shared/**
+      - vendor/decimen-codec/**
+      - vendor/decimen-codec-android/**
+      - send/main.js
+      - main.js
+      - index.html
       - benchmark/offline-runner.mjs
+      - .github/v217_offline_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  apply-and-benchmark:
+  fast-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Apply v0.5.217 fast regression harness
+      - name: Apply initial v0.5.217 regression harness
+        id: bootstrap
         run: |
           set -euo pipefail
-          python3 .github/v217_offline_patch.py
+          if grep -q 'RECEIVER_RUNTIME_BUILD = "v0.5.216"' receive/main.js; then
+            python3 .github/v217_offline_patch.py
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -46,17 +58,17 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: airgapper-v217-fast-regression
+          name: airgapper-fast-regression-${{ github.sha }}
           path: benchmark/offline-summary.json
           retention-days: 14
 
-      - name: Commit v0.5.217
+      - name: Commit initial v0.5.217 harness
+        if: steps.bootstrap.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
           rm -rf node_modules benchmark/offline-summary.json
-          rm -f .github/v217_offline_patch.py .github/workflows/apply-v217-offline-benchmark.yml
-          git add -A
+          git add index.html main.js receive/main.js sw.js benchmark/offline-runner.mjs
           git commit -m "v0.5.217 add fast offline receiver regression"
           git push origin HEAD:master
