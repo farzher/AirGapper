@@ -406,7 +406,14 @@ static void noteGuidedSparseOutcome(int id, bool success)
 // supplied allow-mask and reports per-slot outcomes back.
 
 
+// Data-only Turbo has no QR RS protection, so keep its conservative optical
+// density gate. Distortion-calibrated Stable-RS is a different contract: it
+// has finder/contrast evidence, full QR Reed-Solomon, and AirGapper CRC before
+// acceptance. Let it work closer to the ~2 px/module regime where sparse
+// Guided decoding is already reliable, while still staying above the point
+// where sub-pixel phase dominates a module.
 constexpr float GUIDED_TURBO_CANARY_MIN_MODULE = 2.25f;
+constexpr float GUIDED_STABLE_RS_MIN_MODULE = 1.75f;
 constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_AMBIGUOUS = 11;
@@ -478,7 +485,7 @@ static void pauseTurbo(bool refreshDistortion = false, int cooldown = GUIDED_TUR
 static bool turboSeedEligible(const DecimenGuidedTrack& track)
 {
     auto* cache = guidedTurboTrack(track.id);
-    if (!cache || guidedModuleSize(track) < GUIDED_TURBO_CANARY_MIN_MODULE)
+    if (!cache || guidedModuleSize(track) < GUIDED_STABLE_RS_MIN_MODULE)
         return false;
     // Calibration piggybacks on Guided work we are already paying for. Keep
     // learning missing/stale maps even while Turbo probes themselves cool down.
@@ -601,7 +608,7 @@ static bool turboStableWarpEligible(const GuidedTurboTrack& cache,
     // The calibrated sample map is explicitly warped from seedQuad to the live
     // coherent quad below. Seed-vs-live shape residual is therefore not a safety
     // criterion. Finder pixels + QR RS + AirGapper CRC are the live evidence.
-    return guidedModuleSize(track) >= GUIDED_TURBO_CANARY_MIN_MODULE;
+    return guidedModuleSize(track) >= GUIDED_STABLE_RS_MIN_MODULE;
 }
 
 static PerspectiveTransform turboFrameTransform(const GuidedTurboTrack& cache,
@@ -718,7 +725,7 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
 {
     const PointF p = turboWarpedPoint(cache, frameTransform, x, y);
     int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
-    if (lum < 0 || moduleSize < GUIDED_TURBO_CANARY_MIN_MODULE ||
+    if (lum < 0 || moduleSize < GUIDED_STABLE_RS_MIN_MODULE ||
         std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
         return lum;
 
