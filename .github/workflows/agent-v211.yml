@@ -1,0 +1,26 @@
+name: v211 auto-copy diagnostics
+on:
+  push:
+    paths:
+      - .github/v211_auto_copy.py
+      - .github/workflows/agent-v211.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply auto-copy patch
+        run: python .github/v211_auto_copy.py
+      - name: Commit auto-copy diagnostics
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v211_auto_copy.py .github/workflows/agent-v211.yml
+          git add index.html main.js receive/main.js sw.js
+          git commit -m "v0.5.211 auto-copy completion diagnostics"
+          git push origin master
