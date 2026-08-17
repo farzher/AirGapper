@@ -58,12 +58,6 @@ let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
-let nativeGuidedSamples = 0;
-let nativeGuidedHitEwma = 0;
-let nativeGuidedCooldown = 0;
-let nativeGuidedProbeDelay = Math.floor(Math.random() * 4);
-const NATIVE_GUIDED_BAD_RATIO = 0.20;
-const NATIVE_GUIDED_COOLDOWN_JOBS = 12;
 function ensureGuidedBatch(zx) {
   if (guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr) return true;
   guidedTracksPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
@@ -669,67 +663,16 @@ ctx.onmessage = async (e) => {
     }
     if (!full && tracks?.length && robustLaneFirst) {
       if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 2) {
-        // The high-quality camera changes the economics of the old native
-        // tracker. When geometry is healthy and every lane carries AirGapper's
-        // CRC, give the persistent cached-module decoder a bounded canary. A
-        // calibrated hit bypasses finder search, alignment search and normal QR
-        // RS; Guided is invoked only for the lanes that missed.
-        const cacheEligible = tracks.every((track) => track.crc32 && (track.misses ?? 0) <= 2);
-        if (nativeGuidedProbeDelay > 0) nativeGuidedProbeDelay--;
-        if (nativeGuidedCooldown > 0) nativeGuidedCooldown--;
-        const tryNative = cacheEligible && nativeGuidedProbeDelay <= 0 && nativeGuidedCooldown <= 0;
-        let native;
-        let nativeSymbols = [];
-        if (tryNative) {
-          native = decodeNativeBatch(
-            zx,
-            ptr + inputOffset,
-            pw,
-            ph,
-            ox,
-            oy,
-            tracks,
-            decodePixelFormat,
-            inputStride
-          );
-          nativeSymbols = native?.symbols ?? [];
-          const hitRatio = nativeSymbols.length / Math.max(1, tracks.length);
-          nativeGuidedHitEwma = nativeGuidedSamples
-            ? nativeGuidedHitEwma * 0.72 + hitRatio * 0.28
-            : hitRatio;
-          nativeGuidedSamples++;
-          // A bad camera/pose pays for at most two calibration probes before
-          // backing off. Periodic retries let a later focus/pose improvement
-          // reactivate the cache without a worker restart.
-          if (nativeGuidedSamples >= 2 && nativeGuidedHitEwma < NATIVE_GUIDED_BAD_RATIO)
-            nativeGuidedCooldown = NATIVE_GUIDED_COOLDOWN_JOBS;
-          else if (nativeGuidedSamples >= 2 && hitRatio === 0)
-            nativeGuidedCooldown = 4;
-        }
-
-        const nativeSlots = new Set(nativeSymbols.flatMap((symbol) =>
-          symbol.header?.slotIndex === void 0 ? [] : [symbol.header.slotIndex]
-        ));
-        const remaining = [];
-        let remainingFallbackMask = 0;
-        for (let index = 0; index < tracks.length; index++) {
-          const track = tracks[index];
-          if (track.slot !== void 0 && nativeSlots.has(track.slot)) continue;
-          const nextIndex = remaining.length;
-          remaining.push(track);
-          if ((guidedFallbackMask >>> index) & 1) remainingFallbackMask |= 1 << nextIndex;
-        }
-
-        let guided;
-        if (remaining.length) {
-          guided = decodeGuidedBatch(
-            zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, remaining, remainingFallbackMask >>> 0
-          );
-        }
-        symbols.push(...nativeSymbols);
+        // Guided remains the production tracked decoder. v194 proved cached
+        // module maps can work on the better camera, but calibrating a second
+        // native tracker before Guided added ~105 ms/job and reduced scheduled
+        // camera frames. The next cache path must reuse Guided's successful
+        // geometry instead of duplicating localization work.
+        const guided = decodeGuidedBatch(
+          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks, guidedFallbackMask
+        );
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();
-        const cachedOnly = tryNative && nativeSymbols.length === tracks.length;
         ctx.postMessage({
           id,
           symbols,
@@ -743,11 +686,10 @@ ctx.onmessage = async (e) => {
           workerWaitMs,
           frameCopyMs,
           guidedMetrics: guided?.metrics,
-          nativeMetrics: native?.metrics,
-          nativeAssistTracks: tryNative ? tracks.length : 0,
-          nativeAssistHits: nativeSymbols.length,
-          guidedAssistTracks: remaining.length,
-          pixelPath: cachedOnly ? "y8-cached" : nativeSymbols.length ? "y8-cached+guided" : "y8-guided",
+          nativeAssistTracks: 0,
+          nativeAssistHits: 0,
+          guidedAssistTracks: tracks.length,
+          pixelPath: "y8-guided",
           guidedError: guided?.error,
           latencyMs: performance.now() - startedAt
         });
