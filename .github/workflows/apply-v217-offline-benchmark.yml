@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v225_direct_center_patch.py
+      - .github/v226_center_rs_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -26,19 +26,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v225 direct-center candidate
+      - name: Apply v226 center-sampled Stable-RS candidate
         id: candidate
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            if grep -q 'GUIDED_TURBO_NEAREST_AMBIGUOUS' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-              python3 .github/v225_direct_center_patch.py
+            if ! grep -q 'centerOnlyRs = frameTransform.translationOnly' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+              python3 .github/v226_center_rs_patch.py
               echo 'changed=true' >> "$GITHUB_OUTPUT"
             else
               echo 'changed=false' >> "$GITHUB_OUTPUT"
             fi
-          } 2>&1 | tee /tmp/v225-patch.log
+          } 2>&1 | tee /tmp/v226-patch.log
 
       - name: Cache decimen toolchain
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
@@ -60,7 +60,7 @@ jobs:
           {
             DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
             DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
-          } 2>&1 | tee /tmp/v225-build.log
+          } 2>&1 | tee /tmp/v226-build.log
 
       - uses: actions/setup-node@v4
         if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
@@ -83,9 +83,31 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v225-regression.log
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v226-regression.log
           echo '--- fast regression summary ---'
           cat benchmark/offline-summary.json
+
+      - name: Require a real dense-path win
+        id: performance
+        if: steps.candidate.outputs.changed == 'true' && steps.regression.outcome == 'success'
+        continue-on-error: true
+        run: |
+          node <<'NODE' 2>&1 | tee /tmp/v226-performance.log
+          const fs = require('fs');
+          const r = JSON.parse(fs.readFileSync('benchmark/offline-summary.json', 'utf8'));
+          const stable = r.scenarios['stable-y8'];
+          const motion = r.scenarios['motion-y8'];
+          const dense = r.scenarios['dense-y8'];
+          const problems = [];
+          if (dense.guided.sampleMs > 330) problems.push(`dense sample ${dense.guided.sampleMs.toFixed(1)}ms > 330ms`);
+          if (dense.guided.stableRsAttempts && dense.guided.stableRsSuccesses / dense.guided.stableRsAttempts < 0.95)
+            problems.push(`dense Stable-RS yield ${(100 * dense.guided.stableRsSuccesses / dense.guided.stableRsAttempts).toFixed(1)}% < 95%`);
+          if (stable.decodeP50Ms > 15) problems.push(`stable p50 ${stable.decodeP50Ms.toFixed(1)}ms > 15ms`);
+          if (motion.finalState !== 'TRACK') problems.push(`motion ended ${motion.finalState}`);
+          if (motion.decodeP95Ms > 80) problems.push(`motion p95 ${motion.decodeP95Ms.toFixed(1)}ms > 80ms`);
+          console.log(JSON.stringify({stableP50: stable.decodeP50Ms, motionP95: motion.decodeP95Ms, denseSampleMs: dense.guided.sampleMs, denseStableRS: [dense.guided.stableRsSuccesses, dense.guided.stableRsAttempts]}));
+          if (problems.length) throw new Error(problems.join('; '));
+          NODE
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -109,36 +131,41 @@ jobs:
           git push origin HEAD:master
 
       - name: Commit failure diagnostics
-        if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
+        if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure' || (steps.candidate.outputs.changed == 'true' && steps.performance.outcome == 'failure')
         run: |
           set -euo pipefail
           PATCH_OUTCOME='${{ steps.candidate.outcome }}'
           BUILD_OUTCOME='${{ steps.build.outcome }}'
           REGRESSION_OUTCOME='${{ steps.regression.outcome }}'
+          PERFORMANCE_OUTCOME='${{ steps.performance.outcome }}'
           git reset --hard HEAD
           {
             echo "patch=$PATCH_OUTCOME"
             echo "build=$BUILD_OUTCOME"
             echo "regression=$REGRESSION_OUTCOME"
+            echo "performance=$PERFORMANCE_OUTCOME"
             echo
             echo '--- patch tail ---'
-            tail -n 120 /tmp/v225-patch.log 2>/dev/null || true
+            tail -n 120 /tmp/v226-patch.log 2>/dev/null || true
             echo
             echo '--- build tail ---'
-            tail -n 180 /tmp/v225-build.log 2>/dev/null || true
+            tail -n 180 /tmp/v226-build.log 2>/dev/null || true
+            echo
+            echo '--- performance ---'
+            cat /tmp/v226-performance.log 2>/dev/null || true
             echo
             echo '--- regression tail ---'
-            tail -n 260 /tmp/v225-regression.log 2>/dev/null || true
-          } > benchmark/v225-ci.log
+            tail -n 260 /tmp/v226-regression.log 2>/dev/null || true
+          } > benchmark/v226-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/v225-ci.log
-          git commit -m "record v225 candidate CI failure"
+          git add benchmark/v226-ci.log
+          git commit -m "record v226 candidate rejection"
           git push origin HEAD:master
           exit 1
 
-      - name: Commit passing v225 candidate
-        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
+      - name: Commit passing v226 candidate
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success' && steps.performance.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
@@ -150,5 +177,5 @@ jobs:
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
                   main.js receive/main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.225 direct-center CRC Turbo for stable walls"
+          git commit -m "v0.5.226 fast center-sampled Stable-RS"
           git push origin HEAD:master
