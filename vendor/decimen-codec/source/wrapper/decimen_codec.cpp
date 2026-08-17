@@ -486,11 +486,11 @@ static bool turboSeedEligible(const DecimenGuidedTrack& track)
     auto& adaptive = guidedTurboAdaptive();
     if (adaptive.cooldown)
         return false;
-    if (adaptive.promoted)
-        return true;
-    if (adaptive.seedId < 0)
-        return true;
-    return adaptive.seedId == track.id && !cache->seeded;
+    // Guided already computed the sparse distortion controls. Materialize the
+    // full sample map only until this physical slot owns one good calibrated
+    // map (or its QR dimension changes). Rebuilding 177x177 coordinates every
+    // promoted frame was pure hot-path overhead.
+    return !cache->seeded || !cache->distortionAware || cache->dimension != track.dimension;
 }
 
 static std::array<PointF, 4> turboTrackQuad(const DecimenGuidedTrack& track)
@@ -1227,12 +1227,31 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
         int canaryIndex = -1;
         if (!turboAdaptive.promoted && !turboAdaptive.cooldown) {
+            // First choice: a distortion-aware map whose seed->live shape is
+            // actually rigid on this frame. This makes Stable-RS probation test
+            // the stable wall, not whichever QR happened to decode first.
             for (int i = 0; i < trackCount; ++i) {
                 auto* cache = guidedTurboTrack(tracks[i].id);
-                if (cache && cache->seeded && guidedModuleSize(tracks[i]) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
-                    (turboAdaptive.seedId < 0 || turboAdaptive.seedId == tracks[i].id)) {
+                if (!cache || !cache->seeded || !cache->distortionAware ||
+                    guidedModuleSize(tracks[i]) < GUIDED_TURBO_CANARY_MIN_MODULE)
+                    continue;
+                float dx = 0, dy = 0, residual = 0;
+                if (turboPose(*cache, tracks[i], dx, dy, residual) &&
+                    turboStableRigidEligible(*cache, tracks[i], residual)) {
                     canaryIndex = i;
                     break;
+                }
+            }
+            // Direct Turbo can still probe a non-rigid cached slot when no
+            // Stable-RS candidate exists; do not stall probation completely.
+            if (canaryIndex < 0) {
+                for (int i = 0; i < trackCount; ++i) {
+                    auto* cache = guidedTurboTrack(tracks[i].id);
+                    if (cache && cache->seeded &&
+                        guidedModuleSize(tracks[i]) >= GUIDED_TURBO_CANARY_MIN_MODULE) {
+                        canaryIndex = i;
+                        break;
+                    }
                 }
             }
         }
