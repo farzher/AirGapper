@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v232_restore_dense_threshold_patch.py
+      - .github/v233_threshold_plane_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,12 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v232 measured dense promotion threshold
+      - name: Apply v233 threshold-plane candidate
         id: candidate
         continue-on-error: true
         run: |
           set -o pipefail
-          { if ! grep -A8 'const bool denseDirectCanary' vendor/decimen-codec/source/wrapper/decimen_codec.cpp | grep -q 'stableSuccesses >= 4'; then python3 .github/v232_restore_dense_threshold_patch.py; echo 'changed=true' >> "$GITHUB_OUTPUT"; else echo 'changed=false' >> "$GITHUB_OUTPUT"; fi; } 2>&1 | tee /tmp/v232-patch.log
+          { if ! grep -q 'thresholdXStep' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then python3 .github/v233_threshold_plane_patch.py; echo 'changed=true' >> "$GITHUB_OUTPUT"; else echo 'changed=false' >> "$GITHUB_OUTPUT"; fi; } 2>&1 | tee /tmp/v233-patch.log
 
       - name: Cache codec toolchain
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
@@ -49,7 +49,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          { DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh; DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh; } 2>&1 | tee /tmp/v232-build.log
+          { DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh; DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh; } 2>&1 | tee /tmp/v233-build.log
 
       - uses: actions/setup-node@v4
         if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
@@ -66,29 +66,29 @@ jobs:
         run: |
           set -o pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 & SERVER_PID=$!; trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v232-regression.log
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v233-regression.log
 
-      - name: Require measured recovery from v231
+      - name: Require useful threshold-plane win
         id: performance
         if: steps.candidate.outputs.changed == 'true' && steps.regression.outcome == 'success'
         continue-on-error: true
         run: |
           set -o pipefail
-          node <<'NODE' 2>&1 | tee /tmp/v232-performance.log
+          node <<'NODE' 2>&1 | tee /tmp/v233-performance.log
           const fs=require('fs');
           const b=JSON.parse(fs.readFileSync('benchmark/latest-result.json','utf8')).scenarios;
           const a=JSON.parse(fs.readFileSync('benchmark/offline-summary.json','utf8')).scenarios;
           const bs=b['stable-y8'],as=a['stable-y8'],bm=b['motion-y8'],am=a['motion-y8'],bd=b['dense-y8'],ad=a['dense-y8'];
           const p=[];
-          if(ad.normalized.guidedOutputYield<.98) p.push(`dense output yield ${(100*ad.normalized.guidedOutputYield).toFixed(1)}%`);
-          if(ad.normalized.dataOnlyYield && ad.normalized.dataOnlyYield<.95) p.push(`dense CRC-Turbo yield ${(100*ad.normalized.dataOnlyYield).toFixed(1)}%`);
-          if(ad.normalized.stableRsYield && ad.normalized.stableRsYield<.98) p.push(`dense Stable-RS yield ${(100*ad.normalized.stableRsYield).toFixed(1)}%`);
-          if(ad.normalized.guidedMsPerTrack>bd.normalized.guidedMsPerTrack*.88) p.push(`dense guided/track ${ad.normalized.guidedMsPerTrack.toFixed(3)} did not recover enough from ${bd.normalized.guidedMsPerTrack.toFixed(3)}`);
-          if(ad.normalized.sampleMsPerTrack>bd.normalized.sampleMsPerTrack*.90) p.push(`dense sample/track ${ad.normalized.sampleMsPerTrack.toFixed(3)} did not recover enough from ${bd.normalized.sampleMsPerTrack.toFixed(3)}`);
-          if(ad.decodeP50Ms>38) p.push(`dense p50 ${ad.decodeP50Ms.toFixed(1)}ms > 38ms`);
-          if(as.normalized.guidedOutputYield<.98 || as.normalized.dataOnlyYield<.98 || as.decodeP50Ms>12) p.push('stable path regressed');
+          const beforeSample=(bs.normalized.sampleMsPerTrack+bd.normalized.sampleMsPerTrack)/2;
+          const afterSample=(as.normalized.sampleMsPerTrack+ad.normalized.sampleMsPerTrack)/2;
+          if(afterSample>beforeSample*.98) p.push(`mean stable+dense sample/track ${afterSample.toFixed(3)} did not beat ${beforeSample.toFixed(3)} by 2%`);
+          if(as.normalized.sampleMsPerTrack>bs.normalized.sampleMsPerTrack*1.05) p.push('stable sample cost regressed');
+          if(ad.normalized.sampleMsPerTrack>bd.normalized.sampleMsPerTrack*1.05) p.push('dense sample cost regressed');
+          if(as.normalized.guidedOutputYield<.98 || as.normalized.dataOnlyYield<.98 || as.decodeP50Ms>12) p.push('stable correctness/latency regressed');
+          if(ad.normalized.guidedOutputYield<.98 || ad.normalized.dataOnlyYield<.95 || ad.normalized.stableRsYield<.98 || ad.decodeP50Ms>38) p.push('dense correctness/latency regressed');
           if(am.finalState!=='TRACK' || am.tailFullJobs!==0 || am.normalized.guidedOutputYield<bm.normalized.guidedOutputYield*.90 || am.decodeP95Ms>60) p.push('motion recovery regressed');
-          console.log(JSON.stringify({stable:{before:bs.normalized,after:as.normalized,p50:[bs.decodeP50Ms,as.decodeP50Ms]},motion:{before:bm.normalized,after:am.normalized,p95:[bm.decodeP95Ms,am.decodeP95Ms]},dense:{before:bd.normalized,after:ad.normalized,p50:[bd.decodeP50Ms,ad.decodeP50Ms],direct:[ad.guided.dataOnlySuccesses,ad.guided.dataOnlyAttempts],rs:[ad.guided.stableRsSuccesses,ad.guided.stableRsAttempts]}},null,2));
+          console.log(JSON.stringify({stable:{before:bs.normalized,after:as.normalized,p50:[bs.decodeP50Ms,as.decodeP50Ms]},motion:{before:bm.normalized,after:am.normalized,p95:[bm.decodeP95Ms,am.decodeP95Ms]},dense:{before:bd.normalized,after:ad.normalized,p50:[bd.decodeP50Ms,ad.decodeP50Ms]},meanSample:[beforeSample,afterSample]},null,2));
           if(p.length) throw new Error(p.join('; '));
           NODE
 
@@ -102,22 +102,21 @@ jobs:
           set -euo pipefail
           git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json; rm -rf node_modules benchmark/offline-summary.json
-          git add benchmark/latest-result.json
-          git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
+          git add benchmark/latest-result.json; git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
 
       - name: Record rejected candidate
         if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure' || (steps.candidate.outputs.changed == 'true' && steps.performance.outcome == 'failure')
         run: |
           set -euo pipefail
           git reset --hard HEAD
-          { echo "patch=${{ steps.candidate.outcome }} build=${{ steps.build.outcome }} regression=${{ steps.regression.outcome }} performance=${{ steps.performance.outcome }}"; cat /tmp/v232-performance.log 2>/dev/null || true; tail -n 180 /tmp/v232-build.log 2>/dev/null || true; tail -n 240 /tmp/v232-regression.log 2>/dev/null || true; } > benchmark/v232-ci.log
-          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"; git add benchmark/v232-ci.log; git commit -m "record v232 candidate rejection"; git push origin HEAD:master; exit 1
+          { echo "patch=${{ steps.candidate.outcome }} build=${{ steps.build.outcome }} regression=${{ steps.regression.outcome }} performance=${{ steps.performance.outcome }}"; cat /tmp/v233-performance.log 2>/dev/null || true; tail -n 180 /tmp/v233-build.log 2>/dev/null || true; tail -n 240 /tmp/v233-regression.log 2>/dev/null || true; } > benchmark/v233-ci.log
+          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"; git add benchmark/v233-ci.log; git commit -m "record v233 candidate rejection"; git push origin HEAD:master; exit 1
 
-      - name: Commit passing v232 candidate
+      - name: Commit passing v233 candidate
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success' && steps.performance.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json; rm -rf node_modules benchmark/offline-summary.json
           git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/VERSION vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm main.js receive/main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.232 restore measured dense CRC-Turbo promotion"; git push origin HEAD:master
+          git commit -m "v0.5.233 precompute stable threshold plane"; git push origin HEAD:master
