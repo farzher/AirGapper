@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.212";
+const RECEIVER_RUNTIME_BUILD = "v0.5.213";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1867,6 +1867,14 @@ async function copyDiagnosticsToClipboard(text, automatic = false) {
 copyDiagnostics.addEventListener("click", () => {
   void copyDiagnosticsToClipboard(completionDiagnosticsText || diagnosticsText());
 });
+function freezeCompletionDiagnostics() {
+  if (completionDiagnosticsText) return;
+  // Snapshot the last live transfer instant, before finalization/paint/file
+  // verification can drain the camera/worker recent window.
+  updateStats(true);
+  completionDiagnosticsText = diagnosticsText();
+  void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
+}
 let cameraStartedTs = 0;
 const timeline = [];
 const TIMELINE_MAX_SAMPLES = 2400;
@@ -6352,6 +6360,7 @@ function onDecoded(bytes, box, info) {
       if (fnv1a(payload) === header.payloadId) benchmarkVerifiedBytes = header.totalLen;
     }
   } else if (decoder.isComplete && !transferFinalizing) {
+    freezeCompletionDiagnostics();
     void finalizeCompletedTransfer(header.payloadId);
   }
 }
@@ -6428,14 +6437,9 @@ function liveGoodputKbs(now) {
   return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3);
 }
 async function finish(container, hashOk, seconds) {
-  // Freeze the final live pipeline/camera state before teardown. This avoids
-  // contaminating benchmark diagnostics by requiring a physical tap/bump after
-  // the transfer completes. Native Android can copy synchronously; browser/PWA
-  // Clipboard is best-effort with a legacy copy fallback, and the frozen text
-  // remains available to the manual Copy diagnostics button if policy blocks it.
-  updateStats(true);
-  completionDiagnosticsText = diagnosticsText();
-  void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
+  // Normal completion freezes at decoder.isComplete. Keep this as a defensive
+  // fallback for any future completion path that reaches finish directly.
+  freezeCompletionDiagnostics();
   done = true;
   focusController.detach();
   cancelScanCapture();
