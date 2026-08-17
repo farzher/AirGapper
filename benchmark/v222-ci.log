@@ -1,0 +1,10 @@
+patch=failure
+build=skipped
+regression=skipped
+
+--- patch tail ---
+Stable-RS decode block target not found
+
+--- build tail ---
+
+--- regression tail ---
