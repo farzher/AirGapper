@@ -156,18 +156,23 @@ class GridLattice {
     if (!this.identity) this.identity = detection.identity;
     this.frameWidth = Math.max(1, frameWidth);
     this.frameHeight = Math.max(1, frameHeight);
-    this.lastHitAt = detection.at;
+    const packetIsCurrent = detection.at >= this.lastHitAt;
+    this.lastHitAt = Math.max(this.lastHitAt, detection.at);
     if (this.candidate && this.candidate.layout.id !== declaredLayout.id) {
       this.observations = [];
       this.slotCorrections.clear();
       this.candidate = void 0;
     }
-    // makeCandidate only uses the newest observation for each slot. Storing a
-    // raw last-N stream was therefore both wasted memory and actively harmful:
-    // a few easy QRs decoded every frame could evict the last good geometry for
-    // the other cells. Keep exactly one CRC-backed observation per slot.
+    // Worker completions are not camera ordered. A slow older job must never
+    // replace a newer observation for the same slot. History is also pruned
+    // relative to the newest packet seen by the lattice, not the arrival order.
+    const previousSlot = this.observations.find((item) => item.slotIndex === detection.slotIndex);
+    const slotGeometryIsFresh = !previousSlot ||
+      detection.at > previousSlot.at ||
+      detection.at === previousSlot.at && detection.scanId >= previousSlot.scanId;
+    if (!slotGeometryIsFresh) return this.candidate ? this.snapshot() : null;
     this.observations = this.observations.filter((item) =>
-      detection.at - item.at < OBSERVATION_HISTORY_MS &&
+      this.lastHitAt - item.at < OBSERVATION_HISTORY_MS &&
       item.modules === detection.modules &&
       item.slotIndex !== detection.slotIndex
     );
@@ -175,7 +180,7 @@ class GridLattice {
     if (this.locked && this.candidate) {
       const updated = this.makeCandidate(this.candidate.layout);
       if (updated) this.candidate = updated;
-      this.transition("TRACK", "valid packet refreshed locked lattice", detection.at);
+      if (packetIsCurrent) this.transition("TRACK", "valid packet refreshed locked lattice", detection.at);
     } else {
       this.candidate = (_a = this.makeCandidate(declaredLayout)) != null ? _a : void 0;
       if (!this.candidate) return null;
@@ -186,13 +191,15 @@ class GridLattice {
         this.transition("GRID_LOCK", "multi-slot geometry confirmed", detection.at);
       }
     }
-    this.learnSlotCorrection(detection);
+    if (packetIsCurrent) this.learnSlotCorrection(detection);
     return this.snapshot();
   }
   noteValidPacket(at = this.lastHitAt) {
     if (!this.candidate) return null;
-    this.lastHitAt = at;
-    if (this.locked) this.transition("TRACK", "valid predicted packet kept lattice alive", at);
+    const packetIsCurrent = at >= this.lastHitAt;
+    this.lastHitAt = Math.max(this.lastHitAt, at);
+    if (packetIsCurrent && this.locked)
+      this.transition("TRACK", "valid predicted packet kept lattice alive", at);
     return this.snapshot();
   }
   learnSlotCorrection(detection) {

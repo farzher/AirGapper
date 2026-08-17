@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.206";
+const RECEIVER_RUNTIME_BUILD = "v0.5.207";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1918,6 +1918,7 @@ let geometryCoverageHealthy = false;
 let geometryCoverageCollapseStreak = 0;
 let geometryCoverageCollapseLastAt = 0;
 let geometryCoverageCollapseStartedAt = 0;
+let geometryCoverageLastScanId = -1;
 let recoveryWorkerRestarts = 0;
 let recoveryAbortedJobs = 0;
 let recoveryAbortedWorkerMs = 0;
@@ -2065,7 +2066,8 @@ function noteDecodeCompleted(id, completion) {
   hotPathJobMode.delete(id);
   const auditThisCompletion = Boolean(auditMode && auditMode.generation === hotPathAuditGeneration && auditMode.strict === strictHotPathEnabled);
   if (!replayRunning && auditThisCompletion && !auditMode?.full && gridLattice.locked &&
-      auditMode.tracks >= GEOMETRY_COLLAPSE_MIN_TRACKS) {
+      auditMode.tracks >= GEOMETRY_COLLAPSE_MIN_TRACKS && id >= geometryCoverageLastScanId) {
+    geometryCoverageLastScanId = id;
     const now = receiverNow();
     const trackedOutputs = Math.min(auditMode.tracks, Math.max(0, Number(completion.symbolCount) || 0));
     const coverage = trackedOutputs / auditMode.tracks;
@@ -2073,7 +2075,7 @@ function noteDecodeCompleted(id, completion) {
       geometryCoverageHealthy = true;
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
-  geometryCoverageCollapseStartedAt = 0;
+      geometryCoverageCollapseStartedAt = 0;
     } else if (geometryCoverageHealthy && coverage <= GEOMETRY_COLLAPSE_BAD_RATIO) {
       if (now - geometryCoverageCollapseLastAt > GEOMETRY_COLLAPSE_MAX_GAP_MS) {
         geometryCoverageCollapseStreak = 0;
@@ -2090,7 +2092,7 @@ function noteDecodeCompleted(id, completion) {
     } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
-  geometryCoverageCollapseStartedAt = 0;
+      geometryCoverageCollapseStartedAt = 0;
     }
   }
   const benchmarkTrace = benchmarkJobFrames.get(id);
@@ -4228,6 +4230,7 @@ function stopReceiver() {
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
   geometryCoverageCollapseStartedAt = 0;
+  geometryCoverageLastScanId = -1;
   recoveryWorkerRestarts = 0;
   recoveryAbortedJobs = 0;
   recoveryAbortedWorkerMs = 0;
@@ -4706,6 +4709,7 @@ function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = tru
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
   geometryCoverageCollapseStartedAt = 0;
+  geometryCoverageLastScanId = -1;
   decoderFreshnessHoldActive = false;
   decoderFreshnessHoldUntil = 0;
   discardInFlightDecodeWork(reason, restartWorkers);
