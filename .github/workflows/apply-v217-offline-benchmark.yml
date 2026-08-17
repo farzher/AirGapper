@@ -11,7 +11,7 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
-      - .github/v223_fast_metrics_patch.py
+      - .github/v223_data_plan_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -21,38 +21,68 @@ permissions:
 jobs:
   fast-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add detailed fast-path metrics
-        id: metrics
+      - name: Apply cached CRC-Turbo data-plan candidate
+        id: candidate
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          if ! grep -q 'dataOnlyAttempts: sumGuided' receive/main.js; then
-            python3 .github/v223_fast_metrics_patch.py
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          fi
+          set -o pipefail
+          {
+            if ! grep -q 'struct TurboDataPlan' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+              python3 .github/v223_data_plan_patch.py
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'changed=false' >> "$GITHUB_OUTPUT"
+            fi
+          } 2>&1 | tee /tmp/v223-patch.log
+
+      - name: Cache decimen toolchain
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/decimen-codec/source/emsdk
+            vendor/decimen-codec/source/third_party
+            vendor/decimen-codec/source/build-simd
+            vendor/decimen-codec/source/build-scalar
+          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+
+      - name: Build SIMD and scalar codecs
+        id: build
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
+            DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
+          } 2>&1 | tee /tmp/v223-build.log
 
       - uses: actions/setup-node@v4
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         with:
           node-version: 22
 
       - name: Prepare runner Chrome
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         run: |
           set -euo pipefail
           npm install --no-save --package-lock=false playwright@1.55.0
           google-chrome --version
 
       - name: Run production-only receiver regression
+        id: regression
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -o pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v223-regression.log
           echo '--- fast regression summary ---'
           cat benchmark/offline-summary.json
 
@@ -64,16 +94,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit one-run v222 measurements
-        if: steps.metrics.outputs.changed == 'true'
+      - name: Commit failure diagnostics
+        if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          PATCH_OUTCOME='${{ steps.candidate.outcome }}'
+          BUILD_OUTCOME='${{ steps.build.outcome }}'
+          REGRESSION_OUTCOME='${{ steps.regression.outcome }}'
+          git reset --hard HEAD
+          {
+            echo "patch=$PATCH_OUTCOME"
+            echo "build=$BUILD_OUTCOME"
+            echo "regression=$REGRESSION_OUTCOME"
+            echo
+            echo '--- patch tail ---'
+            tail -n 120 /tmp/v223-patch.log 2>/dev/null || true
+            echo
+            echo '--- build tail ---'
+            tail -n 180 /tmp/v223-build.log 2>/dev/null || true
+            echo
+            echo '--- regression tail ---'
+            tail -n 240 /tmp/v223-regression.log 2>/dev/null || true
+          } > benchmark/v223-ci.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add benchmark/v223-ci.log
+          git commit -m "record v223 candidate CI failure"
+          git push origin HEAD:master
+          exit 1
+
+      - name: Commit passing cached data plan
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          cp benchmark/offline-summary.json benchmark/v222-result.json
-          rm -f benchmark/v222-ci.log
+          cp benchmark/offline-summary.json benchmark/v223-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git add receive/main.js benchmark/v222-result.json
-          git add -u benchmark/v222-ci.log || true
-          git commit -m "record v222 stable-path measurements"
+          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+                  vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+                  vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
+                  benchmark/v223-result.json
+          git commit -m "v0.5.223 cache CRC-Turbo QR data plans"
           git push origin HEAD:master
