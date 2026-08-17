@@ -195,12 +195,12 @@ class GridLattice {
     return this.snapshot();
   }
   noteValidPacket(at = this.lastHitAt) {
-    if (!this.candidate) return null;
+    if (!this.candidate) return false;
     const packetIsCurrent = at >= this.lastHitAt;
     this.lastHitAt = Math.max(this.lastHitAt, at);
     if (packetIsCurrent && this.locked)
       this.transition("TRACK", "valid predicted packet kept lattice alive", at);
-    return this.snapshot();
+    return true;
   }
   learnSlotCorrection(detection) {
     const candidate = this.candidate;
@@ -395,7 +395,6 @@ class GridLattice {
     const observed = new Map(candidate.observations
       .filter((observation) => newestAt - observation.at <= EXACT_GEOMETRY_MS)
       .map((observation) => [observation.slotIndex, observation]));
-    const decoded = new Set(observed.keys());
     const slots = [];
     for (let index = 0; index < count; index++) {
       const observation = observed.get(index);
@@ -414,7 +413,7 @@ class GridLattice {
       const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
       const box = bounds(quad);
       if (!box) return null;
-      slots.push({ index, quad, box, decoded: decoded.has(index), observed: Boolean(observation) });
+      slots.push({ index, quad, box, decoded: observed.has(index), observed: Boolean(observation) });
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
     return {

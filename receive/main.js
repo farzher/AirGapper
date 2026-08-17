@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.207";
+const RECEIVER_RUNTIME_BUILD = "v0.5.208";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2369,8 +2369,24 @@ function noteRegion(box, now, decoded = true, info) {
     regions.length = MAX_REGIONS;
   }
 }
+function markGridRegionDecoded(region, now, info) {
+  if (!region) return void 0;
+  region.decoded = true;
+  region.seen = now;
+  region.decodedSeen = now;
+  region.sightedSeen = now;
+  region.consecutiveMisses = 0;
+  region.detectionConfidence = 1;
+  region.decodeConfidence = 1;
+  region.decodeSuccesses++;
+  region.crc32 = info?.crc32 ?? true;
+  if (info?.scanId !== void 0)
+    region.lastHitScanId = Math.max(region.lastHitScanId ?? -1, info.scanId);
+  if (region.gridSlot !== void 0) noteSlotDecoded(region.gridSlot);
+  lastDecodedRegionSize = Math.max(lastDecodedRegionSize, region.w || 0, region.h || 0);
+  return region;
+}
 function syncGrid(snapshot, now, decodedSlot, info) {
-  var _a, _b;
   lastGridSnapshot = snapshot;
   const shape = `${snapshot.layout.cols}x${snapshot.layout.rows}`;
   if (shape !== gridShape) {
@@ -2414,19 +2430,8 @@ function syncGrid(snapshot, now, decodedSlot, info) {
       observed: Boolean(slot.observed),
       globalGridConfidence: snapshot.confidence
     });
-    if (slot.index === decodedSlot) {
-      region.decoded = true;
-      region.seen = now;
-      region.decodedSeen = now;
-      region.sightedSeen = now;
-      region.consecutiveMisses = 0;
-      region.detectionConfidence = 1;
-      region.decodeConfidence = 1;
-      region.decodeSuccesses++;
-      region.crc32 = (_a = info == null ? void 0 : info.crc32) != null ? _a : true;
-      if ((info == null ? void 0 : info.scanId) !== void 0) region.lastHitScanId = Math.max((_b = region.lastHitScanId) != null ? _b : -1, info.scanId);
-      decodedRegion = region;
-    }
+    if (slot.index === decodedSlot)
+      decodedRegion = markGridRegionDecoded(region, now, info);
   }
   expectedRegions = snapshot.slots.length;
   expectedRegionsAt = now;
@@ -6253,29 +6258,31 @@ function onDecoded(bytes, box, info) {
   lastStreamDecodeAt = decodedAt;
   plainQrPolicy.noteFramed();
   let decodedRegion;
-  if (!optimizerAttribution && box && validQuadObject(info == null ? void 0 : info.quad) && info.modules) {
+  if (!optimizerAttribution) {
     const priorBenchmarkFrame = activeBenchmarkFrame;
     if (productionTrace) activeBenchmarkFrame = productionTrace;
-    const packetAt = info.scanId === void 0 ? decodedAt : (_b = scanCapturedAt.get(info.scanId)) != null ? _b : decodedAt;
-    const snapshot = info.geometryMeasured === false
-      ? gridLattice.noteValidPacket(packetAt)
-      : gridLattice.accept({
-          identity,
-          layoutId: header.layoutId,
-          slotIndex: header.slotIndex,
-          at: packetAt,
-          scanId: (_c = info.scanId) != null ? _c : -1,
-          box,
-          quad: info.quad,
-          modules: info.modules
-        }, receiverFrameWidth, receiverFrameHeight);
-    if (snapshot) {
-      decodedRegion = syncGrid(
-        snapshot,
+    const packetAt = info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt;
+    const geometryInfo = { ...info, crc32: true };
+    if (info?.geometryMeasured === false) {
+      gridLattice.noteValidPacket(packetAt);
+      decodedRegion = markGridRegionDecoded(
+        regions.find((region) => region.gridSlot === header.slotIndex),
         decodedAt,
-        header.slotIndex,
-        { ...info, crc32: true }
+        geometryInfo
       );
+    } else if (box && validQuadObject(info?.quad) && info?.modules) {
+      const snapshot = gridLattice.accept({
+        identity,
+        layoutId: header.layoutId,
+        slotIndex: header.slotIndex,
+        at: packetAt,
+        scanId: info?.scanId ?? -1,
+        box,
+        quad: info.quad,
+        modules: info.modules
+      }, receiverFrameWidth, receiverFrameHeight);
+      if (snapshot)
+        decodedRegion = syncGrid(snapshot, decodedAt, header.slotIndex, geometryInfo);
     }
     if (productionTrace) productionTrace.stateAfter = gridLattice.state;
     activeBenchmarkFrame = priorBenchmarkFrame;

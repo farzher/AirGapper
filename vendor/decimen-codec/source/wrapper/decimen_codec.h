@@ -67,11 +67,11 @@ struct DecimenGuidedMetrics {
 	uint32_t sparseNoRsSuccesses;
 	uint32_t sparseRsFallbacks;
 	uint32_t sparseSkipped;
-	uint32_t reserved;
+	uint32_t turboAttempts;
 	uint32_t fallbackAttemptMask;
 	uint32_t fallbackSuccessMask;
 	uint32_t sparseSuccessMask;
-	uint32_t reserved2;
+	uint32_t turboSuccesses;
 	uint32_t stableRsAttempts;
 	uint32_t stableRsSuccesses;
 	uint32_t stableEligibleTracks;

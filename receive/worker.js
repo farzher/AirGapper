@@ -4,36 +4,38 @@ import { gridLayoutById } from "../shared/grid-layout.js";
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 const ready = import(scalarCodec ? "../vendor/decimen-codec-android/decimen_codec.js" : "../vendor/decimen-codec/decimen_codec.js").then(({ default: DecimenCodec }) => DecimenCodec());
 const ctx = self;
+function validPoint(point) {
+  return Boolean(point && Number.isFinite(point.x) && Number.isFinite(point.y));
+}
 function validQuad(p) {
-  if (!p) return false;
-  return [p.topLeft, p.topRight, p.bottomRight, p.bottomLeft].every((point) =>
-    point && Number.isFinite(point.x) && Number.isFinite(point.y)
-  );
+  return Boolean(p && validPoint(p.topLeft) && validPoint(p.topRight) &&
+    validPoint(p.bottomRight) && validPoint(p.bottomLeft));
 }
 function boundsOf(p, ox, oy) {
   if (!validQuad(p)) return null;
-  const xs = [p.topLeft.x, p.topRight.x, p.bottomRight.x, p.bottomLeft.x];
-  const ys = [p.topLeft.y, p.topRight.y, p.bottomRight.y, p.bottomLeft.y];
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  return { x: ox + x, y: oy + y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  const minX = Math.min(p.topLeft.x, p.topRight.x, p.bottomRight.x, p.bottomLeft.x);
+  const minY = Math.min(p.topLeft.y, p.topRight.y, p.bottomRight.y, p.bottomLeft.y);
+  const maxX = Math.max(p.topLeft.x, p.topRight.x, p.bottomRight.x, p.bottomLeft.x);
+  const maxY = Math.max(p.topLeft.y, p.topRight.y, p.bottomRight.y, p.bottomLeft.y);
+  return { x: ox + minX, y: oy + minY, w: maxX - minX, h: maxY - minY };
 }
 function shifted(p, ox, oy) {
   if (!validQuad(p)) return null;
-  const s = (pt) => ({ x: pt.x + ox, y: pt.y + oy });
   return {
-    topLeft: s(p.topLeft),
-    topRight: s(p.topRight),
-    bottomRight: s(p.bottomRight),
-    bottomLeft: s(p.bottomLeft)
+    topLeft: { x: p.topLeft.x + ox, y: p.topLeft.y + oy },
+    topRight: { x: p.topRight.x + ox, y: p.topRight.y + oy },
+    bottomRight: { x: p.bottomRight.x + ox, y: p.bottomRight.y + oy },
+    bottomLeft: { x: p.bottomLeft.x + ox, y: p.bottomLeft.y + oy }
   };
 }
 let inputPtr = 0;
 let inputCapacity = 0;
 function inputBuffer(zx, bytes) {
-  if (bytes <= inputCapacity) return inputPtr;
+  if (inputPtr && bytes <= inputCapacity) return inputPtr;
+  const next = zx._malloc(bytes);
+  if (!next) return 0;
   if (inputPtr) zx._free(inputPtr);
-  inputPtr = zx._malloc(bytes);
+  inputPtr = next;
   inputCapacity = bytes;
   return inputPtr;
 }
@@ -60,11 +62,10 @@ let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
 function ensureGuidedBatch(zx) {
-  if (guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr) return true;
-  guidedTracksPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
-  guidedResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
-  guidedMetricsPtr = zx._malloc(GUIDED_METRICS_BYTES);
-  guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
+  if (!guidedTracksPtr) guidedTracksPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
+  if (!guidedResultsPtr) guidedResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
+  if (!guidedMetricsPtr) guidedMetricsPtr = zx._malloc(GUIDED_METRICS_BYTES);
+  if (!guidedOutputPtr) guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
   return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
 }
 function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff) {
@@ -127,8 +128,13 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
   const symbols = [];
-  const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
-  const decodedSlots = /* @__PURE__ */ new Set();
+  let expectedSlotsMask = 0;
+  for (const track of tracks) {
+    const slot = Number(track.slot);
+    if (Number.isInteger(slot) && slot >= 0 && slot < 32)
+      expectedSlotsMask = (expectedSlotsMask | ((1 << slot) >>> 0)) >>> 0;
+  }
+  let decodedSlotsMask = 0;
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
     const status = view.getInt32(base + 4, true);
@@ -140,8 +146,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const bytes = zx.HEAPU8.slice(guidedOutputPtr + outputOffset, guidedOutputPtr + outputOffset + outputLength);
     const packet = parseFrame(bytes);
     const slot = packet?.header.slotIndex;
-    if (!packet || slot === void 0 || expectedSlots.size && !expectedSlots.has(slot) || decodedSlots.has(slot)) continue;
-    decodedSlots.add(slot);
+    if (!packet || !Number.isInteger(slot) || slot < 0 || slot >= 32) continue;
+    const slotBit = (1 << slot) >>> 0;
+    if (expectedSlotsMask && !(expectedSlotsMask & slotBit) || decodedSlotsMask & slotBit) continue;
+    decodedSlotsMask = (decodedSlotsMask | slotBit) >>> 0;
     const quad = {
       topLeft: { x: view.getFloat32(base + 20, true), y: view.getFloat32(base + 24, true) },
       topRight: { x: view.getFloat32(base + 28, true), y: view.getFloat32(base + 32, true) },
@@ -162,14 +170,14 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   return { symbols, metrics };
 }
 function ensureNativeBatch(zx) {
-  if (nativeBatchHandle) return true;
-  nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
+  if (!nativeBatchHandle) nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
   if (!nativeBatchHandle) return false;
-  nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
-  nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
-  nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
+  if (!nativeResultsPtr) nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
+  if (!nativeOutputPtr) nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
+  if (!nativeMetricsPtr) nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
+  if (!nativeResultsPtr || !nativeOutputPtr || !nativeMetricsPtr) return false;
   zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
-  return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
+  return true;
 }
 function translatedQuad(q, dx, dy) {
   if (!validQuad(q)) return null;
