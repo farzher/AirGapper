@@ -1,0 +1,33 @@
+name: Agent v169 cold acquisition optics
+on:
+  push:
+    paths:
+      - '.github/v169_patch.py'
+      - '.github/workflows/agent-v169-cold-acquisition-optics.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v169_patch.py
+      - name: Smoke check
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          git diff --check
+          grep -q 'Cold acquisition stays on hardware AE' receive/main.js
+          grep -q 'AUTO_OPTICS_ACQUISITION_RESCUE_MS = 1600' receive/main.js
+          ! grep -q 'autoOpticsWarmStartApplied\|AUTO_OPTICS_WARM_START_MS\|remembered start\|autoOpticsRuntimeState === "warm"' receive/main.js
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js sw.js
+          git commit -m 'v0.5.169 keep cold acquisition on hardware AE'
+          git push origin master
