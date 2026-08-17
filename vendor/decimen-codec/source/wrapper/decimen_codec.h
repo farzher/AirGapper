@@ -96,11 +96,12 @@ void clearTrackedDecoderTrack(int handle, int slot);
 int setTrackedDecoderSampleMap(int handle, int slot, const float* xy, int pointCount);
 void setTrackedDecoderTrackCRC32(int handle, int slot, int enabled);
 void setTrackedDecoderFallbackBudget(int handle, int maxRSFallbacksPerFrame);
+void setTrackedDecoderAutoCalibration(int handle, int enabled);
 int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
 						 const DecimenGuidedTrack* tracks, int trackCount,
 						 DecimenGuidedResult* results, int resultCapacity,
 						 uint8_t* output, int outputCapacity, int maxSymbols,
-						 DecimenGuidedMetrics* metrics);
+						 DecimenGuidedMetrics* metrics, int trackedDecoderHandle);
 
 int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
 						DecimenTrackedResult* results, int resultCapacity,

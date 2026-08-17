@@ -198,6 +198,12 @@ std::vector<DecimenResult> readDenseY(int bufferPtr, int width, int height, int 
 
 namespace {
 
+// The persistent sampler is defined later in this file. Guided decoding owns
+// the high-confidence current-frame finder triplet, so let it seed that cache
+// instead of forcing the cache to rediscover all finders itself.
+static bool seedTrackedCacheFromGuided(int handle, int id, int dimension,
+                                       const BitMatrix& image, const QRCode::FinderPatternSet& fp);
+
 constexpr auto GUIDED_QR_FINDER = FixedPattern<5, 7>{1, 1, 3, 1, 1};
 
 static double guidedNowMs()
@@ -312,7 +318,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                    const DecimenGuidedTrack* tracks, int trackCount,
                                    DecimenGuidedResult* results, int resultCapacity,
                                    uint8_t* output, int outputCapacity, int maxSymbols,
-                                   DecimenGuidedMetrics* metrics)
+                                   DecimenGuidedMetrics* metrics, int trackedDecoderHandle)
 {
     if (!metrics)
         return -1;
@@ -353,6 +359,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
         int resultCount = 0;
         int outputUsed = 0;
+        int cacheSeedsThisCall = 0;
         for (int trackIndex : order) {
             if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
                 break;
@@ -382,6 +389,17 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 decodeSpent += genericElapsed;
                 if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
                     continue;
+
+                // Calibration used to be the fatal cost of the old native
+                // pre-pass: it independently scanned the whole crop for finder
+                // sets before it could build a distortion-corrected module map.
+                // We already have the exact finder triplet here. Seed at most
+                // four maps per job to amortize setup; subsequent frames can
+                // point-sample those maps before falling back to SampleQR.
+                if (trackedDecoderHandle && cacheSeedsThisCall < 4 &&
+                    seedTrackedCacheFromGuided(trackedDecoderHandle, track.id, track.dimension, *bits, finderSet))
+                    ++cacheSeedsThisCall;
+
                 ByteArray bytes = decoded.content().bytes;
 
                 if (outputUsed + int(bytes.size()) > outputCapacity)
@@ -752,6 +770,7 @@ struct TrackedDecoder
 {
 	int maxDimension;
 	int maxRSFallbacks = 2;
+	bool autoCalibration = true;
 	size_t fallbackCursor = 0;
 	std::vector<PersistentTrack> tracks;
 };
@@ -1387,6 +1406,29 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 	return true;
 }
 
+static bool seedTrackedCacheFromGuided(int handle, int id, int dimension,
+                                       const BitMatrix& image, const QRCode::FinderPatternSet& fp)
+{
+	auto* decoder = trackedDecoder(handle);
+	if (!decoder)
+		return false;
+	for (auto& track : decoder->tracks) {
+		if (!track.active || track.id != id || track.dimension != dimension)
+			continue;
+		if (track.calibrated)
+			return false;
+		if (track.calibrationCooldown > 0) {
+			--track.calibrationCooldown;
+			return false;
+		}
+		const bool ok = calibrateTrackSampleMap(track, image, fp);
+		if (!ok)
+			track.calibrationCooldown = 4;
+		return ok;
+	}
+	return false;
+}
+
 static void addBatchMetrics(DecimenBatchMetrics& dst, const DecimenBatchMetrics& src)
 {
 	dst.anchorMs += src.anchorMs;
@@ -1691,6 +1733,13 @@ EMSCRIPTEN_KEEPALIVE void setTrackedDecoderFallbackBudget(int handle, int maxRSF
 		decoder->maxRSFallbacks = std::clamp(maxRSFallbacksPerFrame, 0, int(decoder->tracks.size()));
 }
 
+EMSCRIPTEN_KEEPALIVE void setTrackedDecoderAutoCalibration(int handle, int enabled)
+{
+	auto* decoder = trackedDecoder(handle);
+	if (decoder)
+		decoder->autoCalibration = enabled != 0;
+}
+
 EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
 											 DecimenTrackedResult* results, int resultCapacity,
 											 uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
@@ -1711,6 +1760,15 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		DecimenBatchMetrics measured{};
 		int count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &measured);
 		if (measured.tracks > 0 && measured.successful == measured.tracks) {
+			measured.totalMs = emscripten_get_now() - totalStart;
+			if (metrics) *metrics = measured;
+			return count;
+		}
+
+		// Production guided mode seeds calibration with its already-verified
+		// finder triplets. Never fall back to the old whole-crop finder scan in
+		// that mode; a cache miss is intentionally handed back to guided decode.
+		if (!decoder->autoCalibration) {
 			measured.totalMs = emscripten_get_now() - totalStart;
 			if (metrics) *metrics = measured;
 			return count;
