@@ -1,4 +1,4 @@
-name: v217 offline benchmark build
+name: v217 fast receiver regression
 
 on:
   push:
@@ -13,13 +13,13 @@ permissions:
 jobs:
   apply-and-benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Apply v0.5.217 offline benchmark harness
+      - name: Apply v0.5.217 fast regression harness
         run: |
           set -euo pipefail
           python3 .github/v217_offline_patch.py
@@ -28,25 +28,25 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install headless browser
+      - name: Prepare runner Chrome
         run: |
           set -euo pipefail
           npm install --no-save --package-lock=false playwright@1.55.0
-          npx playwright install --with-deps chromium
+          google-chrome --version
 
-      - name: Run deterministic production receiver benchmark
+      - name: Run fast production receiver regression
         run: |
           set -euo pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/offline-runner.mjs
-          echo '--- offline summary ---'
+          echo '--- fast regression summary ---'
           cat benchmark/offline-summary.json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: airgapper-v217-offline-benchmark
+          name: airgapper-v217-fast-regression
           path: benchmark/offline-summary.json
           retention-days: 14
 
@@ -58,5 +58,5 @@ jobs:
           rm -rf node_modules benchmark/offline-summary.json
           rm -f .github/v217_offline_patch.py .github/workflows/apply-v217-offline-benchmark.yml
           git add -A
-          git commit -m "v0.5.217 add deterministic offline receiver benchmark"
+          git commit -m "v0.5.217 add fast offline receiver regression"
           git push origin HEAD:master
