@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '.github/v159_patch.py'
+      - '.github/v159_buildfix.py'
       - '.github/workflows/agent-v159-guided-projection.yml'
 permissions:
   contents: write
@@ -15,7 +16,9 @@ jobs:
           ref: master
           fetch-depth: 0
       - name: Apply patch
-        run: python .github/v159_patch.py
+        run: |
+          python .github/v159_patch.py
+          python .github/v159_buildfix.py
       - name: Rebuild SIMD codec
         run: bash vendor/decimen-codec/source/build.sh
       - name: Smoke check
