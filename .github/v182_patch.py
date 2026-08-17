@@ -29,3 +29,5 @@ replace_once(
     '''                    if (sparseAlignmentFound >= 6) {\n                        ++metrics->sparseNoRsAttempts;\n                        auto fast = decodeWithoutErrorCorrection(sparse.bits());\n                        if (fast.isValid() && !fast.content().bytes.empty() && hasValidCRC32(fast.content().bytes)) {\n                            decodedTrack = commitDecoded(sparse, fast);\n                            if (decodedTrack) ++metrics->sparseNoRsSuccesses;\n                        }\n                    }\n''',
     ''''''
 )
+
+# workflow trigger
