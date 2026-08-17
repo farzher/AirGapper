@@ -916,17 +916,13 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const int threshold = turboThreshold(levels, xx, y, dim);
             int lum;
             if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
-                // Stable tripod/handheld-hold case: a calibrated module center
-                // that is far from the live threshold does not need four-pixel
-                // bilinear interpolation. One Y byte is enough. Borderline
-                // modules retain the existing bilinear + in-cell vote. Any
-                // confident-but-wrong read is rejected by AirGapper CRC and
-                // Stable-RS runs immediately in this same tracked job.
+                // This slot already earned CRC-Turbo by repeatedly surviving
+                // full RS+CRC, and the live quad differs only by translation.
+                // Read the calibrated module center directly. AirGapper CRC is
+                // still the acceptance gate; a single bad page immediately
+                // falls through to Stable-RS and backs this probe off.
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
-                if (lum >= 0 && std::abs(lum - threshold) <= GUIDED_TURBO_NEAREST_AMBIGUOUS)
-                    lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
-                                         xx, y, dx, dy, threshold, moduleSize);
             } else {
                 lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
                                      xx, y, dx, dy, threshold, moduleSize);
