@@ -988,7 +988,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                          const TurboFrameTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
-                                         DecimenGuidedMetrics& metrics)
+                                         DecimenGuidedMetrics& metrics, bool centerOnly = false)
 {
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
@@ -1014,9 +1014,20 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
             const int threshold = turboThreshold(levels, xx, y, dim);
-            const int lum = turboModuleLum(cache, track, frameTransform,
-                                           yPlane, width, height, stride,
-                                           xx, y, dx, dy, threshold, moduleSize);
+            int lum;
+            if (centerOnly) {
+                // Stable-RS already has full QR error correction and AirGapper
+                // CRC. On a pure-translation calibrated wall, first give RS the
+                // single bilinear module-center sample instead of spending up to
+                // five reads on every threshold-adjacent cell. The caller retries
+                // this exact slot with the conservative voted sampler on failure.
+                const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
+                lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+            } else {
+                lum = turboModuleLum(cache, track, frameTransform,
+                                     yPlane, width, height, stride,
+                                     xx, y, dx, dy, threshold, moduleSize);
+            }
             if (lum < 0) { failed = true; break; }
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
         }
@@ -1401,10 +1412,21 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->sampleAttempts;
                             ++metrics->sparseRsFallbacks;
                             ++metrics->stableRsAttempts;
+                            const bool centerOnlyRs = frameTransform.translationOnly;
                             auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                yPlane, width, height, stride,
-                                                               dx, dy, levels, *metrics);
+                                                               dx, dy, levels, *metrics, centerOnlyRs);
                             success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                            if (!success && centerOnlyRs) {
+                                // No correctness regression: if single-center RS
+                                // cannot reconstruct an exact CRC-valid packet,
+                                // retry the old ambiguity-voted sampler before
+                                // handing the slot to sparse Guided recovery.
+                                decoded = decodeTurboStableRS(*cache, track, frameTransform,
+                                                              yPlane, width, height, stride,
+                                                              dx, dy, levels, *metrics, false);
+                                success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                            }
                             if (success) {
                                 ++metrics->stableRsSuccesses;
                                 cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
