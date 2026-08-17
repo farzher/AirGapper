@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.208";
+const RECEIVER_RUNTIME_BUILD = "v0.5.209";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1072,9 +1072,7 @@ const guidedRollout = {
   state: "active",
   inFlight: 0,
   failures: 0,
-  rampGood: 0,
   badStreak: 0,
-  robustSinceRetry: 0,
   jobsSinceRobust: 0,
   robustLatencies: []
 };
@@ -1082,9 +1080,7 @@ function resetGuidedRollout() {
   guidedRollout.state = "active";
   guidedRollout.inFlight = 0;
   guidedRollout.failures = 0;
-  guidedRollout.rampGood = 0;
   guidedRollout.badStreak = 0;
-  guidedRollout.robustSinceRetry = 0;
   guidedRollout.jobsSinceRobust = 0;
   guidedRollout.robustLatencies.length = 0;
 }
@@ -1122,15 +1118,6 @@ function chooseGuidedStage(message) {
 function noteGuidedRobustBaseline(latencyMs) {
   guidedRollout.robustLatencies.push(latencyMs);
   if (guidedRollout.robustLatencies.length > 24) guidedRollout.robustLatencies.shift();
-  if (guidedRollout.state === "warmup" && guidedRollout.robustLatencies.length >= 4)
-    guidedRollout.state = "probe";
-  if (guidedRollout.state === "retry") {
-    const retryAfter = Math.min(16, 3 + guidedRollout.failures * 2);
-    if (++guidedRollout.robustSinceRetry >= retryAfter) {
-      guidedRollout.robustSinceRetry = 0;
-      guidedRollout.state = "probe";
-    }
-  }
 }
 function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
@@ -1142,7 +1129,6 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   // hatch, while normal camera frames stay on the bounded guided path.
   if (outputSymbols > 0) {
     guidedRollout.badStreak = 0;
-    guidedRollout.rampGood++;
   } else {
     guidedRollout.badStreak++;
     guidedRollout.failures++;
@@ -1855,7 +1841,6 @@ let nextRegionId = 1;
 let lastDecodedRegionSize = 0;
 const cropAttempts = /* @__PURE__ */ new Map();
 const scanCapturedAt = /* @__PURE__ */ new Map();
-const localReacquireIds = /* @__PURE__ */ new Set();
 const scanOutcomes = /* @__PURE__ */ new Map();
 function noteScanOutcome(scanId, kind) {
   var _a;
@@ -2128,9 +2113,7 @@ function noteDecodeCompleted(id, completion) {
       lastRecoveryReason = `finder sightings recentered locked lattice (${geometrySightingNudges})`;
     }
   }
-  fullScanIds.delete(id);
   fullScanJobs.delete(id);
-  localReacquireIds.delete(id);
   scanCapturedAt.delete(id);
   scanCompletionTimes.push(receiverNow());
   focusController.noteDecoderCompletion(id);
@@ -2221,11 +2204,6 @@ function noteDecodeCompleted(id, completion) {
   } else if (completion.symbolCount > 0) {
     lastDecodeError = "";
   }
-  if (completion.full) {
-  } else if (completion.symbolCount === 0) {
-  }
-  if (completion.trackedAttempted && !completion.trackedHit && completion.fallbackAttempted) {
-  }
   finishScanCapture(id, completion);
   scanOutcomes.delete(id);
   const attempts = cropAttempts.get(id);
@@ -2275,7 +2253,6 @@ const MAX_REGIONS = 15;
 const REGION_PAD = 0.35;
 let cropRotate = 0;
 let lastFullScan = 0;
-const fullScanIds = /* @__PURE__ */ new Set();
 const fullScanJobs = /* @__PURE__ */ new Map();
 let expectedRegions = 0;
 let expectedRegionsAt = 0;
@@ -4099,9 +4076,7 @@ decodeWorkers.addEventListener("change", () => {
   if (!stream || done) return;
   minimumAcceptedScanId = frameId;
   cropAttempts.clear();
-  fullScanIds.clear();
   fullScanJobs.clear();
-  localReacquireIds.clear();
   scanCapturedAt.clear();
   clearPendingGridLanes();
   pool.resize(selectedWorkerCount());
@@ -4195,9 +4170,7 @@ function stopReceiver() {
   expectedRegions = 0;
   expectedRegionsAt = 0;
   lastFullScan = 0;
-  fullScanIds.clear();
   fullScanJobs.clear();
-  localReacquireIds.clear();
   scanCapturedAt.clear();
   scanOutcomes.clear();
   hotPathJobMode.clear();
@@ -4318,9 +4291,7 @@ function pauseReceiver() {
   clearPendingGridLanes();
   pool.resize(0);
   cropAttempts.clear();
-  fullScanIds.clear();
   fullScanJobs.clear();
-  localReacquireIds.clear();
   scanCapturedAt.clear();
   minimumAcceptedScanId = frameId;
 }
@@ -4673,9 +4644,7 @@ function discardInFlightDecodeWork(reason, restartWorkers = true) {
   minimumAcceptedScanId = frameId;
   clearPendingGridLanes();
   cropAttempts.clear();
-  fullScanIds.clear();
   fullScanJobs.clear();
-  localReacquireIds.clear();
   scanCapturedAt.clear();
   for (const job of active) {
     if (job.id === void 0) continue;
@@ -5059,7 +5028,6 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       }
     }
     if (message.full) {
-      fullScanIds.add(message.id);
       fullScanJobs.set(message.id, {
         thorough: Boolean(message.thorough),
         native: true,
@@ -6111,9 +6079,7 @@ function resetActiveTransfer() {
   expectedRegionsAt = 0;
   lastDecodedRegionSize = 0;
   cropAttempts.clear();
-  fullScanIds.clear();
   fullScanJobs.clear();
-  localReacquireIds.clear();
   scanCapturedAt.clear();
   scanOutcomes.clear();
   lastFullScan = 0;

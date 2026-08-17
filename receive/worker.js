@@ -77,11 +77,15 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const base = i * GUIDED_TRACK_BYTES;
     view.setInt32(base, track.slot ?? track.id ?? i, true);
     view.setInt32(base + 4, track.dim, true);
-    const points = [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft];
-    for (let p = 0; p < 4; p++) {
-      view.setFloat32(base + 8 + p * 8, points[p].x - ox, true);
-      view.setFloat32(base + 12 + p * 8, points[p].y - oy, true);
-    }
+    const q = track.quad;
+    view.setFloat32(base + 8, q.topLeft.x - ox, true);
+    view.setFloat32(base + 12, q.topLeft.y - oy, true);
+    view.setFloat32(base + 16, q.topRight.x - ox, true);
+    view.setFloat32(base + 20, q.topRight.y - oy, true);
+    view.setFloat32(base + 24, q.bottomRight.x - ox, true);
+    view.setFloat32(base + 28, q.bottomRight.y - oy, true);
+    view.setFloat32(base + 32, q.bottomLeft.x - ox, true);
+    view.setFloat32(base + 36, q.bottomLeft.y - oy, true);
   }
   const count = zx._decodeGuidedBatchY(
     yPtr, width, height, stride,
@@ -472,6 +476,7 @@ ctx.onmessage = async (e) => {
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };
       const allocationBytes = ownedVideoFrame.allocationSize(copyOptions);
       ptr = inputBuffer(zx, allocationBytes);
+      if (!ptr) throw new Error("Could not allocate WASM camera input buffer");
       const copyStarted = performance.now();
       const planes = await ownedVideoFrame.copyTo(zx.HEAPU8.subarray(ptr, ptr + allocationBytes), copyOptions);
       frameCopyMs = performance.now() - copyStarted;
@@ -493,6 +498,7 @@ ctx.onmessage = async (e) => {
       const byteLength = pixelFormat === "y8" ? Math.min(buf.byteLength, payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w) : buf.byteLength;
       pixels = new Uint8Array(buf, 0, byteLength);
       ptr = inputBuffer(zx, pixels.byteLength);
+      if (!ptr) throw new Error("Could not allocate WASM pixel input buffer");
       zx.HEAPU8.set(pixels, ptr);
     }
     const pw = w;
