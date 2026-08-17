@@ -115,7 +115,7 @@ function fastRegressionResult(result, expectedFrames) {
   resultObject.ok = Object.values(resultObject.checks).every(Boolean);
   return resultObject;
 }
-window.__airgapperRunFastRegression = async ({ urls, repeats = 1, fps = 30, mode = "performance" }) => {
+window.__airgapperRunFastRegression = async ({ urls, order, repeats = 1, fps = 30, mode = "performance" }) => {
   if (!Array.isArray(urls) || !urls.length) throw new Error("Fast regression needs images");
   const images = [];
   for (const url of urls) images.push(await fastRegressionImage(url));
@@ -123,27 +123,35 @@ window.__airgapperRunFastRegression = async ({ urls, repeats = 1, fps = 30, mode
   const height = images[0].height;
   if (images.some((image) => image.width !== width || image.height !== height))
     throw new Error("Fast regression images must have matching dimensions");
+  let frameOrder;
+  if (Array.isArray(order) && order.length) {
+    frameOrder = order.map((index) => {
+      if (!Number.isInteger(index) || index < 0 || index >= images.length) throw new Error(`Invalid fast regression frame index ${index}`);
+      return index;
+    });
+  } else {
+    frameOrder = [];
+    for (let repeat = 0; repeat < Math.max(1, repeats); repeat++)
+      for (let index = 0; index < images.length; index++) frameOrder.push(index);
+  }
   const frameMs = 1000 / Math.max(1, fps);
   const records = [];
-  let sequence = 0;
-  for (let repeat = 0; repeat < Math.max(1, repeats); repeat++) {
-    for (const image of images) {
-      const at = sequence * frameMs;
-      records.push({
-        meta: {
-          sequence,
-          width,
-          height,
-          stride: width * 4,
-          callbackTimeMs: at,
-          mediaTimeMs: at,
-          presentationTimeMs: at,
-          expectedDisplayTimeMs: at
-        },
-        pixels: new Uint8ClampedArray(image.data)
-      });
-      sequence++;
-    }
+  for (let sequence = 0; sequence < frameOrder.length; sequence++) {
+    const image = images[frameOrder[sequence]];
+    const at = sequence * frameMs;
+    records.push({
+      meta: {
+        sequence,
+        width,
+        height,
+        stride: width * 4,
+        callbackTimeMs: at,
+        mediaTimeMs: at,
+        presentationTimeMs: at,
+        expectedDisplayTimeMs: at
+      },
+      pixels: new Uint8ClampedArray(image.data)
+    });
   }
   benchmarkCorpus = AgcapCorpus.fromRecords({
     format: "AirGapper fast production regression corpus",
