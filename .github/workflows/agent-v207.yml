@@ -1,0 +1,26 @@
+name: v207 monotonic geometry
+on:
+  push:
+    paths:
+      - .github/v207_patch.py
+      - .github/workflows/agent-v207.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply source patch
+        run: python .github/v207_patch.py
+      - name: Commit source
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v207_patch.py .github/workflows/agent-v207.yml
+          git add index.html main.js receive/main.js receive/grid-lattice.js sw.js
+          git commit -m "v0.5.207 make geometry updates monotonic"
+          git push origin master
