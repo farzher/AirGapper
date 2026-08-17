@@ -374,12 +374,12 @@ static void noteGuidedSparseOutcome(int id, bool success)
         state.cooldown[id] = 0;
         return;
     }
-    if (++state.failures[id] >= 4) {
+    if (++state.failures[id] >= 2) {
         state.failures[id] = 0;
-        // Sparse sampling is materially cheaper than full SampleQR and often
-        // recovers on the very next animated frame. Back off only briefly after
-        // a real miss streak; the old 10-appearance cooldown stranded good slots.
-        state.cooldown[id] = 2;
+        // Proven v168 cadence: a weak sparse geometry should not pay an extra
+        // sample + RS decode every animated frame. Re-probe periodically because
+        // a later pose/framing can become friendlier.
+        state.cooldown[id] = 10;
     }
 }
 
@@ -496,7 +496,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                    const DecimenGuidedTrack* tracks, int trackCount,
                                    DecimenGuidedResult* results, int resultCapacity,
                                    uint8_t* output, int outputCapacity, int maxSymbols,
-                                   uint32_t fallbackAllowedMask, DecimenGuidedMetrics* metrics)
+                                   DecimenGuidedMetrics* metrics)
 {
     if (!metrics)
         return -1;
@@ -599,50 +599,34 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     metrics->fastDecodeMs += fastElapsed;
                     metrics->decodeMs += fastElapsed;
                     decodeSpent += fastElapsed;
-                    if (decodedTrack) {
+                    if (decodedTrack)
                         ++metrics->fastDecodeSuccesses;
-                        if (track.id >= 0 && track.id < 32)
-                            metrics->sparseSuccessMask |= uint32_t(1) << track.id;
-                    }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             } else {
                 ++metrics->sparseSkipped;
             }
 
-            // Sparse misses retain the exact proven decoder. Full SampleQR is
-            // gated by the receiver-wide physical-slot policy supplied with this
-            // job, so one bad slot cannot relearn the same miss independently in
-            // every worker.
+            // Sparse misses retain the exact proven v168 decoder. Do not add a
+            // second fallback policy here: when sparse is skipped or misses, run
+            // SampleQR directly. The sparse cooldown already bounds double work.
             if (!decodedTrack) {
-                const bool fallbackAllowed = track.id < 0 || track.id >= 32 ||
-                    (fallbackAllowedMask & (uint32_t(1) << track.id)) != 0;
-                if (!fallbackAllowed) {
-                    ++metrics->genericFallbackSkipped;
-                } else {
-                    ++metrics->genericFallbackTracks;
-                    if (track.id >= 0 && track.id < 32)
-                        metrics->fallbackAttemptMask |= uint32_t(1) << track.id;
-                    bool fallbackSuccess = false;
-                    for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
-                        metrics->sampleAttempts++;
-                        if (!detected.isValid() || detected.bits().width() != track.dimension)
-                            continue;
-                        ++metrics->genericDecodeAttempts;
-                        const double genericStart = guidedNowMs();
-                        auto decoded = QRCode::Decode(detected.bits());
-                        const double genericElapsed = guidedNowMs() - genericStart;
-                        metrics->genericDecodeMs += genericElapsed;
-                        metrics->decodeMs += genericElapsed;
-                        decodeSpent += genericElapsed;
-                        if (commitDecoded(detected, decoded)) {
-                            fallbackSuccess = true;
-                            decodedTrack = true;
-                            ++metrics->genericFallbackSuccesses;
-                            if (track.id >= 0 && track.id < 32)
-                                metrics->fallbackSuccessMask |= uint32_t(1) << track.id;
-                            break;
-                        }
+                ++metrics->genericFallbackTracks;
+                for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
+                    metrics->sampleAttempts++;
+                    if (!detected.isValid() || detected.bits().width() != track.dimension)
+                        continue;
+                    ++metrics->genericDecodeAttempts;
+                    const double genericStart = guidedNowMs();
+                    auto decoded = QRCode::Decode(detected.bits());
+                    const double genericElapsed = guidedNowMs() - genericStart;
+                    metrics->genericDecodeMs += genericElapsed;
+                    metrics->decodeMs += genericElapsed;
+                    decodeSpent += genericElapsed;
+                    if (commitDecoded(detected, decoded)) {
+                        decodedTrack = true;
+                        ++metrics->genericFallbackSuccesses;
+                        break;
                     }
                 }
             }

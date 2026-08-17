@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.183";
+const RECEIVER_RUNTIME_BUILD = "v0.5.184";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -986,59 +986,6 @@ const slotQualitySamples = new Uint16Array(SLOT_METRIC_COUNT);
 const slotQualityScores = new Float32Array(SLOT_METRIC_COUNT);
 const slotAdaptiveWeak = new Uint8Array(SLOT_METRIC_COUNT);
 
-// Full SampleQR fallback is expensive enough that six independent worker-local
-// histories learn far too slowly. Own the policy here, keyed by physical grid
-// slot, and send each guided job one allow-mask. The thresholds intentionally
-// match v175's conservative policy; only the evidence is now shared globally.
-const GUIDED_FALLBACK_SLOT_COUNT = 32;
-const guidedFallbackMisses = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
-const guidedFallbackCooldown = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
-const guidedFallbackBackoff = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
-function resetGuidedFallbackSlot(slot) {
-  guidedFallbackMisses[slot] = 0;
-  guidedFallbackCooldown[slot] = 0;
-  guidedFallbackBackoff[slot] = 0;
-}
-function resetGuidedFallbackPolicy() {
-  guidedFallbackMisses.fill(0);
-  guidedFallbackCooldown.fill(0);
-  guidedFallbackBackoff.fill(0);
-}
-function guidedFallbackMaskForTracks(tracks) {
-  let mask = 0;
-  for (const track of tracks ?? []) {
-    const slot = Number(track.slot ?? track.id);
-    if (!Number.isInteger(slot) || slot < 0 || slot >= GUIDED_FALLBACK_SLOT_COUNT) continue;
-    if (guidedFallbackCooldown[slot]) {
-      guidedFallbackCooldown[slot]--;
-      continue;
-    }
-    mask = (mask | ((1 << slot) >>> 0)) >>> 0;
-  }
-  return mask >>> 0;
-}
-function noteGuidedFallbackMetrics(guided) {
-  if (!guided) return;
-  const sparseSuccess = Number(guided.sparseSuccessMask) >>> 0;
-  const fallbackAttempt = Number(guided.fallbackAttemptMask) >>> 0;
-  const fallbackSuccess = Number(guided.fallbackSuccessMask) >>> 0;
-  for (let slot = 0; slot < GUIDED_FALLBACK_SLOT_COUNT; slot++) {
-    const bit = (1 << slot) >>> 0;
-    if (sparseSuccess & bit) {
-      resetGuidedFallbackSlot(slot);
-      continue;
-    }
-    if (!(fallbackAttempt & bit)) continue;
-    if (fallbackSuccess & bit) {
-      resetGuidedFallbackSlot(slot);
-      continue;
-    }
-    if (++guidedFallbackMisses[slot] < 4) continue;
-    guidedFallbackMisses[slot] = 0;
-    guidedFallbackBackoff[slot] = Math.min(3, guidedFallbackBackoff[slot] + 1);
-    guidedFallbackCooldown[slot] = guidedFallbackBackoff[slot];
-  }
-}
 function resetSlotMetrics() {
   slotAttemptCounts.fill(0);
   slotHitCounts.fill(0);
@@ -1206,7 +1153,6 @@ function resetLivePipeline(now = receiverNow()) {
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
   resetSlotMetrics();
-  resetGuidedFallbackPolicy();
   resetGuidedRollout();
 }
 function pushLiveLatency(target, value) {
@@ -1800,7 +1746,6 @@ function noteDecodeCompleted(id, completion) {
     const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     const guided = completion.guidedMetrics;
-    if (guided) noteGuidedFallbackMetrics(guided);
     const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
@@ -4376,7 +4321,6 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     return false;
   }
   const guidedStage = chooseGuidedStage(message);
-  if (guidedStage) message.guidedFallbackMask = guidedFallbackMaskForTracks(message.tracks);
   const auditMode = {
     generation: hotPathAuditGeneration,
     strict: Boolean(message.strictHotPath),
@@ -5542,7 +5486,6 @@ function resetActiveTransfer() {
   pendingLaneReplaceTimes.length = 0;
   resetHotPathAudit();
   resetGuidedRollout();
-  resetGuidedFallbackPolicy();
   strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
   transferFinalizing = false;
