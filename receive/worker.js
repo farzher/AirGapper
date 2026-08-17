@@ -546,30 +546,18 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length && robustLaneFirst) {
-      if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 6) {
-        // The persistent sampler is extremely cheap when its cached geometry is
-        // still correct, but stale geometry used to make it a poor primary
-        // decoder. Use it only as a CRC-gated optimistic front-end to the
-        // current-frame guided decoder: verified native hits are accepted, and
-        // every miss still gets the proven finder-guided path below.
-        const nativeTracks = tracks.filter((track) => Boolean(track.crc32));
-        const native = nativeTracks.length
-          ? decodeNativeBatch(zx, ptr + inputOffset, pw, ph, ox, oy, nativeTracks, "y8", inputStride)
-          : null;
-        const nativeSymbols = native?.symbols ?? [];
-        if (nativeSymbols.length) symbols.push(...nativeSymbols);
-        const nativeSlots = new Set(nativeSymbols.flatMap((symbol) =>
-          Number.isInteger(symbol.header?.slotIndex) ? [symbol.header.slotIndex] : []
-        ));
-        const guidedTracks = nativeSlots.size
-          ? tracks.filter((track) => !nativeSlots.has(track.slot))
-          : tracks;
-        const guided = guidedTracks.length
-          ? decodeGuidedBatch(zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, guidedTracks)
-          : null;
+      if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 2) {
+        // Guided is the production tracked decoder. The v147 OP12R trace showed
+        // 1776 guided outputs in 25.9 worker-seconds, while the native pre-pass
+        // spent 35.3 worker-seconds for only 149 CRC hits (2.7%). Do not pay that
+        // cost on every fresh frame. Sparse dense-robust scouts remain the
+        // independent recovery path selected by the main-thread scheduler.
+        const guided = decodeGuidedBatch(
+          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks
+        );
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();
-        const reply = {
+        ctx.postMessage({
           id,
           symbols,
           sightings,
@@ -581,17 +569,14 @@ ctx.onmessage = async (e) => {
           readFullAttempts: 0,
           workerWaitMs,
           frameCopyMs,
-          nativeMetrics: native?.metrics,
           guidedMetrics: guided?.metrics,
-          nativeAssistTracks: nativeTracks.length,
-          nativeAssistHits: nativeSymbols.length,
-          guidedAssistTracks: guidedTracks.length,
-          pixelPath: nativeTracks.length ? "y8-native+guided" : "y8-guided",
+          nativeAssistTracks: 0,
+          nativeAssistHits: 0,
+          guidedAssistTracks: tracks.length,
+          pixelPath: "y8-guided",
           guidedError: guided?.error,
           latencyMs: performance.now() - startedAt
-        };
-        const transfer = native?.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : [];
-        ctx.postMessage(reply, transfer);
+        });
         return;
       }
       readFullAttempts++;

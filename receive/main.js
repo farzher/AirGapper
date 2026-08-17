@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.147";
+const RECEIVER_RUNTIME_BUILD = "v0.5.148";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -842,7 +842,7 @@ const workerLoadSamples = [];
 const pendingLaneReplaceTimes = [];
 let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
-const GUIDED_MIN_TRACKS = 6;
+const GUIDED_MIN_TRACKS = 2;
 const GUIDED_ROBUST_SCOUT_EVERY = 12;
 const GUIDED_ROBUST_SCOUT_BAD_EVERY = 4;
 const guidedRollout = {
