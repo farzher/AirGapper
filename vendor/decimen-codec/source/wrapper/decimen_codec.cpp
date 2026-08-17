@@ -414,6 +414,11 @@ static void noteGuidedSparseOutcome(int id, bool success)
 // where sub-pixel phase dominates a module.
 constexpr float GUIDED_TURBO_CANARY_MIN_MODULE = 2.25f;
 constexpr float GUIDED_STABLE_RS_MIN_MODULE = 1.75f;
+// The one-pixel center sampler is intentionally stricter than CRC-Turbo itself.
+// It is only used after a map has repeatedly passed RS+CRC and the live pose is
+// pure translation. Anything closer to the optical limit keeps bilinear Y.
+constexpr float GUIDED_TURBO_NEAREST_MIN_MODULE = 2.75f;
+constexpr int GUIDED_TURBO_NEAREST_AMBIGUOUS = 18;
 constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_AMBIGUOUS = 11;
@@ -706,6 +711,15 @@ static int turboLum(const uint8_t* yPlane, int width, int height, int stride, Po
     return int(std::lround(a + (b - a) * fy));
 }
 
+static int turboNearestLum(const uint8_t* yPlane, int width, int height, int stride, PointF p, float dx, float dy)
+{
+    const int x = int(std::lround(float(p.x) + dx));
+    const int y = int(std::lround(float(p.y) + dy));
+    if (x < 0 || y < 0 || x >= width || y >= height)
+        return -1;
+    return yPlane[size_t(y) * stride + x];
+}
+
 static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
                                    const TurboFrameTransform& frameTransform,
                                    const uint8_t* yPlane, int width, int height, int stride, float dx, float dy)
@@ -900,8 +914,23 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
             const int threshold = turboThreshold(levels, xx, y, dim);
-            const int lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
-                                           xx, y, dx, dy, threshold, moduleSize);
+            int lum;
+            if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
+                // Stable tripod/handheld-hold case: a calibrated module center
+                // that is far from the live threshold does not need four-pixel
+                // bilinear interpolation. One Y byte is enough. Borderline
+                // modules retain the existing bilinear + in-cell vote. Any
+                // confident-but-wrong read is rejected by AirGapper CRC and
+                // Stable-RS runs immediately in this same tracked job.
+                const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
+                lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
+                if (lum >= 0 && std::abs(lum - threshold) <= GUIDED_TURBO_NEAREST_AMBIGUOUS)
+                    lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
+                                         xx, y, dx, dy, threshold, moduleSize);
+            } else {
+                lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
+                                     xx, y, dx, dy, threshold, moduleSize);
+            }
             if (lum < 0) { failed = true; break; }
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
         }
