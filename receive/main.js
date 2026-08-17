@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.171";
+const RECEIVER_RUNTIME_BUILD = "v0.5.172";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -230,10 +230,10 @@ const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // stable. Requiring 75% of the wall created a bootstrap deadlock when bad AE
 // prevented acquisition in the first place.
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 2;
-const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 1600;
+const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 2500;
 const AUTO_OPTICS_RESCUE_SETTLE_MS = 280;
 const AUTO_OPTICS_RESCUE_SAMPLE_MS = 720;
-const AUTO_OPTICS_RESCUE_RETRY_MS = 5000;
+const AUTO_OPTICS_RESCUE_RETRY_MS = 7000;
 const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v1";
 const AUTO_OPTICS_FINE_INTERVAL_MS = 8000;
 const AUTO_OPTICS_FINE_SAMPLE_MS = 360;
@@ -1045,18 +1045,19 @@ function formatSlotMetric(slot) {
 }
 const PORTFOLIO_MIN_WALL = 8;
 const PORTFOLIO_MIN_SLOTS = 6;
-const PORTFOLIO_MIN_FRACTION = 0.5;
+const PORTFOLIO_MIN_FRACTION = 0.6;
 const PORTFOLIO_LEARN_SAMPLES = 12;
-const PORTFOLIO_EVAL_MS = 2200;
+const PORTFOLIO_EVAL_MS = 2400;
 const PORTFOLIO_DECISION_COOLDOWN_MS = 800;
 const PORTFOLIO_RETRY_MS = 5000;
 const PORTFOLIO_SHRINK_STEP = 1;
+const PORTFOLIO_GROW_STEP = 2;
 const PORTFOLIO_EXPLORE_EVERY = 10;
 const PORTFOLIO_PRESSURE_UTIL = 0.84;
 const PORTFOLIO_PRESSURE_COVERAGE = 0.92;
 const PORTFOLIO_HEADROOM_UTIL = 0.78;
-const PORTFOLIO_KEEP_SHRINK_RATIO = 1.01;
-const PORTFOLIO_KEEP_GROW_RATIO = 0.99;
+const PORTFOLIO_KEEP_SHRINK_RATIO = 1.04;
+const PORTFOLIO_KEEP_GROW_RATIO = 0.985;
 const decodePortfolio = {
   budget: 0,
   maxSlots: 0,
@@ -1071,6 +1072,10 @@ const decodePortfolio = {
   exploreSlot: void 0,
   uniqueRate: 0,
   captureRate: 0,
+  demandRate: 0,
+  sourceRate: 0,
+  sourceFramesTotal: 0,
+  sourceFramesAt: 0,
   scheduleRate: 0,
   utilization: 0,
   busyRate: 0,
@@ -1080,8 +1085,9 @@ function resetDecodePortfolio() {
   Object.assign(decodePortfolio, {
     budget: 0, maxSlots: 0, minSlots: 0, mode: "all", lastDecisionAt: 0,
     lowerBlockedUntil: 0, upperBlockedUntil: 0, probe: null, selectedSlots: [],
-    excludedSlots: [], exploreSlot: void 0, uniqueRate: 0, captureRate: 0,
-    scheduleRate: 0, utilization: 0, busyRate: 0, pressure: false
+    excludedSlots: [], exploreSlot: void 0, uniqueRate: 0, captureRate: 0, demandRate: 0,
+    sourceRate: 0, sourceFramesTotal: 0, sourceFramesAt: 0, scheduleRate: 0,
+    utilization: 0, busyRate: 0, pressure: false
   });
 }
 function portfolioEventRate(events, now, windowMs = PORTFOLIO_EVAL_MS) {
@@ -1090,8 +1096,30 @@ function portfolioEventRate(events, now, windowMs = PORTFOLIO_EVAL_MS) {
   for (let index = events.length - 1; index >= 0 && events[index] > cutoff; index--) count++;
   return count / (windowMs / 1e3);
 }
+function portfolioSourceDemandRate(now, captureRate) {
+  const total = Number(frameTrackProcessor?.totalFrames);
+  if (Number.isFinite(total) && total >= 0) {
+    if (decodePortfolio.sourceFramesAt > 0 && total >= decodePortfolio.sourceFramesTotal) {
+      const elapsed = now - decodePortfolio.sourceFramesAt;
+      if (elapsed >= 20) {
+        const instant = (total - decodePortfolio.sourceFramesTotal) / (elapsed / 1e3);
+        if (instant >= 1 && instant <= 240) {
+          decodePortfolio.sourceRate = decodePortfolio.sourceRate
+            ? decodePortfolio.sourceRate * 0.72 + instant * 0.28
+            : instant;
+        }
+      }
+    }
+    decodePortfolio.sourceFramesTotal = total;
+    decodePortfolio.sourceFramesAt = now;
+  }
+  if (decodePortfolio.sourceRate > 0) return Math.max(captureRate, decodePortfolio.sourceRate);
+  const nominal = Number(stream?.getVideoTracks?.()[0]?.getSettings?.().frameRate);
+  return Math.max(captureRate, Number.isFinite(nominal) ? nominal : 0);
+}
 function portfolioLoadSnapshot(now) {
   const captureRate = portfolioEventRate(captureTimes, now);
+  const demandRate = portfolioSourceDemandRate(now, captureRate);
   const scheduleRate = portfolioEventRate(decodeFrameTimes, now);
   const uniqueRate = portfolioEventRate(uniqueQrTimes, now);
   const busyRate = portfolioEventRate(poolBusyTimes, now);
@@ -1106,18 +1134,18 @@ function portfolioLoadSnapshot(now) {
     samples++;
   }
   utilization = samples ? utilization / samples : pool.size ? pool.busyCount / pool.size : 0;
-  const coverage = captureRate > 0 ? scheduleRate / captureRate : 1;
-  // Throughput-first pressure: worker-busy events are harmless when we are
-  // still consuming nearly every camera frame. Only shrink the QR portfolio
-  // when saturation is causing real schedule loss. This prevents the controller
-  // from trading useful QR opportunities merely to make worker occupancy pretty.
+  // TrackProcessor may discard frames before the JS capture callback when the
+  // receiver is overloaded. Those are exactly the erasures this controller is
+  // supposed to recover, so compare scheduling against source demand, not only
+  // against frames that survived downstream backpressure.
+  const coverage = demandRate > 0 ? scheduleRate / demandRate : 1;
   const overloaded = utilization >= PORTFOLIO_PRESSURE_UTIL || busyRate >= 2;
-  const pressure = captureRate >= 12 && (
+  const pressure = demandRate >= 12 && (
     coverage < PORTFOLIO_PRESSURE_COVERAGE && overloaded ||
     coverage < 0.97 && utilization >= 0.95
   );
-  const headroom = captureRate >= 12 && coverage >= 0.94 && utilization <= PORTFOLIO_HEADROOM_UTIL;
-  return { captureRate, scheduleRate, uniqueRate, busyRate, utilization, coverage, pressure, headroom };
+  const headroom = demandRate >= 12 && coverage >= 0.94 && utilization <= PORTFOLIO_HEADROOM_UTIL;
+  return { captureRate, demandRate, scheduleRate, uniqueRate, busyRate, utilization, coverage, pressure, headroom };
 }
 function portfolioSlotScore(region) {
   const slot = Number(region.gridSlot);
@@ -1181,6 +1209,7 @@ function updateDecodePortfolio(candidates, now, enabled) {
   const metrics = portfolioLoadSnapshot(now);
   decodePortfolio.uniqueRate = metrics.uniqueRate;
   decodePortfolio.captureRate = metrics.captureRate;
+  decodePortfolio.demandRate = metrics.demandRate;
   decodePortfolio.scheduleRate = metrics.scheduleRate;
   decodePortfolio.utilization = metrics.utilization;
   decodePortfolio.busyRate = metrics.busyRate;
@@ -1188,8 +1217,21 @@ function updateDecodePortfolio(candidates, now, enabled) {
 
   const opticsStable = !autoOpticsMutationRunning && !decoderFreshnessHoldActive &&
     !["tuning", "fine", "rescue", "settling"].includes(autoOpticsRuntimeState);
-  if (!opticsStable || !portfolioLearnedEnough(candidates)) {
-    decodePortfolio.mode = opticsStable ? "learning" : "hold-optics";
+  if (!opticsStable) {
+    // An exposure/ISO mutation changes both slot yield and decoder cost. Any
+    // portfolio comparison spanning that boundary is invalid. Reopen the wall
+    // immediately so the new optics gets fresh evidence instead of inheriting
+    // an old low-K decision and taking many seconds to grow back.
+    decodePortfolio.budget = maxSlots;
+    decodePortfolio.probe = null;
+    decodePortfolio.lowerBlockedUntil = 0;
+    decodePortfolio.upperBlockedUntil = 0;
+    decodePortfolio.lastDecisionAt = now;
+    decodePortfolio.mode = "hold-optics";
+    return maxSlots;
+  }
+  if (!portfolioLearnedEnough(candidates)) {
+    decodePortfolio.mode = "learning";
     return decodePortfolio.budget;
   }
 
@@ -1197,8 +1239,8 @@ function updateDecodePortfolio(candidates, now, enabled) {
   if (probe) {
     if (now - probe.startedAt < PORTFOLIO_EVAL_MS) return decodePortfolio.budget;
     const baseline = probe.baseline;
-    const captureComparable = baseline.captureRate < 8 || metrics.captureRate < 8 ||
-      Math.abs(metrics.captureRate - baseline.captureRate) / Math.max(1, baseline.captureRate) <= 0.18;
+    const captureComparable = baseline.demandRate < 8 || metrics.demandRate < 8 ||
+      Math.abs(metrics.demandRate - baseline.demandRate) / Math.max(1, baseline.demandRate) <= 0.18;
     if (!captureComparable) {
       probe.startedAt = now;
       probe.baseline = { ...metrics };
@@ -1212,7 +1254,12 @@ function updateDecodePortfolio(candidates, now, enabled) {
     if (accepted) {
       decodePortfolio.mode = probe.direction < 0 ? "lean" : "grow";
     } else {
-      decodePortfolio.budget = Math.max(minSlots, Math.min(maxSlots, probe.originBudget));
+      // A failed shrink is evidence that the lower-K chain was too aggressive;
+      // return to the full opportunity set instead of crawling upward one slot
+      // every few seconds. A failed grow only returns to its known-good origin.
+      decodePortfolio.budget = probe.direction < 0
+        ? maxSlots
+        : Math.max(minSlots, Math.min(maxSlots, probe.originBudget));
       if (probe.direction < 0) decodePortfolio.lowerBlockedUntil = now + PORTFOLIO_RETRY_MS;
       else decodePortfolio.upperBlockedUntil = now + PORTFOLIO_RETRY_MS;
       decodePortfolio.mode = "restore";
@@ -1226,7 +1273,7 @@ function updateDecodePortfolio(candidates, now, enabled) {
   if (metrics.pressure && decodePortfolio.budget > minSlots && now >= decodePortfolio.lowerBlockedUntil) {
     beginDecodePortfolioProbe(-1, Math.max(minSlots, decodePortfolio.budget - PORTFOLIO_SHRINK_STEP), metrics, now);
   } else if (metrics.headroom && decodePortfolio.budget < maxSlots && now >= decodePortfolio.upperBlockedUntil) {
-    beginDecodePortfolioProbe(1, Math.min(maxSlots, decodePortfolio.budget + 1), metrics, now);
+    beginDecodePortfolioProbe(1, Math.min(maxSlots, decodePortfolio.budget + PORTFOLIO_GROW_STEP), metrics, now);
   } else {
     decodePortfolio.mode = decodePortfolio.budget >= maxSlots ? "all" : metrics.pressure ? "pressure" : "hold";
   }
@@ -1273,7 +1320,10 @@ function decodePortfolioSummary() {
   if (!decodePortfolio.maxSlots) return "";
   const explore = decodePortfolio.exploreSlot === void 0 ? "" : ` · probe s${decodePortfolio.exploreSlot}`;
   const skipped = decodePortfolio.excludedSlots.length ? ` · skip ${decodePortfolio.excludedSlots.map((slot) => `s${slot}`).join(",")}` : "";
-  return `Portfolio ${decodePortfolio.budget}/${decodePortfolio.maxSlots} · ${decodePortfolio.mode}${decodePortfolio.pressure ? " · CPU pressure" : ""} · ${(decodePortfolio.scheduleRate).toFixed(1)}/${(decodePortfolio.captureRate).toFixed(1)} fps · ${(decodePortfolio.utilization * 100).toFixed(0)}% busy${explore}${skipped}`;
+  const delivered = decodePortfolio.captureRate + 0.5 < decodePortfolio.demandRate
+    ? ` · delivered ${decodePortfolio.captureRate.toFixed(1)}`
+    : "";
+  return `Portfolio ${decodePortfolio.budget}/${decodePortfolio.maxSlots} · ${decodePortfolio.mode}${decodePortfolio.pressure ? " · CPU pressure" : ""} · ${decodePortfolio.scheduleRate.toFixed(1)}/${decodePortfolio.demandRate.toFixed(1)} fps${delivered} · ${(decodePortfolio.utilization * 100).toFixed(0)}% busy${explore}${skipped}`;
 }
 function cornerSlotMetrics() {
   const candidates = regions.filter((region) =>
@@ -2955,67 +3005,66 @@ async function rescueAutomaticQrAcquisition(track, now) {
   const caps = track.getCapabilities?.() ?? {};
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
-  let settings = track.getSettings();
-  if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") || !exposureRange || !isoRange) {
+  const settings = track.getSettings();
+  if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") || !exposureRange || !isoRange ||
+      !Number.isFinite(settings.exposureTime) || !Number.isFinite(settings.iso) || settings.exposureTime <= 0 || settings.iso <= 0) {
     autoOpticsRescueRetryAt = now + AUTO_OPTICS_RESCUE_RETRY_MS;
     return;
   }
+
+  const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+  const motionSafeExposure = 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
+  // Hardware AE is the best cold-start brightness estimator. If it already has
+  // a motion-safe shutter, do not replace it merely because generic QR search
+  // has not seeded yet. The old four-ISO sweep could monopolize the sensor for
+  // ~4 seconds and then retry, producing the observed 10-second startup holes.
+  if (settings.exposureTime <= motionSafeExposure * 1.05) {
+    autoOpticsRescueRetryAt = now + AUTO_OPTICS_RESCUE_RETRY_MS;
+    autoOpticsTuneSummary = "cold AE · motion-safe; rescue deferred";
+    return;
+  }
+
+  const exposureProduct = settings.exposureTime * settings.iso;
+  const exposure = quantizeCameraRange(Math.min(settings.exposureTime, motionSafeExposure), exposureRange);
+  const requiredIso = exposureProduct / Math.max(exposureRange.min, exposure);
+  // If preserving AE brightness at a sharp shutter is impossible, leave AE in
+  // charge rather than deliberately testing a badly underexposed frame.
+  if (requiredIso > isoRange.max * 1.03) {
+    autoOpticsRescueRetryAt = now + AUTO_OPTICS_RESCUE_RETRY_MS;
+    autoOpticsTuneSummary = "cold AE · sharp shutter needs too much ISO";
+    return;
+  }
+  const iso = quantizeCameraRange(requiredIso, isoRange);
+
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "rescue";
-  notePipelineEvent("auto-optics-acquisition-rescue");
+  notePipelineEvent("auto-optics-acquisition-motion-clamp");
   try {
-    if (!Number.isFinite(settings.exposureTime) || !Number.isFinite(settings.iso) || settings.exposureTime <= 0 || settings.iso <= 0) {
+    autoOpticsTuneSummary = `cold AE motion clamp · ${formatExposureMs(exposure)} · ISO ${Math.round(iso)}`;
+    const accepted = await applyCameraConstraint(track, {
+      exposureMode: "manual",
+      exposureTime: exposure,
+      iso
+    });
+    if (!accepted || !automaticOpticsSessionAlive(track)) return;
+    if (!await waitForAutoOptics(AUTO_OPTICS_RESCUE_SETTLE_MS, track)) return;
+    const evidenceStart = receiverNow();
+    if (!await waitForAutoOptics(AUTO_OPTICS_RESCUE_SAMPLE_MS, track)) return;
+    const freshDecodes = qrReadTimes.reduce((count, at) => count + Number(at >= evidenceStart), 0);
+    if (gridLattice.locked || freshDecodes >= 2) {
       autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = receiverNow();
       autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_RESCUE_RETRY_MS;
+      autoOpticsTuneSummary = `cold motion clamp found QR · ${formatExposureMs(exposure)} · ISO ${Math.round(iso)}`;
       return;
-    }
-    const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
-    const motionSafeExposure = 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
-    const exposureProduct = settings.exposureTime * settings.iso;
-    const exposure = quantizeCameraRange(Math.min(settings.exposureTime, motionSafeExposure), exposureRange);
-    const aeIso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
-    const maxAutoIso = Math.min(isoRange.max, Math.max(isoRange.min, settings.iso * 4));
-    const remembered = loadAutomaticOpticsMemory(track, exposure, isoRange, isoRange.max);
-    const candidates = [];
-    const add = (value) => {
-      if (!Number.isFinite(value)) return;
-      const candidate = quantizeCameraRange(Math.min(maxAutoIso, Math.max(isoRange.min, value)), isoRange);
-      if (!candidates.some((prior) => Math.abs(prior - candidate) <= Math.max(Number(isoRange.step) || 0, candidate * 0.01)))
-        candidates.push(candidate);
-    };
-    add(remembered);
-    add(aeIso);
-    add(aeIso * 2);
-    add(aeIso / 2);
-
-    for (const candidate of candidates) {
-      if (!automaticOpticsSessionAlive(track)) return;
-      autoOpticsTuneSummary = `acquisition rescue · ISO ${Math.round(candidate)}`;
-      const accepted = await applyCameraConstraint(track, {
-        exposureMode: "manual",
-        exposureTime: exposure,
-        iso: candidate
-      });
-      if (!accepted || !automaticOpticsSessionAlive(track)) continue;
-      if (!await waitForAutoOptics(AUTO_OPTICS_RESCUE_SETTLE_MS, track)) return;
-      const evidenceStart = receiverNow();
-      if (!await waitForAutoOptics(AUTO_OPTICS_RESCUE_SAMPLE_MS, track)) return;
-      const freshDecodes = qrReadTimes.reduce((count, at) => count + Number(at >= evidenceStart), 0);
-      if (gridLattice.locked || freshDecodes >= 2) {
-        autoOpticsRuntimeState = "ae";
-        autoOpticsLockSince = 0;
-        autoOpticsAcquisitionSince = receiverNow();
-        autoOpticsRescueRetryAt = receiverNow() + 2500;
-        autoOpticsTuneSummary = `acquisition rescue · ISO ${Math.round(candidate)} found QR`;
-        return;
-      }
     }
     await applyExposureSetting(track);
     autoOpticsRuntimeState = "ae";
     autoOpticsLockSince = 0;
     autoOpticsAcquisitionSince = receiverNow();
     autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_RESCUE_RETRY_MS;
-    autoOpticsTuneSummary = "acquisition rescue deferred";
+    autoOpticsTuneSummary = "cold motion clamp missed · hardware AE restored";
   } finally {
     autoOpticsMutationRunning = false;
   }
