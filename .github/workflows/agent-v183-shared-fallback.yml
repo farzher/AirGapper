@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '.github/v183_patch.py'
+      - '.github/workflows/agent-v183-shared-fallback.yml'
 permissions:
   contents: write
 jobs:
