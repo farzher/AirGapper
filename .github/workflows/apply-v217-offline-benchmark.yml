@@ -11,7 +11,7 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
-      - .github/v220_dense_stable_rs_patch.py
+      - .github/v221_stable_translation_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,12 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply dense Stable-RS candidate
+      - name: Apply stable translation candidate
         id: candidate
         run: |
           set -euo pipefail
-          if ! grep -q 'GUIDED_STABLE_RS_MIN_MODULE' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-            python3 .github/v220_dense_stable_rs_patch.py
+          if ! grep -q 'struct TurboFrameTransform' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+            python3 .github/v221_stable_translation_patch.py
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -82,7 +82,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit passing Stable-RS candidate
+      - name: Commit passing stable translation candidate
         if: steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -92,5 +92,5 @@ jobs:
           git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
-          git commit -m "v0.5.220 extend Stable-RS to dense tracked QRs"
+          git commit -m "v0.5.221 fast-path stable translated QR walls"
           git push origin HEAD:master
