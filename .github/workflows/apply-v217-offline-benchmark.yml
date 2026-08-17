@@ -27,17 +27,20 @@ jobs:
 
       - name: Apply stable data-only candidate
         id: candidate
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          if ! grep -q 'uint8_t stableSuccesses = 0;' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-            python3 .github/v222_stable_data_turbo_patch.py
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          fi
+          set -o pipefail
+          {
+            if ! grep -q 'uint8_t stableSuccesses = 0;' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+              python3 .github/v222_stable_data_turbo_patch.py
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'changed=false' >> "$GITHUB_OUTPUT"
+            fi
+          } 2>&1 | tee /tmp/v222-patch.log
 
       - name: Cache decimen toolchain
-        if: steps.candidate.outputs.changed == 'true'
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -49,7 +52,7 @@ jobs:
 
       - name: Build SIMD and scalar codecs
         id: build
-        if: steps.candidate.outputs.changed == 'true'
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
         continue-on-error: true
         run: |
           set -o pipefail
@@ -59,12 +62,12 @@ jobs:
           } 2>&1 | tee /tmp/v222-build.log
 
       - uses: actions/setup-node@v4
-        if: steps.build.outcome != 'failure'
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         with:
           node-version: 22
 
       - name: Prepare runner Chrome
-        if: steps.build.outcome != 'failure'
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         run: |
           set -euo pipefail
           npm install --no-save --package-lock=false playwright@1.55.0
@@ -72,7 +75,7 @@ jobs:
 
       - name: Run production-only receiver regression
         id: regression
-        if: steps.build.outcome != 'failure'
+        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         continue-on-error: true
         run: |
           set -o pipefail
@@ -92,16 +95,21 @@ jobs:
           retention-days: 14
 
       - name: Commit failure diagnostics
-        if: steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
+        if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
         run: |
           set -euo pipefail
+          PATCH_OUTCOME='${{ steps.candidate.outcome }}'
           BUILD_OUTCOME='${{ steps.build.outcome }}'
           REGRESSION_OUTCOME='${{ steps.regression.outcome }}'
           git reset --hard HEAD
           mkdir -p benchmark
           {
+            echo "patch=$PATCH_OUTCOME"
             echo "build=$BUILD_OUTCOME"
             echo "regression=$REGRESSION_OUTCOME"
+            echo
+            echo '--- patch tail ---'
+            tail -n 120 /tmp/v222-patch.log 2>/dev/null || true
             echo
             echo '--- build tail ---'
             tail -n 160 /tmp/v222-build.log 2>/dev/null || true
@@ -117,7 +125,7 @@ jobs:
           exit 1
 
       - name: Commit passing stable data-only candidate
-        if: steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
+        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
