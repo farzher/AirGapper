@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.210";
+const RECEIVER_RUNTIME_BUILD = "v0.5.211";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1815,19 +1815,57 @@ opticsKeep.addEventListener("click", () => {
     opticsOptimizeStatus.textContent = `Kept · ${formatExposureMs(winner.exposure)} · ISO ${winner.iso}`;
   });
 });
-copyDiagnostics.addEventListener("click", async () => {
-  var _a;
-  const focusText = (_a = focusDiagnostics.textContent) != null ? _a : "";
-  const text = [focusText, transportDiagnostics?.textContent ?? ""].filter(Boolean).join("\n\n");
+let completionDiagnosticsText = "";
+function diagnosticsText() {
+  return [focusDiagnostics.textContent ?? "", transportDiagnostics?.textContent ?? ""]
+    .filter(Boolean).join("\n\n");
+}
+function legacyClipboardCopy(text) {
   try {
-    if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
-    copyDiagnostics.textContent = "Copied";
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.readOnly = true;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    input.style.pointerEvents = "none";
+    document.body.append(input);
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    const copied = document.execCommand("copy");
+    input.remove();
+    return copied;
   } catch {
-    copyDiagnostics.textContent = "Copy failed";
+    return false;
   }
-  setTimeout(() => {
-    copyDiagnostics.textContent = "Copy diagnostics";
-  }, 1500);
+}
+async function copyDiagnosticsToClipboard(text, automatic = false) {
+  if (!text) return false;
+  try {
+    if (!copyTextOnAndroid(text)) {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        if (!legacyClipboardCopy(text)) throw error;
+      }
+    }
+    copyDiagnostics.textContent = automatic ? "Diagnostics copied" : "Copied";
+    setTimeout(() => {
+      copyDiagnostics.textContent = "Copy diagnostics";
+    }, 1500);
+    return true;
+  } catch {
+    if (!automatic) {
+      copyDiagnostics.textContent = "Copy failed";
+      setTimeout(() => {
+        copyDiagnostics.textContent = "Copy diagnostics";
+      }, 1500);
+    }
+    return false;
+  }
+}
+copyDiagnostics.addEventListener("click", () => {
+  void copyDiagnosticsToClipboard(completionDiagnosticsText || diagnosticsText());
 });
 let cameraStartedTs = 0;
 const timeline = [];
@@ -6099,6 +6137,7 @@ function resetActiveTransfer() {
   strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
   transferFinalizing = false;
+  completionDiagnosticsText = "";
   bar.style.width = "0";
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
@@ -6389,6 +6428,14 @@ function liveGoodputKbs(now) {
   return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3);
 }
 async function finish(container, hashOk, seconds) {
+  // Freeze the final live pipeline/camera state before teardown. This avoids
+  // contaminating benchmark diagnostics by requiring a physical tap/bump after
+  // the transfer completes. Native Android can copy synchronously; browser/PWA
+  // Clipboard is best-effort with a legacy copy fallback, and the frozen text
+  // remains available to the manual Copy diagnostics button if policy blocks it.
+  updateStats(true);
+  completionDiagnosticsText = diagnosticsText();
+  void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
   done = true;
   focusController.detach();
   cancelScanCapture();
@@ -7217,11 +7264,11 @@ misses        ${failures.length}`;
     runBenchmarkBtn.disabled = false;
   }
 }
-function updateStats() {
+function updateStats(forceDiagnostics = false) {
   if (done) return;
   const now = receiverNow();
   if (optimizeEnabled) beginOptimizeWhenReady();
-  if (!receiverDevActions.hidden) renderFocusDiagnostics();
+  if (forceDiagnostics || !receiverDevActions.hidden) renderFocusDiagnostics();
   const prune = (a) => {
     while (a.length > 0 && a[0] < now - STATS_WINDOW_MS) a.shift();
   };
@@ -7241,7 +7288,7 @@ function updateStats() {
   const uniqueRate = perSecond(uniqueQrTimes);
 const duplicateRate = perSecond(duplicateQrTimes);
 const usefulRate = perSecond(usefulFrameTimes);
-if (!receiverDevActions.hidden && transportDiagnostics) {
+if ((forceDiagnostics || !receiverDevActions.hidden) && transportDiagnostics) {
   const transportRate = uniqueRate + duplicateRate;
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
