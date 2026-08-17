@@ -1,0 +1,26 @@
+name: v194 cached hot path and instant optics restore
+on:
+  push:
+    paths:
+      - .github/v194_patch.py
+      - .github/workflows/agent-v194-hotpath.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v194_patch.py
+      - name: Commit source changes and remove patch scaffold
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v194_patch.py .github/workflows/agent-v194-hotpath.yml
+          git add index.html main.js receive/main.js receive/worker.js sw.js
+          git commit -m "v0.5.194 adapt cached decoder to high-quality camera"
+          git push origin master
