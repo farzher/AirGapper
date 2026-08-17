@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.189";
+const RECEIVER_RUNTIME_BUILD = "v0.5.190";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -239,6 +239,9 @@ const AUTO_OPTICS_RESCUE_SETTLE_MS = 280;
 const AUTO_OPTICS_RESCUE_SAMPLE_MS = 720;
 const AUTO_OPTICS_RESCUE_RETRY_MS = 7000;
 const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v1";
+const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
+const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
+const AUTO_OPTICS_MEMORY_MAX_SCALE = 2.25;
 // A relative winner is meaningless when the whole local ISO neighborhood is
 // unusable. Below this per-QR yield, abandon manual tuning and let hardware AE
 // re-establish a sane exposure product before trying the motion-safe handoff.
@@ -250,7 +253,7 @@ const AUTO_OPTICS_HOLD_MIN_ATTEMPTS = 40;
 // Once a startup winner is found, never poke the camera periodically. Hold it
 // until live per-QR yield falls far enough below that measured winner to prove
 // the scene/optics changed, then recalibrate from neutral hardware AE.
-const AUTO_OPTICS_HOLD_DEGRADE_RATIO = 0.55;
+const AUTO_OPTICS_HOLD_DEGRADE_RATIO = 0.70;
 let autoOpticsTuneSummary = "";
 let autoOpticsRuntimeState = "ae";
 let autoOpticsMutationRunning = false;
@@ -1141,66 +1144,6 @@ function shouldScheduleAdaptiveSlot(region, sourceSequence, adaptive) {
   // probe frame. They remain geometrically tracked; only payload decode work is
   // thinned out. Acquisition/reacquisition is intentionally unaffected.
   return (Math.trunc(sequence) + slot) % SLOT_WEAK_PROBE_EVERY === 0;
-}
-const CPU_TRACK_BUDGET_WINDOW_MS = 900;
-const CPU_TRACK_BUDGET_MIN_SAMPLES = 6;
-const CPU_TRACK_BUDGET_HEADROOM = 0.90;
-const CPU_TRACK_BUDGET_MIN_FRACTION = 0.55;
-let cpuTrackBudgetActive = false;
-let cpuTrackBudget = 0;
-let cpuTrackBudgetCandidates = 0;
-let cpuTrackWindowCount = 1;
-function cpuBudgetTrackedRegions(candidates, sourceSequence, now) {
-  cpuTrackBudgetActive = false;
-  cpuTrackBudget = candidates.length;
-  cpuTrackBudgetCandidates = candidates.length;
-  cpuTrackWindowCount = 1;
-  if (strictHotPathActive() || replayRunning || optimizerPipelineActive ||
-      ["tuning", "rescue", "settling"].includes(autoOpticsRuntimeState) ||
-      candidates.length < 8 || pool.size < 2) return candidates;
-
-  const costs = [];
-  const cutoff = now - CPU_TRACK_BUDGET_WINDOW_MS;
-  for (let i = hotJobCompletionSamples.length - 1; i >= 0; i--) {
-    const sample = hotJobCompletionSamples[i];
-    if (sample.at <= cutoff) break;
-    if (sample.full || !(sample.tracks >= 4) || !(sample.latencyMs > 0)) continue;
-    costs.push(sample.latencyMs / sample.tracks);
-  }
-  if (costs.length < CPU_TRACK_BUDGET_MIN_SAMPLES) return candidates;
-  costs.sort((a, b) => a - b);
-  const msPerTrack = costs[costs.length >> 1];
-  if (!(msPerTrack > 0)) return candidates;
-
-  const settings = stream?.getVideoTracks()[0]?.getSettings?.() ?? {};
-  const fps = Math.max(12, Math.min(60, Number(settings.frameRate) || 30));
-  const targetJobMs = pool.size * 1000 / fps * CPU_TRACK_BUDGET_HEADROOM;
-  const minimum = Math.min(candidates.length, Math.max(6, Math.ceil(candidates.length * CPU_TRACK_BUDGET_MIN_FRACTION)));
-  const budget = Math.max(minimum, Math.min(candidates.length, Math.floor(targetJobMs / msPerTrack)));
-  if (budget >= candidates.length - 1) return candidates;
-
-  const located = candidates.map((region) => {
-    const bounds = trackedQuadBounds(region.quad);
-    return {
-      region,
-      x: bounds ? (bounds.left + bounds.right) * 0.5 : region.x + region.w * 0.5,
-      y: bounds ? (bounds.top + bounds.bottom) * 0.5 : region.y + region.h * 0.5
-    };
-  });
-  const xs = located.map((item) => item.x);
-  const ys = located.map((item) => item.y);
-  const vertical = Math.max(...ys) - Math.min(...ys) >= Math.max(...xs) - Math.min(...xs);
-  located.sort((a, b) => vertical ? a.y - b.y || a.x - b.x : a.x - b.x || a.y - b.y);
-
-  const windows = Math.max(2, Math.ceil(candidates.length / budget));
-  const sequence = Number.isFinite(Number(sourceSequence)) ? Math.abs(Math.trunc(Number(sourceSequence))) : cropRotate;
-  const windowIndex = sequence % windows;
-  const maxStart = candidates.length - budget;
-  const start = windows <= 1 ? 0 : Math.round(maxStart * windowIndex / (windows - 1));
-  cpuTrackBudgetActive = true;
-  cpuTrackBudget = budget;
-  cpuTrackWindowCount = windows;
-  return located.slice(start, start + budget).map((item) => item.region);
 }
 function formatSlotMetric(slot) {
   const attempts = slotAttemptCounts[slot] || 0;
@@ -2541,20 +2484,36 @@ function readAutomaticOpticsMemory(track) {
     return void 0;
   }
 }
-function loadAutomaticOpticsMemory(track, exposure, isoRange, cap) {
+function usableAutomaticOpticsMemory(track) {
   const saved = readAutomaticOpticsMemory(track);
+  if (!saved || Date.now() - Number(saved.at || 0) > AUTO_OPTICS_MEMORY_FRESH_MS) return void 0;
+  const scale = Number(saved.lightScale);
+  if (Number.isFinite(scale) && scale >= AUTO_OPTICS_MEMORY_MIN_SCALE && scale <= AUTO_OPTICS_MEMORY_MAX_SCALE)
+    return saved;
+  // Old v1 entries remain useful for post-lock comparison, but never get the
+  // high-confidence cold-start treatment because they lack an AE-relative scale.
+  return saved;
+}
+function loadAutomaticOpticsMemory(track, exposure, isoRange, cap, aeProduct) {
+  const saved = usableAutomaticOpticsMemory(track);
   if (!saved) return void 0;
-  const adjusted = saved.iso * saved.exposure / Math.max(1e-6, exposure);
+  const scale = Number(saved.lightScale);
+  const adjusted = Number.isFinite(scale) && Number.isFinite(aeProduct) && aeProduct > 0
+    ? aeProduct * scale / Math.max(1e-6, exposure)
+    : saved.iso * saved.exposure / Math.max(1e-6, exposure);
   return quantizeCameraRange(Math.min(cap, Math.max(isoRange.min, adjusted)), isoRange);
 }
-function rememberAutomaticOptics(track, exposure, iso, score = 0) {
+function rememberAutomaticOptics(track, exposure, iso, score = 0, yieldRate = 0, aeProduct = 0) {
   if (!Number.isFinite(exposure) || !Number.isFinite(iso) || exposure <= 0 || iso <= 0) return;
+  const lightScale = Number.isFinite(aeProduct) && aeProduct > 0 ? exposure * iso / aeProduct : void 0;
   try {
     const all = JSON.parse(localStorage.getItem(AUTO_OPTICS_MEMORY_KEY) || "{}");
     all[autoOpticsMemoryKey(track)] = {
       exposure,
       iso,
       score: Number.isFinite(score) ? score : 0,
+      yieldRate: Number.isFinite(yieldRate) ? yieldRate : 0,
+      ...(Number.isFinite(lightScale) ? { lightScale } : {}),
       at: Date.now()
     };
     const entries = Object.entries(all).sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0)).slice(0, 8);
@@ -2852,7 +2811,7 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsRetryAt = receiverNow() + 2200;
       return;
     }
-    const rememberedIso = loadAutomaticOpticsMemory(track, exposure, isoRange, maxAutoIso);
+    const rememberedIso = loadAutomaticOpticsMemory(track, exposure, isoRange, maxAutoIso, aeExposureProduct);
     const tuned = await tuneAutomaticQrIso(track, exposure, iso, isoRange, maxAutoIso, rememberedIso);
     if (!automaticOpticsSessionAlive(track)) return;
     if (tuned.deferred || tuned.collapsed) {
@@ -2873,7 +2832,6 @@ async function settleAutomaticQrOptics(track, now) {
       return;
     }
     autoOpticsRuntimeState = "manual";
-    autoOpticsAeBaseline = void 0;
     autoOpticsHoldSample = autoOpticsPipelineSnapshot();
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = tuned.best?.yieldRate ?? 0;
@@ -2883,7 +2841,8 @@ async function settleAutomaticQrOptics(track, now) {
     const tunedExposure = track.getSettings().exposureTime ?? exposure;
     const tunedIso = track.getSettings().iso ?? tuned.iso ?? iso;
     if (tuned.best?.valid && tuned.best.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD)
-      rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score);
+      rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score, tuned.best.yieldRate, aeExposureProduct);
+    autoOpticsAeBaseline = void 0;
     focusController.adoptAutomaticCameraState("automatic QR exposure tuned against live tracked decode yield");
   } finally {
     autoOpticsMutationRunning = false;
@@ -2929,7 +2888,17 @@ async function rescueAutomaticQrAcquisition(track, now) {
   };
   const aeProduct = aeBaseline.exposure * aeBaseline.iso;
   const baseExposure = quantizeCameraRange(Math.min(aeBaseline.exposure, motionSafeExposure), exposureRange);
-  const scales = [AUTO_QR_LIGHT_SCALE, 1, Math.pow(2, 0.7), 2];
+  const memory = usableAutomaticOpticsMemory(track);
+  const memoryScale = Number(memory?.lightScale);
+  const memoryHealthy = Number(memory?.yieldRate || 0) >= AUTO_OPTICS_MEMORY_MIN_YIELD &&
+    Number.isFinite(memoryScale) && memoryScale >= AUTO_OPTICS_MEMORY_MIN_SCALE && memoryScale <= AUTO_OPTICS_MEMORY_MAX_SCALE;
+  const scales = [
+    ...(memoryHealthy ? [memoryScale] : []),
+    AUTO_QR_LIGHT_SCALE,
+    1,
+    Math.pow(2, 0.7),
+    2
+  ];
   const candidates = [];
   const seen = new Set();
   for (const scale of scales) {
@@ -2961,7 +2930,8 @@ async function rescueAutomaticQrAcquisition(track, now) {
   try {
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index];
-      autoOpticsTuneSummary = `cold search ${index + 1}/${candidates.length} · ${formatExposureMs(candidate.exposure)} · ISO ${Math.round(candidate.iso)} · ${Math.log2(candidate.scale).toFixed(1)}EV vs AE`;
+      const remembered = memoryHealthy && Math.abs(candidate.scale - memoryScale) < 1e-6;
+      autoOpticsTuneSummary = `cold search ${index + 1}/${candidates.length}${remembered ? " · recent winner" : ""} · ${formatExposureMs(candidate.exposure)} · ISO ${Math.round(candidate.iso)} · ${Math.log2(candidate.scale).toFixed(1)}EV vs AE`;
       const accepted = await applyCameraConstraint(track, {
         exposureMode: "manual",
         exposureTime: candidate.exposure,
@@ -3443,13 +3413,13 @@ function renderFocusDiagnostics() {
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · track budget ${cpuTrackBudgetActive ? `${cpuTrackBudget}/${cpuTrackBudgetCandidates} · ${cpuTrackWindowCount} spatial bands` : "full"} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
-    `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? " · adaptive hold" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
+    `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
@@ -4279,10 +4249,6 @@ function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = tru
   gridShape = "";
   lastGridSnapshot = void 0;
   activeDecodeBudget = 0;
-  cpuTrackBudgetActive = false;
-  cpuTrackBudget = 0;
-  cpuTrackBudgetCandidates = 0;
-  cpuTrackWindowCount = 1;
   expectedRegions = 0;
   expectedRegionsAt = now;
   lastDecodedRegionSize = 0;
@@ -5361,12 +5327,9 @@ async function captureFrame(source) {
   }
   const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
   const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
-  const weakFilteredRegions = adaptiveWeakSlots
+  const batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
-  const batchRegions = gridLattice.active
-    ? cpuBudgetTrackedRegions(weakFilteredRegions, source.sequence, now)
-    : weakFilteredRegions;
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
