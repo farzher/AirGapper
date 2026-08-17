@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.185";
+const RECEIVER_RUNTIME_BUILD = "v0.5.186";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -204,6 +204,7 @@ let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
 const AUTO_QR_EV_BIAS = -0.7;
+const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
@@ -220,6 +221,11 @@ const AUTO_OPTICS_GAIN_SETTLE_MS = 340;
 const AUTO_OPTICS_GAIN_SAMPLE_MS = 520;
 const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 12;
 const AUTO_OPTICS_GAIN_IMPROVEMENT = 1.03;
+// AirGapper is looking at an emissive black/white modem, not making a pleasing
+// photograph. Prefer less light when two candidates decode essentially alike.
+const AUTO_OPTICS_DARK_TIE_RATIO = 0.985;
+const AUTO_OPTICS_STARTUP_HEALTHY_YIELD = 0.45;
+const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.35;
 const AUTO_OPTICS_GAIN_MAX_PROBES = 5;
 const AUTO_OPTICS_POSE_STABLE_MS = 260;
 const AUTO_OPTICS_POSE_WAIT_MS = 1800;
@@ -2344,12 +2350,7 @@ async function applyExposureSetting(track) {
     const caps = (_a = track.getCapabilities) == null ? void 0 : _a.call(track);
     const patch = { exposureMode: "continuous" };
     if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
-      const step = Math.max((_b = caps.exposureCompensation.step) != null ? _b : 0, 0.01);
-      const raw = Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS));
-      patch.exposureCompensation = Math.max(
-        caps.exposureCompensation.min,
-        Math.min(0, Math.round((raw - caps.exposureCompensation.min) / step) * step + caps.exposureCompensation.min)
-      );
+      patch.exposureCompensation = quantizeCameraRange(0, caps.exposureCompensation);
     }
     await applyCameraConstraint(track, patch);
     if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
@@ -2498,6 +2499,16 @@ function rememberAutomaticOptics(track, exposure, iso, score = 0) {
   } catch {
   }
 }
+function forgetAutomaticOptics(track) {
+  try {
+    const all = JSON.parse(localStorage.getItem(AUTO_OPTICS_MEMORY_KEY) || "{}");
+    const key = autoOpticsMemoryKey(track);
+    if (!(key in all)) return;
+    delete all[key];
+    localStorage.setItem(AUTO_OPTICS_MEMORY_KEY, JSON.stringify(all));
+  } catch {
+  }
+}
 function autoOpticsPipelineSnapshot() {
   return {
     at: receiverNow(),
@@ -2611,7 +2622,9 @@ async function tuneAutomaticQrIso(track, exposure, aeBaseIso, isoRange, maxAutoI
   const remembered = Number.isFinite(rememberedIso)
     ? quantizeCameraRange(Math.min(cap, Math.max(isoRange.min, rememberedIso)), isoRange)
     : void 0;
-  const base = remembered ?? aeBase;
+  // Always establish the fresh AE-derived QR baseline first. Memory is only an
+  // additional candidate and never replaces the current scene measurement.
+  const base = aeBase;
   const probes = [];
   const measured = new Set();
   const probe = async (candidate) => {
@@ -2621,69 +2634,68 @@ async function tuneAutomaticQrIso(track, exposure, aeBaseIso, isoRange, maxAutoI
     if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES) return null;
     measured.add(key);
     let result = null;
-    // One bad half-second because the user moved the camera must not poison a
-    // candidate. Retry the same ISO once after pose stability returns; unique
-    // ISO probe budget is unchanged.
     for (let window = 0; window < 2 && automaticOpticsSessionAlive(track); window++) {
       result = await measureAutomaticIsoCandidate(track, exposure, requested, isoRange);
       if (!result?.unstable) break;
-      autoOpticsTuneSummary = `${probes.map(describeAutoIsoProbe).join(" · ")}${probes.length ? " · " : ""}${Math.round(requested)}:hold framing`;
+      autoOpticsTuneSummary = `QR ${AUTO_QR_EV_BIAS.toFixed(1)}EV · ${probes.map(describeAutoIsoProbe).join(" · ")}${probes.length ? " · " : ""}${Math.round(requested)}:hold framing`;
     }
     if (result) probes.push(result);
-    autoOpticsTuneSummary = `${remembered ? `memory ${Math.round(remembered)} · ` : ""}${probes.map(describeAutoIsoProbe).join(" · ")}`;
+    autoOpticsTuneSummary = `QR ${AUTO_QR_EV_BIAS.toFixed(1)}EV · ${probes.map(describeAutoIsoProbe).join(" · ")}`;
     return result;
   };
   const scoreOf = (item) => item?.valid ? item.score : 0;
   const better = (candidate, incumbent) => scoreOf(candidate) > scoreOf(incumbent) * AUTO_OPTICS_GAIN_IMPROVEMENT;
-  const geometricMidpoint = (a, b) => Math.sqrt(Math.max(isoRange.min, a) * Math.max(isoRange.min, b));
+  const chooseWinner = (items) => {
+    const validItems = items.filter((item) => item?.valid);
+    if (!validItems.length) return null;
+    return validItems.reduce((winner, item) => {
+      if (better(item, winner)) return item;
+      // Within ~1.5% confidence, lower ISO wins. On an emissive QR wall this
+      // reduces clipping/bloom and leaves more motion/noise headroom.
+      if (item.score >= winner.score * AUTO_OPTICS_DARK_TIE_RATIO && item.requestedIso < winner.requestedIso) return item;
+      return winner;
+    });
+  };
 
-  let baseline = await probe(base);
+  const baseline = await probe(base);
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
 
-  if (remembered !== void 0) {
-    const factor = AUTO_OPTICS_FINE_FACTOR;
-    const direction = autoOpticsFineTuneDirection < 0 ? -1 : 1;
-    const neighbor = await probe(base * (direction > 0 ? factor : 1 / factor));
+  // A remembered setting darker than today's baseline is safe to test early. A
+  // brighter memory is deferred unless today's darker baseline is struggling.
+  if (remembered !== void 0 && remembered < base * 0.96) {
+    await probe(remembered);
     if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-    if (better(neighbor, baseline)) {
-      autoOpticsFineTuneDirection = direction;
-    } else {
-      autoOpticsFineTuneDirection = -direction;
-      // Only spend a third startup probe when remembered quality is clearly
-      // weak. Normal reloads therefore settle after memory + one local check.
-      if ((baseline?.yieldRate ?? 0) < 0.52 && measured.size < 3)
-        await probe(base * (direction > 0 ? 1 / factor : factor));
-    }
-  } else {
-    // First use on a camera keeps the proven v152 coarse search: establish a
-    // broad brightness bracket, continue uphill if necessary, then refine it.
-    const brighter = await probe(base * 2);
-    if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+  }
 
-    if (better(brighter, baseline)) {
-      const upper = await probe(base * 2 * Math.SQRT2);
+  let incumbent = chooseWinner(probes) || baseline;
+  const darkAnchor = Math.min(base, incumbent?.requestedIso || base);
+  const darker = await probe(darkAnchor / Math.SQRT2);
+  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+  const darkHeld = darker?.valid && (better(darker, incumbent) || darker.score >= scoreOf(incumbent) * AUTO_OPTICS_DARK_TIE_RATIO);
+  incumbent = chooseWinner(probes) || incumbent;
+
+  if (darkHeld) {
+    autoOpticsFineTuneDirection = -1;
+    await probe(darker.requestedIso / Math.SQRT2);
+    if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+  } else {
+    const baselineWeak = !baseline?.valid || baseline.yieldRate < AUTO_OPTICS_STARTUP_HEALTHY_YIELD;
+    if (remembered !== void 0 && remembered > base * 1.04 && baselineWeak) {
+      await probe(remembered);
       if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-      if (better(upper, brighter)) {
-        const far = await probe(base * 4);
-        if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-        if (far && upper && !better(far, upper))
-          await probe(geometricMidpoint(upper.requestedIso, far.requestedIso));
-      } else if (upper && brighter) {
-        await probe(geometricMidpoint(brighter.requestedIso, upper.requestedIso));
-      }
+      incumbent = chooseWinner(probes) || incumbent;
+    }
+    // Do not brighten a healthy darker baseline just because we have probe
+    // budget. Brighter settings must be justified by weak decode evidence.
+    if (baselineWeak && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES) {
+      const brightAnchor = Math.max(base, incumbent?.requestedIso || base);
+      const brighter = await probe(brightAnchor * Math.SQRT2);
+      if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+      if (better(brighter, incumbent) && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES)
+        await probe(brighter.requestedIso * Math.SQRT2);
+      autoOpticsFineTuneDirection = 1;
     } else {
-      const darker = await probe(base / Math.SQRT2);
-      if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-      const validNow = [baseline, brighter, darker].filter((item) => item?.valid).sort((a, b) => a.requestedIso - b.requestedIso);
-      if (validNow.length >= 2) {
-        const bestNow = validNow.reduce((winner, item) => item.score > winner.score ? item : winner);
-        const bestIndex = validNow.indexOf(bestNow);
-        const neighbors = [validNow[bestIndex - 1], validNow[bestIndex + 1]].filter(Boolean);
-        if (neighbors.length) {
-          const rival = neighbors.reduce((winner, item) => item.score > winner.score ? item : winner);
-          await probe(geometricMidpoint(bestNow.requestedIso, rival.requestedIso));
-        }
-      }
+      autoOpticsFineTuneDirection = -1;
     }
   }
 
@@ -2692,7 +2704,7 @@ async function tuneAutomaticQrIso(track, exposure, aeBaseIso, isoRange, maxAutoI
     autoOpticsTuneSummary = `${remembered ? `memory ${Math.round(remembered)} · ` : ""}${probes.map(describeAutoIsoProbe).join(" · ")} · deferred: reframe`;
     return { iso: base, probes, deferred: true };
   }
-  const best = valid.reduce((winner, item) => item.score > winner.score ? item : winner);
+  const best = chooseWinner(valid);
   if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
     autoOpticsTuneSummary = `${remembered ? `memory ${Math.round(remembered)} · ` : ""}${probes.map(describeAutoIsoProbe).join(" · ")} · collapsed ${(best.yieldRate * 100).toFixed(0)}%`;
     return { iso: base, probes, best, collapsed: true };
@@ -2724,7 +2736,8 @@ async function settleAutomaticQrOptics(track, now) {
   // 30% of a frame is 10 ms at 30 fps / 5 ms at 60 fps: short enough to cut
   // handheld/display-transition blur without demanding extreme gain.
   const motionSafeExposure = 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
-  const exposureProduct = settings.exposureTime * settings.iso;
+  const aeExposureProduct = settings.exposureTime * settings.iso;
+  const exposureProduct = aeExposureProduct * AUTO_QR_LIGHT_SCALE;
   const maxAutoIso = Math.min(isoRange.max, Math.max(isoRange.min, settings.iso * 4));
   let exposure = quantizeCameraRange(Math.min(settings.exposureTime, motionSafeExposure), exposureRange);
   let iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
@@ -2732,8 +2745,8 @@ async function settleAutomaticQrOptics(track, now) {
     iso = quantizeCameraRange(maxAutoIso, isoRange);
     exposure = quantizeCameraRange(exposureProduct / Math.max(isoRange.min, iso), exposureRange);
   }
-  // Re-quantize gain after shutter quantization so brightness remains close to
-  // the hardware-AE baseline rather than accidentally changing EV.
+  // Re-quantize gain after shutter quantization so the final manual state stays
+  // at the deliberate QR darkness target rather than drifting back toward AE.
   iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "settling";
@@ -2768,7 +2781,8 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsAcquisitionSince = receiverNow();
       autoOpticsRetryAt = receiverNow() + (tuned.collapsed ? AUTO_OPTICS_COLLAPSE_RETRY_MS : 800);
       if (tuned.collapsed) {
-        autoOpticsTuneSummary = `collapsed ${(collapsedYield * 100).toFixed(0)}% · hardware AE reacquire`;
+        forgetAutomaticOptics(track);
+        autoOpticsTuneSummary = `collapsed ${(collapsedYield * 100).toFixed(0)}% · memory cleared · hardware AE reacquire`;
         focusController.adoptAutomaticCameraState("automatic optics collapsed; hardware AE reacquire");
       }
       return;
@@ -2780,7 +2794,8 @@ async function settleAutomaticQrOptics(track, now) {
     autoOpticsFineTuneAt = receiverNow() + AUTO_OPTICS_FINE_INTERVAL_MS;
     const tunedExposure = track.getSettings().exposureTime ?? exposure;
     const tunedIso = track.getSettings().iso ?? tuned.iso ?? iso;
-    if (tuned.best?.valid) rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score);
+    if (tuned.best?.valid && tuned.best.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD)
+      rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score);
     focusController.adoptAutomaticCameraState("automatic QR exposure tuned against live tracked decode yield");
   } finally {
     autoOpticsMutationRunning = false;
@@ -2825,6 +2840,7 @@ async function fineTuneAutomaticQrOptics(track, now) {
     }
     if (baseline.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
       const collapsedYield = baseline.yieldRate;
+      forgetAutomaticOptics(track);
       await applyExposureSetting(track);
       autoOpticsRuntimeState = "ae";
       autoOpticsLockSince = 0;
@@ -2848,13 +2864,15 @@ async function fineTuneAutomaticQrOptics(track, now) {
     const improved = candidate.score > baseline.score * AUTO_OPTICS_FINE_IMPROVEMENT;
     if (improved) {
       autoOpticsFineTuneDirection = direction;
-      rememberAutomaticOptics(track, exposure, candidate.iso, candidate.score);
+      if (candidate.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD)
+        rememberAutomaticOptics(track, exposure, candidate.iso, candidate.score);
       autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(baseline.yieldRate * 100).toFixed(0)}% · probe ${Math.round(candidate.iso)}:${(candidate.yieldRate * 100).toFixed(0)}% → ${Math.round(candidate.iso)}`;
       autoOpticsFineTuneAt = receiverNow() + Math.round(AUTO_OPTICS_FINE_INTERVAL_MS * 0.75);
     } else {
       await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: exposure, iso: currentIso });
       autoOpticsFineTuneDirection = -direction;
-      rememberAutomaticOptics(track, exposure, currentIso, baseline.score);
+      if (baseline.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD)
+        rememberAutomaticOptics(track, exposure, currentIso, baseline.score);
       autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(baseline.yieldRate * 100).toFixed(0)}% · probe ${Math.round(candidate.iso)}:${(candidate.yieldRate * 100).toFixed(0)}% → keep`;
       autoOpticsFineTuneAt = receiverNow() + AUTO_OPTICS_FINE_INTERVAL_MS;
     }
@@ -2905,7 +2923,7 @@ async function rescueAutomaticQrAcquisition(track, now) {
     return;
   }
 
-  const exposureProduct = settings.exposureTime * settings.iso;
+  const exposureProduct = settings.exposureTime * settings.iso * AUTO_QR_LIGHT_SCALE;
   const exposure = quantizeCameraRange(Math.min(settings.exposureTime, motionSafeExposure), exposureRange);
   const requiredIso = exposureProduct / Math.max(exposureRange.min, exposure);
   // If preserving AE brightness at a sharp shutter is impossible, leave AE in
