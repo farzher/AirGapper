@@ -1,0 +1,32 @@
+name: v213 completion snapshot retry
+on:
+  push:
+    paths:
+      - .github/workflows/agent-v213-retry.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply completion snapshot patch if needed
+        run: |
+          if grep -q 'v0.5.213' index.html; then
+            echo 'v0.5.213 already applied'
+          else
+            python .github/v213_completion_snapshot.py
+          fi
+      - name: Commit completion snapshot fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f --ignore-unmatch .github/v213_completion_snapshot.py .github/workflows/agent-v213.yml .github/workflows/agent-v213-retry.yml
+          git add index.html main.js receive/main.js sw.js
+          if ! git diff --cached --quiet; then
+            git commit -m "v0.5.213 snapshot diagnostics at decoder completion"
+            git push origin master
+          fi
