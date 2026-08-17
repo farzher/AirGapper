@@ -7364,7 +7364,11 @@ function fastRegressionResult(result, expectedFrames) {
   const trackedJobs = jobs.length - fullJobs;
   const decodeErrors = jobs.filter((job) => job.error).map((job) => String(job.error));
   const lockedStates = new Set(["GRID_LOCK", "TRACK", "PARTIAL_LOSS"]);
-  const firstLockedStateFrame = frames.findIndex((frame) => lockedStates.has(frame.stateBefore) || lockedStates.has(frame.stateAfter));
+  // stateAfter can be updated asynchronously by a decode job whose source was
+  // captured several frames earlier. Use stateBefore for wall-clock lock
+  // observation; keep acquisition.firstGridLockFrame separately as the source
+  // frame whose decode triggered the transition.
+  const firstLockedStateFrame = frames.findIndex((frame) => lockedStates.has(frame.stateBefore));
   const stateCounts = {};
   for (const frame of frames) {
     const state = frame.stateBefore ?? "unknown";
@@ -7387,8 +7391,9 @@ function fastRegressionResult(result, expectedFrames) {
     uniqueUsefulQrPerSecond: result?.throughput?.uniqueUsefulQrPerSecond ?? 0,
     verifiedKBPerSecond: result?.throughput?.verifiedKBPerSecond ?? 0,
     firstProductionFrame: result?.acquisition?.firstProductionFrame,
-    firstGridLockFrame: result?.acquisition?.firstGridLockFrame,
-    firstLockedStateFrame: firstLockedStateFrame >= 0 ? firstLockedStateFrame : null,
+    lockTriggerSourceFrame: result?.acquisition?.firstGridLockFrame,
+    firstGridLockFrame: firstLockedStateFrame >= 0 ? (frames[firstLockedStateFrame]?.sequence ?? firstLockedStateFrame) : null,
+    firstLockedStateFrame: firstLockedStateFrame >= 0 ? (frames[firstLockedStateFrame]?.sequence ?? firstLockedStateFrame) : null,
     stateCounts,
     finalState: frames.at(-1)?.stateAfter ?? frames.at(-1)?.stateBefore ?? null,
     transitions: result?.transitions?.length ?? 0,
