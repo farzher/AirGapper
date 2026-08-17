@@ -1,0 +1,122 @@
+camera benchmark failed at 2026-08-17T23:43:07Z
+candidate changed=true
+AIRGAPPER_SENDER_PROFILE stable-1000B 2548x1276 frames=8
+AIRGAPPER_SENDER_PROFILE motion-1000B 2548x1276 frames=20
+AIRGAPPER_SENDER_PROFILE dense-2953B 2138x1070 frames=10
+AIRGAPPER_SENDER_PROFILE camera-dense-2953B 1440x2560 frames=20
+AIRGAPPER_FAST_REGRESSION_START stable-y8
+AIRGAPPER_FAST_REGRESSION_RESULT stable-y8 {"version":"v0.5.232","productionOnly":true,"frames":32,"expectedFrames":32,"decodedPackets":493,"uniqueSymbols":75,"decodedSlots":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],"slotCounts":{"0":27,"1":28,"2":27,"3":27,"4":27,"5":27,"6":28,"7":27,"8":27,"9":28,"10":27,"11":27,"12":29,"13":27,"14":27,"15":29,"16":27,"17":27},"qrPerSecond":477.09677419354836,"uniqueUsefulQrPerSecond":72.58064516129032,"verifiedKBPerSecond":37.3469002016129,"firstProductionFrame":0,"firstGridLockFrame":4,"firstLockedStateFrame":4,"stateCounts":{"SEARCH":5,"GRID_LOCK":1,"TRACK":26},"finalState":"TRACK","transitions":2,"jobs":30,"fullJobs":3,"trackedJobs":27,"guidedJobs":27,"guidedTracks":486,"guidedOutputs":486,"guided":{"jobs":27,"tracks":486,"outputs":486,"turboAttempts":450,"turboSuccesses":450,"stableEligibleTracks":450,"stableRsAttempts":36,"stableRsSuccesses":36,"dataOnlyAttempts":414,"dataOnlySuccesses":414,"rsFallbacks":72,"sparseAttempts":36,"sparseSuccesses":36,"genericFallbackTracks":0,"genericFallbackSuccesses":0,"genericDecodeAttempts":0,"binarizeMs":11.39999999999418,"finderMs":1.1000000000203727,"sampleMs":171.50000000011642,"decodeMs":47.69999999985157,"totalMs":241.09999999999127},"tailFullJobs":0,"tailTrackedJobs":16,"decodeP50Ms":7.5,"decodeP95Ms":32.19999999999709,"workerBusyPercent":6.249999999999999,"hotPath":{"strict":false,"postLockRecoverySuppressed":false,"nativeTracks":0,"crcFastSuccesses":0,"crcFastPercent":0,"nativeMisses":0,"qrRsFallbacks":0,"anchorSuccesses":0,"anchorMisses":0,"thresholdFallbacks":0,"outOfFrameMisses":0,"bitstreamFailures":0,"crcFailures":0,"multiSampleRetries":0,"localRecoveryAttempts":0,"localRecoverySuccesses":0,"readFullAttempts":3,"fullScanJobs":3},"byKind":{"DIRECT RECOVERY Y8":{"jobs":3,"pixels":4812464,"processedPixels":4812464,"bytes":19249856,"tracks":0,"outputSymbols":7,"hits":0,"misses":0,"readFullAttempts":3,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0},"Y8 TRACKED GRID":{"jobs":27,"pixels":87783696,"processedPixels":87783696,"bytes":351134784,"tracks":486,"outputSymbols":486,"hits":486,"misses":0,"readFullAttempts":0,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0}},"decodeErrors":[],"checks":{"productionOnly":true,"allFramesReplayed":true,"decodedSomething":true,"discoveredLayout":true,"scheduledWork":true,"noDecodeErrors":true,"oracleSkipped":true},"ok":true,"normalized":{"guidedOutputYield":1,"turboYield":1,"stableRsYield":1,"dataOnlyYield":1,"sampleMsPerTrack":0.35288065843645355,"sampleMsPerOutput":0.35288065843645355,"decodeMsPerOutput":0.09814814814784274,"guidedMsPerTrack":0.4960905349794059,"guidedMsPerOutput":0.4960905349794059,"guidedMsPerJob":8.929629629629305,"stableRsAttemptsPerTrack":0.07407407407407407,"dataOnlyAttemptsPerTrack":0.8518518518518519},"wallTimeMs":1550}
+AIRGAPPER_FAST_REGRESSION_START motion-y8
+AIRGAPPER_FAST_REGRESSION_RESULT motion-y8 {"version":"v0.5.232","productionOnly":true,"frames":28,"expectedFrames":28,"decodedPackets":364,"uniqueSymbols":144,"decodedSlots":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],"slotCounts":{"0":14,"1":18,"2":17,"3":19,"4":22,"5":22,"6":22,"7":22,"8":22,"9":21,"10":22,"11":22,"12":21,"13":23,"14":22,"15":17,"16":20,"17":18},"qrPerSecond":404.4444444444444,"uniqueUsefulQrPerSecond":159.99999999999997,"verifiedKBPerSecond":42.87977430555555,"firstProductionFrame":0,"firstGridLockFrame":4,"firstLockedStateFrame":4,"stateCounts":{"SEARCH":5,"GRID_LOCK":1,"TRACK":22},"finalState":"TRACK","transitions":2,"jobs":26,"fullJobs":3,"trackedJobs":23,"guidedJobs":22,"guidedTracks":396,"guidedOutputs":349,"guided":{"jobs":22,"tracks":396,"outputs":349,"turboAttempts":344,"turboSuccesses":113,"stableEligibleTracks":333,"stableRsAttempts":117,"stableRsSuccesses":100,"dataOnlyAttempts":17,"dataOnlySuccesses":13,"rsFallbacks":352,"sparseAttempts":256,"sparseSuccesses":235,"genericFallbackTracks":21,"genericFallbackSuccesses":1,"genericDecodeAttempts":1,"binarizeMs":114.49999999994179,"finderMs":6.599999999991269,"sampleMs":252.2999999999738,"decodeMs":122.00000000004366,"totalMs":505.3999999999942},"tailFullJobs":0,"tailTrackedJobs":14,"decodeP50Ms":24.80000000000291,"decodeP95Ms":31.69999999999709,"workerBusyPercent":5.952380952380952,"hotPath":{"strict":false,"postLockRecoverySuppressed":false,"nativeTracks":0,"crcFastSuccesses":0,"crcFastPercent":0,"nativeMisses":0,"qrRsFallbacks":0,"anchorSuccesses":0,"anchorMisses":0,"thresholdFallbacks":0,"outOfFrameMisses":0,"bitstreamFailures":0,"crcFailures":0,"multiSampleRetries":0,"localRecoveryAttempts":1,"localRecoverySuccesses":1,"readFullAttempts":4,"fullScanJobs":3},"byKind":{"DIRECT RECOVERY Y8":{"jobs":3,"pixels":4812464,"processedPixels":4812464,"bytes":19249856,"tracks":0,"outputSymbols":7,"hits":0,"misses":0,"readFullAttempts":3,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0},"Y8 TRACKED GRID":{"jobs":23,"pixels":74778704,"processedPixels":74778704,"bytes":299114816,"tracks":414,"outputSymbols":357,"hits":349,"misses":47,"readFullAttempts":1,"fallbackAttempts":1,"fallbackSuccesses":1,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0}},"decodeErrors":[],"checks":{"productionOnly":true,"allFramesReplayed":true,"decodedSomething":true,"discoveredLayout":true,"scheduledWork":true,"noDecodeErrors":true,"oracleSkipped":true},"ok":true,"normalized":{"guidedOutputYield":0.8813131313131313,"turboYield":0.32848837209302323,"stableRsYield":0.8547008547008547,"dataOnlyYield":0.7647058823529411,"sampleMsPerTrack":0.637121212121146,"sampleMsPerOutput":0.7229226361030768,"decodeMsPerOutput":0.349570200573191,"guidedMsPerTrack":1.2762626262626116,"guidedMsPerOutput":1.4481375358166022,"guidedMsPerJob":22.97272727272701,"stableRsAttemptsPerTrack":0.29545454545454547,"dataOnlyAttemptsPerTrack":0.04292929292929293},"wallTimeMs":5232}
+AIRGAPPER_FAST_REGRESSION_START dense-y8
+AIRGAPPER_FAST_REGRESSION_RESULT dense-y8 {"version":"v0.5.232","productionOnly":true,"frames":20,"expectedFrames":20,"decodedPackets":233,"uniqueSymbols":159,"decodedSlots":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],"slotCounts":{"0":13,"1":13,"2":12,"3":13,"4":12,"5":12,"6":14,"7":12,"8":12,"9":14,"10":12,"11":12,"12":16,"13":13,"14":12,"15":16,"16":13,"17":12},"qrPerSecond":367.8947368421052,"uniqueUsefulQrPerSecond":251.05263157894734,"verifiedKBPerSecond":60.93441611842105,"firstProductionFrame":0,"firstGridLockFrame":6,"firstLockedStateFrame":6,"stateCounts":{"SEARCH":7,"GRID_LOCK":1,"TRACK":12},"finalState":"TRACK","transitions":2,"jobs":17,"fullJobs":3,"trackedJobs":14,"guidedJobs":13,"guidedTracks":218,"guidedOutputs":218,"guided":{"jobs":13,"tracks":218,"outputs":218,"turboAttempts":164,"turboSuccesses":164,"stableEligibleTracks":164,"stableRsAttempts":128,"stableRsSuccesses":128,"dataOnlyAttempts":36,"dataOnlySuccesses":36,"rsFallbacks":182,"sparseAttempts":54,"sparseSuccesses":54,"genericFallbackTracks":0,"genericFallbackSuccesses":0,"genericDecodeAttempts":0,"binarizeMs":17.5,"finderMs":1.1000000000349246,"sampleMs":368.59999999996217,"decodeMs":176.7000000000844,"totalMs":570.7000000000116},"tailFullJobs":0,"tailTrackedJobs":10,"decodeP50Ms":38.60000000000582,"decodeP95Ms":94,"workerBusyPercent":34.99999999999999,"hotPath":{"strict":false,"postLockRecoverySuppressed":false,"nativeTracks":0,"crcFastSuccesses":0,"crcFastPercent":0,"nativeMisses":0,"qrRsFallbacks":0,"anchorSuccesses":0,"anchorMisses":0,"thresholdFallbacks":0,"outOfFrameMisses":0,"bitstreamFailures":0,"crcFailures":0,"multiSampleRetries":0,"localRecoveryAttempts":1,"localRecoverySuccesses":1,"readFullAttempts":4,"fullScanJobs":3},"byKind":{"DIRECT RECOVERY Y8":{"jobs":3,"pixels":3405708,"processedPixels":3405708,"bytes":13622832,"tracks":0,"outputSymbols":7,"hits":0,"misses":0,"readFullAttempts":3,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0},"Y8 TRACKED GRID":{"jobs":14,"pixels":30040380,"processedPixels":30040380,"bytes":120161520,"tracks":236,"outputSymbols":226,"hits":218,"misses":0,"readFullAttempts":1,"fallbackAttempts":1,"fallbackSuccesses":1,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0}},"decodeErrors":[],"checks":{"productionOnly":true,"allFramesReplayed":true,"decodedSomething":true,"discoveredLayout":true,"scheduledWork":true,"noDecodeErrors":true,"oracleSkipped":true},"ok":true,"normalized":{"guidedOutputYield":1,"turboYield":1,"stableRsYield":1,"dataOnlyYield":1,"sampleMsPerTrack":1.6908256880732209,"sampleMsPerOutput":1.6908256880732209,"decodeMsPerOutput":0.8105504587159835,"guidedMsPerTrack":2.617889908256934,"guidedMsPerOutput":2.617889908256934,"guidedMsPerJob":43.900000000000894,"stableRsAttemptsPerTrack":0.5871559633027523,"dataOnlyAttemptsPerTrack":0.1651376146788991},"wallTimeMs":1385}
+AIRGAPPER_FAST_REGRESSION_START camera-dense-y8
+file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:289
+  if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
+                             ^
+
+Error: camera-dense-y8: too many acquisition scans (6 > 5); camera-dense tracked jobs 7 < 10 · {"version":"v0.5.232","productionOnly":true,"frames":20,"expectedFrames":20,"decodedPackets":92,"uniqueSymbols":78,"decodedSlots":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],"slotCounts":{"0":4,"1":4,"2":7,"3":4,"4":6,"5":5,"6":5,"7":4,"8":7,"9":4,"10":4,"11":6,"12":5,"13":3,"14":7,"15":5,"16":6,"17":6},"qrPerSecond":145.26315789473682,"uniqueUsefulQrPerSecond":123.1578947368421,"verifiedKBPerSecond":60.93441611842105,"firstProductionFrame":8,"firstGridLockFrame":8,"firstLockedStateFrame":8,"stateCounts":{"SEARCH":9,"GRID_LOCK":1,"TRACK":10},"finalState":"TRACK","transitions":2,"jobs":13,"fullJobs":6,"trackedJobs":7,"guidedJobs":7,"guidedTracks":126,"guidedOutputs":90,"guided":{"jobs":7,"tracks":126,"outputs":90,"turboAttempts":0,"turboSuccesses":0,"stableEligibleTracks":0,"stableRsAttempts":0,"stableRsSuccesses":0,"dataOnlyAttempts":0,"dataOnlySuccesses":0,"rsFallbacks":2,"sparseAttempts":126,"sparseSuccesses":1,"genericFallbackTracks":125,"genericFallbackSuccesses":89,"genericDecodeAttempts":125,"binarizeMs":16.699999999967986,"finderMs":1.2000000000116415,"sampleMs":308.9999999999709,"decodeMs":328.1000000000495,"totalMs":655.6999999999825},"tailFullJobs":0,"tailTrackedJobs":6,"decodeP50Ms":88.69999999999709,"decodeP95Ms":104,"workerBusyPercent":51.66666666666666,"hotPath":{"strict":false,"postLockRecoverySuppressed":false,"nativeTracks":0,"crcFastSuccesses":0,"crcFastPercent":0,"nativeMisses":0,"qrRsFallbacks":0,"anchorSuccesses":0,"anchorMisses":0,"thresholdFallbacks":0,"outOfFrameMisses":0,"bitstreamFailures":0,"crcFailures":0,"multiSampleRetries":0,"localRecoveryAttempts":0,"localRecoverySuccesses":0,"readFullAttempts":6,"fullScanJobs":6},"byKind":{"DIRECT RECOVERY Y8":{"jobs":6,"pixels":10437120,"processedPixels":10437120,"bytes":41748480,"tracks":0,"outputSymbols":2,"hits":0,"misses":0,"readFullAttempts":6,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0},"Y8 TRACKED GRID":{"jobs":7,"pixels":7971840,"processedPixels":7971840,"bytes":31887360,"tracks":126,"outputSymbols":90,"hits":90,"misses":36,"readFullAttempts":0,"fallbackAttempts":0,"fallbackSuccesses":0,"fallbackFailures":0,"targetedAttempts":0,"targetedPixels":0,"targetedSuccesses":0}},"decodeErrors":[],"checks":{"productionOnly":true,"allFramesReplayed":true,"decodedSomething":true,"discoveredLayout":true,"scheduledWork":true,"noDecodeErrors":true,"oracleSkipped":true},"ok":true,"normalized":{"guidedOutputYield":0.7142857142857143,"turboYield":0,"stableRsYield":0,"dataOnlyYield":0,"sampleMsPerTrack":2.452380952380721,"sampleMsPerOutput":3.43333333333301,"decodeMsPerOutput":3.6455555555561054,"guidedMsPerTrack":5.203968253968116,"guidedMsPerOutput":7.285555555555361,"guidedMsPerJob":93.67142857142608,"stableRsAttemptsPerTrack":0,"dataOnlyAttemptsPerTrack":0},"wallTimeMs":3432}
+    at assertScenario (file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:289:30)
+    at file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:349:5
+
+Node.js v22.23.2
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /shared/style.css HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /shared/transport.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /shared/wake-lock.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /shared/worker-pool.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /shared/zip.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/decimen-codec-android/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/decimen-codec-android/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/qrcode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/raptorq/raptorq.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:46] "GET /vendor/raptorq/raptorq_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:47] "GET /vendor/raptorq/raptorq_bg.wasm HTTP/1.1" 304 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:56] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:42:58] "GET /sw.js?build=v0.5.232 HTTP/1.1" 304 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:01] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:03] "GET /sw.js?build=v0.5.232 HTTP/1.1" 304 -
+127.0.0.1 - - [17/Aug/2026 23:43:04] "GET /sw.js?build=v0.5.232 HTTP/1.1" 304 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /receive/worker.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/decode-policy.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/protocol.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/grid-layout.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /shared/coding-mode.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.js HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [17/Aug/2026 23:43:06] "GET /vendor/decimen-codec/decimen_codec.wasm HTTP/1.1" 200 -
