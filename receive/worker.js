@@ -37,7 +37,7 @@ function inputBuffer(zx, bytes) {
   inputCapacity = bytes;
   return inputPtr;
 }
-const NATIVE_BATCH_MAX_TRACKS = 18;
+const NATIVE_BATCH_MAX_TRACKS = 32;
 const ROBUST_BATCH_MAX_RESULTS = 8;
 const NATIVE_TRACK_RESULT_BYTES = 32;
 const NATIVE_BATCH_METRICS_BYTES = 128;
@@ -114,9 +114,11 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     sparseNoRsSuccesses: metricsView.getUint32(112, true),
     sparseRsFallbacks: metricsView.getUint32(116, true),
     sparseSkipped: metricsView.getUint32(120, true),
+    turboAttempts: metricsView.getUint32(124, true),
     fallbackAttemptMask: metricsView.getUint32(128, true),
     fallbackSuccessMask: metricsView.getUint32(132, true),
-    sparseSuccessMask: metricsView.getUint32(136, true)
+    sparseSuccessMask: metricsView.getUint32(136, true),
+    turboSuccesses: metricsView.getUint32(140, true)
   };
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
@@ -688,8 +690,12 @@ ctx.onmessage = async (e) => {
           guidedMetrics: guided?.metrics,
           nativeAssistTracks: 0,
           nativeAssistHits: 0,
-          guidedAssistTracks: tracks.length,
-          pixelPath: "y8-guided",
+          guidedAssistTracks: Math.max(0, tracks.length - (guided?.metrics?.turboSuccesses ?? 0)),
+          pixelPath: guided?.metrics?.turboSuccesses === tracks.length
+            ? "y8-turbo"
+            : guided?.metrics?.turboSuccesses
+              ? "y8-turbo+guided"
+              : "y8-guided",
           guidedError: guided?.error,
           latencyMs: performance.now() - startedAt
         });

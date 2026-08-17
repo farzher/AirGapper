@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.195";
+const RECEIVER_RUNTIME_BUILD = "v0.5.196";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1254,6 +1254,8 @@ const livePipeline = {
   guidedSparseNoRsSuccesses: 0,
   guidedSparseRsFallbacks: 0,
   guidedSparseSkipped: 0,
+  guidedTurboAttempts: 0,
+  guidedTurboSuccesses: 0,
   guidedJobs: 0,
   guidedOutputs: 0,
   guidedFinderAttempts: 0,
@@ -1279,6 +1281,7 @@ function resetLivePipeline(now = receiverNow()) {
     guidedFastDecodeMs: 0, guidedGenericDecodeMs: 0, guidedFastDecodeAttempts: 0, guidedFastDecodeSuccesses: 0, guidedGenericDecodeAttempts: 0,
     guidedGenericFallbackTracks: 0, guidedGenericFallbackSuccesses: 0, guidedGenericFallbackSkipped: 0,
     guidedSparseNoRsAttempts: 0, guidedSparseNoRsSuccesses: 0, guidedSparseRsFallbacks: 0, guidedSparseSkipped: 0,
+    guidedTurboAttempts: 0, guidedTurboSuccesses: 0,
     guidedJobs: 0, guidedOutputs: 0, guidedFinderAttempts: 0, guidedFinderSuccesses: 0,
     workerWaitMs: 0, otherMs: 0, readFullAttempts: 0, timeouts: 0, errors: 0, lastCompletedAt: 0,
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
@@ -1908,6 +1911,8 @@ function noteDecodeCompleted(id, completion) {
       livePipeline.guidedSparseNoRsSuccesses += Math.max(0, Number(guided.sparseNoRsSuccesses) || 0);
       livePipeline.guidedSparseRsFallbacks += Math.max(0, Number(guided.sparseRsFallbacks) || 0);
       livePipeline.guidedSparseSkipped += Math.max(0, Number(guided.sparseSkipped) || 0);
+      livePipeline.guidedTurboAttempts += Math.max(0, Number(guided.turboAttempts) || 0);
+      livePipeline.guidedTurboSuccesses += Math.max(0, Number(guided.turboSuccesses) || 0);
       livePipeline.guidedFinderAttempts += Math.max(0, Number(guided.finderAttempts) || 0);
       livePipeline.guidedFinderSuccesses += Math.max(0, Number(guided.finderSuccesses) || 0);
     }
@@ -5521,7 +5526,7 @@ async function captureFrame(source) {
       geometryRecoveryProbes++;
       notePipelineEvent("global-recovery-probe", geometryRecoveryProbes);
     }
-    // A dense 18-QR wall can present 54 finder patterns to the generic
+    // A dense wall can present dozens of finder patterns to the generic
     // detector. That is a bad acquisition problem even when every QR is sharp.
     // Keep the first and every fourth attempt full-frame (important for 1-QR
     // senders), but rotate the intervening attempts through overlapping 3x3
@@ -5628,7 +5633,7 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
+  const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 32);
   const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
   const batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
@@ -7160,7 +7165,7 @@ Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.t
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
 Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}

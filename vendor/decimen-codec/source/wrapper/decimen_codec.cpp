@@ -43,6 +43,7 @@
 #include "qrcode/QRDetector.h"
 #include "qrcode/QRBitMatrixParser.h"
 #include "qrcode/QRDataBlock.h"
+#include "qrcode/QRDataMask.h"
 #include "qrcode/QRFormatInformation.h"
 #include "qrcode/QRVersion.h"
 #include "ByteArray.h"
@@ -387,10 +388,370 @@ static void noteGuidedSparseOutcome(int id, bool success)
 // learns from the same physical-slot history. The codec only executes the
 // supplied allow-mask and reports per-slot outcomes back.
 
+
+constexpr float GUIDED_TURBO_SEED_MIN_MODULE = 2.95f;
+constexpr float GUIDED_TURBO_RUN_MIN_MODULE = 3.05f;
+constexpr int GUIDED_TURBO_RS_BUDGET = 4;
+constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
+constexpr int GUIDED_TURBO_AMBIGUOUS = 11;
+
+struct GuidedTurboTrack
+{
+    int dimension = 0;
+    bool seeded = false;
+    bool distortionAware = false;
+    std::array<PointF, 4> seedQuad{};
+    std::vector<PointF> samples;
+    uint8_t misses = 0;
+    uint8_t cooldown = 0;
+};
+
+static std::array<GuidedTurboTrack, 64>& guidedTurboTracks()
+{
+    static std::array<GuidedTurboTrack, 64> tracks;
+    return tracks;
+}
+
+static GuidedTurboTrack* guidedTurboTrack(int id)
+{
+    return id >= 0 && id < int(guidedTurboTracks().size()) ? &guidedTurboTracks()[id] : nullptr;
+}
+
+static bool turboSeedEligible(const DecimenGuidedTrack& track)
+{
+    return guidedTurboTrack(track.id) && guidedModuleSize(track) >= GUIDED_TURBO_SEED_MIN_MODULE;
+}
+
+static std::array<PointF, 4> turboTrackQuad(const DecimenGuidedTrack& track)
+{
+    return {PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
+            PointF{track.x2, track.y2}, PointF{track.x3, track.y3}};
+}
+
+static std::array<PointF, 4> turboPositionQuad(const Position& pos)
+{
+    return {PointF(pos[0]), PointF(pos[1]), PointF(pos[2]), PointF(pos[3])};
+}
+
+static std::vector<PointF> buildHomographySampleMap(int dim, const Position& pos)
+{
+    std::vector<PointF> out;
+    if (dim <= 0)
+        return out;
+    PerspectiveTransform map(
+        QuadrilateralF{PointF{0, 0}, PointF{double(dim), 0}, PointF{double(dim), double(dim)}, PointF{0, double(dim)}},
+        QuadrilateralF{PointF(pos[0]), PointF(pos[1]), PointF(pos[2]), PointF(pos[3])});
+    if (!map.isValid())
+        return {};
+    out.resize(size_t(dim) * dim);
+    for (int y = 0; y < dim; ++y)
+        for (int x = 0; x < dim; ++x)
+            out[size_t(y) * dim + x] = map(centered(PointI{x, y}));
+    return out;
+}
+
+static bool buildSparseSampleMap(int dim, const PerspectiveTransform& fallback,
+                                 Matrix<std::optional<PointF>>& controls,
+                                 const std::vector<int>& centers,
+                                 std::vector<PointF>& out)
+{
+    const int W = Size(centers) - 1;
+    const int H = W;
+    if (dim <= 0 || W <= 0)
+        return false;
+    for (int y = 0; y <= H; ++y)
+        for (int x = 0; x <= W; ++x)
+            if (!controls(x, y))
+                controls.set(x, y, fallback(centered(PointI(centers[x], centers[y]))));
+
+    out.assign(size_t(dim) * dim, PointF{});
+    for (int ry = 0; ry < H; ++ry)
+        for (int rx = 0; rx < W; ++rx) {
+            const int x0 = centers[rx], x1 = centers[rx + 1];
+            const int y0 = centers[ry], y1 = centers[ry + 1];
+            const int beginX = rx == 0 ? 0 : x0;
+            const int endX = rx == W - 1 ? dim : x1;
+            const int beginY = ry == 0 ? 0 : y0;
+            const int endY = ry == H - 1 ? dim : y1;
+            PerspectiveTransform local{
+                Rectangle(x0, x1, y0, y1, 0.5),
+                QuadrilateralF{*controls(rx, ry), *controls(rx + 1, ry),
+                               *controls(rx + 1, ry + 1), *controls(rx, ry + 1)}};
+            if (!local.isValid())
+                return false;
+            for (int y = beginY; y < endY; ++y)
+                for (int x = beginX; x < endX; ++x)
+                    out[size_t(y) * dim + x] = local(centered(PointI{x, y}));
+        }
+    return true;
+}
+
+static void seedGuidedTurbo(int id, int dim, const Position& pos,
+                            std::vector<PointF>&& samples, bool distortionAware)
+{
+    auto* cache = guidedTurboTrack(id);
+    if (!cache || dim <= 0 || samples.size() != size_t(dim) * dim)
+        return;
+    cache->dimension = dim;
+    cache->seeded = true;
+    cache->distortionAware = distortionAware;
+    cache->seedQuad = turboPositionQuad(pos);
+    cache->samples = std::move(samples);
+    cache->misses = 0;
+    cache->cooldown = 0;
+}
+
+static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                      float& dx, float& dy, float& residual)
+{
+    if (!cache.seeded || cache.dimension != track.dimension ||
+        cache.samples.size() != size_t(track.dimension) * track.dimension)
+        return false;
+    const auto current = turboTrackQuad(track);
+    std::array<PointF, 4> delta;
+    dx = 0;
+    dy = 0;
+    for (int i = 0; i < 4; ++i) {
+        delta[i] = current[i] - cache.seedQuad[i];
+        dx += delta[i].x;
+        dy += delta[i].y;
+    }
+    dx *= 0.25f;
+    dy *= 0.25f;
+    residual = 0;
+    for (const auto& d : delta)
+        residual = std::max(residual, float(std::hypot(d.x - dx, d.y - dy)));
+    const float module = guidedModuleSize(track);
+    return residual <= std::max(1.0f, module * 0.48f);
+}
+
+static bool turboFinderIdeal(int x, int y)
+{
+    return x == 0 || x == 6 || y == 0 || y == 6 || (x >= 2 && x <= 4 && y >= 2 && y <= 4);
+}
+
+struct TurboLevels
+{
+    int tl = 128, tr = 128, bl = 128;
+    int separation = 0;
+    int matches = 0;
+    bool ok = false;
+};
+
+static int turboLum(const uint8_t* yPlane, int width, int height, int stride, PointF p, float dx, float dy)
+{
+    const int x = int(std::lround(p.x + dx));
+    const int y = int(std::lround(p.y + dy));
+    return x < 0 || y < 0 || x >= width || y >= height ? -1 : int(yPlane[size_t(y) * stride + x]);
+}
+
+static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const uint8_t* yPlane,
+                                   int width, int height, int stride, float dx, float dy)
+{
+    TurboLevels out;
+    const int dim = cache.dimension;
+    const PointI starts[3] = {{0, 0}, {dim - 7, 0}, {0, dim - 7}};
+    int thresholds[3] = {};
+    int minSep = 255;
+    int matches = 0;
+    for (int finder = 0; finder < 3; ++finder) {
+        int blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
+        int values[49];
+        bool expected[49];
+        int n = 0;
+        for (int my = 0; my < 7; ++my)
+            for (int mx = 0; mx < 7; ++mx) {
+                const int sx = starts[finder].x + mx;
+                const int sy = starts[finder].y + my;
+                const int lum = turboLum(yPlane, width, height, stride,
+                    cache.samples[size_t(sy) * dim + sx], dx, dy);
+                if (lum < 0)
+                    return {};
+                const bool black = turboFinderIdeal(mx, my);
+                values[n] = lum;
+                expected[n++] = black;
+                if (black) { blackSum += lum; ++blackCount; }
+                else { whiteSum += lum; ++whiteCount; }
+            }
+        const int black = blackSum / std::max(1, blackCount);
+        const int white = whiteSum / std::max(1, whiteCount);
+        const int sep = white - black;
+        if (sep < 26)
+            return {};
+        minSep = std::min(minSep, sep);
+        thresholds[finder] = (black + white) / 2;
+        for (int i = 0; i < n; ++i)
+            matches += ((values[i] <= thresholds[finder]) == expected[i]);
+    }
+    out.tl = thresholds[0];
+    out.tr = thresholds[1];
+    out.bl = thresholds[2];
+    out.separation = minSep;
+    out.matches = matches;
+    out.ok = matches >= 132;
+    return out;
+}
+
+static int turboThreshold(const TurboLevels& levels, int x, int y, int dim)
+{
+    const float fx = (x + 0.5f) / dim;
+    const float fy = (y + 0.5f) / dim;
+    const float t = levels.tl + (levels.tr - levels.tl) * fx + (levels.bl - levels.tl) * fy;
+    const int lo = std::min({levels.tl, levels.tr, levels.bl}) - 12;
+    const int hi = std::max({levels.tl, levels.tr, levels.bl}) + 12;
+    return std::clamp(int(std::lround(t)), lo, hi);
+}
+
+static int turboModuleLum(const GuidedTurboTrack& cache, const uint8_t* yPlane,
+                          int width, int height, int stride, int x, int y,
+                          float dx, float dy, int threshold, float moduleSize)
+{
+    const PointF p = cache.samples[size_t(y) * cache.dimension + x];
+    int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+    if (lum < 0 || moduleSize < 3.35f || std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
+        return lum;
+    const int cx = int(std::lround(p.x + dx));
+    const int cy = int(std::lround(p.y + dy));
+    if (cx <= 0 || cy <= 0 || cx + 1 >= width || cy + 1 >= height)
+        return lum;
+    const size_t row = size_t(cy) * stride;
+    const int sum = lum * 2 + yPlane[row + cx - 1] + yPlane[row + cx + 1] +
+                    yPlane[row - stride + cx] + yPlane[row + stride + cx];
+    return sum / 6;
+}
+
+static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                         const uint8_t* yPlane, int width, int height, int stride,
+                                         float dx, float dy, const TurboLevels& levels,
+                                         DecimenGuidedMetrics& metrics)
+{
+    const int dim = track.dimension;
+    const auto* version = QRCode::Version::Model2((dim - 17) / 4);
+    if (!version)
+        return {};
+    const auto& ecBlocks = version->ecBlocksForLevel(QRCode::ErrorCorrectionLevel::Low);
+    std::vector<int> blockSizes;
+    int dataCodewords = 0;
+    for (const auto& group : ecBlocks.blockArray())
+        for (int i = 0; i < group.count; ++i) {
+            blockSizes.push_back(group.dataCodewords);
+            dataCodewords += group.dataCodewords;
+        }
+    if (blockSizes.empty() || dataCodewords <= 0)
+        return {};
+
+    const double sampleStarted = guidedNowMs();
+    const auto functionPattern = version->buildFunctionPattern();
+    ByteArray raw;
+    raw.reserve(dataCodewords);
+    uint8_t currentByte = 0;
+    int bitsRead = 0;
+    bool readingUp = true;
+    const float moduleSize = guidedModuleSize(track);
+    bool failed = false;
+    for (int x = dim - 1; x > 0 && int(raw.size()) < dataCodewords && !failed; x -= 2) {
+        if (x == 6)
+            --x;
+        for (int row = 0; row < dim && int(raw.size()) < dataCodewords && !failed; ++row) {
+            const int y = readingUp ? dim - 1 - row : row;
+            for (int col = 0; col < 2 && int(raw.size()) < dataCodewords; ++col) {
+                const int xx = x - col;
+                if (functionPattern.get(xx, y))
+                    continue;
+                const int threshold = turboThreshold(levels, xx, y, dim);
+                const int lum = turboModuleLum(cache, yPlane, width, height, stride,
+                                               xx, y, dx, dy, threshold, moduleSize);
+                if (lum < 0) { failed = true; break; }
+                const bool black = lum <= threshold;
+                const bool bit = QRCode::GetDataMaskBit(4, xx, y) != black;
+                currentByte = uint8_t((currentByte << 1) | uint8_t(bit));
+                if (++bitsRead % 8 == 0) {
+                    raw.push_back(currentByte);
+                    currentByte = 0;
+                }
+            }
+        }
+        readingUp = !readingUp;
+    }
+    metrics.sampleMs += guidedNowMs() - sampleStarted;
+    if (failed || int(raw.size()) != dataCodewords)
+        return {};
+
+    const double decodeStarted = guidedNowMs();
+    const int minData = *std::min_element(blockSizes.begin(), blockSizes.end());
+    std::vector<ByteArray> blocks(blockSizes.size());
+    for (size_t i = 0; i < blocks.size(); ++i)
+        blocks[i].resize(blockSizes[i]);
+    int offset = 0;
+    for (int i = 0; i < minData; ++i)
+        for (size_t block = 0; block < blocks.size(); ++block)
+            blocks[block][i] = raw[offset++];
+    for (size_t block = 0; block < blocks.size(); ++block)
+        if (blockSizes[block] > minData)
+            blocks[block][minData] = raw[offset++];
+    if (offset != dataCodewords)
+        return {};
+    ByteArray data(dataCodewords);
+    auto dst = data.begin();
+    for (const auto& block : blocks)
+        dst = std::copy(block.begin(), block.end(), dst);
+    auto decoded = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
+    metrics.decodeMs += guidedNowMs() - decodeStarted;
+    return decoded;
+}
+
+static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                       const uint8_t* yPlane, int width, int height, int stride,
+                                       float dx, float dy, const TurboLevels& levels,
+                                       DecimenGuidedMetrics& metrics)
+{
+    const int dim = track.dimension;
+    const float moduleSize = guidedModuleSize(track);
+    const double sampleStarted = guidedNowMs();
+    BitMatrix sampled(dim, dim);
+    for (int y = 0; y < dim; ++y)
+        for (int x = 0; x < dim; ++x) {
+            const int threshold = turboThreshold(levels, x, y, dim);
+            const int lum = turboModuleLum(cache, yPlane, width, height, stride,
+                                           x, y, dx, dy, threshold, moduleSize);
+            if (lum < 0)
+                return {};
+            if (lum <= threshold)
+                sampled.set(x, y);
+        }
+    metrics.sampleMs += guidedNowMs() - sampleStarted;
+    const double decodeStarted = guidedNowMs();
+    auto decoded = QRCode::Decode(sampled);
+    metrics.decodeMs += guidedNowMs() - decodeStarted;
+    return decoded;
+}
+
+static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const uint8_t* yPlane,
+                                    int width, int height, int stride, float predictedX, float predictedY)
+{
+    PointF best{predictedX, predictedY};
+    int bestScore = -1;
+    for (int oy = -2; oy <= 2; ++oy)
+        for (int ox = -2; ox <= 2; ++ox) {
+            const float dx = predictedX + ox;
+            const float dy = predictedY + oy;
+            const auto levels = turboReadLevels(cache, yPlane, width, height, stride, dx, dy);
+            if (!levels.ok)
+                continue;
+            const int score = levels.matches * 4 + levels.separation;
+            if (score > bestScore) {
+                bestScore = score;
+                best = PointF{dx, dy};
+            }
+        }
+    return best;
+}
+
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const DecimenGuidedTrack& track,
                                          const QRCode::FinderPatternSet& fp,
-                                         int* alignmentFoundOut)
+                                         int* alignmentFoundOut,
+                                         std::vector<PointF>* sampleMapOut)
 {
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
@@ -487,6 +848,8 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
     if (alignmentFound < 3)
         return {};
 
+    if (sampleMapOut && !buildSparseSampleMap(dim, base, controls, centers, *sampleMapOut))
+        sampleMapOut->clear();
     return SampleGrid(image, dim, dim, base, std::move(controls), centers, centers);
 }
 
@@ -509,20 +872,125 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
     }
 
     try {
+        metrics->tracks = trackCount;
+        int resultCount = 0;
+        int outputUsed = 0;
+        std::vector<uint8_t> completed(trackCount, 0);
+
+        auto commitTurbo = [&](int trackIndex, const DecoderResult& decoded, float correctionX, float correctionY) {
+            if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
+                return false;
+            const ByteArray& bytes = decoded.content().bytes;
+            if (outputUsed + int(bytes.size()) > outputCapacity ||
+                resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
+                return false;
+            const auto& track = tracks[trackIndex];
+            std::memcpy(output + outputUsed, bytes.data(), bytes.size());
+            auto& result = results[resultCount++];
+            result = {};
+            result.id = track.id;
+            result.status = DECIMEN_TRACK_OK;
+            result.bytesOffset = outputUsed;
+            result.bytesLength = int(bytes.size());
+            result.dimension = track.dimension;
+            result.x0 = track.x0 + correctionX; result.y0 = track.y0 + correctionY;
+            result.x1 = track.x1 + correctionX; result.y1 = track.y1 + correctionY;
+            result.x2 = track.x2 + correctionX; result.y2 = track.y2 + correctionY;
+            result.x3 = track.x3 + correctionX; result.y3 = track.y3 + correctionY;
+            outputUsed += int(bytes.size());
+            completed[trackIndex] = 1;
+            ++metrics->successful;
+            return true;
+        };
+
+        // Shared wall motion: use one high-resolution cached QR as the pose
+        // anchor, then apply its residual correction to every cached slot. The
+        // main lattice supplies the large/slow pose change; this only refines a
+        // few pixels of worker-latency/hand-motion drift.
+        float wallCorrectionX = 0, wallCorrectionY = 0;
+        for (int i = 0; i < trackCount; ++i) {
+            auto* cache = guidedTurboTrack(tracks[i].id);
+            if (!cache || !cache->seeded || guidedModuleSize(tracks[i]) < GUIDED_TURBO_RUN_MIN_MODULE)
+                continue;
+            float dx = 0, dy = 0, residual = 0;
+            if (!turboPose(*cache, tracks[i], dx, dy, residual))
+                continue;
+            const PointF refined = turboRefineWallOffset(*cache, yPlane, width, height, stride, dx, dy);
+            wallCorrectionX = refined.x - dx;
+            wallCorrectionY = refined.y - dy;
+            break;
+        }
+
+        int rsBudget = GUIDED_TURBO_RS_BUDGET;
+        for (int i = 0; i < trackCount; ++i) {
+            const auto& track = tracks[i];
+            auto* cache = guidedTurboTrack(track.id);
+            if (!cache || !cache->seeded || guidedModuleSize(track) < GUIDED_TURBO_RUN_MIN_MODULE)
+                continue;
+            if (cache->cooldown) {
+                --cache->cooldown;
+                continue;
+            }
+            float dx = 0, dy = 0, residual = 0;
+            if (!turboPose(*cache, track, dx, dy, residual))
+                continue;
+            dx += wallCorrectionX;
+            dy += wallCorrectionY;
+            const auto levels = turboReadLevels(*cache, yPlane, width, height, stride, dx, dy);
+            if (!levels.ok)
+                continue;
+
+            ++metrics->reserved; // turbo attempts (ABI-reserved field)
+            ++metrics->sampleAttempts;
+            ++metrics->sparseNoRsAttempts;
+            const double turboStarted = guidedNowMs();
+            auto decoded = decodeTurboDataOnly(*cache, track, yPlane, width, height, stride,
+                                               dx, dy, levels, *metrics);
+            bool success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+            if (success) {
+                ++metrics->sparseNoRsSuccesses;
+            } else if (rsBudget > 0) {
+                --rsBudget;
+                ++metrics->sparseRsFallbacks;
+                decoded = decodeTurboWithRS(*cache, track, yPlane, width, height, stride,
+                                            dx, dy, levels, *metrics);
+                success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+            }
+            metrics->fastDecodeMs += guidedNowMs() - turboStarted;
+            if (success) {
+                ++metrics->reserved2; // turbo successes (ABI-reserved field)
+                cache->misses = 0;
+                cache->cooldown = 0;
+            } else if (++cache->misses >= 2) {
+                cache->misses = 0;
+                cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
+            }
+        }
+
+        // A clean high-resolution frame can finish here: no HybridBinarizer,
+        // finder search, alignment search, generic parser or QR RS at all.
+        if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount})) {
+            metrics->misses = metrics->tracks - metrics->successful;
+            metrics->totalMs = guidedNowMs() - started;
+            return resultCount;
+        }
+
         const double binStart = guidedNowMs();
         ImageView iv(const_cast<uint8_t*>(yPlane), width, height, ImageFormat::Lum, stride, 1);
         HybridBinarizer binarized(iv);
         auto bits = binarized.getBitMatrix();
         metrics->binarizeMs = guidedNowMs() - binStart;
         if (!bits) {
+            metrics->misses = metrics->tracks - metrics->successful;
             metrics->totalMs = guidedNowMs() - started;
-            return 0;
+            return resultCount;
         }
 
         std::vector<int> order;
         order.reserve(trackCount);
         for (int i = 0; i < trackCount; ++i)
-            order.push_back(i);
+            if (!completed[i])
+                order.push_back(i);
         const PointF imageCenter{width * 0.5, height * 0.5};
         std::sort(order.begin(), order.end(), [&](int a, int b) {
             auto center = [](const DecimenGuidedTrack& t) {
@@ -535,13 +1003,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                    std::hypot(cb.x - imageCenter.x, cb.y - imageCenter.y);
         });
 
-        int resultCount = 0;
-        int outputUsed = 0;
         for (int trackIndex : order) {
             if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
                 break;
             const auto& track = tracks[trackIndex];
-            metrics->tracks++;
 
             QRCode::FinderPatternSet finderSet;
             const double finderStart = guidedNowMs();
@@ -575,26 +1040,21 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 result.x2 = pos[2].x; result.y2 = pos[2].y;
                 result.x3 = pos[3].x; result.y3 = pos[3].y;
                 outputUsed += int(bytes.size());
-                metrics->successful++;
+                ++metrics->successful;
                 return true;
             };
 
-            // Sparse distortion-aware tiled sample. It stays hot unless a slot
-            // produces a sustained miss streak. When all six real sparse alignment
-            // controls are present, first try the parser without QR Reed-Solomon;
-            // AirGapper CRC is the oracle. A miss immediately pays normal RS, so
-            // this cannot reduce decode yield versus the sparse path it replaces.
             if (guidedSparseAllowed(track.id)) {
                 ++metrics->fastDecodeAttempts;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr);
+                std::vector<PointF> sparseMap;
+                auto* mapOut = turboSeedEligible(track) ? &sparseMap : nullptr;
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut);
                 if (sparse.isValid() && sparse.bits().width() == track.dimension) {
                     metrics->sampleAttempts++;
                     const double fastStart = guidedNowMs();
-                    if (!decodedTrack) {
-                        ++metrics->sparseRsFallbacks;
-                        auto decoded = QRCode::Decode(sparse.bits());
-                        decodedTrack = commitDecoded(sparse, decoded);
-                    }
+                    ++metrics->sparseRsFallbacks;
+                    auto decoded = QRCode::Decode(sparse.bits());
+                    decodedTrack = commitDecoded(sparse, decoded);
                     const double fastElapsed = guidedNowMs() - fastStart;
                     metrics->fastDecodeMs += fastElapsed;
                     metrics->decodeMs += fastElapsed;
@@ -603,6 +1063,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         ++metrics->fastDecodeSuccesses;
                         if (track.id >= 0 && track.id < 32)
                             metrics->sparseSuccessMask |= uint32_t(1) << track.id;
+                        if (mapOut) {
+                            if (sparseMap.empty())
+                                sparseMap = buildHomographySampleMap(track.dimension, sparse.position());
+                            seedGuidedTurbo(track.id, track.dimension, sparse.position(), std::move(sparseMap), true);
+                        }
                     }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
@@ -610,10 +1075,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 ++metrics->sparseSkipped;
             }
 
-            // Sparse misses retain the exact proven decoder. Full SampleQR is
-            // gated by the receiver-wide physical-slot policy supplied with this
-            // job, so one bad slot cannot relearn the same miss independently in
-            // every worker.
             if (!decodedTrack) {
                 const bool fallbackAllowed = track.id < 0 || track.id >= 32 ||
                     (fallbackAllowedMask & (uint32_t(1) << track.id)) != 0;
@@ -623,7 +1084,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     ++metrics->genericFallbackTracks;
                     if (track.id >= 0 && track.id < 32)
                         metrics->fallbackAttemptMask |= uint32_t(1) << track.id;
-                    bool fallbackSuccess = false;
                     for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
                         metrics->sampleAttempts++;
                         if (!detected.isValid() || detected.bits().width() != track.dimension)
@@ -636,11 +1096,14 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         metrics->decodeMs += genericElapsed;
                         decodeSpent += genericElapsed;
                         if (commitDecoded(detected, decoded)) {
-                            fallbackSuccess = true;
                             decodedTrack = true;
                             ++metrics->genericFallbackSuccesses;
                             if (track.id >= 0 && track.id < 32)
                                 metrics->fallbackSuccessMask |= uint32_t(1) << track.id;
+                            if (turboSeedEligible(track)) {
+                                auto map = buildHomographySampleMap(track.dimension, detected.position());
+                                seedGuidedTurbo(track.id, track.dimension, detected.position(), std::move(map), false);
+                            }
                             break;
                         }
                     }

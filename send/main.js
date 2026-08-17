@@ -30,7 +30,7 @@ const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 function selectedLayout() {
   const mode = cfgLayout.value;
-  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" ? mode : "four-three";
+  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-eight" ? mode : "four-three";
 }
 function selectedOrientation() {
   const orientation = cfgOrientation.value;
@@ -54,6 +54,10 @@ function layoutGrid(mode = selectedLayout()) {
       return { cols: 3, rows: 5, codes: 15 };
     case "three-six":
       return { cols: 3, rows: 6, codes: 18 };
+    case "four-six":
+      return { cols: 4, rows: 6, codes: 24 };
+    case "four-eight":
+      return { cols: 4, rows: 8, codes: 32 };
     default:
       return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
   }

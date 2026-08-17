@@ -193,7 +193,7 @@ function fitsBits(value, width) {
 }
 function packFrame(h, block) {
   const headerLen = frameHeaderLength(h.mode);
-  if (codingMode(h.k) !== h.mode || h.mode === "raptorq" && h.k > RAPTOR_MAX_K || block.length !== h.blockLen || h.blockLen <= (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0) || Math.ceil(h.totalLen / (h.blockLen - (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0))) !== h.k || !fitsBits(h.payloadId, 32) || !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) || !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) || h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen) || h.mode === "mds" && !fitsBits(h.seq, 8) || h.mode === "raptorq" && !fitsBits(h.seq, 24) || h.mode !== "direct" && (!fitsBits(h.layoutId, 3) || !fitsBits(h.slotIndex, 5))) throw new Error("Frame metadata exceeds its packed field.");
+  if (codingMode(h.k) !== h.mode || h.mode === "raptorq" && h.k > RAPTOR_MAX_K || block.length !== h.blockLen || h.blockLen <= (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0) || Math.ceil(h.totalLen / (h.blockLen - (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0))) !== h.k || !fitsBits(h.payloadId, 32) || !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) || !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) || h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen) || h.mode === "mds" && !fitsBits(h.seq, 8) || h.mode === "raptorq" && !fitsBits(h.seq, 24) || h.mode !== "direct" && (!fitsBits(h.layoutId, 4) || !fitsBits(h.slotIndex, 5))) throw new Error("Frame metadata exceeds its packed field.");
   const out = new Uint8Array(headerLen + block.length + FRAME_CRC_LEN);
   out[0] = magicForMode(h.mode);
   let bit = 8;
@@ -201,7 +201,7 @@ function packFrame(h, block) {
     bit = writeBits(out, bit, h.totalLen - 1, DIRECT_TOTAL_BITS);
   } else {
     bit = writeBits(out, bit, h.seq, h.mode === "mds" ? 8 : 24);
-    bit = writeBits(out, bit, h.layoutId, 3);
+    bit = writeBits(out, bit, h.layoutId, 4);
     bit = writeBits(out, bit, h.slotIndex, 5);
     bit = writeBits(out, bit, h.blockLen - 1, BLOCK_LEN_BITS);
     bit = writeBits(out, bit, h.totalLen - 1, h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS);
@@ -235,7 +235,7 @@ function parseFrameBody(bytes, hasCrc) {
   } else {
     const sequence = readBits(bytes, bit, mode === "mds" ? 8 : 24);
     seq = sequence.value;
-    const layout = readBits(bytes, sequence.next, 3);
+    const layout = readBits(bytes, sequence.next, 4);
     layoutId = layout.value;
     const slot = readBits(bytes, layout.next, 5);
     slotIndex = slot.value;
