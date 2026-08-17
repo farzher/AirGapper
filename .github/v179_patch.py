@@ -22,3 +22,5 @@ replace_once(
     '''  if (batchTracks.length > 1) {\n    const points = batchTracks.flatMap((track) => [''',
     '''  // A single tracked grid slot must use the same bounded shared-crop hot\n  // path as a multi-QR wall. The legacy per-region crop below is intentionally\n  // only for non-grid/provisional regions: unlike this path it is not clamped\n  // and quantized to the camera frame, which can mis-map a large 1-QR crop and\n  // strand guided decoding while periodic full scans still succeed.\n  if (batchTracks.length >= 1) {\n    const points = batchTracks.flatMap((track) => ['''
 )
+
+# workflow trigger
