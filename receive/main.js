@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.145";
+const RECEIVER_RUNTIME_BUILD = "v0.5.147";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -843,22 +843,26 @@ const pendingLaneReplaceTimes = [];
 let lastDecodeSubmittedSourceSequence = -1;
 const usefulFrameTimes = [];
 const GUIDED_MIN_TRACKS = 6;
+const GUIDED_ROBUST_SCOUT_EVERY = 12;
+const GUIDED_ROBUST_SCOUT_BAD_EVERY = 4;
 const guidedRollout = {
-  state: "warmup",
+  state: "active",
   inFlight: 0,
   failures: 0,
   rampGood: 0,
   badStreak: 0,
   robustSinceRetry: 0,
+  jobsSinceRobust: 0,
   robustLatencies: []
 };
 function resetGuidedRollout() {
-  guidedRollout.state = "warmup";
+  guidedRollout.state = "active";
   guidedRollout.inFlight = 0;
   guidedRollout.failures = 0;
   guidedRollout.rampGood = 0;
   guidedRollout.badStreak = 0;
   guidedRollout.robustSinceRetry = 0;
+  guidedRollout.jobsSinceRobust = 0;
   guidedRollout.robustLatencies.length = 0;
 }
 function guidedBaselineP50() {
@@ -867,15 +871,30 @@ function guidedBaselineP50() {
 function chooseGuidedStage(message) {
   if (message.full || message.strictHotPath || message.pixelFormat !== "y8" || !Array.isArray(message.tracks) || message.tracks.length < GUIDED_MIN_TRACKS)
     return "";
-  if (guidedRollout.state === "warmup" && guidedRollout.robustLatencies.length >= 4)
-    guidedRollout.state = "probe";
-  const limit = guidedRollout.state === "probe" ? 1 : guidedRollout.state === "ramp" ? 2 : guidedRollout.state === "active" ? Math.max(1, pool.size - 1) : 0;
-  if (!limit || guidedRollout.inFlight >= limit)
+
+  // On the OP12R production trace, guided decoded 326 symbols in 56 jobs while
+  // consuming only ~3.3 worker-seconds; dense robust consumed ~100 worker-
+  // seconds. Guided is the production decoder now, not a speculative rollout.
+  // Keep one occasional dense scout for independent recovery/evidence, and
+  // increase that scout cadence only after several zero-output guided frames.
+  const robustInFlight = pool.activeJobs.reduce((count, job) => {
+    if (job.id === void 0) return count;
+    const mode = hotPathJobMode.get(job.id);
+    return count + Number(mode && !mode.full && !mode.guided);
+  }, 0);
+  const scoutEvery = guidedRollout.badStreak >= 3
+    ? GUIDED_ROBUST_SCOUT_BAD_EVERY
+    : GUIDED_ROBUST_SCOUT_EVERY;
+  guidedRollout.jobsSinceRobust++;
+  if (guidedRollout.jobsSinceRobust >= scoutEvery && robustInFlight === 0) {
+    guidedRollout.jobsSinceRobust = 0;
     return "";
-  const stage = guidedRollout.state;
+  }
+
+  guidedRollout.state = "active";
   guidedRollout.inFlight++;
   message.guidedDecode = true;
-  return stage;
+  return "active";
 }
 function noteGuidedRobustBaseline(latencyMs) {
   guidedRollout.robustLatencies.push(latencyMs);
@@ -893,51 +912,19 @@ function noteGuidedRobustBaseline(latencyMs) {
 function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (!stage) return;
-  const baseline = guidedBaselineP50();
-  // Guided decode is dramatically cheaper than dense robust search. Requiring
-  // one third of a large wall made a 4/15 guided result fail rollout even when
-  // it completed in a few tens of milliseconds. Four fresh symbols per frame
-  // is already a strong throughput contribution; let the fast path stay active.
-  const minOutput = Math.max(2, Math.ceil(Math.max(1, tracks) / 4));
-  const fastEnough = !baseline || latencyMs <= Math.max(180, baseline * 0.85);
-  const good = outputSymbols >= minOutput && fastEnough;
-  if (stage === "probe") {
-    if (good && guidedRollout.state === "probe") {
-      guidedRollout.state = "ramp";
-      guidedRollout.rampGood = 1;
-      guidedRollout.badStreak = 0;
-    } else if (guidedRollout.state === "probe") {
-      guidedRollout.failures++;
-      guidedRollout.state = "retry";
-      guidedRollout.rampGood = 0;
-      guidedRollout.badStreak = 0;
-      guidedRollout.robustSinceRetry = 0;
-    }
-    return;
+  // Do not demote a low-latency decoder merely because one animated display
+  // frame produced few symbols. A zero-output guided frame is cheap (~10-60ms
+  // in the measured run); dense robust frames are the expensive 0.2-2s events.
+  // Generic lattice recovery plus the single robust scout provide the escape
+  // hatch, while normal camera frames stay on the bounded guided path.
+  if (outputSymbols > 0) {
+    guidedRollout.badStreak = 0;
+    guidedRollout.rampGood++;
+  } else {
+    guidedRollout.badStreak++;
+    guidedRollout.failures++;
   }
-  if (stage === "ramp") {
-    if (guidedRollout.state !== "ramp") return;
-    if (good) {
-      if (++guidedRollout.rampGood >= 4) guidedRollout.state = "active";
-    } else {
-      guidedRollout.failures++;
-      guidedRollout.state = "retry";
-      guidedRollout.rampGood = 0;
-      guidedRollout.badStreak = 0;
-      guidedRollout.robustSinceRetry = 0;
-    }
-    return;
-  }
-  if (stage === "active" && guidedRollout.state === "active") {
-    if (good) guidedRollout.badStreak = 0;
-    else if (++guidedRollout.badStreak >= 2) {
-      guidedRollout.failures++;
-      guidedRollout.state = "retry";
-      guidedRollout.rampGood = 0;
-      guidedRollout.badStreak = 0;
-      guidedRollout.robustSinceRetry = 0;
-    }
-  }
+  guidedRollout.state = "active";
 }
 const livePipeline = {
   startedAt: 0,
