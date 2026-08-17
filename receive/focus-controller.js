@@ -1244,6 +1244,10 @@ class FocusController {
       return;
     }
     this.requestedMode = "single-shot";
+    // Start the retry clock with the initial sweep. Without this fence the
+    // first target-absent callback can issue a second single-shot immediately
+    // and restart the lens before the original sweep has had time to settle.
+    this.lastSeekingAfAt = performance.now();
     await this.apply(track, { focusMode: "single-shot" });
     this.committedFocusMode = this.settings().focusMode;
     this.committedFocusDistance = this.settings().focusDistance;
