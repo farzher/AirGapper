@@ -46,6 +46,45 @@ async function captureDistinctFrames(label, count) {
   return { frames, geometry };
 }
 
+async function perturbFrames(urls, count = 20) {
+  return page.evaluate(async ({ urls, count }) => {
+    const load = (url) => new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = url;
+    });
+    const sources = await Promise.all(urls.map(load));
+    const width = sources[0].naturalWidth;
+    const height = sources[0].naturalHeight;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const frames = [];
+    for (let index = 0; index < count; index++) {
+      const phase = index * 0.73;
+      const dx = Math.sin(phase) * 4.5;
+      const dy = Math.cos(phase * 0.81) * 3.5;
+      const scale = 1 + Math.sin(phase * 0.57) * 0.0045;
+      const angle = Math.sin(phase * 0.43) * 0.22 * Math.PI / 180;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, width, height);
+      ctx.translate(width / 2 + dx, height / 2 + dy);
+      ctx.rotate(angle);
+      ctx.scale(scale, scale);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(sources[index % sources.length], -width / 2, -height / 2);
+      ctx.restore();
+      frames.push(canvas.toDataURL("image/png"));
+    }
+    return frames;
+  }, { urls, count });
+}
+
 async function generateSenderProfiles() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator('[data-mode="send"]').click();
@@ -82,6 +121,8 @@ async function generateSenderProfiles() {
   await page.waitForTimeout(120);
 
   const easy = await captureDistinctFrames("stable-1000B", 8);
+  const motion = await perturbFrames(easy.frames, 20);
+  console.log(`AIRGAPPER_SENDER_PROFILE motion-1000B ${easy.geometry.width}x${easy.geometry.height} frames=${motion.length}`);
 
   const easyGeometry = easy.geometry;
   await page.evaluate(() => {
@@ -96,7 +137,7 @@ async function generateSenderProfiles() {
   await page.waitForTimeout(180);
   const dense = await captureDistinctFrames("dense-2953B", 10);
 
-  return { easy: easy.frames, dense: dense.frames };
+  return { easy: easy.frames, motion, dense: dense.frames };
 }
 
 function commonAssertions(name, result, failures) {
@@ -128,6 +169,14 @@ function assertScenario(name, result) {
     if (result.tailTrackedJobs < 12) failures.push(`stable tail only scheduled ${result.tailTrackedJobs} tracked jobs (<12)`);
     if (result.decodeP95Ms > 180) failures.push(`stable Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 180ms`);
   }
+  if (name === "motion-y8") {
+    if (result.finalState !== "TRACK") failures.push(`motion path ended in ${result.finalState}, not TRACK`);
+    if (result.trackedJobs < 16) failures.push(`motion tracked jobs ${result.trackedJobs} < 16`);
+    if (result.guidedJobs < 10) failures.push(`motion Guided jobs ${result.guidedJobs} < 10`);
+    if (result.guidedOutputs < 80) failures.push(`motion Guided outputs ${result.guidedOutputs} < 80`);
+    if (result.tailTrackedJobs < 10) failures.push(`motion tail only scheduled ${result.tailTrackedJobs} tracked jobs (<10)`);
+    if (result.decodeP95Ms > 220) failures.push(`motion Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 220ms`);
+  }
   if (name === "dense-y8") {
     if (result.trackedJobs < 10) failures.push(`dense tracked jobs ${result.trackedJobs} < 10`);
     if (result.guidedJobs < 7) failures.push(`dense actual Guided jobs ${result.guidedJobs} < 7`);
@@ -147,7 +196,7 @@ function assertScenario(name, result) {
 }
 
 try {
-  const { easy, dense } = await generateSenderProfiles();
+  const { easy, motion, dense } = await generateSenderProfiles();
   await page.evaluate(() => document.getElementById("home-button").click());
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
@@ -159,6 +208,14 @@ try {
       name: "stable-y8",
       urls: easy,
       order: [...easyOrder, ...Array(24).fill(0)],
+      fps: 30,
+      mode: "performance",
+      cameraPath: true
+    },
+    {
+      name: "motion-y8",
+      urls: [...easy, ...motion],
+      order: Array.from({ length: easy.length + motion.length }, (_, index) => index),
       fps: 30,
       mode: "performance",
       cameraPath: true
@@ -197,7 +254,7 @@ try {
     format: "AirGapper fast production regression",
     generatedAt: new Date().toISOString(),
     baseUrl,
-    sourceFrames: { stable: easy.length, dense: dense.length },
+    sourceFrames: { stable: easy.length, motion: motion.length, dense: dense.length },
     oracle: false,
     browserErrors: pageErrors,
     scenarios: results
