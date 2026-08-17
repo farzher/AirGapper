@@ -77,7 +77,7 @@ new = '''                    if (levels.ok) {
                             success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
                             if (success) {
                                 ++metrics->stableRsSuccesses;
-                                cache->stableSuccesses = std::min<uint8_t>(255, uint8_t(cache->stableSuccesses + 1));
+                                cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
                             }
                         }
                     }'''
