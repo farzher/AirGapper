@@ -3,13 +3,14 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 const WORKER_JOB_TIMEOUT_MS = 12e3;
 class DecodeWorkerPool {
-  constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable) {
+  constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable, onFrameSignature) {
     this.create = create;
     this.onDecoded = onDecoded;
     this.onSighted = onSighted;
     this.onTrackedAttempt = onTrackedAttempt;
     this.onCompleted = onCompleted;
     this.onAvailable = onAvailable;
+    this.onFrameSignature = onFrameSignature;
     __publicField(this, "workers", []);
     __publicField(this, "busy", []);
     __publicField(this, "activeIds", []);
@@ -31,6 +32,17 @@ class DecodeWorkerPool {
       const message = event.data;
       if (message.id === -1) return;
       if (this.activeIds[slot] !== message.id) return;
+      // A worker publishes its tiny page signature immediately after copying
+      // Y8, before the expensive QR decode. Keep the worker busy; this is only
+      // a preflight notification used by the next camera frame.
+      if (message.preflight) {
+        this.onFrameSignature?.({
+          id: message.id,
+          sourceSequence: message.sourceSequence,
+          signature: message.frameSignature
+        });
+        return;
+      }
       const symbols = (_a = message.symbols) != null ? _a : [];
       const sightings = (_b = message.sightings) != null ? _b : [];
       const jobOptics = this.jobOptics.get(message.id);
@@ -72,6 +84,8 @@ class DecodeWorkerPool {
           robustSearchMs: message.robustSearchMs ?? 0,
           exactFastPath: Boolean(message.exactFastPath),
           directFrameFailed: Boolean(message.directFrameFailed),
+          repeatSkipped: Boolean(message.repeatSkipped),
+          repeatDistance: Number(message.repeatDistance),
           symbols,
           sightings,
           error: message.error

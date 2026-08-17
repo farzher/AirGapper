@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.153";
+const RECEIVER_RUNTIME_BUILD = "v0.5.154";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -715,6 +715,7 @@ function clearLockedLaneCrops() {
 function clearPendingGridLanes() {
   for (let index = 0; index < pendingGridLanes.length; index++) discardPendingGridLane(index);
   clearLockedLaneCrops();
+  latestRepeatSignature = undefined;
 }
 function stableLockedLaneCrop(groupIndex, key, laneCount, vw, vh, minX, minY, maxX, maxY, typicalEdge) {
   const cropQuantum = 16;
@@ -792,6 +793,8 @@ function drainPendingGridLane(workerSlot) {
   if (accepted) cropAttempts.set(id, pending.regions.map((region) => ({ region, quad: region.quad })));
   else pending.direct.frame.close();
 }
+let latestRepeatSignature;
+const repeatSkipTimes = [];
 const pool = new DecodeWorkerPool(
   createDecodeWorker,
   (bytes, box, info) => onDecoded(bytes, box, info),
@@ -804,7 +807,14 @@ const pool = new DecodeWorkerPool(
   },
   () => void 0,
   (id, completion) => noteDecodeCompleted(id, completion),
-  (slot) => drainPendingGridLane(slot)
+  (slot) => drainPendingGridLane(slot),
+  ({ sourceSequence, signature }) => {
+    const sequence = Number(sourceSequence);
+    if (!Number.isFinite(sequence) || !signature) return;
+    if (!latestRepeatSignature || sequence > latestRepeatSignature.sourceSequence) {
+      latestRepeatSignature = { sourceSequence: sequence, signature };
+    }
+  }
 );
 const captureTimes = [];
 const qrReadTimes = [];
@@ -1708,6 +1718,10 @@ function noteDecodeCompleted(id, completion) {
     lastGuidedMetrics = { ...completion.guidedMetrics, frameCopyMs: completion.frameCopyMs };
   }
   if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
+  if (completion.repeatSkipped) {
+    repeatSkipTimes.push(receiverNow());
+    notePipelineEvent("repeat-frame-skip", Number.isFinite(completion.repeatDistance) ? completion.repeatDistance : 0);
+  }
   if (auditThisCompletion && completion.nativeMetrics) {
     hotPathAudit.trackedJobs++;
     hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
@@ -1757,7 +1771,7 @@ function noteDecodeCompleted(id, completion) {
   const attempts = cropAttempts.get(id);
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
-  if (!attempts) return;
+  if (!attempts || completion.repeatSkipped) return;
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
@@ -2675,6 +2689,8 @@ function renderFocusDiagnostics() {
     while (samples.length && samples[0].at <= windowStart) samples.shift();
   }
   while (pendingLaneReplaceTimes.length && pendingLaneReplaceTimes[0] <= windowStart) pendingLaneReplaceTimes.shift();
+  while (repeatSkipTimes.length && repeatSkipTimes[0] <= windowStart) repeatSkipTimes.shift();
+  const repeatSkipRate = repeatSkipTimes.length / (STATS_WINDOW_MS / 1e3);
   const trackedSubmits = hotJobSubmitSamples.filter((sample) => !sample.full);
   const trackedCompletions = hotJobCompletionSamples.filter((sample) => !sample.full);
   const submittedJobsRate = trackedSubmits.length / (STATS_WINDOW_MS / 1e3);
@@ -2720,7 +2736,7 @@ function renderFocusDiagnostics() {
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · decode frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
@@ -3057,6 +3073,8 @@ function stopReceiver() {
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
   resetDuplicateAttribution();
+  repeatSkipTimes.length = 0;
+  latestRepeatSignature = undefined;
   poolBusyTimes.length = 0;
   scanCompletionTimes.length = 0;
   decodeFrameTimes.length = 0;
@@ -3806,6 +3824,14 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
   message.trackCount = auditMode.tracks;
   message.sourceSequence = sourceSequence;
   if (sourceOpticsEpoch !== void 0) message.opticsEpoch = sourceOpticsEpoch;
+  const repeatEligible = Boolean(
+    guidedStage && !auditMode.full && auditMode.tracks >= 2 && message.pixelFormat === "y8" &&
+    !replayRunning && !optimizerPipelineActive && autoOpticsRuntimeState !== "tuning" && !captureNextScan
+  );
+  message.repeatFilter = repeatEligible;
+  if (repeatEligible && latestRepeatSignature?.sourceSequence === sourceSequence - 1) {
+    message.previousFrameSignature = latestRepeatSignature.signature;
+  }
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (!accepted && guidedStage) guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (accepted) {

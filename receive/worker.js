@@ -344,9 +344,81 @@ function projectedNeighbor(q, dx, dy, stride) {
   const x = dx * stride, y = dy * stride;
   return { topLeft: project(x, y), topRight: project(x + 1, y), bottomRight: project(x + 1, y + 1), bottomLeft: project(x, y + 1) };
 }
+
+const REPEAT_SIGNATURE_X = 8;
+const REPEAT_SIGNATURE_Y = 6;
+const REPEAT_SIGNATURE_TRACKS = 3;
+const REPEAT_SIGNATURE_MAX_BITS = 6;
+
+function repeatPageSignature(heap, yPtr, width, height, stride, ox, oy, tracks) {
+  if (!Array.isArray(tracks) || tracks.length < 2 || stride < width) return null;
+  const ordered = tracks
+    .filter((track) => validQuad(track.quad) && Number.isFinite(track.dim) && track.dim >= 21)
+    .sort((a, b) => (a.slot ?? a.id ?? 0) - (b.slot ?? b.id ?? 0));
+  if (ordered.length < 2) return null;
+  const pickIndices = [];
+  for (let i = 1; i <= REPEAT_SIGNATURE_TRACKS; i++) {
+    const index = Math.round((ordered.length - 1) * i / (REPEAT_SIGNATURE_TRACKS + 1));
+    if (!pickIndices.includes(index)) pickIndices.push(index);
+  }
+  const selected = pickIndices.map((index) => ordered[index]).filter(Boolean);
+  if (selected.length < 2) return null;
+
+  const bits = new Uint8Array(Math.ceil(selected.length * REPEAT_SIGNATURE_X * REPEAT_SIGNATURE_Y / 8));
+  let bitIndex = 0;
+  const keys = [];
+  const project = (q, u, v) => ({
+    x: (1 - u) * (1 - v) * q.topLeft.x + u * (1 - v) * q.topRight.x + u * v * q.bottomRight.x + (1 - u) * v * q.bottomLeft.x - ox,
+    y: (1 - u) * (1 - v) * q.topLeft.y + u * (1 - v) * q.topRight.y + u * v * q.bottomRight.y + (1 - u) * v * q.bottomLeft.y - oy
+  });
+
+  for (const track of selected) {
+    const values = [];
+    const dim = Math.round(track.dim);
+    keys.push(`${track.slot ?? track.id ?? 0}:${dim}`);
+    for (let gy = 0; gy < REPEAT_SIGNATURE_Y; gy++) {
+      for (let gx = 0; gx < REPEAT_SIGNATURE_X; gx++) {
+        // Interior module centers avoid the three fixed finder patterns. The
+        // exact samples need not decode QR; they only need to change strongly
+        // when the sender paints a different random-looking data matrix.
+        const mx = Math.max(0, Math.min(dim - 1, Math.round(dim * (0.20 + (gx + 0.5) / REPEAT_SIGNATURE_X * 0.60))));
+        const my = Math.max(0, Math.min(dim - 1, Math.round(dim * (0.20 + (gy + 0.5) / REPEAT_SIGNATURE_Y * 0.60))));
+        const p = project(track.quad, (mx + 0.5) / dim, (my + 0.5) / dim);
+        const x = Math.round(p.x), y = Math.round(p.y);
+        if (x < 0 || y < 0 || x >= width || y >= height) return null;
+        values.push(heap[yPtr + y * stride + x]);
+      }
+    }
+    const ranked = [...values].sort((a, b) => a - b);
+    const lo = ranked[Math.floor(ranked.length * 0.12)];
+    const hi = ranked[Math.floor(ranked.length * 0.88)];
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi - lo < 36) return null;
+    const threshold = (lo + hi) * 0.5;
+    for (const value of values) {
+      if (value < threshold) bits[bitIndex >> 3] |= 1 << (bitIndex & 7);
+      bitIndex++;
+    }
+  }
+  return { key: keys.join('|'), bits: Array.from(bits), bitCount: bitIndex };
+}
+
+function repeatSignatureDistance(current, previous) {
+  if (!current || !previous || current.key !== previous.key || current.bitCount !== previous.bitCount ||
+      !Array.isArray(current.bits) || !Array.isArray(previous.bits) || current.bits.length !== previous.bits.length) return null;
+  let different = 0;
+  for (let i = 0; i < current.bits.length; i++) {
+    let value = (current.bits[i] ^ previous.bits[i]) & 255;
+    while (value) {
+      value &= value - 1;
+      different++;
+    }
+  }
+  return { different, fraction: different / Math.max(1, current.bitCount) };
+}
+
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -399,6 +471,40 @@ ctx.onmessage = async (e) => {
     }
     const pw = w;
     const ph = h;
+    // Adjacent-camera duplicates are expensive because the 30 fps receiver can
+    // photograph one 20-ish fps sender page twice. After the Y plane copy, a
+    // 144-bit signature costs only a handful of reads from known QR interiors.
+    // Publish it immediately so the next worker can compare against it. Only a
+    // near-identical whole-page match exits early; rolling transitions keep
+    // decoding because their signature changes substantially.
+    if (repeatFilter && decodePixelFormat === "y8" && !full && guidedDecode && tracks?.length >= 2) {
+      const frameSignature = repeatPageSignature(zx.HEAPU8, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks);
+      if (frameSignature) {
+        ctx.postMessage({ id, preflight: true, sourceSequence, frameSignature });
+        const distance = repeatSignatureDistance(frameSignature, previousFrameSignature);
+        if (distance && distance.different <= REPEAT_SIGNATURE_MAX_BITS) {
+          ctx.postMessage({
+            id,
+            sourceSequence,
+            symbols: [],
+            sightings: [],
+            full: false,
+            trackedAttempted: false,
+            trackedHit: false,
+            fallbackAttempted: false,
+            fallbackSucceeded: false,
+            readFullAttempts: 0,
+            workerWaitMs,
+            frameCopyMs,
+            repeatSkipped: true,
+            repeatDistance: distance.fraction,
+            pixelPath: "y8-repeat",
+            latencyMs: performance.now() - startedAt
+          });
+          return;
+        }
+      }
+    }
     const symbols = [];
     const sightings = [];
     const mapOutputToDisplay = (decodedSymbols = symbols, decodedSightings = sightings) => {
