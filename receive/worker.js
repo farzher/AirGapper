@@ -454,7 +454,13 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && (usedDirectFrame || pixelFormat === "rgba");
+    // Direct camera frames use the Y8 Guided lane first. Buffered RGBA frames
+    // (corpus replay, benchmark images, legacy/canvas inputs) already have
+    // trusted lattice geometry, so do not throw that information away by
+    // running the generic finder before the persistent tracked decoder. Try
+    // native tracked sampling first; the existing cold-track recovery below
+    // still wakes robust detection when geometry genuinely stops working.
+    const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && usedDirectFrame;
     const coldTrackCount = !strictHotPath && !full && Array.isArray(tracks)
       ? tracks.filter((track) => (track.misses ?? 0) >= 4).length
       : 0;
