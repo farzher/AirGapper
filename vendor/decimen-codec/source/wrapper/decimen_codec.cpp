@@ -1027,33 +1027,43 @@ static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const Decimen
 {
     PointF best{predictedX, predictedY};
     int bestScore = -1;
-    for (int oy = -3; oy <= 3; ++oy)
-        for (int ox = -3; ox <= 3; ++ox) {
-            const float dx = predictedX + ox;
-            const float dy = predictedY + oy;
-            const auto levels = turboReadLevels(cache, track, frameTransform, yPlane, width, height, stride, dx, dy);
-            if (!levels.ok)
-                continue;
-            const int score = levels.matches * 4 + levels.separation;
-            if (score > bestScore) {
-                bestScore = score;
-                best = PointF{dx, dy};
-            }
+    int bestMatches = -1;
+    auto consider = [&](float dx, float dy) {
+        const auto levels = turboReadLevels(cache, track, frameTransform, yPlane, width, height, stride, dx, dy);
+        if (!levels.ok) return;
+        const int score = levels.matches * 4 + levels.separation;
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatches = levels.matches;
+            best = PointF{dx, dy};
         }
-    const PointF coarse = best;
-    for (int hy = -1; hy <= 1; ++hy)
-        for (int hx = -1; hx <= 1; ++hx) {
-            const float dx = coarse.x + hx * 0.5f;
-            const float dy = coarse.y + hy * 0.5f;
-            const auto levels = turboReadLevels(cache, track, frameTransform, yPlane, width, height, stride, dx, dy);
-            if (!levels.ok)
-                continue;
-            const int score = levels.matches * 4 + levels.separation;
-            if (score > bestScore) {
-                bestScore = score;
-                best = PointF{dx, dy};
-            }
-        }
+    };
+    consider(predictedX, predictedY);
+    if (bestMatches < 143) {
+        for (int oy = -1; oy <= 1; ++oy)
+            for (int ox = -1; ox <= 1; ++ox)
+                if (ox || oy)
+                    consider(predictedX + ox, predictedY + oy);
+    }
+    if (bestMatches < 140) {
+        for (int oy = -2; oy <= 2; ++oy)
+            for (int ox = -2; ox <= 2; ++ox)
+                if (std::max(std::abs(ox), std::abs(oy)) == 2)
+                    consider(predictedX + ox, predictedY + oy);
+    }
+    if (bestMatches < 132) {
+        for (int oy = -3; oy <= 3; ++oy)
+            for (int ox = -3; ox <= 3; ++ox)
+                if (std::max(std::abs(ox), std::abs(oy)) == 3)
+                    consider(predictedX + ox, predictedY + oy);
+    }
+    if (bestScore >= 0) {
+        const PointF coarse = best;
+        for (int hy = -1; hy <= 1; ++hy)
+            for (int hx = -1; hx <= 1; ++hx)
+                if (hx || hy)
+                    consider(coarse.x + hx * 0.5f, coarse.y + hy * 0.5f);
+    }
     return best;
 }
 
@@ -1216,6 +1226,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         auto& turboAdaptive = guidedTurboAdaptive();
         if (turboAdaptive.cooldown)
             --turboAdaptive.cooldown;
+        for (auto& cache : guidedTurboTracks())
+            if (cache.cooldown)
+                --cache.cooldown;
 
         int canaryIndex = -1;
         if (!turboAdaptive.promoted && !turboAdaptive.cooldown) {
@@ -1224,7 +1237,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             // the stable wall, not whichever QR happened to decode first.
             for (int i = 0; i < trackCount; ++i) {
                 auto* cache = guidedTurboTrack(tracks[i].id);
-                if (!cache || !cache->seeded || !cache->distortionAware ||
+                if (!cache || !cache->seeded || !cache->distortionAware || cache->cooldown ||
                     guidedModuleSize(tracks[i]) < GUIDED_TURBO_CANARY_MIN_MODULE)
                     continue;
                 float dx = 0, dy = 0, residual = 0;
@@ -1239,7 +1252,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (canaryIndex < 0) {
                 for (int i = 0; i < trackCount; ++i) {
                     auto* cache = guidedTurboTrack(tracks[i].id);
-                    if (cache && cache->seeded &&
+                    if (cache && cache->seeded && !cache->cooldown &&
                         guidedModuleSize(tracks[i]) >= GUIDED_TURBO_CANARY_MIN_MODULE) {
                         canaryIndex = i;
                         break;
@@ -1281,21 +1294,21 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // still rigidly consistent with that map; handheld/projective motion stays
         // on the existing projective direct canary + Guided recovery chain.
         float stableResidualX = 0, stableResidualY = 0;
-        bool stableReference = false;
-        for (int i = 0; i < trackCount; ++i) {
+        int stableReferenceTries = 0;
+        for (int i = 0; i < trackCount && stableReferenceTries < 3; ++i) {
             auto* cache = guidedTurboTrack(tracks[i].id);
-            if (!cache || !cache->seeded || !turboAllowed(i))
+            if (!cache || !cache->seeded || !cache->distortionAware || cache->cooldown)
                 continue;
             float poseX = 0, poseY = 0, residual = 0;
             if (!turboPose(*cache, tracks[i], poseX, poseY, residual) ||
                 !turboStableRigidEligible(*cache, tracks[i], residual))
                 continue;
+            ++stableReferenceTries;
             const auto refined = turboRefineRigidOffset(*cache, yPlane, width, height, stride, poseX, poseY);
             if (!refined)
                 continue;
             stableResidualX = refined->x - poseX;
             stableResidualY = refined->y - poseY;
-            stableReference = true;
             break;
         }
 
@@ -1304,14 +1317,15 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             auto* cache = guidedTurboTrack(track.id);
             if (!cache || !cache->seeded || !turboAllowed(i))
                 continue;
-            if (cache->cooldown) {
-                --cache->cooldown;
+            if (cache->cooldown)
                 continue;
-            }
             float poseX = 0, poseY = 0, residual = 0;
             if (!turboPose(*cache, track, poseX, poseY, residual))
                 continue;
-            const bool stableEligible = stableReference && turboStableRigidEligible(*cache, track, residual);
+            // `rigid` now means exactly what diagnostics need: this cache/track
+            // geometry can use the rigid Stable-RS sampler. Finder contrast is a
+            // separate, cheap per-slot gate and must not erase this opportunity.
+            const bool stableEligible = turboStableRigidEligible(*cache, track, residual);
             if (stableEligible)
                 ++metrics->stableEligibleTracks;
             const bool stableProbation = !turboAdaptive.promoted && stableEligible && cache->distortionAware;
@@ -1321,6 +1335,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             const double turboStarted = guidedNowMs();
             bool success = false;
             bool directSuccess = false;
+            bool directAttempted = false;
             bool stableRsAttempted = false;
 
             if (directMode) {
@@ -1331,6 +1346,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     const auto levels = turboReadLevels(*cache, track, frameTransform,
                                                         yPlane, width, height, stride, dx, dy);
                     if (levels.ok) {
+                        directAttempted = true;
                         ++metrics->sampleAttempts;
                         ++metrics->sparseNoRsAttempts;
                         auto decoded = decodeTurboDataOnly(*cache, track, frameTransform,
@@ -1365,21 +1381,30 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             }
 
             metrics->fastDecodeMs += guidedNowMs() - turboStarted;
+            const bool decoderAttempted = directAttempted || stableRsAttempted;
             if (success) {
                 ++metrics->turboSuccesses;
                 cache->misses = 0;
                 cache->cooldown = 0;
-            } else if (turboAdaptive.promoted && turboAdaptive.rsMode) {
-                if (++cache->misses >= 4) {
+            } else if (decoderAttempted) {
+                if (turboAdaptive.promoted && turboAdaptive.rsMode) {
+                    if (++cache->misses >= 4) {
+                        cache->misses = 0;
+                        cache->cooldown = 2;
+                    }
+                } else if (++cache->misses >= 2) {
                     cache->misses = 0;
-                    cache->cooldown = 2;
+                    cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
                 }
-            } else if (++cache->misses >= 2) {
-                cache->misses = 0;
-                cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
+            } else {
+                // No decoder ran, so this is anchor evidence rather than a decode
+                // failure. Briefly rotate away from this slot during probation.
+                cache->cooldown = std::max<uint8_t>(cache->cooldown, 2);
             }
 
             if (!turboAdaptive.promoted) {
+                if (!decoderAttempted)
+                    continue;
                 ++turboAdaptive.canaryAttempts;
                 turboAdaptive.canaryDirectSuccesses += int(directSuccess);
                 if (stableRsAttempted) {
@@ -1413,7 +1438,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 } else if (turboAdaptive.canaryAttempts >= 10) {
                     pauseTurbo(false);
                 }
-            } else {
+            } else if (decoderAttempted) {
                 ++turboAdaptive.promotedAttempts;
                 turboAdaptive.promotedSuccesses += int(success);
                 const int evaluationWindow = turboAdaptive.rsMode ? 72 : 36;
