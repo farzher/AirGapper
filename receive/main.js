@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.173";
+const RECEIVER_RUNTIME_BUILD = "v0.5.174";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1043,309 +1043,6 @@ function formatSlotMetric(slot) {
   const state = slotAdaptiveWeak[slot] ? " [weak]" : "";
   return `s${slot} ${hits}/${attempts}${attempts ? ` ${(hits / attempts * 100).toFixed(0)}%` : ""}${state}`;
 }
-const PORTFOLIO_MIN_WALL = 8;
-const PORTFOLIO_MIN_SLOTS = 6;
-const PORTFOLIO_MIN_FRACTION = 0.6;
-const PORTFOLIO_LEARN_SAMPLES = 12;
-const PORTFOLIO_EVAL_MS = 2400;
-const PORTFOLIO_POST_OPTICS_CLEAN_MS = PORTFOLIO_EVAL_MS;
-const PORTFOLIO_DECISION_COOLDOWN_MS = 800;
-const PORTFOLIO_RETRY_MS = 5000;
-const PORTFOLIO_SHRINK_STEP = 1;
-const PORTFOLIO_GROW_STEP = 2;
-const PORTFOLIO_EXPLORE_EVERY = 10;
-const PORTFOLIO_PRESSURE_UTIL = 0.84;
-const PORTFOLIO_PRESSURE_COVERAGE = 0.92;
-const PORTFOLIO_HEADROOM_UTIL = 0.78;
-const PORTFOLIO_KEEP_SHRINK_RATIO = 1.04;
-const PORTFOLIO_KEEP_GROW_RATIO = 0.985;
-const decodePortfolio = {
-  budget: 0,
-  maxSlots: 0,
-  minSlots: 0,
-  mode: "all",
-  lastDecisionAt: 0,
-  lowerBlockedUntil: 0,
-  upperBlockedUntil: 0,
-  probe: null,
-  selectedSlots: [],
-  excludedSlots: [],
-  exploreSlot: void 0,
-  uniqueRate: 0,
-  captureRate: 0,
-  demandRate: 0,
-  sourceRate: 0,
-  sourceFramesTotal: 0,
-  sourceFramesAt: 0,
-  cleanAfter: 0,
-  scheduleRate: 0,
-  utilization: 0,
-  busyRate: 0,
-  pressure: false
-};
-function resetDecodePortfolio() {
-  Object.assign(decodePortfolio, {
-    budget: 0, maxSlots: 0, minSlots: 0, mode: "all", lastDecisionAt: 0,
-    lowerBlockedUntil: 0, upperBlockedUntil: 0, probe: null, selectedSlots: [],
-    excludedSlots: [], exploreSlot: void 0, uniqueRate: 0, captureRate: 0, demandRate: 0,
-    sourceRate: 0, sourceFramesTotal: 0, sourceFramesAt: 0, cleanAfter: 0, scheduleRate: 0,
-    utilization: 0, busyRate: 0, pressure: false
-  });
-}
-function portfolioEventRate(events, now, windowMs = PORTFOLIO_EVAL_MS) {
-  const cutoff = now - windowMs;
-  let count = 0;
-  for (let index = events.length - 1; index >= 0 && events[index] > cutoff; index--) count++;
-  return count / (windowMs / 1e3);
-}
-function portfolioSourceDemandRate(now, captureRate) {
-  const total = Number(frameTrackProcessor?.totalFrames);
-  if (Number.isFinite(total) && total >= 0) {
-    if (decodePortfolio.sourceFramesAt > 0 && total >= decodePortfolio.sourceFramesTotal) {
-      const elapsed = now - decodePortfolio.sourceFramesAt;
-      if (elapsed >= 20) {
-        const instant = (total - decodePortfolio.sourceFramesTotal) / (elapsed / 1e3);
-        if (instant >= 1 && instant <= 240) {
-          decodePortfolio.sourceRate = decodePortfolio.sourceRate
-            ? decodePortfolio.sourceRate * 0.72 + instant * 0.28
-            : instant;
-        }
-      }
-    }
-    decodePortfolio.sourceFramesTotal = total;
-    decodePortfolio.sourceFramesAt = now;
-  }
-  if (decodePortfolio.sourceRate > 0) return Math.max(captureRate, decodePortfolio.sourceRate);
-  const nominal = Number(stream?.getVideoTracks?.()[0]?.getSettings?.().frameRate);
-  return Math.max(captureRate, Number.isFinite(nominal) ? nominal : 0);
-}
-function portfolioLoadSnapshot(now) {
-  const captureRate = portfolioEventRate(captureTimes, now);
-  const demandRate = portfolioSourceDemandRate(now, captureRate);
-  const scheduleRate = portfolioEventRate(decodeFrameTimes, now);
-  const uniqueRate = portfolioEventRate(uniqueQrTimes, now);
-  const busyRate = portfolioEventRate(poolBusyTimes, now);
-  const cutoff = now - PORTFOLIO_EVAL_MS;
-  let utilization = 0;
-  let samples = 0;
-  for (let index = workerLoadSamples.length - 1; index >= 0; index--) {
-    const sample = workerLoadSamples[index];
-    if (sample.at <= cutoff) break;
-    if (!sample.size) continue;
-    utilization += sample.busy / sample.size;
-    samples++;
-  }
-  utilization = samples ? utilization / samples : pool.size ? pool.busyCount / pool.size : 0;
-  // TrackProcessor may discard frames before the JS capture callback when the
-  // receiver is overloaded. Those are exactly the erasures this controller is
-  // supposed to recover, so compare scheduling against source demand, not only
-  // against frames that survived downstream backpressure.
-  const coverage = demandRate > 0 ? scheduleRate / demandRate : 1;
-  const overloaded = utilization >= PORTFOLIO_PRESSURE_UTIL || busyRate >= 2;
-  const pressure = demandRate >= 12 && (
-    coverage < PORTFOLIO_PRESSURE_COVERAGE && overloaded ||
-    coverage < 0.97 && utilization >= 0.95
-  );
-  const headroom = demandRate >= 12 && coverage >= 0.94 && utilization <= PORTFOLIO_HEADROOM_UTIL;
-  return { captureRate, demandRate, scheduleRate, uniqueRate, busyRate, utilization, coverage, pressure, headroom };
-}
-function portfolioSlotScore(region) {
-  const slot = Number(region.gridSlot);
-  const measured = Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT;
-  const samples = measured ? slotQualitySamples[slot] : 0;
-  const recent = samples >= 4 ? slotQualityScores[slot] : 0.55;
-  const attempts = measured ? slotAttemptCounts[slot] : 0;
-  const hits = measured ? slotHitCounts[slot] : 0;
-  const lifetime = attempts ? hits / attempts : recent;
-  // Rank by observed payload yield. A short miss streak already depresses the
-  // recent EWMA, so heavily penalizing LOST again made good 30-50% slots fall
-  // out of the portfolio and then recover only through sparse probes.
-  const success = samples >= PORTFOLIO_LEARN_SAMPLES
-    ? Math.max(recent * 0.72 + lifetime * 0.28, lifetime * 0.68)
-    : Math.max(0.5, recent * 0.65 + lifetime * 0.35);
-  const stateWeight = region.slotState === "ACTIVE" ? 1
-    : region.slotState === "LOST" ? 0.9
-    : region.slotState === "LOW_QUALITY" ? 0.78
-    : region.slotState === "PARTIAL" ? 0.5 : 0;
-  const ppm = Math.max(0.7, Math.min(1.1, (region.pixelsPerModule || 2) / 2.5));
-  const priorSelected = decodePortfolio.selectedSlots.includes(slot) ? 0.006 : 0;
-  return stateWeight * Math.max(0.2, region.visibleFraction || 0) * ppm * (0.12 + success) + priorSelected;
-}
-
-function portfolioLearnedEnough(candidates) {
-  const required = Math.min(6, candidates.length);
-  let learned = 0;
-  for (const region of candidates) {
-    const slot = Number(region.gridSlot);
-    if (Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotQualitySamples[slot] >= PORTFOLIO_LEARN_SAMPLES) learned++;
-  }
-  return learned >= required;
-}
-function beginDecodePortfolioProbe(direction, trialBudget, metrics, now) {
-  decodePortfolio.probe = {
-    direction,
-    originBudget: decodePortfolio.budget,
-    trialBudget,
-    startedAt: now,
-    baseline: { ...metrics }
-  };
-  decodePortfolio.budget = trialBudget;
-  decodePortfolio.lastDecisionAt = now;
-  decodePortfolio.mode = direction < 0 ? "probe-down" : "probe-up";
-}
-function updateDecodePortfolio(candidates, now, enabled) {
-  const maxSlots = candidates.length;
-  if (!enabled || strictHotPathActive() || maxSlots < PORTFOLIO_MIN_WALL) {
-    decodePortfolio.budget = maxSlots;
-    decodePortfolio.maxSlots = maxSlots;
-    decodePortfolio.minSlots = maxSlots;
-    decodePortfolio.mode = "all";
-    decodePortfolio.probe = null;
-    decodePortfolio.pressure = false;
-    return maxSlots;
-  }
-  const minSlots = Math.min(maxSlots, Math.max(PORTFOLIO_MIN_SLOTS, Math.ceil(maxSlots * PORTFOLIO_MIN_FRACTION)));
-  if (!decodePortfolio.budget) {
-    decodePortfolio.budget = maxSlots;
-    decodePortfolio.lastDecisionAt = now;
-  }
-  if (decodePortfolio.maxSlots && Math.abs(maxSlots - decodePortfolio.maxSlots) >= 3) decodePortfolio.probe = null;
-  decodePortfolio.maxSlots = maxSlots;
-  decodePortfolio.minSlots = minSlots;
-  decodePortfolio.budget = Math.max(minSlots, Math.min(maxSlots, decodePortfolio.budget));
-
-  const metrics = portfolioLoadSnapshot(now);
-  decodePortfolio.uniqueRate = metrics.uniqueRate;
-  decodePortfolio.captureRate = metrics.captureRate;
-  decodePortfolio.demandRate = metrics.demandRate;
-  decodePortfolio.scheduleRate = metrics.scheduleRate;
-  decodePortfolio.utilization = metrics.utilization;
-  decodePortfolio.busyRate = metrics.busyRate;
-  decodePortfolio.pressure = metrics.pressure;
-
-  const opticsStable = !autoOpticsMutationRunning && !decoderFreshnessHoldActive &&
-    !["tuning", "fine", "rescue", "settling"].includes(autoOpticsRuntimeState);
-  if (!opticsStable) {
-    // An exposure/ISO mutation changes both slot yield and decoder cost. Any
-    // portfolio comparison spanning that boundary is invalid. Reopen the wall
-    // immediately and require one completely post-mutation measurement window
-    // before another K decision; otherwise the rolling rate still contains the
-    // tuning pause and falsely reports severe CPU pressure for ~2 seconds.
-    decodePortfolio.budget = maxSlots;
-    decodePortfolio.probe = null;
-    decodePortfolio.lowerBlockedUntil = 0;
-    decodePortfolio.upperBlockedUntil = 0;
-    decodePortfolio.lastDecisionAt = now;
-    decodePortfolio.cleanAfter = now + PORTFOLIO_POST_OPTICS_CLEAN_MS;
-    decodePortfolio.mode = "hold-optics";
-    decodePortfolio.pressure = false;
-    return maxSlots;
-  }
-  if (now < decodePortfolio.cleanAfter) {
-    decodePortfolio.budget = maxSlots;
-    decodePortfolio.probe = null;
-    decodePortfolio.mode = "clean-window";
-    decodePortfolio.pressure = false;
-    return maxSlots;
-  }
-  if (!portfolioLearnedEnough(candidates)) {
-    decodePortfolio.mode = "learning";
-    return decodePortfolio.budget;
-  }
-
-  const probe = decodePortfolio.probe;
-  if (probe) {
-    if (now - probe.startedAt < PORTFOLIO_EVAL_MS) return decodePortfolio.budget;
-    const baseline = probe.baseline;
-    const captureComparable = baseline.demandRate < 8 || metrics.demandRate < 8 ||
-      Math.abs(metrics.demandRate - baseline.demandRate) / Math.max(1, baseline.demandRate) <= 0.18;
-    if (!captureComparable) {
-      probe.startedAt = now;
-      probe.baseline = { ...metrics };
-      decodePortfolio.mode = "probe-wait";
-      return decodePortfolio.budget;
-    }
-    const baselineRate = Math.max(1, baseline.uniqueRate);
-    const accepted = probe.direction < 0
-      ? metrics.uniqueRate >= baselineRate * PORTFOLIO_KEEP_SHRINK_RATIO
-      : metrics.uniqueRate >= baselineRate * PORTFOLIO_KEEP_GROW_RATIO;
-    if (accepted) {
-      decodePortfolio.mode = probe.direction < 0 ? "lean" : "grow";
-    } else {
-      // A failed shrink is evidence that the lower-K chain was too aggressive;
-      // return to the full opportunity set instead of crawling upward one slot
-      // every few seconds. A failed grow only returns to its known-good origin.
-      decodePortfolio.budget = probe.direction < 0
-        ? maxSlots
-        : Math.max(minSlots, Math.min(maxSlots, probe.originBudget));
-      if (probe.direction < 0) decodePortfolio.lowerBlockedUntil = now + PORTFOLIO_RETRY_MS;
-      else decodePortfolio.upperBlockedUntil = now + PORTFOLIO_RETRY_MS;
-      decodePortfolio.mode = "restore";
-    }
-    decodePortfolio.probe = null;
-    decodePortfolio.lastDecisionAt = now;
-    return decodePortfolio.budget;
-  }
-
-  if (now - decodePortfolio.lastDecisionAt < PORTFOLIO_DECISION_COOLDOWN_MS) return decodePortfolio.budget;
-  if (metrics.pressure && decodePortfolio.budget > minSlots && now >= decodePortfolio.lowerBlockedUntil) {
-    beginDecodePortfolioProbe(-1, Math.max(minSlots, decodePortfolio.budget - PORTFOLIO_SHRINK_STEP), metrics, now);
-  } else if (metrics.headroom && decodePortfolio.budget < maxSlots && now >= decodePortfolio.upperBlockedUntil) {
-    beginDecodePortfolioProbe(1, Math.min(maxSlots, decodePortfolio.budget + PORTFOLIO_GROW_STEP), metrics, now);
-  } else {
-    decodePortfolio.mode = decodePortfolio.budget >= maxSlots ? "all" : metrics.pressure ? "pressure" : "hold";
-  }
-  return decodePortfolio.budget;
-}
-function selectDecodePortfolio(candidates, sourceSequence, now, enabled) {
-  const budget = updateDecodePortfolio(candidates, now, enabled);
-  if (budget >= candidates.length) {
-    decodePortfolio.selectedSlots = candidates.map((region) => region.gridSlot).filter((slot) => slot !== void 0);
-    decodePortfolio.excludedSlots = [];
-    decodePortfolio.exploreSlot = void 0;
-    return candidates;
-  }
-  const ranked = [...candidates].sort((a, b) => portfolioSlotScore(b) - portfolioSlotScore(a) || Number(a.gridSlot) - Number(b.gridSlot));
-  const selected = ranked.slice(0, budget);
-  const excluded = ranked.slice(budget);
-  decodePortfolio.exploreSlot = void 0;
-  const sequence = Number(sourceSequence);
-  // v168 weak slots already arrive here only on their sparse recovery-probe
-  // frame. Do not let best-K immediately rank that probe back out: force one
-  // due weak slot into the portfolio for this frame. If multiple weak slots
-  // share a probe phase, rotate them rather than paying for all at once.
-  const dueWeak = excluded.filter((region) => {
-    const slot = Number(region.gridSlot);
-    return Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotAdaptiveWeak[slot];
-  });
-  if (selected.length && dueWeak.length && Number.isFinite(sequence)) {
-    const probeIndex = Math.floor(Math.trunc(sequence) / SLOT_WEAK_PROBE_EVERY) % dueWeak.length;
-    const probe = dueWeak[probeIndex];
-    selected[selected.length - 1] = probe;
-    decodePortfolio.exploreSlot = probe.gridSlot;
-  } else if (selected.length && excluded.length && Number.isFinite(sequence) && Math.trunc(sequence) % PORTFOLIO_EXPLORE_EVERY === 0) {
-    const exploreIndex = Math.floor(Math.trunc(sequence) / PORTFOLIO_EXPLORE_EVERY) % excluded.length;
-    const explore = excluded[exploreIndex];
-    selected[selected.length - 1] = explore;
-    decodePortfolio.exploreSlot = explore.gridSlot;
-  }
-  const stableSelected = ranked.slice(0, budget);
-  decodePortfolio.selectedSlots = stableSelected.map((region) => region.gridSlot).filter((slot) => slot !== void 0);
-  decodePortfolio.excludedSlots = excluded.map((region) => region.gridSlot).filter((slot) => slot !== void 0);
-  return selected;
-}
-function decodePortfolioSummary() {
-  if (!decodePortfolio.maxSlots) return "";
-  const explore = decodePortfolio.exploreSlot === void 0 ? "" : ` · probe s${decodePortfolio.exploreSlot}`;
-  const skipped = decodePortfolio.excludedSlots.length ? ` · skip ${decodePortfolio.excludedSlots.map((slot) => `s${slot}`).join(",")}` : "";
-  const delivered = decodePortfolio.captureRate + 0.5 < decodePortfolio.demandRate
-    ? ` · delivered ${decodePortfolio.captureRate.toFixed(1)}`
-    : "";
-  const clean = decodePortfolio.mode === "clean-window"
-    ? ` · clean ${(Math.max(0, decodePortfolio.cleanAfter - receiverNow()) / 1e3).toFixed(1)}s`
-    : "";
-  return `Portfolio ${decodePortfolio.budget}/${decodePortfolio.maxSlots} · ${decodePortfolio.mode}${decodePortfolio.pressure ? " · CPU pressure" : ""}${clean} · ${decodePortfolio.scheduleRate.toFixed(1)}/${decodePortfolio.demandRate.toFixed(1)} fps${delivered} · ${(decodePortfolio.utilization * 100).toFixed(0)}% busy${explore}${skipped}`;
-}
 function cornerSlotMetrics() {
   const candidates = regions.filter((region) =>
     region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN" &&
@@ -1443,7 +1140,6 @@ function resetLivePipeline(now = receiverNow()) {
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
   resetSlotMetrics();
-  resetDecodePortfolio();
   resetGuidedRollout();
 }
 function pushLiveLatency(target, value) {
@@ -3502,7 +3198,6 @@ function renderFocusDiagnostics() {
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     cornerSlotMetrics(),
-    decodePortfolioSummary(),
     `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
@@ -5401,11 +5096,9 @@ async function captureFrame(source) {
   }
   const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
   const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
-  const weakFilteredRegions = adaptiveWeakSlots
+  const batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
-  const portfolioEnabled = gridLattice.active && !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
-  const batchRegions = selectDecodePortfolio(weakFilteredRegions, source.sequence, now, portfolioEnabled);
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
