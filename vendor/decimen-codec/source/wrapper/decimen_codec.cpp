@@ -915,12 +915,17 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const bool mask = ((entry >> 16) & 1) != 0;
             const int threshold = turboThreshold(levels, xx, y, dim);
             int lum;
-            if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
-                // This slot already earned CRC-Turbo by repeatedly surviving
-                // full RS+CRC, and the live quad differs only by translation.
-                // Read the calibrated module center directly. AirGapper CRC is
-                // still the acceptance gate; a single bad page immediately
-                // falls through to Stable-RS and backs this probe off.
+            const bool provenDenseNearest =
+                frameTransform.translationOnly &&
+                moduleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
+                cache.stableSuccesses >= 4;
+            if (frameTransform.translationOnly &&
+                (moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE || provenDenseNearest)) {
+                // CRC-Turbo has no QR RS, so dense nearest-center sampling is
+                // allowed only after this exact calibrated slot has repeatedly
+                // passed Stable-RS + AirGapper CRC. A wrong center bit cannot be
+                // accepted: CRC failure falls through to Stable-RS immediately
+                // and the caller backs the probe off.
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
