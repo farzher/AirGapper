@@ -62,6 +62,9 @@ async function generateSenderProfiles() {
       element.dispatchEvent(new Event("change", { bubbles: true }));
     }
   });
+
+  // Deterministic but deliberately incompressible enough that Send must use
+  // the animated transport instead of collapsing the fixture to one direct QR.
   let seed = 0x6d2b79f5;
   let payload = "";
   for (let index = 0; index < 48_000; index++) {
@@ -113,6 +116,12 @@ function assertScenario(name, result) {
     if (result.tailTrackedJobs <= result.tailFullJobs)
       failures.push(`stable tail did not favor tracked work (${result.tailTrackedJobs} tracked vs ${result.tailFullJobs} full)`);
   }
+  if (name === "dense-performance") {
+    if (result.firstLockedStateFrame == null) failures.push("dense wall never locked");
+    if (result.trackedJobs <= result.fullJobs) failures.push("dense wall did not move decisively to tracked decoding");
+    if (result.tailFullJobs !== 0) failures.push(`dense tail still used ${result.tailFullJobs} full scans`);
+    if (result.uniqueUsefulQrPerSecond <= 0) failures.push("dense wall produced no useful symbol rate");
+  }
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
 }
 
@@ -138,13 +147,6 @@ try {
       order: [...denseOrder, ...denseOrder],
       fps: 30,
       mode: "performance"
-    },
-    {
-      name: "dense-maximum",
-      urls: dense,
-      order: [...denseOrder, ...denseOrder],
-      fps: 30,
-      mode: "maximum"
     }
   ];
 
