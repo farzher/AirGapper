@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.179";
+const RECEIVER_RUNTIME_BUILD = "v0.5.180";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -4554,10 +4554,23 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
     direct?.frame.close();
     return null;
   }
-  const pixelXf = direct.visibleX + x * direct.scaleX;
-  const pixelYf = direct.visibleY + y * direct.scaleY;
-  const pixelRf = direct.visibleX + (x + w) * direct.scaleX;
-  const pixelBf = direct.visibleY + (y + h) * direct.scaleY;
+  // Padded tracked crops are allowed to extend beyond the display frame. Canvas
+  // readback naturally clips those requests, but VideoFrame copyTo/visibleRect
+  // does not accept a negative/out-of-range crop. Clamp in display coordinates
+  // before mapping into the coded frame; track quads stay in global coordinates
+  // and are localized by ox/oy in the worker as before.
+  const cropX = Math.max(0, Math.min(source.width, x));
+  const cropY = Math.max(0, Math.min(source.height, y));
+  const cropRight = Math.max(cropX, Math.min(source.width, x + w));
+  const cropBottom = Math.max(cropY, Math.min(source.height, y + h));
+  if (cropRight - cropX < 2 || cropBottom - cropY < 2) {
+    direct.frame.close();
+    return null;
+  }
+  const pixelXf = direct.visibleX + cropX * direct.scaleX;
+  const pixelYf = direct.visibleY + cropY * direct.scaleY;
+  const pixelRf = direct.visibleX + cropRight * direct.scaleX;
+  const pixelBf = direct.visibleY + cropBottom * direct.scaleY;
   const pixelX = Math.round(pixelXf), pixelY = Math.round(pixelYf);
   const pixelRight = Math.round(pixelRf), pixelBottom = Math.round(pixelBf);
   if ([pixelXf - pixelX, pixelYf - pixelY, pixelRf - pixelRight, pixelBf - pixelBottom].some((delta) => Math.abs(delta) > 1e-4)) {

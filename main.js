@@ -2,7 +2,7 @@ var _a;
 import { closeOnBackdropClick } from "./shared/dialog.js";
 import { isAndroid, isIOS } from "./shared/platform.js";
 
-const APP_BUILD = "v0.5.179";
+const APP_BUILD = "v0.5.180";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
