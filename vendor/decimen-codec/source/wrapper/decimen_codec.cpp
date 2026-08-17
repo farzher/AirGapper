@@ -805,6 +805,73 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
     return values[2];
 }
 
+static const std::vector<uint32_t>& turboCodewordPlan(int dim);
+
+struct TurboDataPlan
+{
+    std::vector<uint32_t> samples;
+    std::vector<uint16_t> destination;
+    int dataCodewords = 0;
+};
+
+// The QR placement walk, function mask, EC block layout and data deinterleave
+// destination are immutable for a Model-2 version + EC level. CRC-Turbo used to
+// rebuild all of them for every physical QR on every frame. Build once per
+// worker/version, then sample data codewords directly into DecodeBitStream order.
+static const TurboDataPlan& turboDataPlan(int dim)
+{
+    static std::array<TurboDataPlan, 41> plans;
+    static const TurboDataPlan empty;
+    if (dim < 21 || dim > 177 || ((dim - 17) & 3))
+        return empty;
+    const int versionNumber = (dim - 17) / 4;
+    const auto* version = QRCode::Version::Model2(versionNumber);
+    if (!version)
+        return empty;
+    auto& plan = plans[versionNumber];
+    if (plan.dataCodewords)
+        return plan;
+
+    const auto& ecBlocks = version->ecBlocksForLevel(QRCode::ErrorCorrectionLevel::Low);
+    std::vector<int> blockSizes;
+    for (const auto& group : ecBlocks.blockArray())
+        for (int i = 0; i < group.count; ++i)
+            blockSizes.push_back(group.dataCodewords);
+    if (blockSizes.empty())
+        return empty;
+
+    int dataCodewords = 0;
+    std::vector<int> blockOffsets(blockSizes.size());
+    for (size_t block = 0; block < blockSizes.size(); ++block) {
+        blockOffsets[block] = dataCodewords;
+        dataCodewords += blockSizes[block];
+    }
+    if (dataCodewords <= 0 || dataCodewords >= 65536)
+        return empty;
+
+    const auto& fullPlan = turboCodewordPlan(dim);
+    const size_t wantedBits = size_t(dataCodewords) * 8;
+    if (fullPlan.size() < wantedBits)
+        return empty;
+    plan.samples.assign(fullPlan.begin(), fullPlan.begin() + wantedBits);
+    plan.destination.resize(dataCodewords);
+
+    const int minData = *std::min_element(blockSizes.begin(), blockSizes.end());
+    int raw = 0;
+    for (int i = 0; i < minData; ++i)
+        for (size_t block = 0; block < blockSizes.size(); ++block)
+            plan.destination[raw++] = uint16_t(blockOffsets[block] + i);
+    for (size_t block = 0; block < blockSizes.size(); ++block)
+        if (blockSizes[block] > minData)
+            plan.destination[raw++] = uint16_t(blockOffsets[block] + minData);
+    if (raw != dataCodewords) {
+        plan = {};
+        return empty;
+    }
+    plan.dataCodewords = dataCodewords;
+    return plan;
+}
+
 static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
                                          const TurboFrameTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
@@ -815,72 +882,37 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
         return {};
-    const auto& ecBlocks = version->ecBlocksForLevel(QRCode::ErrorCorrectionLevel::Low);
-    std::vector<int> blockSizes;
-    int dataCodewords = 0;
-    for (const auto& group : ecBlocks.blockArray())
-        for (int i = 0; i < group.count; ++i) {
-            blockSizes.push_back(group.dataCodewords);
-            dataCodewords += group.dataCodewords;
-        }
-    if (blockSizes.empty() || dataCodewords <= 0)
+    const auto& plan = turboDataPlan(dim);
+    if (plan.dataCodewords <= 0 || plan.samples.size() != size_t(plan.dataCodewords) * 8 ||
+        plan.destination.size() != size_t(plan.dataCodewords))
         return {};
 
     const double sampleStarted = guidedNowMs();
-    const auto functionPattern = version->buildFunctionPattern();
-    ByteArray raw;
-    raw.reserve(dataCodewords);
-    uint8_t currentByte = 0;
-    int bitsRead = 0;
-    bool readingUp = true;
+    ByteArray data(plan.dataCodewords);
     const float moduleSize = guidedModuleSize(track);
     bool failed = false;
-    for (int x = dim - 1; x > 0 && int(raw.size()) < dataCodewords && !failed; x -= 2) {
-        if (x == 6)
-            --x;
-        for (int row = 0; row < dim && int(raw.size()) < dataCodewords && !failed; ++row) {
-            const int y = readingUp ? dim - 1 - row : row;
-            for (int col = 0; col < 2 && int(raw.size()) < dataCodewords; ++col) {
-                const int xx = x - col;
-                if (functionPattern.get(xx, y))
-                    continue;
-                const int threshold = turboThreshold(levels, xx, y, dim);
-                const int lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
-                                               xx, y, dx, dy, threshold, moduleSize);
-                if (lum < 0) { failed = true; break; }
-                const bool black = lum <= threshold;
-                const bool bit = QRCode::GetDataMaskBit(4, xx, y) != black;
-                currentByte = uint8_t((currentByte << 1) | uint8_t(bit));
-                if (++bitsRead % 8 == 0) {
-                    raw.push_back(currentByte);
-                    currentByte = 0;
-                }
-            }
+    for (int codeword = 0; codeword < plan.dataCodewords && !failed; ++codeword) {
+        uint8_t value = 0;
+        const size_t firstBit = size_t(codeword) * 8;
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint32_t entry = plan.samples[firstBit + bit];
+            const int xx = int(entry & 0xff);
+            const int y = int((entry >> 8) & 0xff);
+            const bool mask = ((entry >> 16) & 1) != 0;
+            const int threshold = turboThreshold(levels, xx, y, dim);
+            const int lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
+                                           xx, y, dx, dy, threshold, moduleSize);
+            if (lum < 0) { failed = true; break; }
+            value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
         }
-        readingUp = !readingUp;
+        if (!failed)
+            data[plan.destination[codeword]] = value;
     }
     metrics.sampleMs += guidedNowMs() - sampleStarted;
-    if (failed || int(raw.size()) != dataCodewords)
+    if (failed)
         return {};
 
     const double decodeStarted = guidedNowMs();
-    const int minData = *std::min_element(blockSizes.begin(), blockSizes.end());
-    std::vector<ByteArray> blocks(blockSizes.size());
-    for (size_t i = 0; i < blocks.size(); ++i)
-        blocks[i].resize(blockSizes[i]);
-    int offset = 0;
-    for (int i = 0; i < minData; ++i)
-        for (size_t block = 0; block < blocks.size(); ++block)
-            blocks[block][i] = raw[offset++];
-    for (size_t block = 0; block < blocks.size(); ++block)
-        if (blockSizes[block] > minData)
-            blocks[block][minData] = raw[offset++];
-    if (offset != dataCodewords)
-        return {};
-    ByteArray data(dataCodewords);
-    auto dst = data.begin();
-    for (const auto& block : blocks)
-        dst = std::copy(block.begin(), block.end(), dst);
     auto decoded = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
     metrics.decodeMs += guidedNowMs() - decodeStarted;
     return decoded;
