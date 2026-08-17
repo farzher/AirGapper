@@ -306,6 +306,69 @@ static bool guidedFinderTriplet(const BitMatrix& image, const DecimenGuidedTrack
     return true;
 }
 
+// Sample a known tracked QR without QRDetector's expensive version-40
+// alignment-pattern lattice search. The previous successful position quad
+// gives us a high-quality projective prior. Current-frame finder centers give
+// an exact affine correction for translation/rotation/scale/shear; apply that
+// correction to the prior bottom-right alignment-point prediction, then sample
+// the whole module grid once. A CRC-verified miss simply falls through to the
+// stock SampleQR path below, so this is an opportunistic accelerator only.
+static DetectorResult sampleGuidedProjection(const BitMatrix& image,
+                                             const DecimenGuidedTrack& track,
+                                             const QRCode::FinderPatternSet& fp)
+{
+    const int dim = track.dimension;
+    const QuadrilateralF moduleBounds{
+        PointF{0, 0}, PointF{double(dim), 0},
+        PointF{double(dim), double(dim)}, PointF{0, double(dim)}
+    };
+    const QuadrilateralF priorPixels{
+        PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
+        PointF{track.x2, track.y2}, PointF{track.x3, track.y3}
+    };
+    PerspectiveTransform prior(moduleBounds, priorPixels);
+
+    const PointF predictedTL = prior(PointF{3.5, 3.5});
+    const PointF predictedTR = prior(PointF{dim - 3.5, 3.5});
+    const PointF predictedBL = prior(PointF{3.5, dim - 3.5});
+    // For model-2 QR >= v2, QRDetector's brOffset={3,3} means this fourth
+    // control point is the bottom-right alignment-pattern center.
+    const PointF predictedBR = prior(PointF{dim - 6.5, dim - 6.5});
+
+    const PointF u = predictedTR - predictedTL;
+    const PointF v = predictedBL - predictedTL;
+    const PointF w = predictedBR - predictedTL;
+    const double det = u.x * v.y - u.y * v.x;
+
+    PointF correctedBR;
+    PointF brOffset{3, 3};
+    if (std::abs(det) > 1e-5) {
+        const double a = (w.x * v.y - w.y * v.x) / det;
+        const double b = (u.x * w.y - u.y * w.x) / det;
+        const PointF actualTL = fp.tl;
+        correctedBR = actualTL + a * (PointF(fp.tr) - actualTL) + b * (PointF(fp.bl) - actualTL);
+    } else {
+        // Degenerate prior: use the same cheap parallelogram fallback as
+        // QRDetector and interpret the fourth point as the finder-corner
+        // projection rather than an alignment center.
+        correctedBR = PointF(fp.tr) - PointF(fp.tl) + PointF(fp.bl);
+        brOffset = PointF{0, 0};
+    }
+
+    if (!image.isIn(correctedBR))
+        return {};
+
+    const QuadrilateralF moduleControl{
+        PointF{3.5, 3.5},
+        PointF{dim - 3.5, 3.5},
+        PointF{dim - 3.5 - brOffset.x, dim - 3.5 - brOffset.y},
+        PointF{3.5, dim - 3.5}
+    };
+    PerspectiveTransform mod2Pix(moduleControl,
+        QuadrilateralF{PointF(fp.tl), PointF(fp.tr), correctedBR, PointF(fp.bl)});
+    return SampleGrid(image, dim, dim, mod2Pix);
+}
+
 } // namespace
 
 extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
@@ -369,23 +432,14 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             const double sampleStart = guidedNowMs();
             double decodeSpent = 0;
             bool decodedTrack = false;
-            for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
-                metrics->sampleAttempts++;
-                if (!detected.isValid() || detected.bits().width() != track.dimension)
-                    continue;
-                ++metrics->genericDecodeAttempts;
-                const double genericStart = guidedNowMs();
-                auto decoded = QRCode::Decode(detected.bits());
-                const double genericElapsed = guidedNowMs() - genericStart;
-                metrics->genericDecodeMs += genericElapsed;
-                metrics->decodeMs += genericElapsed;
-                decodeSpent += genericElapsed;
-                if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
-                    continue;
-                ByteArray bytes = decoded.content().bytes;
 
+            auto commitDecoded = [&](const DetectorResult& detected, const DecoderResult& decoded) {
+                if (!detected.isValid() || detected.bits().width() != track.dimension ||
+                    !decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
+                    return false;
+                const ByteArray& bytes = decoded.content().bytes;
                 if (outputUsed + int(bytes.size()) > outputCapacity)
-                    break;
+                    return false;
                 std::memcpy(output + outputUsed, bytes.data(), bytes.size());
                 const Position pos = detected.position();
                 auto& result = results[resultCount++];
@@ -401,11 +455,49 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 result.x3 = pos[3].x; result.y3 = pos[3].y;
                 outputUsed += int(bytes.size());
                 metrics->successful++;
-                decodedTrack = true;
-                break;
+                return true;
+            };
+
+            // Fast tracked projection: one SampleGrid + ordinary QR RS decode.
+            // This avoids the dozens of alignment-pattern searches SampleQR
+            // performs for v40. It uses no persistent pixel/module cache.
+            auto projected = sampleGuidedProjection(*bits, track, finderSet);
+            if (projected.isValid() && projected.bits().width() == track.dimension) {
+                metrics->sampleAttempts++;
+                metrics->fastDecodeAttempts++;
+                const double fastStart = guidedNowMs();
+                auto decoded = QRCode::Decode(projected.bits());
+                const double fastElapsed = guidedNowMs() - fastStart;
+                metrics->fastDecodeMs += fastElapsed;
+                metrics->decodeMs += fastElapsed;
+                decodeSpent += fastElapsed;
+                decodedTrack = commitDecoded(projected, decoded);
+                if (decodedTrack)
+                    metrics->fastDecodeSuccesses++;
+            }
+
+            // Projection misses retain the exact proven decoder. No cache, no
+            // reduced ECC, and no correctness tradeoff: SampleQR remains the
+            // oracle and refreshes the returned quad for the lattice.
+            if (!decodedTrack) {
+                for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
+                    metrics->sampleAttempts++;
+                    if (!detected.isValid() || detected.bits().width() != track.dimension)
+                        continue;
+                    ++metrics->genericDecodeAttempts;
+                    const double genericStart = guidedNowMs();
+                    auto decoded = QRCode::Decode(detected.bits());
+                    const double genericElapsed = guidedNowMs() - genericStart;
+                    metrics->genericDecodeMs += genericElapsed;
+                    metrics->decodeMs += genericElapsed;
+                    decodeSpent += genericElapsed;
+                    if (commitDecoded(detected, decoded)) {
+                        decodedTrack = true;
+                        break;
+                    }
+                }
             }
             metrics->sampleMs += std::max(0.0, guidedNowMs() - sampleStart - decodeSpent);
-            (void)decodedTrack;
         }
         metrics->misses = metrics->tracks - metrics->successful;
         metrics->totalMs = guidedNowMs() - started;
