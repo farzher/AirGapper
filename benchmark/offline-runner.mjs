@@ -140,6 +140,35 @@ async function generateSenderProfiles() {
   return { easy: easy.frames, motion, dense: dense.frames };
 }
 
+function ratio(numerator, denominator) {
+  return denominator > 0 ? numerator / denominator : 0;
+}
+
+function addNormalizedDiagnostics(result) {
+  const guided = result.guided ?? {};
+  const tracks = Number(guided.tracks) || 0;
+  const outputs = Number(guided.outputs) || 0;
+  const jobs = Number(guided.jobs) || 0;
+  const turboAttempts = Number(guided.turboAttempts) || 0;
+  const stableRsAttempts = Number(guided.stableRsAttempts) || 0;
+  const dataOnlyAttempts = Number(guided.dataOnlyAttempts) || 0;
+  result.normalized = {
+    guidedOutputYield: ratio(outputs, tracks),
+    turboYield: ratio(Number(guided.turboSuccesses) || 0, turboAttempts),
+    stableRsYield: ratio(Number(guided.stableRsSuccesses) || 0, stableRsAttempts),
+    dataOnlyYield: ratio(Number(guided.dataOnlySuccesses) || 0, dataOnlyAttempts),
+    sampleMsPerTrack: ratio(Number(guided.sampleMs) || 0, tracks),
+    sampleMsPerOutput: ratio(Number(guided.sampleMs) || 0, outputs),
+    decodeMsPerOutput: ratio(Number(guided.decodeMs) || 0, outputs),
+    guidedMsPerTrack: ratio(Number(guided.totalMs) || 0, tracks),
+    guidedMsPerOutput: ratio(Number(guided.totalMs) || 0, outputs),
+    guidedMsPerJob: ratio(Number(guided.totalMs) || 0, jobs),
+    stableRsAttemptsPerTrack: ratio(stableRsAttempts, tracks),
+    dataOnlyAttemptsPerTrack: ratio(dataOnlyAttempts, tracks)
+  };
+  return result;
+}
+
 function commonAssertions(name, result, failures) {
   if (!result.ok) failures.push("receiver invariants failed");
   if (!result.productionOnly) failures.push("oracle path was not disabled");
@@ -168,6 +197,9 @@ function assertScenario(name, result) {
     if (result.guidedOutputs < 80) failures.push(`too few Guided outputs (${result.guidedOutputs} < 80)`);
     if (result.tailTrackedJobs < 12) failures.push(`stable tail only scheduled ${result.tailTrackedJobs} tracked jobs (<12)`);
     if (result.decodeP95Ms > 180) failures.push(`stable Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 180ms`);
+    if (result.normalized.guidedOutputYield < 0.98) failures.push(`stable Guided yield ${(result.normalized.guidedOutputYield * 100).toFixed(1)}% < 98%`);
+    if (result.guided.dataOnlyAttempts >= 50 && result.normalized.dataOnlyYield < 0.98)
+      failures.push(`stable CRC-Turbo yield ${(result.normalized.dataOnlyYield * 100).toFixed(1)}% < 98%`);
   }
   if (name === "motion-y8") {
     if (result.finalState !== "TRACK") failures.push(`motion path ended in ${result.finalState}, not TRACK`);
@@ -176,6 +208,7 @@ function assertScenario(name, result) {
     if (result.guidedOutputs < 80) failures.push(`motion Guided outputs ${result.guidedOutputs} < 80`);
     if (result.tailTrackedJobs < 10) failures.push(`motion tail only scheduled ${result.tailTrackedJobs} tracked jobs (<10)`);
     if (result.decodeP95Ms > 220) failures.push(`motion Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 220ms`);
+    if (result.normalized.guidedOutputYield < 0.75) failures.push(`motion Guided yield ${(result.normalized.guidedOutputYield * 100).toFixed(1)}% < 75%`);
   }
   if (name === "dense-y8") {
     if (result.trackedJobs < 10) failures.push(`dense tracked jobs ${result.trackedJobs} < 10`);
@@ -183,6 +216,9 @@ function assertScenario(name, result) {
     if (result.guidedOutputs < 45) failures.push(`dense Guided outputs ${result.guidedOutputs} < 45`);
     if (result.uniqueUsefulQrPerSecond < 60) failures.push(`dense useful rate ${result.uniqueUsefulQrPerSecond.toFixed(1)} QR/s < 60`);
     if (result.decodeP95Ms > 220) failures.push(`dense Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 220ms`);
+    if (result.normalized.guidedOutputYield < 0.95) failures.push(`dense Guided yield ${(result.normalized.guidedOutputYield * 100).toFixed(1)}% < 95%`);
+    if (result.guided.stableRsAttempts >= 40 && result.normalized.stableRsYield < 0.95)
+      failures.push(`dense Stable-RS yield ${(result.normalized.stableRsYield * 100).toFixed(1)}% < 95%`);
   }
   // Keep a short buffered-path guard because corpus replay and non-TrackProcessor
   // inputs are real product paths too. Geometry-aware native decode should win
@@ -242,7 +278,7 @@ try {
   for (const scenario of scenarios) {
     console.log(`AIRGAPPER_FAST_REGRESSION_START ${scenario.name}`);
     const started = performance.now();
-    const result = await page.evaluate(async (input) => window.__airgapperRunFastRegression(input), scenario);
+    const result = addNormalizedDiagnostics(await page.evaluate(async (input) => window.__airgapperRunFastRegression(input), scenario));
     result.wallTimeMs = Math.round(performance.now() - started);
     assertScenario(scenario.name, result);
     results[scenario.name] = result;
