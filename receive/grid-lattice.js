@@ -4,6 +4,14 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
 import { gridLayoutById } from "../shared/grid-layout.js";
 // Preserve a proven wall through short optical/display-phase miss bursts.
 const WHOLE_GRID_LOSS_MS = 3200;
+// Geometry has two different lifetimes. Identity/lock evidence may survive a
+// brief miss, but quads used to aim the hot decoder must represent the camera
+// pose *now*. Keeping those concepts separate prevents repeatedly decoded easy
+// slots from pushing rarer slot geometry out of the lattice, while also
+// preventing an old exact quad from fighting a newer whole-wall fit.
+const OBSERVATION_HISTORY_MS = 2500;
+const CURRENT_FIT_MS = 420;
+const EXACT_GEOMETRY_MS = 420;
 function corners(quad) {
   return quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];
 }
@@ -144,8 +152,16 @@ class GridLattice {
       this.observations = [];
       this.candidate = void 0;
     }
+    // makeCandidate only uses the newest observation for each slot. Storing a
+    // raw last-N stream was therefore both wasted memory and actively harmful:
+    // a few easy QRs decoded every frame could evict the last good geometry for
+    // the other cells. Keep exactly one CRC-backed observation per slot.
+    this.observations = this.observations.filter((item) =>
+      detection.at - item.at < OBSERVATION_HISTORY_MS &&
+      item.modules === detection.modules &&
+      item.slotIndex !== detection.slotIndex
+    );
     this.observations.push(detection);
-    this.observations = this.observations.filter((item) => detection.at - item.at < 2500 && item.modules === detection.modules).slice(-32);
     if (this.locked && this.candidate) {
       const updated = this.makeCandidate(this.candidate.layout);
       if (updated) this.candidate = updated;
@@ -272,6 +288,12 @@ class GridLattice {
     let observations = [...latest.values()];
     if (!observations.length) return null;
     const newest = observations.reduce((a, b) => a.at > b.at ? a : b);
+    // A moving phone makes a 1-2 second old quad a different camera pose. When
+    // the current window already spans both lattice axes, fit only that fresh
+    // evidence. Fall back to the longer-lived anchors only when the visible
+    // fragment cannot constrain a 2D wall by itself.
+    const current = observations.filter((observation) => newest.at - observation.at <= CURRENT_FIT_MS);
+    if (lockReady(layout, current)) observations = current;
     const pairsFor = (items) => items.flatMap((observation) => {
       const slot = observation.slotIndex;
       return slotWorld(layout, observation.modules, slot).map((world, index) => ({ world, image: corners(observation.quad)[index] }));
@@ -316,7 +338,14 @@ class GridLattice {
     // ways a single projective transform cannot represent. Once a slot has
     // actually decoded, keep that exact CRC-backed quad and use the lattice
     // only for cells that have not yet been observed.
-    const observed = new Map(candidate.observations.map((observation) => [observation.slotIndex, observation]));
+    const newestAt = candidate.observations.reduce((latest, observation) => Math.max(latest, observation.at), 0);
+    // Exact per-QR geometry is best only while it is fresh. After camera motion,
+    // the current lattice projection is a better aim point than a formerly exact
+    // quad from another pose. This also lets a fresh decode on one part of the
+    // wall move stale cells immediately instead of waiting for each cell to win.
+    const observed = new Map(candidate.observations
+      .filter((observation) => newestAt - observation.at <= EXACT_GEOMETRY_MS)
+      .map((observation) => [observation.slotIndex, observation]));
     const decoded = new Set(observed.keys());
     const slots = [];
     for (let index = 0; index < count; index++) {
@@ -339,7 +368,11 @@ class GridLattice {
       slots.push({ index, quad, box, decoded: decoded.has(index), observed: Boolean(observation) });
     }
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
-    return { state: this.state, provisional: !this.active, confidence, layout: candidate.layout, modules, slots, observedSlots: observed.size, fitError: candidate.error };
+    return {
+      state: this.state, provisional: !this.active, confidence, layout: candidate.layout, modules, slots,
+      observedSlots: observed.size, storedSlots: this.observations.length, fitSlots: candidate.observations.length,
+      fitError: candidate.error
+    };
   }
 }
 export {
