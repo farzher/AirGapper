@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.167";
+const RECEIVER_RUNTIME_BUILD = "v0.5.168";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -973,22 +973,77 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   guidedRollout.state = "active";
 }
 const SLOT_METRIC_COUNT = 64;
+const SLOT_WEAK_MIN_SAMPLES = 32;
+const SLOT_WEAK_ENTER_SCORE = 0.08;
+const SLOT_WEAK_RECOVERY_SCORE = 0.25;
+const SLOT_WEAK_PROBE_EVERY = 8;
+const SLOT_WEAK_MIN_WALL = 6;
+const SLOT_WEAK_MIN_HEALTHY = 4;
 const slotAttemptCounts = new Uint32Array(SLOT_METRIC_COUNT);
 const slotHitCounts = new Uint32Array(SLOT_METRIC_COUNT);
+const slotQualitySamples = new Uint16Array(SLOT_METRIC_COUNT);
+const slotQualityScores = new Float32Array(SLOT_METRIC_COUNT);
+const slotAdaptiveWeak = new Uint8Array(SLOT_METRIC_COUNT);
 function resetSlotMetrics() {
   slotAttemptCounts.fill(0);
   slotHitCounts.fill(0);
+  slotQualitySamples.fill(0);
+  slotQualityScores.fill(0.5);
+  slotAdaptiveWeak.fill(0);
+}
+function noteSlotDecoded(slot) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT || !slotAdaptiveWeak[index]) return;
+  slotAdaptiveWeak[index] = 0;
+  slotQualityScores[index] = Math.max(slotQualityScores[index], SLOT_WEAK_RECOVERY_SCORE);
 }
 function noteSlotMetric(slot, hit) {
   const index = Number(slot);
   if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return;
   slotAttemptCounts[index]++;
-  if (hit) slotHitCounts[index]++;
+  if (hit) {
+    slotHitCounts[index]++;
+    // A weak-slot probe that succeeds is real CRC-backed evidence. Restore it
+    // immediately, then let the EWMA decide again only after another sustained
+    // miss run instead of making one lucky/failed frame flap the scheduler.
+    noteSlotDecoded(index);
+  }
+  slotQualitySamples[index] = Math.min(65535, slotQualitySamples[index] + 1);
+  slotQualityScores[index] = slotQualityScores[index] * 0.9 + Number(hit) * 0.1;
+  if (!slotAdaptiveWeak[index] && slotQualitySamples[index] >= SLOT_WEAK_MIN_SAMPLES &&
+      slotQualityScores[index] < SLOT_WEAK_ENTER_SCORE) {
+    slotAdaptiveWeak[index] = 1;
+  }
+}
+function adaptiveWeakSlotScheduling(candidates) {
+  if (strictHotPathActive() || candidates.length < SLOT_WEAK_MIN_WALL) return false;
+  let healthy = 0;
+  for (const region of candidates) {
+    const slot = Number(region.gridSlot);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) continue;
+    if (slotQualitySamples[slot] >= SLOT_WEAK_MIN_SAMPLES / 2 &&
+        !slotAdaptiveWeak[slot] && slotQualityScores[slot] >= SLOT_WEAK_RECOVERY_SCORE) healthy++;
+  }
+  // Only suppress a local outlier. If focus/exposure/motion makes the entire
+  // wall bad, there are not enough healthy peers and every slot stays active.
+  return healthy >= SLOT_WEAK_MIN_HEALTHY;
+}
+function shouldScheduleAdaptiveSlot(region, sourceSequence, adaptive) {
+  if (!adaptive) return true;
+  const slot = Number(region.gridSlot);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !slotAdaptiveWeak[slot]) return true;
+  const sequence = Number(sourceSequence);
+  if (!Number.isFinite(sequence)) return true;
+  // Stagger weak slots so several bad edge cells do not all consume the same
+  // probe frame. They remain geometrically tracked; only payload decode work is
+  // thinned out. Acquisition/reacquisition is intentionally unaffected.
+  return (Math.trunc(sequence) + slot) % SLOT_WEAK_PROBE_EVERY === 0;
 }
 function formatSlotMetric(slot) {
   const attempts = slotAttemptCounts[slot] || 0;
   const hits = slotHitCounts[slot] || 0;
-  return `s${slot} ${hits}/${attempts}${attempts ? ` ${(hits / attempts * 100).toFixed(0)}%` : ""}`;
+  const state = slotAdaptiveWeak[slot] ? " [weak]" : "";
+  return `s${slot} ${hits}/${attempts}${attempts ? ` ${(hits / attempts * 100).toFixed(0)}%` : ""}${state}`;
 }
 function cornerSlotMetrics() {
   const candidates = regions.filter((region) =>
@@ -1912,6 +1967,7 @@ function noteRegion(box, now, decoded = true, info) {
       if (geometryIsFresh) Object.assign(r, box);
       r.seen = now;
       r.decoded = true;
+      if (r.gridSlot !== void 0) noteSlotDecoded(r.gridSlot);
       r.decodedSeen = now;
       r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
@@ -5080,7 +5136,11 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchRegions = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
+  const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 18);
+  const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
+  const batchRegions = adaptiveWeakSlots
+    ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
+    : batchCandidates;
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
