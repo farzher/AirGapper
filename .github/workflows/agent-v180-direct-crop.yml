@@ -1,0 +1,29 @@
+name: Agent v180 direct crop clamp
+on:
+  push:
+    paths:
+      - '.github/v180_patch.py'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v180_patch.py
+      - name: Check syntax and diff
+        run: |
+          node --check receive/main.js
+          node --check main.js
+          git diff --check
+          git diff -- receive/main.js index.html main.js sw.js
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js sw.js
+          git commit -m 'v0.5.180 clamp direct tracked crops to frame'
+          git push
