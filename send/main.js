@@ -30,7 +30,7 @@ const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 function selectedLayout() {
   const mode = cfgLayout.value;
-  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" ? mode : "four-three";
+  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "five-nine" ? mode : "four-three";
 }
 function selectedOrientation() {
   const orientation = cfgOrientation.value;
@@ -54,6 +54,8 @@ function layoutGrid(mode = selectedLayout()) {
       return { cols: 3, rows: 5, codes: 15 };
     case "three-six":
       return { cols: 3, rows: 6, codes: 18 };
+    case "five-nine":
+      return { cols: 5, rows: 9, codes: 45 };
     default:
       return { cols: 3, rows: 4, codes: DEFAULT_GRID_CODES };
   }
@@ -371,7 +373,7 @@ function restoreSendSettings() {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six") {
+    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "five-nine") {
       cfgLayout.value = saved.layout;
     } else if (saved.layout === "five-three") {
       cfgLayout.value = "three-five";
