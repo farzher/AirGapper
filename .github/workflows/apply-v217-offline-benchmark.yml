@@ -94,6 +94,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Record latest passing regression
+        if: steps.regression.outcome == 'success' && steps.candidate.outputs.changed != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          cp benchmark/offline-summary.json benchmark/latest-result.json
+          rm -rf node_modules benchmark/offline-summary.json
+          git add benchmark/latest-result.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "record latest fast receiver regression"
+          git push origin HEAD:master
+
       - name: Commit failure diagnostics
         if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
         run: |
