@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - .github/v189_cold_patch.py
+      - .github/workflows/agent-v189-final.yml
 
 permissions:
   contents: write
