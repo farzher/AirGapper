@@ -1,0 +1,118 @@
+name: v185 optics recovery
+
+on:
+  push:
+    paths:
+      - .github/workflows/agent-v185-optics-recovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v0.5.185
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+
+          # v184 only removed v183's shared guided-fallback cadence. The traces
+          # show that work simply moved into fallback, so restore the v183 path.
+          git revert --no-commit 7e68555e3b913d216e3c31347555dd9ebd73d105
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=None):
+              p = Path(path)
+              s = p.read_text()
+              n = s.replace(old, new, count if count is not None else -1)
+              if n == s:
+                  raise SystemExit(f"replacement not found in {path}: {old[:120]!r}")
+              p.write_text(n)
+
+          # Version/cache. Revert returns product files to v183/cache145, but
+          # v146 has already existed publicly, so use a fresh v147 cache.
+          replace("index.html", "v0.5.183", "v0.5.185")
+          replace("main.js", 'const APP_BUILD = "v0.5.183";', 'const APP_BUILD = "v0.5.185";')
+          replace("receive/main.js", 'const RECEIVER_RUNTIME_BUILD = "v0.5.183";', 'const RECEIVER_RUNTIME_BUILD = "v0.5.185";')
+          replace("sw.js", 'const CACHE = "airgapper-static-js-v145";', 'const CACHE = "airgapper-static-js-v147";')
+
+          p = Path("receive/main.js")
+          s = p.read_text()
+
+          old = """const AUTO_OPTICS_FINE_FACTOR = Math.pow(2, 1 / 6);\nconst AUTO_OPTICS_FINE_IMPROVEMENT = 1.018;\nlet autoOpticsTuneSummary = \"\";"""
+          new = """const AUTO_OPTICS_FINE_FACTOR = Math.pow(2, 1 / 6);\nconst AUTO_OPTICS_FINE_IMPROVEMENT = 1.018;\n// A relative winner is meaningless when the whole local ISO neighborhood is\n// unusable. Below this per-QR yield, abandon manual tuning and let hardware AE\n// re-establish a sane exposure product before trying the motion-safe handoff.\nconst AUTO_OPTICS_COLLAPSE_YIELD = 0.12;\nconst AUTO_OPTICS_COLLAPSE_RETRY_MS = 900;\nlet autoOpticsTuneSummary = \"\";"""
+          if old not in s: raise SystemExit("auto optics constants anchor missing")
+          s = s.replace(old, new, 1)
+
+          old = """let exposureApplyGeneration = 0;\nlet manualOpticsReapplyGeneration = 0;\nlet cameraMutationQueue = Promise.resolve();"""
+          new = """let exposureApplyGeneration = 0;\nlet manualOpticsReapplyGeneration = 0;\nlet manualOpticsCheckAt = 0;\nlet manualOpticsRepairRunning = false;\nlet cameraMutationQueue = Promise.resolve();"""
+          if old not in s: raise SystemExit("manual watchdog vars anchor missing")
+          s = s.replace(old, new, 1)
+
+          # Periodically verify pinned manual axes. Some Android HALs accept the
+          # write, then silently drift back to AE values a few frames later.
+          anchor = """  lastRecoveryReason = `${reason}; manual optics restored`;\n}\nfocusMode.value = manualFocusMode;"""
+          insert = """  lastRecoveryReason = `${reason}; manual optics restored`;\n}\nfunction manualOpticsNeedsRepair(track) {\n  if (automaticOptics || automaticExposureAxis && automaticIsoAxis) return false;\n  const actual = track.getSettings();\n  const caps = track.getCapabilities?.() ?? {};\n  const close = (value, target, step) => {\n    if (target === undefined) return true;\n    if (!Number.isFinite(value)) return false;\n    const tolerance = Math.max((step ?? 0) * 0.75, Math.abs(target) * 0.02, 1e-6);\n    return Math.abs(value - target) <= tolerance;\n  };\n  return !automaticExposureAxis && preferredExposureTime !== undefined &&\n      !close(actual.exposureTime, preferredExposureTime, caps.exposureTime?.step) ||\n    !automaticIsoAxis && preferredIso !== undefined &&\n      !close(actual.iso, preferredIso, caps.iso?.step);\n}\nasync function maintainManualOptics(now) {\n  if (automaticOptics || replayRunning || optimizerPipelineActive || optimizeRunning ||\n      manualOpticsRepairRunning || now < manualOpticsCheckAt) return;\n  const track = stream?.getVideoTracks()[0];\n  if (!track || track.readyState !== \"live\") return;\n  manualOpticsCheckAt = now + 500;\n  if (!manualOpticsNeedsRepair(track)) return;\n  manualOpticsRepairRunning = true;\n  manualOpticsCheckAt = now + 1200;\n  manualSensorSessionActive = false;\n  try {\n    await applyExposureSetting(track);\n    notePipelineEvent(\"manual-optics-watchdog\");\n    lastRecoveryReason = \"manual optics drift corrected\";\n  } finally {\n    manualOpticsRepairRunning = false;\n  }\n}\nfocusMode.value = manualFocusMode;"""
+          if anchor not in s: raise SystemExit("manual watchdog insertion anchor missing")
+          s = s.replace(anchor, insert, 1)
+
+          # Never commit a locally-best ISO when even the winner is essentially
+          # unreadable. The caller will restore AE and retry from a fresh base.
+          old = """  const best = valid.reduce((winner, item) => item.score > winner.score ? item : winner);\n  const finalIso = quantizeCameraRange(Math.min(cap, best.iso || best.requestedIso || base), isoRange);"""
+          new = """  const best = valid.reduce((winner, item) => item.score > winner.score ? item : winner);\n  if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {\n    autoOpticsTuneSummary = `${remembered ? `memory ${Math.round(remembered)} · ` : \"\"}${probes.map(describeAutoIsoProbe).join(\" · \")} · collapsed ${(best.yieldRate * 100).toFixed(0)}%`;\n    return { iso: base, probes, best, collapsed: true };\n  }\n  const finalIso = quantizeCameraRange(Math.min(cap, best.iso || best.requestedIso || base), isoRange);"""
+          if old not in s: raise SystemExit("tune winner anchor missing")
+          s = s.replace(old, new, 1)
+
+          old = """    if (tuned.deferred) {\n      // The camera moved or framing collapsed during every useful measurement.\n      // Restore hardware AE and try again only after a fresh stable QR lock;\n      // never commit a random ISO winner from incomparable scene geometry.\n      await applyExposureSetting(track);\n      autoOpticsRuntimeState = \"ae\";\n      autoOpticsLockSince = 0;\n      autoOpticsRetryAt = receiverNow() + 800;\n      return;\n    }"""
+          new = """    if (tuned.deferred || tuned.collapsed) {\n      // Movement makes samples incomparable; catastrophic yield means the whole\n      // local manual neighborhood is wrong. In either case, restore hardware AE\n      // instead of preserving a bad relative winner.\n      const collapsedYield = tuned.best?.yieldRate ?? 0;\n      await applyExposureSetting(track);\n      autoOpticsRuntimeState = \"ae\";\n      autoOpticsLockSince = 0;\n      autoOpticsAcquisitionSince = receiverNow();\n      autoOpticsRetryAt = receiverNow() + (tuned.collapsed ? AUTO_OPTICS_COLLAPSE_RETRY_MS : 800);\n      if (tuned.collapsed) {\n        autoOpticsTuneSummary = `collapsed ${(collapsedYield * 100).toFixed(0)}% · hardware AE reacquire`;\n        focusController.adoptAutomaticCameraState(\"automatic optics collapsed; hardware AE reacquire\");\n      }\n      return;\n    }"""
+          if old not in s: raise SystemExit("settle deferred anchor missing")
+          s = s.replace(old, new, 1)
+
+          # A healthy manual winner can later become terrible after pose/screen
+          # brightness changes. Detect that before wasting another local probe.
+          old = """    if (!baseline?.valid) {\n      autoOpticsTuneSummary = `steady ISO ${Math.round(currentIso)} · fine tune deferred`;\n      autoOpticsFineTuneAt = receiverNow() + 2200;\n      return;\n    }\n    const candidate = await measureAutomaticIsoCandidate(track, exposure, candidateIso, isoRange, {"""
+          new = """    if (!baseline?.valid) {\n      autoOpticsTuneSummary = `steady ISO ${Math.round(currentIso)} · fine tune deferred`;\n      autoOpticsFineTuneAt = receiverNow() + 2200;\n      return;\n    }\n    if (baseline.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {\n      const collapsedYield = baseline.yieldRate;\n      await applyExposureSetting(track);\n      autoOpticsRuntimeState = \"ae\";\n      autoOpticsLockSince = 0;\n      autoOpticsAcquisitionSince = receiverNow();\n      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_COLLAPSE_RETRY_MS;\n      autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(collapsedYield * 100).toFixed(0)}% · hardware AE reacquire`;\n      focusController.adoptAutomaticCameraState(\"automatic optics collapsed; hardware AE reacquire\");\n      return;\n    }\n    const candidate = await measureAutomaticIsoCandidate(track, exposure, candidateIso, isoRange, {"""
+          if old not in s: raise SystemExit("fine baseline anchor missing")
+          s = s.replace(old, new, 1)
+
+          old = """  } finally {\n    autoOpticsRuntimeState = \"manual\";\n    autoOpticsMutationRunning = false;\n  }\n}\n\nasync function releaseAutomaticQrOptics"""
+          new = """  } finally {\n    if (autoOpticsRuntimeState === \"fine\") autoOpticsRuntimeState = \"manual\";\n    autoOpticsMutationRunning = false;\n  }\n}\n\nasync function releaseAutomaticQrOptics"""
+          if old not in s: raise SystemExit("fine finally anchor missing")
+          s = s.replace(old, new, 1)
+
+          # Manual watchdog runs from the frame pump but only does getSettings()
+          # twice per second; it writes only when a pinned axis actually drifted.
+          old = """  const now = receiverNow();\n  maintainAutomaticQrOptics(now);"""
+          new = """  const now = receiverNow();\n  void maintainManualOptics(now);\n  maintainAutomaticQrOptics(now);"""
+          if old not in s: raise SystemExit("frame optics maintenance anchor missing")
+          s = s.replace(old, new, 1)
+
+          # The timing counters already exist, so this adds no decoder work. It
+          # makes thermal/clock slowdowns visible in copied diagnostics.
+          old = """Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}"""
+          new = """Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}"""
+          if old not in s: raise SystemExit("guided diagnostics anchor missing")
+          s = s.replace(old, new, 1)
+
+          # When switching into manual mode, make the watchdog eligible to
+          # verify immediately after the explicit apply/validation completes.
+          old = """  if (!automaticOptics) {\n    setOptimizeEnabled(false);\n    if (track) void applyAndValidateManualExposure(track);\n    return;\n  }"""
+          new = """  if (!automaticOptics) {\n    setOptimizeEnabled(false);\n    manualOpticsCheckAt = 0;\n    if (track) void applyAndValidateManualExposure(track);\n    return;\n  }"""
+          if old not in s: raise SystemExit("manual toggle anchor missing")
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
+          rm -f .github/workflows/agent-v185-optics-recovery.yml
+          git add -A
+          git commit -m "v0.5.185 recover collapsed optics"
+          git push origin HEAD:master
