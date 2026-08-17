@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.205";
+const RECEIVER_RUNTIME_BUILD = "v0.5.206";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1917,6 +1917,7 @@ let geometrySightingNudges = 0;
 let geometryCoverageHealthy = false;
 let geometryCoverageCollapseStreak = 0;
 let geometryCoverageCollapseLastAt = 0;
+let geometryCoverageCollapseStartedAt = 0;
 let recoveryWorkerRestarts = 0;
 let recoveryAbortedJobs = 0;
 let recoveryAbortedWorkerMs = 0;
@@ -2072,18 +2073,24 @@ function noteDecodeCompleted(id, completion) {
       geometryCoverageHealthy = true;
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
+  geometryCoverageCollapseStartedAt = 0;
     } else if (geometryCoverageHealthy && coverage <= GEOMETRY_COLLAPSE_BAD_RATIO) {
-      if (now - geometryCoverageCollapseLastAt > GEOMETRY_COLLAPSE_MAX_GAP_MS)
+      if (now - geometryCoverageCollapseLastAt > GEOMETRY_COLLAPSE_MAX_GAP_MS) {
         geometryCoverageCollapseStreak = 0;
+        geometryCoverageCollapseStartedAt = now;
+      }
+      if (!geometryCoverageCollapseStreak) geometryCoverageCollapseStartedAt = now;
       geometryCoverageCollapseLastAt = now;
       geometryCoverageCollapseStreak++;
-      if (geometryCoverageCollapseStreak >= GEOMETRY_COLLAPSE_STREAK) {
+      if (geometryCoverageCollapseStreak >= GEOMETRY_COLLAPSE_STREAK &&
+          now - geometryCoverageCollapseStartedAt >= GEOMETRY_COLLAPSE_MIN_SPAN_MS) {
         notePipelineEvent("geometry-coverage-collapse", trackedOutputs);
         enterGeometryRecovery(`tracked coverage collapsed ${trackedOutputs}/${auditMode.tracks}; fresh acquisition`, now, true);
       }
     } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
+  geometryCoverageCollapseStartedAt = 0;
     }
   }
   const benchmarkTrace = benchmarkJobFrames.get(id);
@@ -2255,6 +2262,7 @@ const GEOMETRY_COLLAPSE_HEALTHY_RATIO = 0.55;
 const GEOMETRY_COLLAPSE_BAD_RATIO = 0.28;
 const GEOMETRY_COLLAPSE_STREAK = 4;
 const GEOMETRY_COLLAPSE_MAX_GAP_MS = 650;
+const GEOMETRY_COLLAPSE_MIN_SPAN_MS = 180;
 // A short synchronized miss burst is common when a camera exposure crosses a
 // display transition. Keep proven geometry alive long enough for tracked
 // decoding and occasional generic rescue probes to recover it.
@@ -4219,6 +4227,7 @@ function stopReceiver() {
   geometryCoverageHealthy = false;
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
+  geometryCoverageCollapseStartedAt = 0;
   recoveryWorkerRestarts = 0;
   recoveryAbortedJobs = 0;
   recoveryAbortedWorkerMs = 0;
@@ -4696,6 +4705,7 @@ function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = tru
   geometryCoverageHealthy = false;
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
+  geometryCoverageCollapseStartedAt = 0;
   decoderFreshnessHoldActive = false;
   decoderFreshnessHoldUntil = 0;
   discardInFlightDecodeWork(reason, restartWorkers);
@@ -6242,16 +6252,19 @@ function onDecoded(bytes, box, info) {
   if (!optimizerAttribution && box && validQuadObject(info == null ? void 0 : info.quad) && info.modules) {
     const priorBenchmarkFrame = activeBenchmarkFrame;
     if (productionTrace) activeBenchmarkFrame = productionTrace;
-    const snapshot = gridLattice.accept({
-      identity,
-      layoutId: header.layoutId,
-      slotIndex: header.slotIndex,
-      at: info.scanId === void 0 ? decodedAt : (_b = scanCapturedAt.get(info.scanId)) != null ? _b : decodedAt,
-      scanId: (_c = info.scanId) != null ? _c : -1,
-      box,
-      quad: info.quad,
-      modules: info.modules
-    }, receiverFrameWidth, receiverFrameHeight);
+    const packetAt = info.scanId === void 0 ? decodedAt : (_b = scanCapturedAt.get(info.scanId)) != null ? _b : decodedAt;
+    const snapshot = info.geometryMeasured === false
+      ? gridLattice.noteValidPacket(packetAt)
+      : gridLattice.accept({
+          identity,
+          layoutId: header.layoutId,
+          slotIndex: header.slotIndex,
+          at: packetAt,
+          scanId: (_c = info.scanId) != null ? _c : -1,
+          box,
+          quad: info.quad,
+          modules: info.modules
+        }, receiverFrameWidth, receiverFrameHeight);
     if (snapshot) {
       decodedRegion = syncGrid(
         snapshot,

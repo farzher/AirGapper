@@ -43,9 +43,10 @@ const NATIVE_TRACK_RESULT_BYTES = 32;
 const NATIVE_BATCH_METRICS_BYTES = 128;
 const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
+const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 156;
+const GUIDED_METRICS_BYTES = 160;
 const GUIDED_OUTPUT_BYTES = 128 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -130,7 +131,8 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   const decodedSlots = /* @__PURE__ */ new Set();
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
-    if (view.getInt32(base + 4, true) !== NATIVE_TRACK_OK) continue;
+    const status = view.getInt32(base + 4, true);
+    if (status !== NATIVE_TRACK_OK && status !== GUIDED_TRACK_PREDICTED) continue;
     const outputOffset = view.getInt32(base + 8, true);
     const outputLength = view.getInt32(base + 12, true);
     const modules = view.getInt32(base + 16, true);
@@ -153,6 +155,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       quad: shifted(quad, ox, oy),
       modules,
       tracked: true,
+      geometryMeasured: status === NATIVE_TRACK_OK,
       header: packet.header
     });
   }

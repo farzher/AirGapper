@@ -65,6 +65,9 @@
 
 using namespace ZXing;
 
+static_assert(sizeof(DecimenGuidedMetrics) == 160,
+              "DecimenGuidedMetrics JS ABI must allocate 160 bytes");
+
 namespace ZXing::QRCode {
 DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCorrectionLevel ecLevel);
 }
@@ -391,9 +394,8 @@ static void noteGuidedSparseOutcome(int id, bool success)
 
 
 constexpr float GUIDED_TURBO_CANARY_MIN_MODULE = 2.25f;
-constexpr int GUIDED_TURBO_RS_BUDGET = 4;
 constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
-constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 24;
+constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_AMBIGUOUS = 11;
 
 struct GuidedTurboTrack
@@ -409,11 +411,11 @@ struct GuidedTurboTrack
 
 struct GuidedTurboAdaptive
 {
-    int seedId = -1;
     int canaryAttempts = 0;
     int canarySuccesses = 0;
     int canaryDirectSuccesses = 0;
-    int canaryStableEligible = 0;
+    int canaryStableAttempts = 0;
+    int canaryStableSuccesses = 0;
     int promotedAttempts = 0;
     int promotedSuccesses = 0;
     int cooldown = 0;
@@ -438,43 +440,27 @@ static GuidedTurboTrack* guidedTurboTrack(int id)
     return id >= 0 && id < int(guidedTurboTracks().size()) ? &guidedTurboTracks()[id] : nullptr;
 }
 
-static void coolLowDensityTurbo()
-{
-    auto& adaptive = guidedTurboAdaptive();
-    adaptive.seedId = -1;
-    adaptive.canaryAttempts = 0;
-    adaptive.canarySuccesses = 0;
-    adaptive.canaryDirectSuccesses = 0;
-    adaptive.canaryStableEligible = 0;
-    adaptive.promotedAttempts = 0;
-    adaptive.promotedSuccesses = 0;
-    adaptive.promoted = false;
-    adaptive.rsMode = false;
-    adaptive.cooldown = GUIDED_TURBO_CANARY_COOLDOWN;
-    for (auto& cache : guidedTurboTracks()) {
-        cache.seeded = false;
-        cache.samples.clear();
-        cache.misses = 0;
-        cache.cooldown = 0;
-    }
-}
-
-static void demoteTurboPreserveCache()
+static void pauseTurbo(bool refreshDistortion = false, int cooldown = GUIDED_TURBO_CANARY_COOLDOWN)
 {
     auto& adaptive = guidedTurboAdaptive();
     adaptive.canaryAttempts = 0;
     adaptive.canarySuccesses = 0;
     adaptive.canaryDirectSuccesses = 0;
-    adaptive.canaryStableEligible = 0;
+    adaptive.canaryStableAttempts = 0;
+    adaptive.canaryStableSuccesses = 0;
     adaptive.promotedAttempts = 0;
     adaptive.promotedSuccesses = 0;
     adaptive.promoted = false;
     adaptive.rsMode = false;
-    // Briefly stop probing, but keep every calibrated distortion-aware map.
-    adaptive.cooldown = 8;
+    adaptive.cooldown = cooldown;
     for (auto& cache : guidedTurboTracks()) {
         cache.misses = 0;
         cache.cooldown = 0;
+        // A sustained promoted Stable-RS collapse means the lens map no longer
+        // matches the current pose. Keep it usable for projective direct probes
+        // while allowing the next successful Guided sample to replace it.
+        if (refreshDistortion && cache.seeded)
+            cache.distortionAware = false;
     }
 }
 
@@ -483,13 +469,8 @@ static bool turboSeedEligible(const DecimenGuidedTrack& track)
     auto* cache = guidedTurboTrack(track.id);
     if (!cache || guidedModuleSize(track) < GUIDED_TURBO_CANARY_MIN_MODULE)
         return false;
-    auto& adaptive = guidedTurboAdaptive();
-    if (adaptive.cooldown)
-        return false;
-    // Guided already computed the sparse distortion controls. Materialize the
-    // full sample map only until this physical slot owns one good calibrated
-    // map (or its QR dimension changes). Rebuilding 177x177 coordinates every
-    // promoted frame was pure hot-path overhead.
+    // Calibration piggybacks on Guided work we are already paying for. Keep
+    // learning missing/stale maps even while Turbo probes themselves cool down.
     return !cache->seeded || !cache->distortionAware || cache->dimension != track.dimension;
 }
 
@@ -570,8 +551,6 @@ static void seedGuidedTurbo(int id, int dim, const Position& pos,
     cache->samples = std::move(samples);
     cache->misses = 0;
     cache->cooldown = 0;
-    auto& adaptive = guidedTurboAdaptive();
-    if (adaptive.seedId < 0) adaptive.seedId = id;
 }
 
 static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -922,34 +901,71 @@ static PointF turboRefineRigidOffset(const GuidedTurboTrack& cache,
 {
     PointF best{predictedX, predictedY};
     int bestScore = -1;
-    for (int oy = -2; oy <= 2; ++oy)
-        for (int ox = -2; ox <= 2; ++ox) {
-            const float dx = predictedX + ox;
-            const float dy = predictedY + oy;
-            const auto levels = turboReadLevelsRigid(cache, yPlane, width, height, stride, dx, dy);
-            if (!levels.ok)
-                continue;
-            const int score = levels.matches * 4 + levels.separation;
-            if (score > bestScore) {
-                bestScore = score;
-                best = PointF{dx, dy};
-            }
+    int bestMatches = -1;
+    auto consider = [&](float dx, float dy) {
+        const auto levels = turboReadLevelsRigid(cache, yPlane, width, height, stride, dx, dy);
+        if (!levels.ok) return;
+        const int score = levels.matches * 4 + levels.separation;
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatches = levels.matches;
+            best = PointF{dx, dy};
         }
+    };
+    for (int oy = -1; oy <= 1; ++oy)
+        for (int ox = -1; ox <= 1; ++ox)
+            consider(predictedX + ox, predictedY + oy);
+    if (bestMatches < 143) {
+        for (int oy = -2; oy <= 2; ++oy)
+            for (int ox = -2; ox <= 2; ++ox)
+                if (std::max(std::abs(ox), std::abs(oy)) == 2)
+                    consider(predictedX + ox, predictedY + oy);
+    }
     const PointF coarse = best;
     for (int hy = -1; hy <= 1; ++hy)
-        for (int hx = -1; hx <= 1; ++hx) {
-            const float dx = coarse.x + hx * 0.5f;
-            const float dy = coarse.y + hy * 0.5f;
-            const auto levels = turboReadLevelsRigid(cache, yPlane, width, height, stride, dx, dy);
-            if (!levels.ok)
-                continue;
-            const int score = levels.matches * 4 + levels.separation;
-            if (score > bestScore) {
-                bestScore = score;
-                best = PointF{dx, dy};
+        for (int hx = -1; hx <= 1; ++hx)
+            consider(coarse.x + hx * 0.5f, coarse.y + hy * 0.5f);
+    return best;
+}
+
+// Model-2 data placement never changes for a given dimension. Stable-RS runs
+// this traversal thousands of times, so build the function-pattern/mask walk
+// once per QR version and keep only packed {x,y,mask4} entries.
+static const std::vector<uint32_t>& turboCodewordPlan(int dim)
+{
+    static std::array<std::vector<uint32_t>, 41> plans;
+    static const std::vector<uint32_t> empty;
+    if (dim < 21 || dim > 177 || ((dim - 17) & 3))
+        return empty;
+    const int versionNumber = (dim - 17) / 4;
+    const auto* version = QRCode::Version::Model2(versionNumber);
+    if (!version)
+        return empty;
+    auto& plan = plans[versionNumber];
+    if (!plan.empty())
+        return plan;
+    const size_t wanted = size_t(version->totalCodewords()) * 8;
+    plan.reserve(wanted);
+    const auto functionPattern = version->buildFunctionPattern();
+    bool readingUp = true;
+    for (int x = dim - 1; x > 0 && plan.size() < wanted; x -= 2) {
+        if (x == 6) --x;
+        for (int row = 0; row < dim && plan.size() < wanted; ++row) {
+            const int y = readingUp ? dim - 1 - row : row;
+            for (int col = 0; col < 2 && plan.size() < wanted; ++col) {
+                const int xx = x - col;
+                if (functionPattern.get(xx, y)) continue;
+                const uint32_t mask = uint32_t(QRCode::GetDataMaskBit(4, xx, y));
+                plan.push_back(uint32_t(xx) | (uint32_t(y) << 8) | (mask << 16));
             }
         }
-    return best;
+        readingUp = !readingUp;
+    }
+    if (plan.size() != wanted) {
+        plan.clear();
+        return empty;
+    }
+    return plan;
 }
 
 static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
@@ -966,37 +982,29 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     if (totalCodewords <= 0)
         return {};
 
+    const auto& plan = turboCodewordPlan(dim);
+    if (plan.size() != size_t(totalCodewords) * 8)
+        return {};
     const double sampleStarted = guidedNowMs();
-    const auto functionPattern = version->buildFunctionPattern();
     ByteArray raw;
     raw.reserve(totalCodewords);
     uint8_t currentByte = 0;
-    int bitsRead = 0;
-    bool readingUp = true;
     bool failed = false;
-    for (int x = dim - 1; x > 0 && int(raw.size()) < totalCodewords && !failed; x -= 2) {
-        if (x == 6)
-            --x;
-        for (int row = 0; row < dim && int(raw.size()) < totalCodewords && !failed; ++row) {
-            const int y = readingUp ? dim - 1 - row : row;
-            for (int col = 0; col < 2 && int(raw.size()) < totalCodewords; ++col) {
-                const int xx = x - col;
-                if (functionPattern.get(xx, y))
-                    continue;
-                const int threshold = turboThreshold(levels, xx, y, dim);
-                const PointF p = cache.samples[size_t(y) * dim + xx];
-                const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
-                if (lum < 0) { failed = true; break; }
-                const bool black = lum <= threshold;
-                const bool bit = QRCode::GetDataMaskBit(4, xx, y) != black;
-                currentByte = uint8_t((currentByte << 1) | uint8_t(bit));
-                if (++bitsRead % 8 == 0) {
-                    raw.push_back(currentByte);
-                    currentByte = 0;
-                }
-            }
+    for (size_t bitIndex = 0; bitIndex < plan.size(); ++bitIndex) {
+        const uint32_t entry = plan[bitIndex];
+        const int xx = int(entry & 0xff);
+        const int y = int((entry >> 8) & 0xff);
+        const bool mask = ((entry >> 16) & 1) != 0;
+        const int threshold = turboThreshold(levels, xx, y, dim);
+        const PointF p = cache.samples[size_t(y) * dim + xx];
+        const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+        if (lum < 0) { failed = true; break; }
+        const bool black = lum <= threshold;
+        currentByte = uint8_t((currentByte << 1) | uint8_t(mask != black));
+        if ((bitIndex & 7) == 7) {
+            raw.push_back(currentByte);
+            currentByte = 0;
         }
-        readingUp = !readingUp;
     }
     metrics.sampleMs += guidedNowMs() - sampleStarted;
     if (failed || int(raw.size()) != totalCodewords)
@@ -1207,7 +1215,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             auto& result = results[resultCount++];
             result = {};
             result.id = track.id;
-            result.status = DECIMEN_TRACK_OK;
+            result.status = DECIMEN_TRACK_PREDICTED;
             result.bytesOffset = outputUsed;
             result.bytesLength = int(bytes.size());
             result.dimension = track.dimension;
@@ -1265,23 +1273,23 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // single proving slot participates, so a soft/old camera cannot turn
         // this experiment into a second full decoder.
         float wallCorrectionX = 0, wallCorrectionY = 0;
-        for (int i = 0; i < trackCount; ++i) {
-            auto* cache = guidedTurboTrack(tracks[i].id);
-            if (!cache || !cache->seeded || !turboAllowed(i))
-                continue;
-            float dx = 0, dy = 0, residual = 0;
-            if (!turboPose(*cache, tracks[i], dx, dy, residual))
-                continue;
-            const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
-            if (!frameTransform.isValid())
-                continue;
-            // The projective frame warp carries current translation/scale/perspective.
-            // Search only the small residual left by lattice/worker latency.
-            const PointF refined = turboRefineWallOffset(*cache, tracks[i], frameTransform,
-                                                          yPlane, width, height, stride, 0, 0);
-            wallCorrectionX = refined.x;
-            wallCorrectionY = refined.y;
-            break;
+        if (!turboAdaptive.promoted || !turboAdaptive.rsMode) {
+            for (int i = 0; i < trackCount; ++i) {
+                auto* cache = guidedTurboTrack(tracks[i].id);
+                if (!cache || !cache->seeded || !turboAllowed(i))
+                    continue;
+                float dx = 0, dy = 0, residual = 0;
+                if (!turboPose(*cache, tracks[i], dx, dy, residual))
+                    continue;
+                const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
+                if (!frameTransform.isValid())
+                    continue;
+                const PointF refined = turboRefineWallOffset(*cache, tracks[i], frameTransform,
+                                                              yPlane, width, height, stride, 0, 0);
+                wallCorrectionX = refined.x;
+                wallCorrectionY = refined.y;
+                break;
+            }
         }
 
         // Stable-RS uses the calibrated distortion map as-is plus a single
@@ -1320,7 +1328,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             const bool stableEligible = stableReference && turboStableRigidEligible(*cache, track, residual);
             if (stableEligible)
                 ++metrics->stableEligibleTracks;
-            const bool directMode = !turboAdaptive.promoted || !turboAdaptive.rsMode;
+            const bool stableProbation = !turboAdaptive.promoted && stableEligible && cache->distortionAware;
+            const bool directMode = turboAdaptive.promoted ? !turboAdaptive.rsMode : !stableProbation;
 
             ++metrics->reserved; // Turbo attempts (ABI-reserved field)
             const double turboStarted = guidedNowMs();
@@ -1363,7 +1372,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     ++metrics->stableRsAttempts;
                     auto decoded = decodeTurboStableRS(*cache, track, yPlane, width, height, stride,
                                                        dx, dy, levels, *metrics);
-                    success = commitTurbo(i, decoded, dx, dy);
+                    success = commitTurbo(i, decoded, stableResidualX, stableResidualY);
                     if (success)
                         ++metrics->stableRsSuccesses;
                 }
@@ -1388,36 +1397,37 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 ++turboAdaptive.canaryAttempts;
                 turboAdaptive.canarySuccesses += int(success);
                 turboAdaptive.canaryDirectSuccesses += int(directSuccess);
-                turboAdaptive.canaryStableEligible += int(stableEligible);
+                if (stableRsAttempted) {
+                    ++turboAdaptive.canaryStableAttempts;
+                    turboAdaptive.canaryStableSuccesses += int(success);
+                }
 
                 const bool directEarly = turboAdaptive.canaryAttempts >= 4 &&
                                          turboAdaptive.canaryDirectSuccesses == turboAdaptive.canaryAttempts;
-                if (directEarly) {
-                    turboAdaptive.promoted = true;
-                    turboAdaptive.rsMode = false;
-                } else if (turboAdaptive.canaryAttempts >= 8) {
-                    const bool directWin = turboAdaptive.canaryDirectSuccesses * 4 >=
-                                           turboAdaptive.canaryAttempts * 3;
-                    const bool stableRsWin = turboAdaptive.canaryStableEligible >= 6 &&
-                                             turboAdaptive.canarySuccesses * 8 >=
-                                             turboAdaptive.canaryAttempts * 3;
-                    if (directWin || stableRsWin) {
-                        turboAdaptive.promoted = true;
-                        turboAdaptive.rsMode = !directWin;
-                    } else {
-                        if (turboAdaptive.canaryStableEligible >= 6)
-                            demoteTurboPreserveCache();
-                        else
-                            coolLowDensityTurbo();
-                    }
+                const bool stableEarly = turboAdaptive.canaryStableAttempts >= 4 &&
+                                         turboAdaptive.canaryStableSuccesses * 4 >=
+                                         turboAdaptive.canaryStableAttempts * 3;
+                bool promoteDirect = directEarly;
+                bool promoteStable = stableEarly;
+                if (!promoteDirect && !promoteStable && turboAdaptive.canaryAttempts >= 8) {
+                    promoteDirect = turboAdaptive.canaryDirectSuccesses * 4 >=
+                                    turboAdaptive.canaryAttempts * 3;
+                    promoteStable = turboAdaptive.canaryStableAttempts >= 6 &&
+                                    turboAdaptive.canaryStableSuccesses * 2 >=
+                                    turboAdaptive.canaryStableAttempts;
                 }
-                if (turboAdaptive.promoted) {
+                if (promoteDirect || promoteStable) {
+                    turboAdaptive.promoted = true;
+                    turboAdaptive.rsMode = promoteStable && !promoteDirect;
                     turboAdaptive.canaryAttempts = 0;
                     turboAdaptive.canarySuccesses = 0;
                     turboAdaptive.canaryDirectSuccesses = 0;
-                    turboAdaptive.canaryStableEligible = 0;
+                    turboAdaptive.canaryStableAttempts = 0;
+                    turboAdaptive.canaryStableSuccesses = 0;
                     turboAdaptive.promotedAttempts = 0;
                     turboAdaptive.promotedSuccesses = 0;
+                } else if (turboAdaptive.canaryAttempts >= 10) {
+                    pauseTurbo(false);
                 }
             } else {
                 ++turboAdaptive.promotedAttempts;
@@ -1427,12 +1437,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     const bool tooWeak = turboAdaptive.rsMode
                         ? turboAdaptive.promotedSuccesses * 10 < turboAdaptive.promotedAttempts * 3
                         : turboAdaptive.promotedSuccesses * 2 < turboAdaptive.promotedAttempts;
-                    if (tooWeak) {
-                        if (turboAdaptive.rsMode)
-                            demoteTurboPreserveCache();
-                        else
-                            coolLowDensityTurbo();
-                    } else {
+                    if (tooWeak)
+                        pauseTurbo(turboAdaptive.rsMode, turboAdaptive.rsMode ? 4 : GUIDED_TURBO_CANARY_COOLDOWN);
+                    else {
                         turboAdaptive.promotedAttempts = 0;
                         turboAdaptive.promotedSuccesses = 0;
                     }

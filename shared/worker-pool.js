@@ -101,6 +101,7 @@ class DecodeWorkerPool {
             quad: symbol.quad,
             modules: symbol.modules,
             tracked: symbol.tracked,
+            geometryMeasured: symbol.geometryMeasured !== false,
             crc32: symbol.crc32,
             verifiedPayload: Boolean(symbol.verifiedPayload),
             header: symbol.header

@@ -11,6 +11,9 @@ enum DecimenTrackedStatus : int32_t {
 	DECIMEN_TRACK_MISS = 0,
 	DECIMEN_TRACK_OK = 1,
 	DECIMEN_TRACK_OUTPUT_FULL = 2,
+	// Bytes are valid, but the returned quad is a prediction from cached
+	// geometry rather than a fresh finder/alignment measurement.
+	DECIMEN_TRACK_PREDICTED = 3,
 };
 
 struct DecimenTrackedResult {

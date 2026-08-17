@@ -189,6 +189,12 @@ class GridLattice {
     this.learnSlotCorrection(detection);
     return this.snapshot();
   }
+  noteValidPacket(at = this.lastHitAt) {
+    if (!this.candidate) return null;
+    this.lastHitAt = at;
+    if (this.locked) this.transition("TRACK", "valid predicted packet kept lattice alive", at);
+    return this.snapshot();
+  }
   learnSlotCorrection(detection) {
     const candidate = this.candidate;
     if (!this.locked || !candidate || candidate.error > LOCAL_GEOMETRY_LEARN_MAX_ERROR) return;
@@ -221,6 +227,7 @@ class GridLattice {
       this.transition("REACQUIRE", "whole lattice expired without a valid packet", now);
       this.candidate = void 0;
       this.observations = [];
+      this.slotCorrections.clear();
       return null;
     }
     // Provisional geometry remains publishable for overlays, visibility,
