@@ -11,7 +11,7 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
-      - .github/v219_y8_regression_patch.py
+      - .github/v220_dense_stable_rs_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -21,20 +21,38 @@ permissions:
 jobs:
   fast-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply camera-path regression transport
+      - name: Apply dense Stable-RS candidate
         id: candidate
         run: |
           set -euo pipefail
-          if ! grep -q 'let fastRegressionCameraFrames;' receive/main.js; then
-            python3 .github/v219_y8_regression_patch.py
+          if ! grep -q 'GUIDED_STABLE_RS_MIN_MODULE' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+            python3 .github/v220_dense_stable_rs_patch.py
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Cache decimen toolchain
+        if: steps.candidate.outputs.changed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/decimen-codec/source/emsdk
+            vendor/decimen-codec/source/third_party
+            vendor/decimen-codec/source/build-simd
+            vendor/decimen-codec/source/build-scalar
+          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+
+      - name: Build SIMD and scalar codecs
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
 
       - uses: actions/setup-node@v4
         with:
@@ -64,13 +82,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit passing camera regression transport
+      - name: Commit passing Stable-RS candidate
         if: steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
           rm -rf node_modules benchmark/offline-summary.json
-          git add receive/main.js
-          git commit -m "add live-equivalent Y8 receiver regression path"
+          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+                  vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+                  vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm
+          git commit -m "v0.5.220 extend Stable-RS to dense tracked QRs"
           git push origin HEAD:master
