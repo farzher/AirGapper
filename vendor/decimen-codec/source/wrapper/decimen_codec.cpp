@@ -1016,13 +1016,14 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int threshold = turboThreshold(levels, xx, y, dim);
             int lum;
             if (centerOnly) {
-                // Stable-RS already has full QR error correction and AirGapper
-                // CRC. On a pure-translation calibrated wall, first give RS the
-                // single bilinear module-center sample instead of spending up to
-                // five reads on every threshold-adjacent cell. The caller retries
-                // this exact slot with the conservative voted sampler on failure.
+                // This path is limited by the caller to calibrated dense QRs
+                // whose live pose is pure translation. Let QR RS absorb an
+                // occasional phase-adjacent module and use one luminance byte
+                // per data cell. AirGapper CRC remains the exact acceptance
+                // gate; failure retries the old bilinear/voted sampler in this
+                // same slot before sparse Guided recovery can run.
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
-                lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+                lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
                 lum = turboModuleLum(cache, track, frameTransform,
                                      yPlane, width, height, stride,
