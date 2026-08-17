@@ -629,19 +629,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             // this cannot reduce decode yield versus the sparse path it replaces.
             if (guidedSparseAllowed(track.id)) {
                 ++metrics->fastDecodeAttempts;
-                int sparseAlignmentFound = 0;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet, &sparseAlignmentFound);
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr);
                 if (sparse.isValid() && sparse.bits().width() == track.dimension) {
                     metrics->sampleAttempts++;
                     const double fastStart = guidedNowMs();
-                    if (sparseAlignmentFound >= 6) {
-                        ++metrics->sparseNoRsAttempts;
-                        auto fast = decodeWithoutErrorCorrection(sparse.bits());
-                        if (fast.isValid() && !fast.content().bytes.empty() && hasValidCRC32(fast.content().bytes)) {
-                            decodedTrack = commitDecoded(sparse, fast);
-                            if (decodedTrack) ++metrics->sparseNoRsSuccesses;
-                        }
-                    }
                     if (!decodedTrack) {
                         ++metrics->sparseRsFallbacks;
                         auto decoded = QRCode::Decode(sparse.bits());
