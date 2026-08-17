@@ -11,7 +11,7 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
-      - .github/v218_rgba_tracked_patch.py
+      - .github/v219_y8_regression_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,12 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply candidate tracked-path optimization
+      - name: Apply camera-path regression transport
         id: candidate
         run: |
           set -euo pipefail
-          if grep -q 'usedDirectFrame || pixelFormat === "rgba"' receive/worker.js; then
-            python3 .github/v218_rgba_tracked_patch.py
+          if ! grep -q 'let fastRegressionCameraFrames;' receive/main.js; then
+            python3 .github/v219_y8_regression_patch.py
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -64,13 +64,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit passing candidate
+      - name: Commit passing camera regression transport
         if: steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
           rm -rf node_modules benchmark/offline-summary.json
-          git add receive/worker.js
-          git commit -m "v0.5.218 prefer tracked decode for buffered RGBA"
+          git add receive/main.js
+          git commit -m "add live-equivalent Y8 receiver regression path"
           git push origin HEAD:master
