@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v226_center_rs_patch.py
+      - .github/v227_density_scope_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -26,19 +26,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v226 center-sampled Stable-RS candidate
+      - name: Apply v227 density scope candidate
         id: candidate
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            if ! grep -q 'centerOnlyRs = frameTransform.translationOnly' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-              python3 .github/v226_center_rs_patch.py
+            if ! grep -q 'guidedModuleSize(track) < GUIDED_TURBO_NEAREST_MIN_MODULE' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+              python3 .github/v227_density_scope_patch.py
               echo 'changed=true' >> "$GITHUB_OUTPUT"
             else
               echo 'changed=false' >> "$GITHUB_OUTPUT"
             fi
-          } 2>&1 | tee /tmp/v226-patch.log
+          } 2>&1 | tee /tmp/v227-patch.log
 
       - name: Cache decimen toolchain
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
@@ -60,7 +60,7 @@ jobs:
           {
             DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
             DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
-          } 2>&1 | tee /tmp/v226-build.log
+          } 2>&1 | tee /tmp/v227-build.log
 
       - uses: actions/setup-node@v4
         if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
@@ -83,29 +83,40 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v226-regression.log
-          echo '--- fast regression summary ---'
-          cat benchmark/offline-summary.json
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v227-regression.log
 
-      - name: Require a real dense-path win
+      - name: Compare normalized decoder cost with v226
         id: performance
         if: steps.candidate.outputs.changed == 'true' && steps.regression.outcome == 'success'
         continue-on-error: true
         run: |
-          node <<'NODE' 2>&1 | tee /tmp/v226-performance.log
+          node <<'NODE' 2>&1 | tee /tmp/v227-performance.log
           const fs = require('fs');
-          const r = JSON.parse(fs.readFileSync('benchmark/offline-summary.json', 'utf8'));
-          const stable = r.scenarios['stable-y8'];
-          const motion = r.scenarios['motion-y8'];
-          const dense = r.scenarios['dense-y8'];
+          const before = JSON.parse(fs.readFileSync('benchmark/latest-result.json', 'utf8')).scenarios;
+          const after = JSON.parse(fs.readFileSync('benchmark/offline-summary.json', 'utf8')).scenarios;
           const problems = [];
-          if (dense.guided.sampleMs > 330) problems.push(`dense sample ${dense.guided.sampleMs.toFixed(1)}ms > 330ms`);
-          if (dense.guided.stableRsAttempts && dense.guided.stableRsSuccesses / dense.guided.stableRsAttempts < 0.95)
-            problems.push(`dense Stable-RS yield ${(100 * dense.guided.stableRsSuccesses / dense.guided.stableRsAttempts).toFixed(1)}% < 95%`);
-          if (stable.decodeP50Ms > 15) problems.push(`stable p50 ${stable.decodeP50Ms.toFixed(1)}ms > 15ms`);
-          if (motion.finalState !== 'TRACK') problems.push(`motion ended ${motion.finalState}`);
-          if (motion.decodeP95Ms > 80) problems.push(`motion p95 ${motion.decodeP95Ms.toFixed(1)}ms > 80ms`);
-          console.log(JSON.stringify({stableP50: stable.decodeP50Ms, motionP95: motion.decodeP95Ms, denseSampleMs: dense.guided.sampleMs, denseStableRS: [dense.guided.stableRsSuccesses, dense.guided.stableRsAttempts]}));
+          const bStable = before['stable-y8'], aStable = after['stable-y8'];
+          const bMotion = before['motion-y8'], aMotion = after['motion-y8'];
+          const bDense = before['dense-y8'], aDense = after['dense-y8'];
+          if (aStable.normalized.sampleMsPerTrack > bStable.normalized.sampleMsPerTrack * 1.02)
+            problems.push(`stable sample/track ${aStable.normalized.sampleMsPerTrack.toFixed(3)} > baseline ${bStable.normalized.sampleMsPerTrack.toFixed(3)}`);
+          if (aStable.decodeP50Ms > Math.max(11, bStable.decodeP50Ms * 1.20))
+            problems.push(`stable p50 ${aStable.decodeP50Ms.toFixed(1)}ms regressed from ${bStable.decodeP50Ms.toFixed(1)}ms`);
+          if (aDense.normalized.sampleMsPerTrack > bDense.normalized.sampleMsPerTrack * 1.12)
+            problems.push(`dense sample/track ${aDense.normalized.sampleMsPerTrack.toFixed(3)} > ${bDense.normalized.sampleMsPerTrack.toFixed(3)} * 1.12`);
+          if (aDense.decodeP50Ms > Math.max(55, bDense.decodeP50Ms * 1.15))
+            problems.push(`dense p50 ${aDense.decodeP50Ms.toFixed(1)}ms regressed from ${bDense.decodeP50Ms.toFixed(1)}ms`);
+          if (aDense.normalized.stableRsYield < 0.98)
+            problems.push(`dense Stable-RS yield ${(100*aDense.normalized.stableRsYield).toFixed(1)}% < 98%`);
+          if (aMotion.finalState !== 'TRACK' || aMotion.normalized.guidedOutputYield < bMotion.normalized.guidedOutputYield * 0.90)
+            problems.push(`motion recovery regressed (${aMotion.finalState}, ${(100*aMotion.normalized.guidedOutputYield).toFixed(1)}% yield)`);
+          if (aMotion.decodeP95Ms > Math.max(60, bMotion.decodeP95Ms * 1.25))
+            problems.push(`motion p95 ${aMotion.decodeP95Ms.toFixed(1)}ms regressed from ${bMotion.decodeP95Ms.toFixed(1)}ms`);
+          console.log(JSON.stringify({
+            stable: {before: bStable.normalized, after: aStable.normalized, p50: [bStable.decodeP50Ms, aStable.decodeP50Ms]},
+            motion: {before: bMotion.normalized, after: aMotion.normalized, p95: [bMotion.decodeP95Ms, aMotion.decodeP95Ms]},
+            dense: {before: bDense.normalized, after: aDense.normalized, p50: [bDense.decodeP50Ms, aDense.decodeP50Ms]}
+          }, null, 2));
           if (problems.length) throw new Error(problems.join('; '));
           NODE
 
@@ -130,41 +141,31 @@ jobs:
           git commit -m "record latest fast receiver regression"
           git push origin HEAD:master
 
-      - name: Commit failure diagnostics
+      - name: Commit candidate rejection diagnostics
         if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure' || (steps.candidate.outputs.changed == 'true' && steps.performance.outcome == 'failure')
         run: |
           set -euo pipefail
-          PATCH_OUTCOME='${{ steps.candidate.outcome }}'
-          BUILD_OUTCOME='${{ steps.build.outcome }}'
-          REGRESSION_OUTCOME='${{ steps.regression.outcome }}'
-          PERFORMANCE_OUTCOME='${{ steps.performance.outcome }}'
           git reset --hard HEAD
           {
-            echo "patch=$PATCH_OUTCOME"
-            echo "build=$BUILD_OUTCOME"
-            echo "regression=$REGRESSION_OUTCOME"
-            echo "performance=$PERFORMANCE_OUTCOME"
+            echo "patch=${{ steps.candidate.outcome }}"
+            echo "build=${{ steps.build.outcome }}"
+            echo "regression=${{ steps.regression.outcome }}"
+            echo "performance=${{ steps.performance.outcome }}"
             echo
-            echo '--- patch tail ---'
-            tail -n 120 /tmp/v226-patch.log 2>/dev/null || true
+            cat /tmp/v227-performance.log 2>/dev/null || true
             echo
-            echo '--- build tail ---'
-            tail -n 180 /tmp/v226-build.log 2>/dev/null || true
+            tail -n 220 /tmp/v227-build.log 2>/dev/null || true
             echo
-            echo '--- performance ---'
-            cat /tmp/v226-performance.log 2>/dev/null || true
-            echo
-            echo '--- regression tail ---'
-            tail -n 260 /tmp/v226-regression.log 2>/dev/null || true
-          } > benchmark/v226-ci.log
+            tail -n 260 /tmp/v227-regression.log 2>/dev/null || true
+          } > benchmark/v227-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/v226-ci.log
-          git commit -m "record v226 candidate rejection"
+          git add benchmark/v227-ci.log
+          git commit -m "record v227 candidate rejection"
           git push origin HEAD:master
           exit 1
 
-      - name: Commit passing v226 candidate
+      - name: Commit passing v227 candidate
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success' && steps.performance.outcome == 'success'
         run: |
           set -euo pipefail
@@ -177,5 +178,5 @@ jobs:
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
                   main.js receive/main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.226 fast center-sampled Stable-RS"
+          git commit -m "v0.5.227 scope center-sampled RS to dense QRs"
           git push origin HEAD:master
