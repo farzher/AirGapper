@@ -19,10 +19,12 @@ if old not in s:
     raise SystemExit("GuidedTurboTrack fields target not found")
 s = s.replace(old, new, 1)
 
-old = '''    cache->misses = 0;
+old = '''    cache->samples = std::move(samples);
+    cache->misses = 0;
     cache->cooldown = 0;
 }'''
-new = '''    cache->misses = 0;
+new = '''    cache->samples = std::move(samples);
+    cache->misses = 0;
     cache->cooldown = 0;
     cache->stableSuccesses = 0;
 }'''
@@ -30,7 +32,7 @@ if old not in s:
     raise SystemExit("seedGuidedTurbo reset target not found")
 s = s.replace(old, new, 1)
 
-old = '''                    if (levels.ok) {
+old = '''                    } else {
                         stableRsAttempted = true;
                         ++metrics->sampleAttempts;
                         ++metrics->sparseRsFallbacks;
@@ -42,13 +44,13 @@ old = '''                    if (levels.ok) {
                         if (success)
                             ++metrics->stableRsSuccesses;
                     }'''
-new = '''                    if (levels.ok) {
+new = '''                    } else {
                         // Once this exact distortion-aware map has repeatedly
                         // survived QR RS + AirGapper CRC, try the existing
                         // data-only decoder first on sufficiently resolved QRs.
                         // Its CRC is still an exact acceptance gate. A miss pays
                         // no correctness cost: Stable-RS runs immediately below
-                        // and the data-only probe backs off for two appearances.
+                        // and the data-only probe backs off briefly.
                         const bool stableDirectEligible =
                             guidedModuleSize(track) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
                             cache->stableSuccesses >= 2 && !cache->cooldown;
