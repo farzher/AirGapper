@@ -1,16 +1,9 @@
 import fs from "node:fs/promises";
-import process from "node:process";
-import { chromium } from "playwright-core";
+import { chromium } from "playwright";
 
 const baseUrl = process.env.AIRGAPPER_URL || "http://127.0.0.1:8080/";
-const chrome = process.env.CHROME_BIN;
-if (!chrome) throw new Error("CHROME_BIN is required");
-const urls = process.argv.slice(2);
-if (!urls.length) throw new Error("Pass one or more benchmark image URLs");
-
 const browser = await chromium.launch({
   headless: true,
-  executablePath: chrome,
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
 
@@ -21,14 +14,45 @@ page.on("console", (message) => {
 });
 page.on("pageerror", (error) => console.error(`[browser pageerror] ${error.stack || error.message}`));
 
-try {
+async function generateSenderFrames() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.locator('[data-mode="send"]').click();
+  await page.selectOption("#cfg-layout", "three-six");
+  await page.selectOption("#cfg-orientation", "landscape");
+  await page.selectOption("#cfg-scaling", "integer");
+  await page.selectOption("#cfg-fps", "30");
+  const payload = Array.from({ length: 42000 }, (_, index) => String.fromCharCode(33 + index % 90)).join("");
+  await page.fill("#snippet-text", payload);
+  await page.locator("#send-snippet").click();
+  await page.waitForFunction(() => {
+    const canvas = document.getElementById("qr");
+    return canvas && canvas.width > 100 && canvas.height > 100 && !document.getElementById("stage").hidden;
+  });
+
+  const frames = [];
+  const seen = new Set();
+  const deadline = Date.now() + 7000;
+  while (frames.length < 18 && Date.now() < deadline) {
+    const url = await page.locator("#qr").evaluate((canvas) => canvas.toDataURL("image/png"));
+    if (!seen.has(url)) {
+      seen.add(url);
+      frames.push(url);
+    }
+    await page.waitForTimeout(45);
+  }
+  if (frames.length < 6) throw new Error(`Only generated ${frames.length} distinct sender frames`);
+  console.log(`AIRGAPPER_GENERATED_FRAMES ${frames.length}`);
+  return frames;
+}
+
+try {
+  const urls = await generateSenderFrames();
   await page.waitForFunction(() => typeof window.__airgapperRunOfflineImages === "function");
 
   const scenarios = [
-    ...urls.map((url, index) => ({ name: `static-${index + 1}`, urls: [url], repeats: 75, fps: 30, mode: "performance" })),
-    { name: "trio-cycle", urls, repeats: 45, fps: 30, mode: "performance" },
-    { name: "trio-maximum", urls, repeats: 30, fps: 30, mode: "maximum" }
+    { name: "static-repeat", urls: [urls[0]], repeats: 120, fps: 30, mode: "performance" },
+    { name: "animated-cycle", urls, repeats: 8, fps: 30, mode: "performance" },
+    { name: "animated-maximum", urls, repeats: 6, fps: 30, mode: "maximum" }
   ];
 
   const results = {};
@@ -39,11 +63,7 @@ try {
     console.log(`AIRGAPPER_BENCHMARK_RESULT ${scenario.name} ${JSON.stringify(result)}`);
   }
 
-  const output = {
-    generatedAt: new Date().toISOString(),
-    baseUrl,
-    scenarios: results
-  };
+  const output = { generatedAt: new Date().toISOString(), baseUrl, sourceFrames: urls.length, scenarios: results };
   await fs.writeFile("benchmark/offline-summary.json", JSON.stringify(output, null, 2));
   console.log(`AIRGAPPER_OFFLINE_SUMMARY ${JSON.stringify(output)}`);
 } finally {
