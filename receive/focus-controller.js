@@ -124,6 +124,8 @@ class FocusController {
     __publicField(this, "seekingAfRetries", 0);
     __publicField(this, "seekingAfVerified", 0);
     __publicField(this, "seekingAfUnconfirmed", 0);
+    __publicField(this, "singleShotAfRejected", false);
+    __publicField(this, "continuousAfNudges", 0);
     __publicField(this, "lastSeekingAfAt", -Infinity);
     __publicField(this, "seekingAfRunning", false);
     __publicField(this, "waiter");
@@ -164,6 +166,8 @@ class FocusController {
     this.seekingAfRetries = 0;
     this.seekingAfVerified = 0;
     this.seekingAfUnconfirmed = 0;
+    this.singleShotAfRejected = false;
+    this.continuousAfNudges = 0;
     this.lastSeekingAfAt = -Infinity;
     this.seekingAfRunning = false;
     this.optimizeMovementSince = 0;
@@ -1007,6 +1011,8 @@ class FocusController {
       actualDistance: settings.focusDistance,
       distanceRange: this.caps.focusDistance,
       poiSupported: this.pointsOfInterestSupported(),
+      hardwareFocusModes: [...this.focusModes()],
+      actualPointsOfInterest: settings.pointsOfInterest,
       exposureRange: this.manualExposure() ? this.caps.exposureTime : void 0,
       isoRange: this.caps.iso,
       actualExposureMode: settings.exposureMode,
@@ -1023,6 +1029,8 @@ class FocusController {
       seekingAfRetries: this.seekingAfRetries,
       seekingAfVerified: this.seekingAfVerified,
       seekingAfUnconfirmed: this.seekingAfUnconfirmed,
+      singleShotAfRejected: this.singleShotAfRejected,
+      continuousAfNudges: this.continuousAfNudges,
       exposureProbes: this.exposureProbes,
       optical,
       targetDetected: Boolean(this.latest && !this.targetMissingSince),
@@ -1213,7 +1221,11 @@ class FocusController {
   async maybeRetrySeekingAutofocus(now = performance.now(), metrics, force = false) {
     if (this.seekingAfRunning || this.strategy !== "auto" || !this.isAcquiring() || this.isOptimizing()) return;
     const track = this.track;
-    if (!track || track.readyState !== "live" || !this.focusModes().includes("single-shot")) return;
+    if (!track || track.readyState !== "live") return;
+    const modes = this.focusModes();
+    const canSingle = modes.includes("single-shot") && !this.singleShotAfRejected;
+    const canContinuous = modes.includes("continuous") || this.settings().focusMode === "continuous";
+    if (!canSingle && !canContinuous) return;
     const silence = this.decodeSilence(now);
     if (!force && this.validDecodesInGeneration > 0 && silence < 2200) return;
     const optical = metrics || (!this.targetMissingSince ? this.latest?.metrics : void 0);
@@ -1225,34 +1237,63 @@ class FocusController {
 
     const generation = this.generation;
     const geometry = !this.targetMissingSince ? this.latest?.geometry : void 0;
+    const centerX = Math.max(0, Math.min(1, Number.isFinite(geometry?.x) ? geometry.x : 0.5));
+    const centerY = Math.max(0, Math.min(1, Number.isFinite(geometry?.y) ? geometry.y : 0.5));
+    const offsets = [[0, 0], [-0.025, 0], [0.025, 0], [0, -0.025], [0, 0.025]];
+    const offset = offsets[this.seekingAfRetries % offsets.length];
     const point = {
-      x: Math.max(0, Math.min(1, Number.isFinite(geometry?.x) ? geometry.x : 0.5)),
-      y: Math.max(0, Math.min(1, Number.isFinite(geometry?.y) ? geometry.y : 0.5))
+      x: Math.max(0, Math.min(1, centerX + offset[0])),
+      y: Math.max(0, Math.min(1, centerY + offset[1]))
     };
     this.seekingAfRunning = true;
     this.lastSeekingAfAt = now;
-    this.requestedMode = "single-shot";
     this.focusProbes++;
     this.focusRefinementCount++;
+    this.seekingAfRetries++;
     try {
-      const accepted = await this.apply(track, {
-        focusMode: "single-shot",
-        ...(this.pointsOfInterestSupported() ? { pointsOfInterest: [point] } : {})
-      });
-      if (accepted && this.current(generation)) {
-        const immediate = this.settings();
-        await new Promise((resolve) => setTimeout(resolve, 80));
+      if (canSingle) {
+        this.requestedMode = "single-shot";
+        const accepted = await this.apply(track, {
+          focusMode: "single-shot",
+          ...(this.pointsOfInterestSupported() ? { pointsOfInterest: [point] } : {})
+        });
+        if (!this.current(generation)) return;
+        if (accepted) {
+          const immediate = this.settings();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (!this.current(generation)) return;
+          const actual = this.settings();
+          const verified = immediate.focusMode === "single-shot" || actual.focusMode === "single-shot";
+          if (verified) {
+            this.seekingAfVerified++;
+            this.committedFocusMode = actual.focusMode;
+            this.committedFocusDistance = actual.focusDistance;
+            this.lastReason = `mandatory single-shot AF confirmed at ${(point.x * 100).toFixed(0)}%,${(point.y * 100).toFixed(0)}%`;
+            this.changed();
+            return;
+          }
+          this.seekingAfUnconfirmed++;
+          if (this.seekingAfUnconfirmed >= 2) this.singleShotAfRejected = true;
+        } else {
+          this.seekingAfUnconfirmed++;
+          this.singleShotAfRejected = true;
+        }
+      }
+
+      if (canContinuous) {
+        this.requestedMode = "continuous";
+        const accepted = await this.apply(track, {
+          focusMode: "continuous",
+          ...(this.pointsOfInterestSupported() ? { pointsOfInterest: [point] } : {})
+        });
         if (!this.current(generation)) return;
         const actual = this.settings();
-        const verified = immediate.focusMode === "single-shot" || actual.focusMode === "single-shot";
-        this.seekingAfRetries++;
-        if (verified) this.seekingAfVerified++;
-        else this.seekingAfUnconfirmed++;
+        if (accepted) this.continuousAfNudges++;
         this.committedFocusMode = actual.focusMode;
         this.committedFocusDistance = actual.focusDistance;
-        this.lastReason = verified
-          ? `hardware single-shot AF ${this.seekingAfRetries} at ${(point.x * 100).toFixed(0)}%,${(point.y * 100).toFixed(0)}%`
-          : `AF trigger ${this.seekingAfRetries} sent at ${(point.x * 100).toFixed(0)}%,${(point.y * 100).toFixed(0)}%; camera reports ${actual.focusMode ?? "unknown"}`;
+        this.lastReason = accepted
+          ? `continuous AF metering nudge ${this.continuousAfNudges} at ${(point.x * 100).toFixed(0)}%,${(point.y * 100).toFixed(0)}%${this.singleShotAfRejected ? "; single-shot rejected" : ""}`
+          : "camera rejected autofocus controls; continuous hardware AF left running";
         this.changed();
       }
     } finally {
@@ -1264,8 +1305,9 @@ class FocusController {
     this.automaticFocusConfigured = true;
     const track = this.track;
     if (!track || track.readyState !== "live") return;
-    if (!this.focusModes().includes("single-shot")) {
-      this.lastReason = "single-shot autofocus unavailable; camera focus left continuous";
+    const modes = this.focusModes();
+    if (!modes.includes("single-shot") && !modes.includes("continuous") && this.settings().focusMode !== "continuous") {
+      this.lastReason = "hardware autofocus controls unavailable";
       this.changed();
       return;
     }
