@@ -12,6 +12,12 @@ const WHOLE_GRID_LOSS_MS = 3200;
 const OBSERVATION_HISTORY_MS = 2500;
 const CURRENT_FIT_MS = 420;
 const EXACT_GEOMETRY_MS = 420;
+// CRC-backed QR corner estimates still carry ~subpixel/pixel frame noise. The
+// wall itself is rigid, so publish coherent global motion and retain only the
+// slowly learned local residual that represents lens distortion.
+const LOCAL_GEOMETRY_LEARN_MAX_ERROR = 0.08;
+const LOCAL_GEOMETRY_MAX_RESIDUAL = 0.08;
+const LOCAL_GEOMETRY_ALPHA = 0.08;
 function corners(quad) {
   return quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];
 }
@@ -107,6 +113,7 @@ class GridLattice {
     __publicField(this, "state", "SEARCH");
     __publicField(this, "identity", "");
     __publicField(this, "observations", []);
+    __publicField(this, "slotCorrections", /* @__PURE__ */ new Map());
     __publicField(this, "candidate");
     __publicField(this, "lastHitAt", 0);
     __publicField(this, "frameWidth", 1);
@@ -129,12 +136,14 @@ class GridLattice {
     this.transition("SEARCH", "reset", this.lastHitAt);
     this.identity = "";
     this.observations = [];
+    this.slotCorrections.clear();
     this.candidate = void 0;
     this.lastHitAt = 0;
   }
   reacquire(at, reason = "whole lattice invalidated") {
     this.transition("REACQUIRE", reason, at);
     this.observations = [];
+    this.slotCorrections.clear();
     this.candidate = void 0;
     this.lastHitAt = at;
   }
@@ -150,6 +159,7 @@ class GridLattice {
     this.lastHitAt = detection.at;
     if (this.candidate && this.candidate.layout.id !== declaredLayout.id) {
       this.observations = [];
+      this.slotCorrections.clear();
       this.candidate = void 0;
     }
     // makeCandidate only uses the newest observation for each slot. Storing a
@@ -176,7 +186,35 @@ class GridLattice {
         this.transition("GRID_LOCK", "multi-slot geometry confirmed", detection.at);
       }
     }
+    this.learnSlotCorrection(detection);
     return this.snapshot();
+  }
+  learnSlotCorrection(detection) {
+    const candidate = this.candidate;
+    if (!this.locked || !candidate || candidate.error > LOCAL_GEOMETRY_LEARN_MAX_ERROR) return;
+    const measured = corners(detection.quad);
+    if (!validPoints(measured) || !detection.box) return;
+    const predicted = slotWorld(candidate.layout, detection.modules, detection.slotIndex)
+      .map((point) => project(candidate.transform, point));
+    const edge = Math.max(1, Math.sqrt(detection.box.w * detection.box.h));
+    const residual = measured.map((point, index) => ({
+      x: point.x - predicted[index].x,
+      y: point.y - predicted[index].y
+    }));
+    if (residual.some((point) => Math.hypot(point.x, point.y) > edge * LOCAL_GEOMETRY_MAX_RESIDUAL)) return;
+    const previous = this.slotCorrections.get(detection.slotIndex);
+    if (!previous || previous.length !== 4) {
+      // First CRC-backed sample establishes the local lens residual immediately;
+      // later samples only nudge it slowly so decoder corner noise cannot move
+      // one QR independently from the rest of the wall.
+      this.slotCorrections.set(detection.slotIndex, residual);
+      return;
+    }
+    const next = residual.map((point, index) => ({
+      x: previous[index].x + (point.x - previous[index].x) * LOCAL_GEOMETRY_ALPHA,
+      y: previous[index].y + (point.y - previous[index].y) * LOCAL_GEOMETRY_ALPHA
+    }));
+    this.slotCorrections.set(detection.slotIndex, next);
   }
   tick(now) {
     if (this.candidate && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
@@ -349,20 +387,19 @@ class GridLattice {
     const decoded = new Set(observed.keys());
     const slots = [];
     for (let index = 0; index < count; index++) {
-      const observation = observed.get(index);
-      let quad;
-      if (observation && validGeometry(observation)) {
-        const points = corners(observation.quad);
-        quad = {
-          topLeft: { ...points[0] },
-          topRight: { ...points[1] },
-          bottomRight: { ...points[2] },
-          bottomLeft: { ...points[3] }
-        };
-      } else {
-        const points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
-        quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+      // Never publish a raw per-frame QR quad. The whole wall moves through one
+      // homography; each slot carries only its persistent local lens residual.
+      // This removes independent overlay/track jitter while preserving the
+      // non-projective distortion Guided calibrated for the hot sampler.
+      let points = slotWorld(candidate.layout, modules, index).map((point) => project(candidate.transform, point));
+      const correction = this.slotCorrections.get(index);
+      if (correction && correction.length === 4) {
+        points = points.map((point, cornerIndex) => ({
+          x: point.x + correction[cornerIndex].x,
+          y: point.y + correction[cornerIndex].y
+        }));
       }
+      const quad = { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
       const box = bounds(quad);
       if (!box) return null;
       slots.push({ index, quad, box, decoded: decoded.has(index), observed: Boolean(observation) });
@@ -370,7 +407,8 @@ class GridLattice {
     const confidence = Math.max(0, Math.min(1, candidate.observations.length / Math.min(3, candidate.observations.length + 1) * (1 - candidate.error)));
     return {
       state: this.state, provisional: !this.active, confidence, layout: candidate.layout, modules, slots,
-      observedSlots: observed.size, storedSlots: this.observations.length, fitSlots: candidate.observations.length,
+      observedSlots: observed.size, correctedSlots: this.slotCorrections.size,
+      storedSlots: this.observations.length, fitSlots: candidate.observations.length,
       fitError: candidate.error
     };
   }

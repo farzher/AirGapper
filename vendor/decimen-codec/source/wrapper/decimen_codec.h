@@ -69,6 +69,9 @@ struct DecimenGuidedMetrics {
 	uint32_t fallbackSuccessMask;
 	uint32_t sparseSuccessMask;
 	uint32_t reserved2;
+	uint32_t stableRsAttempts;
+	uint32_t stableRsSuccesses;
+	uint32_t stableEligibleTracks;
 };
 
 struct DecimenBatchMetrics {

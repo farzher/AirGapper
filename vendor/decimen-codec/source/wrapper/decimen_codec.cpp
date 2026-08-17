@@ -609,7 +609,7 @@ static bool turboStableRigidEligible(const GuidedTurboTrack& cache,
         return false;
     const float module = guidedModuleSize(track);
     return module >= GUIDED_TURBO_CANARY_MIN_MODULE &&
-           residual <= std::max(0.65f, module * 0.24f);
+           residual <= std::max(1.0f, module * 0.40f);
 }
 
 static PerspectiveTransform turboFrameTransform(const GuidedTurboTrack& cache,
@@ -1299,6 +1299,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (!turboPose(*cache, track, poseX, poseY, residual))
                 continue;
             const bool stableEligible = stableReference && turboStableRigidEligible(*cache, track, residual);
+            if (stableEligible)
+                ++metrics->stableEligibleTracks;
             const bool directMode = !turboAdaptive.promoted || !turboAdaptive.rsMode;
 
             ++metrics->reserved; // Turbo attempts (ABI-reserved field)
@@ -1339,9 +1341,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     stableRsAttempted = true;
                     ++metrics->sampleAttempts;
                     ++metrics->sparseRsFallbacks;
+                    ++metrics->stableRsAttempts;
                     auto decoded = decodeTurboStableRS(*cache, track, yPlane, width, height, stride,
                                                        dx, dy, levels, *metrics);
                     success = commitTurbo(i, decoded, dx, dy);
+                    if (success)
+                        ++metrics->stableRsSuccesses;
                 }
             }
 
