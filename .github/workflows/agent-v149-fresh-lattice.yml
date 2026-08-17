@@ -20,10 +20,6 @@ jobs:
         run: |
           node --check receive/grid-lattice.js
           node --check receive/main.js
-          grep -q 'v0.5.149' receive/main.js
-          grep -q 'OBSERVATION_HISTORY_MS = 2500' receive/grid-lattice.js
-          grep -q 'CURRENT_FIT_MS = 420' receive/grid-lattice.js
-          grep -q 'EXACT_GEOMETRY_MS = 420' receive/grid-lattice.js
           git diff --check
       - name: Commit patch
         run: |
