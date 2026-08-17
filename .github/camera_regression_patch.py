@@ -13,7 +13,7 @@ insert=r'''async function cameraLikeFrames(urls, count = 20) {
       image.src = url;
     });
     const sources = await Promise.all(urls.map(load));
-    const render = ({ width, height, wallWidth, wallHeight, blur, phaseScale }) => {
+    const render = ({ width, height, wallWidth, wallHeight, blur, phaseScale, rotation = 0 }) => {
       const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
@@ -31,7 +31,7 @@ insert=r'''async function cameraLikeFrames(urls, count = 20) {
         ctx.fillStyle = "white";
         ctx.fillRect(0, 0, width, height);
         ctx.translate(width / 2 + dx, height / 2 + dy);
-        ctx.rotate(angle);
+        ctx.rotate(rotation + angle);
         ctx.scale(scale, scale);
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
@@ -58,19 +58,19 @@ insert=r'''async function cameraLikeFrames(urls, count = 20) {
       phaseScale: 0.75
     });
 
-    // Separate low-density acquisition stress matching a portrait phone sensor.
-    // This is intentionally allowed to fall below Stable-RS's density gate; it
-    // checks acquisition/tracked fallback behavior, not Turbo throughput.
-    const cameraWidth = 1440;
-    const cameraHeight = 2560;
-    const sourceAspect = sourceWidth / sourceHeight;
+    // The real OnePlus trace is a portrait-coded 1440x2560 VideoFrame but its
+    // tracked crop is ~3.33 MP, almost the entire 3.69 MP source. Model the
+    // physical landscape monitor as a quarter-turned ~1240x2480 wall. This
+    // preserves the live dense module scale and crop cost instead of shrinking
+    // the wall into a 1410x705 strip that incorrectly fell below Stable-RS.
     const camera = render({
-      width: cameraWidth,
-      height: cameraHeight,
-      wallWidth: 1410,
-      wallHeight: 1410 / sourceAspect,
-      blur: 0.32,
-      phaseScale: 1
+      width: 1440,
+      height: 2560,
+      wallWidth: 2480,
+      wallHeight: 1240,
+      blur: 0.34,
+      phaseScale: 1,
+      rotation: Math.PI / 2
     });
     return { optical, camera };
   }, { urls, count });
@@ -86,7 +86,6 @@ new='''  const dense = await captureDistinctFrames("dense-2953B", 10);\n  const 
 if old not in s: raise SystemExit('dense return block missing')
 s=s.replace(old,new,1)
 
-# Low-density portrait stress is expected to need a little more acquisition.
 old='''  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");\n  else if (result.firstLockedStateFrame > 8) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>8)`);\n  if (result.fullJobs > 5) failures.push(`too many acquisition scans (${result.fullJobs} > 5)`);'''
 new='''  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = name === "camera-dense-y8" ? 10 : 8;\n    if (result.firstLockedStateFrame > lockLimit) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 5;\n  if (result.fullJobs > fullLimit) failures.push(`too many acquisition scans (${result.fullJobs} > ${fullLimit})`);'''
 if old not in s: raise SystemExit('common lock/full limits missing')
