@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.193";
+const RECEIVER_RUNTIME_BUILD = "v0.5.194";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -648,8 +648,8 @@ async function reapplyManualOpticsAfterFreshFrames(track, reason) {
   const startedAt = performance.now();
   while (generation === manualOpticsReapplyGeneration && !automaticOptics &&
       stream?.getVideoTracks()[0] === track && track.readyState === "live" &&
-      (latestSourceFrameSequence - firstSequence < 3 || frameModeSync) &&
-      performance.now() - startedAt < 1200) {
+      (latestSourceFrameSequence - firstSequence < 1 || frameModeSync) &&
+      performance.now() - startedAt < 450) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
@@ -4264,6 +4264,11 @@ async function start() {
     return;
   }
   stream = acquiredStream;
+  const startupOpticsTrack = stream.getVideoTracks()[0];
+  if (startupOpticsTrack && !automaticOptics) {
+    seedDesiredCamera(startupOpticsTrack);
+    await applyExposureSetting(startupOpticsTrack);
+  }
   startBtn.style.display = "none";
   preview.style.display = "";
   video.srcObject = stream;
