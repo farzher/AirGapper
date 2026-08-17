@@ -13,6 +13,7 @@ on:
       - sw.js
       - benchmark/offline-runner.mjs
       - .github/camera_regression_patch.py
+      - .github/benchmark_lock_semantics_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,16 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply camera-realistic benchmark update
+      - name: Apply benchmark infrastructure updates
         id: candidate
         run: |
           set -euo pipefail
-          if [ -f .github/camera_regression_patch.py ] && ! grep -q 'camera-dense-y8' benchmark/offline-runner.mjs; then
+          changed=false
+          if [ -f .github/camera_regression_patch.py ] && ! grep -q 'optical-dense-y8' benchmark/offline-runner.mjs; then
             python3 .github/camera_regression_patch.py 2>&1 | tee /tmp/camera-patch.log
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            changed=true
           fi
+          if [ -f .github/benchmark_lock_semantics_patch.py ] && ! grep -q 'lockTriggerSourceFrame' receive/main.js; then
+            python3 .github/benchmark_lock_semantics_patch.py 2>&1 | tee /tmp/lock-patch.log
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
@@ -59,7 +64,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit camera benchmark update
+      - name: Commit benchmark infrastructure update
         if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -67,9 +72,10 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/camera_regression_patch.py
-          git add benchmark/offline-runner.mjs benchmark/latest-result.json
-          git commit -m "add camera-realistic dense receiver regression"
+          [ ! -f .github/camera_regression_patch.py ] || git rm .github/camera_regression_patch.py
+          [ ! -f .github/benchmark_lock_semantics_patch.py ] || git rm .github/benchmark_lock_semantics_patch.py
+          git add benchmark/offline-runner.mjs receive/main.js benchmark/latest-result.json
+          git commit -m "add camera-realistic receiver regression"
           git push origin HEAD:master
 
       - name: Record normal regression
@@ -92,7 +98,8 @@ jobs:
             echo "camera benchmark failed at $(date -u +%FT%TZ)"
             echo "candidate changed=${{ steps.candidate.outputs.changed }}"
             cat /tmp/camera-patch.log 2>/dev/null || true
-            tail -n 260 /tmp/regression.log 2>/dev/null || true
+            cat /tmp/lock-patch.log 2>/dev/null || true
+            tail -n 320 /tmp/regression.log 2>/dev/null || true
             tail -n 100 /tmp/airgapper-http.log 2>/dev/null || true
           } > benchmark/camera-regression-ci.log
           git config user.name "AirGapper Agent"
