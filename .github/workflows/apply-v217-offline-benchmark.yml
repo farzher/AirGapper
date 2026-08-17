@@ -1,4 +1,4 @@
-name: v217 fast receiver regression
+name: fast receiver regression
 
 on:
   push:
@@ -11,34 +11,18 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
-      - .github/v217_offline_patch.py
-      - .github/v217_fast_diag_patch.py
-      - .github/v217_provisional_acquisition_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   fast-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
-
-      - name: Apply initial v0.5.217 regression harness
-        id: bootstrap
-        run: |
-          set -euo pipefail
-          if grep -q 'RECEIVER_RUNTIME_BUILD = "v0.5.216"' receive/main.js; then
-            python3 .github/v217_offline_patch.py
-            python3 .github/v217_fast_diag_patch.py
-            python3 .github/v217_provisional_acquisition_patch.py
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -50,7 +34,7 @@ jobs:
           npm install --no-save --package-lock=false playwright@1.55.0
           google-chrome --version
 
-      - name: Run fast production receiver regression
+      - name: Run production-only receiver regression
         run: |
           set -euo pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
@@ -61,18 +45,9 @@ jobs:
           cat benchmark/offline-summary.json
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: airgapper-fast-regression-${{ github.sha }}
           path: benchmark/offline-summary.json
+          if-no-files-found: ignore
           retention-days: 14
-
-      - name: Commit initial v0.5.217 harness
-        if: steps.bootstrap.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "AirGapper Agent"
-          git config user.email "actions@github.com"
-          rm -rf node_modules benchmark/offline-summary.json
-          git add index.html main.js receive/main.js sw.js benchmark/offline-runner.mjs
-          git commit -m "v0.5.217 add fast offline receiver regression"
-          git push origin HEAD:master
