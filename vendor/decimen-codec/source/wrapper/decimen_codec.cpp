@@ -389,10 +389,11 @@ static void noteGuidedSparseOutcome(int id, bool success)
 // supplied allow-mask and reports per-slot outcomes back.
 
 
-constexpr float GUIDED_TURBO_SEED_MIN_MODULE = 2.95f;
-constexpr float GUIDED_TURBO_RUN_MIN_MODULE = 3.05f;
+constexpr float GUIDED_TURBO_CANARY_MIN_MODULE = 2.25f;
+constexpr float GUIDED_TURBO_FULL_MIN_MODULE = 3.05f;
 constexpr int GUIDED_TURBO_RS_BUDGET = 4;
 constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
+constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 24;
 constexpr int GUIDED_TURBO_AMBIGUOUS = 11;
 
 struct GuidedTurboTrack
@@ -406,10 +407,27 @@ struct GuidedTurboTrack
     uint8_t cooldown = 0;
 };
 
+struct GuidedTurboAdaptive
+{
+    int seedId = -1;
+    int canaryAttempts = 0;
+    int canarySuccesses = 0;
+    int promotedAttempts = 0;
+    int promotedSuccesses = 0;
+    int cooldown = 0;
+    bool promoted = false;
+};
+
 static std::array<GuidedTurboTrack, 64>& guidedTurboTracks()
 {
     static std::array<GuidedTurboTrack, 64> tracks;
     return tracks;
+}
+
+static GuidedTurboAdaptive& guidedTurboAdaptive()
+{
+    static GuidedTurboAdaptive state;
+    return state;
 }
 
 static GuidedTurboTrack* guidedTurboTrack(int id)
@@ -417,9 +435,42 @@ static GuidedTurboTrack* guidedTurboTrack(int id)
     return id >= 0 && id < int(guidedTurboTracks().size()) ? &guidedTurboTracks()[id] : nullptr;
 }
 
+static void coolLowDensityTurbo()
+{
+    auto& adaptive = guidedTurboAdaptive();
+    adaptive.seedId = -1;
+    adaptive.canaryAttempts = 0;
+    adaptive.canarySuccesses = 0;
+    adaptive.promotedAttempts = 0;
+    adaptive.promotedSuccesses = 0;
+    adaptive.promoted = false;
+    adaptive.cooldown = GUIDED_TURBO_CANARY_COOLDOWN;
+    for (auto& cache : guidedTurboTracks()) {
+        cache.seeded = false;
+        cache.samples.clear();
+        cache.misses = 0;
+        cache.cooldown = 0;
+    }
+}
+
 static bool turboSeedEligible(const DecimenGuidedTrack& track)
 {
-    return guidedTurboTrack(track.id) && guidedModuleSize(track) >= GUIDED_TURBO_SEED_MIN_MODULE;
+    auto* cache = guidedTurboTrack(track.id);
+    if (!cache)
+        return false;
+    const float module = guidedModuleSize(track);
+    if (module < GUIDED_TURBO_CANARY_MIN_MODULE)
+        return false;
+    if (module >= GUIDED_TURBO_FULL_MIN_MODULE)
+        return true;
+    auto& adaptive = guidedTurboAdaptive();
+    if (adaptive.cooldown)
+        return false;
+    if (adaptive.promoted)
+        return true;
+    if (adaptive.seedId < 0)
+        return true;
+    return adaptive.seedId == track.id && !cache->seeded;
 }
 
 static std::array<PointF, 4> turboTrackQuad(const DecimenGuidedTrack& track)
@@ -499,6 +550,8 @@ static void seedGuidedTurbo(int id, int dim, const Position& pos,
     cache->samples = std::move(samples);
     cache->misses = 0;
     cache->cooldown = 0;
+    auto& adaptive = guidedTurboAdaptive();
+    if (adaptive.seedId < 0) adaptive.seedId = id;
 }
 
 static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -903,14 +956,46 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             return true;
         };
 
-        // Shared wall motion: use one high-resolution cached QR as the pose
-        // anchor, then apply its residual correction to every cached slot. The
-        // main lattice supplies the large/slow pose change; this only refines a
-        // few pixels of worker-latency/hand-motion drift.
+        auto& turboAdaptive = guidedTurboAdaptive();
+        if (turboAdaptive.cooldown)
+            --turboAdaptive.cooldown;
+
+        bool highDensityTurbo = false;
+        for (int i = 0; i < trackCount; ++i) {
+            auto* cache = guidedTurboTrack(tracks[i].id);
+            if (cache && cache->seeded && guidedModuleSize(tracks[i]) >= GUIDED_TURBO_FULL_MIN_MODULE) {
+                highDensityTurbo = true;
+                break;
+            }
+        }
+
+        int canaryIndex = -1;
+        if (!highDensityTurbo && !turboAdaptive.promoted && !turboAdaptive.cooldown) {
+            for (int i = 0; i < trackCount; ++i) {
+                auto* cache = guidedTurboTrack(tracks[i].id);
+                if (cache && cache->seeded && guidedModuleSize(tracks[i]) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
+                    (turboAdaptive.seedId < 0 || turboAdaptive.seedId == tracks[i].id)) {
+                    canaryIndex = i;
+                    break;
+                }
+            }
+        }
+        auto turboAllowed = [&](int i) {
+            const float module = guidedModuleSize(tracks[i]);
+            if (module >= GUIDED_TURBO_FULL_MIN_MODULE)
+                return true;
+            if (module < GUIDED_TURBO_CANARY_MIN_MODULE || turboAdaptive.cooldown)
+                return false;
+            return turboAdaptive.promoted || i == canaryIndex;
+        };
+
+        // Shared wall motion is paid once. In the 1440p canary state only the
+        // single proving slot participates, so a soft/old camera cannot turn
+        // this experiment into a second full decoder.
         float wallCorrectionX = 0, wallCorrectionY = 0;
         for (int i = 0; i < trackCount; ++i) {
             auto* cache = guidedTurboTrack(tracks[i].id);
-            if (!cache || !cache->seeded || guidedModuleSize(tracks[i]) < GUIDED_TURBO_RUN_MIN_MODULE)
+            if (!cache || !cache->seeded || !turboAllowed(i))
                 continue;
             float dx = 0, dy = 0, residual = 0;
             if (!turboPose(*cache, tracks[i], dx, dy, residual))
@@ -925,7 +1010,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         for (int i = 0; i < trackCount; ++i) {
             const auto& track = tracks[i];
             auto* cache = guidedTurboTrack(track.id);
-            if (!cache || !cache->seeded || guidedModuleSize(track) < GUIDED_TURBO_RUN_MIN_MODULE)
+            if (!cache || !cache->seeded || !turboAllowed(i))
                 continue;
             if (cache->cooldown) {
                 --cache->cooldown;
@@ -964,6 +1049,35 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             } else if (++cache->misses >= 2) {
                 cache->misses = 0;
                 cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
+            }
+
+            if (guidedModuleSize(track) < GUIDED_TURBO_FULL_MIN_MODULE) {
+                if (!turboAdaptive.promoted) {
+                    ++turboAdaptive.canaryAttempts;
+                    turboAdaptive.canarySuccesses += int(success);
+                    const bool earlyWin = turboAdaptive.canaryAttempts >= 2 &&
+                                          turboAdaptive.canarySuccesses == turboAdaptive.canaryAttempts;
+                    if (earlyWin || turboAdaptive.canaryAttempts >= 6) {
+                        if (earlyWin || turboAdaptive.canarySuccesses * 2 >= turboAdaptive.canaryAttempts) {
+                            turboAdaptive.promoted = true;
+                            turboAdaptive.canaryAttempts = 0;
+                            turboAdaptive.canarySuccesses = 0;
+                        } else {
+                            coolLowDensityTurbo();
+                        }
+                    }
+                } else {
+                    ++turboAdaptive.promotedAttempts;
+                    turboAdaptive.promotedSuccesses += int(success);
+                    if (turboAdaptive.promotedAttempts >= 36) {
+                        if (turboAdaptive.promotedSuccesses * 4 < turboAdaptive.promotedAttempts)
+                            coolLowDensityTurbo();
+                        else {
+                            turboAdaptive.promotedAttempts = 0;
+                            turboAdaptive.promotedSuccesses = 0;
+                        }
+                    }
+                }
             }
         }
 

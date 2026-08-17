@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.196";
+const RECEIVER_RUNTIME_BUILD = "v0.5.197";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -191,6 +191,7 @@ if (deviceLabel) {
   });
 }
 const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
+const CAMERA_PERFORMANCE_KEY = "airgapper:camera-performance:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480],
   [960, 720],
@@ -495,6 +496,91 @@ const browserModeResults = loadBrowserModeResults();
 let browserModes = [];
 let automaticBrowserMode;
 let preferredCameraDeviceId = "";
+let automaticCameraDeviceId = "";
+let automaticCameraUpgradeAttempted = false;
+let cameraPerformanceSaveAt = 0;
+function loadCameraPerformance() {
+  try {
+    return JSON.parse(localStorage.getItem(CAMERA_PERFORMANCE_KEY) ?? "{}") ?? {};
+  } catch {
+    return {};
+  }
+}
+const cameraPerformance = loadCameraPerformance();
+function saveCameraPerformance() {
+  try {
+    localStorage.setItem(CAMERA_PERFORMANCE_KEY, JSON.stringify(cameraPerformance));
+  } catch {}
+}
+function learnedAutomaticCameraId() {
+  let bestId = "";
+  let best = -1;
+  for (const [id, record] of Object.entries(cameraPerformance)) {
+    const goodput = Math.max(Number(record?.bestGoodputKbs) || 0, Number(record?.lastGoodputKbs) || 0);
+    if (goodput > best) {
+      best = goodput;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+function inputDeviceCapabilities(device) {
+  try {
+    return device?.getCapabilities?.() ?? {};
+  } catch {
+    return {};
+  }
+}
+function cameraFacingHint(device, caps) {
+  const modes = Array.isArray(caps?.facingMode) ? caps.facingMode : caps?.facingMode ? [caps.facingMode] : [];
+  const label = String(device?.label ?? "").toLowerCase();
+  if (modes.includes("environment") || /back|rear|environment/.test(label)) return "rear";
+  if (modes.includes("user") || /front|user|selfie/.test(label)) return "front";
+  return "unknown";
+}
+function automaticCameraScore(device, index) {
+  const caps = inputDeviceCapabilities(device);
+  const record = cameraPerformance[device.deviceId] ?? {};
+  const width = Number(caps?.width?.max) || Number(record.maxWidth) || 0;
+  const height = Number(caps?.height?.max) || Number(record.maxHeight) || 0;
+  const area = width * height;
+  const fps = Number(caps?.frameRate?.max) || Number(record.maxFps) || 0;
+  const goodput = Math.max(Number(record.bestGoodputKbs) || 0, Number(record.lastGoodputKbs) || 0);
+  const focusModes = Array.isArray(caps?.focusMode) ? caps.focusMode : [];
+  const af = focusModes.includes("continuous") ? 1 : 0;
+  const mainHint = /camera\s*0(?:\D|$)|main/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
+  // Sensor/video resolution dominates first-use selection. Measured AirGapper
+  // throughput is strong enough to separate cameras exposing similar modes.
+  return area + fps * 10000 + goodput * 1000 + af * 50000 + mainHint * 1000 - index;
+}
+function bestAutomaticCameraDevice(devices) {
+  if (!devices.length) return undefined;
+  const tagged = devices.map((device, index) => ({ device, index, caps: inputDeviceCapabilities(device) }));
+  const rear = tagged.filter(({ device, caps }) => cameraFacingHint(device, caps) === "rear");
+  const candidates = rear.length ? rear : tagged.filter(({ device, caps }) => cameraFacingHint(device, caps) !== "front");
+  const pool = candidates.length ? candidates : tagged;
+  return pool.reduce((best, candidate) =>
+    !best || automaticCameraScore(candidate.device, candidate.index) > automaticCameraScore(best.device, best.index)
+      ? candidate : best, undefined)?.device;
+}
+function noteCameraPerformance(goodputKbs, uniqueRate, runSeconds) {
+  if (runSeconds < 3 || goodputKbs <= 0 || performance.now() < cameraPerformanceSaveAt) return;
+  const track = stream?.getVideoTracks?.()[0];
+  const settings = track?.getSettings?.();
+  const id = String(settings?.deviceId ?? "");
+  if (!id) return;
+  cameraPerformanceSaveAt = performance.now() + 2000;
+  const record = cameraPerformance[id] ?? {};
+  record.bestGoodputKbs = Math.max(Number(record.bestGoodputKbs) || 0, goodputKbs);
+  record.lastGoodputKbs = goodputKbs;
+  record.bestUniqueQrPerSecond = Math.max(Number(record.bestUniqueQrPerSecond) || 0, uniqueRate);
+  record.maxWidth = Math.max(Number(record.maxWidth) || 0, Number(settings.width) || 0);
+  record.maxHeight = Math.max(Number(record.maxHeight) || 0, Number(settings.height) || 0);
+  record.maxFps = Math.max(Number(record.maxFps) || 0, Number(settings.frameRate) || 0);
+  record.updatedAt = Date.now();
+  cameraPerformance[id] = record;
+  saveCameraPerformance();
+}
 function loadBrowserModeResults() {
   var _a;
   try {
@@ -584,15 +670,23 @@ async function refreshCameraDevices(activeTrack) {
   if (preferredExists) {
     cameraDevice.value = preferredCameraDeviceId;
   } else if (mobileCameraUi) {
-    // Mobile's normal receiver always asks for the rear/environment camera.
-    // Do not turn the camera Chrome happened to grant into a persistent exact
-    // device choice. The selector is developer-only on mobile; selecting an
-    // explicit device there still overrides this default.
     preferredCameraDeviceId = "";
+    const best = bestAutomaticCameraDevice(devices);
+    automaticCameraDeviceId = best?.deviceId || learnedAutomaticCameraId() || "";
     cameraDevice.value = activeExists ? activeId : "";
+    // Permission makes labels/capabilities materially richer than they are on
+    // the pre-permission call. If Chrome initially handed us a weaker rear
+    // camera, reopen once with the newly-ranked sensor. Never loop/reprobe.
+    if (activeId && automaticCameraDeviceId && activeId !== automaticCameraDeviceId &&
+        !automaticCameraUpgradeAttempted && stream && !done) {
+      automaticCameraUpgradeAttempted = true;
+      setTimeout(() => {
+        if (!stream || done || preferredCameraDeviceId) return;
+        stopReceiver();
+        void start();
+      }, 0);
+    }
   } else if (activeExists) {
-    // Desktop has no meaningful facingMode. Once Chrome grants a concrete
-    // device, pin it for retries so a resolution fallback cannot jump webcams.
     preferredCameraDeviceId = activeId;
     cameraDevice.value = activeId;
     saveCameraSettings();
@@ -603,9 +697,13 @@ async function refreshCameraDevices(activeTrack) {
   cameraDevice.disabled = devices.length <= 1;
 }
 function cameraDeviceConstraint() {
-  return preferredCameraDeviceId
-    ? { deviceId: { exact: preferredCameraDeviceId } }
-    : { facingMode: "environment" };
+  if (preferredCameraDeviceId) return { deviceId: { exact: preferredCameraDeviceId } };
+  if (mobileCameraUi) {
+    const learned = automaticCameraDeviceId || learnedAutomaticCameraId();
+    if (learned) return { deviceId: { ideal: learned }, facingMode: { ideal: "environment" } };
+    return { facingMode: "environment" };
+  }
+  return {};
 }
 function readRequestedCameraSettings() {
   const browserMode = browserModes.find((mode) => mode.key === cameraResolution.value);
@@ -3851,6 +3949,8 @@ cameraResolution.addEventListener("change", () => {
 });
 cameraDevice?.addEventListener("change", () => {
   preferredCameraDeviceId = cameraDevice.value;
+  automaticCameraUpgradeAttempted = false;
+  if (!preferredCameraDeviceId) automaticCameraDeviceId = learnedAutomaticCameraId();
   saveCameraSettings();
   if (!stream || done) return;
   stopReceiver();
@@ -7115,6 +7215,7 @@ if (!receiverDevActions.hidden && transportDiagnostics) {
   const runTransportRate = runUniqueRate + runDuplicateRate;
   const runDuplicatePercent = runTransportRate > 0 ? runDuplicateRate / runTransportRate * 100 : 0;
   const runGoodputKbs = decoder && runSeconds ? decoder.usefulSymbols * decoder.blockLen / expectedCodingOverhead() / 1024 / runSeconds : 0;
+  noteCameraPerformance(runGoodputKbs, runUniqueRate, runSeconds);
   const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
   const pipelineSeconds = livePipeline.startedAt ? Math.max(1e-3, (now - livePipeline.startedAt) / 1e3) : 0;
   const activeJobs = pool.activeJobs;

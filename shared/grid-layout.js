@@ -9,7 +9,8 @@ const GRID_LAYOUTS = [
   { id: 6, cols: 5, rows: 3 },
   { id: 7, cols: 3, rows: 6 },
   { id: 8, cols: 4, rows: 6 },
-  { id: 9, cols: 4, rows: 8 }
+  { id: 9, cols: 4, rows: 8 },
+  { id: 10, cols: 4, rows: 7 }
 ];
 function gridLayoutById(id) {
   return GRID_LAYOUTS.find((layout) => layout.id === id);
