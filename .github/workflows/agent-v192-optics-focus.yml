@@ -1,0 +1,28 @@
+name: v192 optics memory and autofocus recovery
+
+on:
+  push:
+    paths:
+      - .github/v192_patch.py
+      - .github/workflows/agent-v192-optics-focus.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v0.5.192
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          python3 .github/v192_patch.py
+          rm -f .github/v192_patch.py .github/workflows/agent-v192-optics-focus.yml
+          git add -A
+          git commit -m "v0.5.192 restore proven optics and drive real AF recovery"
+          git push origin HEAD:master
