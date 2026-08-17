@@ -1,0 +1,30 @@
+name: v189 auto optics cleanup
+
+on:
+  push:
+    paths:
+      - .github/v189_patch.py
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v0.5.189
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          python3 .github/v189_patch.py
+          node --check main.js
+          node --check receive/main.js
+          git diff --check
+          rm -f .github/v189_patch.py .github/workflows/agent-v189-auto-optics-cleanup.yml
+          git add -A
+          git commit -m "v0.5.189 simplify automatic optics control"
+          git push origin HEAD:master
