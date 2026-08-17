@@ -1,0 +1,26 @@
+name: v204 lattice snapshot fix
+on:
+  push:
+    paths:
+      - .github/v204_patch.py
+      - .github/workflows/agent-v204.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply source patch
+        run: python .github/v204_patch.py
+      - name: Commit fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v204_patch.py .github/workflows/agent-v204.yml
+          git add index.html main.js receive/main.js receive/grid-lattice.js sw.js
+          git commit -m "v0.5.204 fix coherent lattice snapshot"
+          git push origin master
