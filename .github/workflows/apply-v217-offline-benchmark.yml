@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f .github/camera_regression_patch.py ] && ! grep -q 'camera-dense-y8' benchmark/offline-runner.mjs; then
-            python3 .github/camera_regression_patch.py
+            python3 .github/camera_regression_patch.py 2>&1 | tee /tmp/camera-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -60,7 +60,7 @@ jobs:
           retention-days: 14
 
       - name: Commit camera benchmark update
-        if: steps.candidate.outputs.changed == 'true'
+        if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
@@ -73,7 +73,7 @@ jobs:
           git push origin HEAD:master
 
       - name: Record normal regression
-        if: steps.candidate.outputs.changed != 'true'
+        if: success() && steps.candidate.outputs.changed != 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
@@ -82,3 +82,22 @@ jobs:
           rm -rf node_modules benchmark/offline-summary.json
           git add benchmark/latest-result.json
           git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
+
+      - name: Record regression failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          {
+            echo "camera benchmark failed at $(date -u +%FT%TZ)"
+            echo "candidate changed=${{ steps.candidate.outputs.changed }}"
+            cat /tmp/camera-patch.log 2>/dev/null || true
+            tail -n 260 /tmp/regression.log 2>/dev/null || true
+            tail -n 100 /tmp/airgapper-http.log 2>/dev/null || true
+          } > benchmark/camera-regression-ci.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add benchmark/camera-regression-ci.log
+          git commit -m "record camera regression setup failure"
+          git push origin HEAD:master
+          exit 1
