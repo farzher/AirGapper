@@ -19,7 +19,7 @@ const CAMERA_TUNING = {
   poorFocusRetryMs: 480,
   maxStabilizingAfRetries: 2,
   seekingAfRetryMs: 850,
-  seekingAfSlowRetryMs: 1500,
+  seekingAfSlowRetryMs: 3000,
   seekingAfFastRetries: 5,
   seekingAfGoodFocus: 0.58,
   recoverySamples: 3,

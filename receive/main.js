@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.190";
+const RECEIVER_RUNTIME_BUILD = "v0.5.191";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -237,11 +237,11 @@ const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 2500;
 const AUTO_OPTICS_RESCUE_SETTLE_MS = 280;
 const AUTO_OPTICS_RESCUE_SAMPLE_MS = 720;
-const AUTO_OPTICS_RESCUE_RETRY_MS = 7000;
+const AUTO_OPTICS_RESCUE_RETRY_MS = 12000;
 const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v1";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
-const AUTO_OPTICS_MEMORY_MAX_SCALE = 2.25;
+const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
 // A relative winner is meaningless when the whole local ISO neighborhood is
 // unusable. Below this per-QR yield, abandon manual tuning and let hardware AE
 // re-establish a sane exposure product before trying the motion-safe handoff.
@@ -2782,8 +2782,11 @@ async function settleAutomaticQrOptics(track, now) {
   const aeIso = savedAe?.iso ?? settings.iso;
   const aeExposureProduct = aeExposure * aeIso;
   const exposureProduct = aeExposureProduct * AUTO_QR_LIGHT_SCALE;
-  const maxAutoIso = Math.min(isoRange.max, Math.max(isoRange.min, aeIso * 4));
   let exposure = quantizeCameraRange(Math.min(aeExposure, motionSafeExposure), exposureRange);
+  const maxAutoIso = Math.min(
+    isoRange.max,
+    Math.max(isoRange.min, aeExposureProduct / Math.max(exposureRange.min, exposure))
+  );
   let iso = quantizeCameraRange(exposureProduct / Math.max(exposureRange.min, exposure), isoRange);
   if (iso > maxAutoIso) {
     iso = quantizeCameraRange(maxAutoIso, isoRange);
@@ -2895,13 +2898,14 @@ async function rescueAutomaticQrAcquisition(track, now) {
   const scales = [
     ...(memoryHealthy ? [memoryScale] : []),
     AUTO_QR_LIGHT_SCALE,
-    1,
-    Math.pow(2, 0.7),
-    2
+    Math.pow(2, -1.7),
+    Math.pow(2, -3),
+    Math.pow(2, -4.5)
   ];
   const candidates = [];
   const seen = new Set();
-  for (const scale of scales) {
+  for (const scaleRaw of scales) {
+    const scale = Math.min(1, Math.max(AUTO_OPTICS_MEMORY_MIN_SCALE / 8, scaleRaw));
     let exposure = baseExposure;
     let iso = quantizeCameraRange(aeProduct * scale / Math.max(exposureRange.min, exposure), isoRange);
     // If gain clips at the camera limit, recover as much of the requested light
@@ -2931,7 +2935,7 @@ async function rescueAutomaticQrAcquisition(track, now) {
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index];
       const remembered = memoryHealthy && Math.abs(candidate.scale - memoryScale) < 1e-6;
-      autoOpticsTuneSummary = `cold search ${index + 1}/${candidates.length}${remembered ? " · recent winner" : ""} · ${formatExposureMs(candidate.exposure)} · ISO ${Math.round(candidate.iso)} · ${Math.log2(candidate.scale).toFixed(1)}EV vs AE`;
+      autoOpticsTuneSummary = `cold dark search ${index + 1}/${candidates.length}${remembered ? " · recent winner" : ""} · ${formatExposureMs(candidate.exposure)} · ISO ${Math.round(candidate.iso)} · ${Math.log2(candidate.scale).toFixed(1)}EV vs AE`;
       const accepted = await applyCameraConstraint(track, {
         exposureMode: "manual",
         exposureTime: candidate.exposure,
@@ -2969,6 +2973,13 @@ async function rescueAutomaticQrAcquisition(track, now) {
   } finally {
     autoOpticsMutationRunning = false;
   }
+}
+
+function maintainAcquisitionAutofocus(now) {
+  if (replayRunning || optimizerPipelineActive || optimizeRunning || autoOpticsMutationRunning || gridLattice.locked) return;
+  const track = stream?.getVideoTracks()[0];
+  if (!track || track.readyState !== "live") return;
+  void focusController.maybeRetrySeekingAutofocus(now);
 }
 
 function maintainAutomaticQrOptics(now) {
@@ -4990,6 +5001,7 @@ async function captureFrame(source) {
   receiverFrameHeight = vh;
   const now = receiverNow();
   void maintainManualOptics(now);
+  maintainAcquisitionAutofocus(now);
   maintainAutomaticQrOptics(now);
   const trace = replayRunning ? {
     sequence: source.sequence,
