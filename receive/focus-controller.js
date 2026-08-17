@@ -864,6 +864,17 @@ class FocusController {
       this.validDecodeTimes.push(now);
       while (this.validDecodeTimes.length && this.validDecodeTimes[0] < now - 1e4) this.validDecodeTimes.shift();
     }
+    // A CRC-verified AirGapper packet is stronger evidence than the optional
+    // optical analyzer that focus is already usable. The direct Y8 hot path can
+    // intentionally bypass that analyzer, so never leave AF recovery armed just
+    // because no ImageData optical sample happened to run. This changes only the
+    // controller state; continuous hardware AF itself remains active.
+    if (this.strategy === "auto" && this.isAcquiring() && !this.isOptimizing()) {
+      this.commitSettings(this.settings());
+      this.lockedAt = now;
+      if (this.initialLockMs === void 0) this.initialLockMs = Math.max(0, now - this.attachedAt);
+      this.transition("LOCKED", "verified QR decode; autofocus recovery disarmed");
+    }
   }
   noteUsefulDecode(scanId, now = performance.now()) {
     if (scanId !== void 0 && scanId >= this.decodeBoundary) this.lastUsefulDecodeAt = now;
@@ -1223,9 +1234,15 @@ class FocusController {
     const track = this.track;
     if (!track || track.readyState !== "live") return;
     const modes = this.focusModes();
+    const currentFocusMode = this.settings().focusMode;
     const canSingle = modes.includes("single-shot") && !this.singleShotAfRejected;
-    const canContinuous = modes.includes("continuous") || this.settings().focusMode === "continuous";
+    const canContinuous = modes.includes("continuous") || currentFocusMode === "continuous";
     if (!canSingle && !canContinuous) return;
+    // Continuous AF is the least disruptive acquisition tool. Some Android
+    // cameras advertise single-shot but reject it or perform a visible lens
+    // sweep. Give already-running continuous AF several QR-evidence windows
+    // before escalating to single-shot.
+    const trySingle = canSingle && (!canContinuous || currentFocusMode !== "continuous" || this.seekingAfRetries >= CAMERA_TUNING.seekingAfFastRetries);
     const silence = this.decodeSilence(now);
     if (!force && this.validDecodesInGeneration > 0 && silence < 2200) return;
     const optical = metrics || (!this.targetMissingSince ? this.latest?.metrics : void 0);
@@ -1251,7 +1268,7 @@ class FocusController {
     this.focusRefinementCount++;
     this.seekingAfRetries++;
     try {
-      if (canSingle) {
+      if (trySingle) {
         this.requestedMode = "single-shot";
         const accepted = await this.apply(track, {
           focusMode: "single-shot",
@@ -1306,11 +1323,37 @@ class FocusController {
     const track = this.track;
     if (!track || track.readyState !== "live") return;
     const modes = this.focusModes();
-    if (!modes.includes("single-shot") && !modes.includes("continuous") && this.settings().focusMode !== "continuous") {
+    const initial = this.settings();
+    const canContinuous = modes.includes("continuous") || initial.focusMode === "continuous";
+    const canSingle = modes.includes("single-shot");
+    if (!canSingle && !canContinuous) {
       this.lastReason = "hardware autofocus controls unavailable";
       this.changed();
       return;
     }
+
+    // Camera HALs normally open in continuous AF already. Do not immediately
+    // kick the lens through a single-shot sweep: first let the live QR stream
+    // prove whether the current focus works. A later no-decode watchdog can
+    // nudge continuous AF, then escalate to single-shot only after repeated
+    // failure.
+    if (canContinuous) {
+      this.requestedMode = "continuous";
+      if (initial.focusMode !== "continuous") {
+        await this.apply(track, { focusMode: "continuous" });
+        if (!this.track || track.readyState !== "live") return;
+      }
+      const actual = this.settings();
+      this.committedFocusMode = actual.focusMode;
+      this.committedFocusDistance = actual.focusDistance;
+      this.lastSeekingAfAt = performance.now();
+      this.lastReason = initial.focusMode === "continuous"
+        ? "continuous hardware AF already running; waiting for QR evidence"
+        : "continuous hardware AF selected; waiting for QR evidence";
+      this.changed();
+      return;
+    }
+
     this.lastSeekingAfAt = -Infinity;
     await this.maybeRetrySeekingAutofocus(performance.now(), void 0, true);
   }
