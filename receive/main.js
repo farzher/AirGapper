@@ -1240,7 +1240,20 @@ function selectDecodePortfolio(candidates, sourceSequence, now, enabled) {
   const excluded = ranked.slice(budget);
   decodePortfolio.exploreSlot = void 0;
   const sequence = Number(sourceSequence);
-  if (selected.length && excluded.length && Number.isFinite(sequence) && Math.trunc(sequence) % PORTFOLIO_EXPLORE_EVERY === 0) {
+  // v168 weak slots already arrive here only on their sparse recovery-probe
+  // frame. Do not let best-K immediately rank that probe back out: force one
+  // due weak slot into the portfolio for this frame. If multiple weak slots
+  // share a probe phase, rotate them rather than paying for all at once.
+  const dueWeak = excluded.filter((region) => {
+    const slot = Number(region.gridSlot);
+    return Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotAdaptiveWeak[slot];
+  });
+  if (selected.length && dueWeak.length && Number.isFinite(sequence)) {
+    const probeIndex = Math.floor(Math.trunc(sequence) / SLOT_WEAK_PROBE_EVERY) % dueWeak.length;
+    const probe = dueWeak[probeIndex];
+    selected[selected.length - 1] = probe;
+    decodePortfolio.exploreSlot = probe.gridSlot;
+  } else if (selected.length && excluded.length && Number.isFinite(sequence) && Math.trunc(sequence) % PORTFOLIO_EXPLORE_EVERY === 0) {
     const exploreIndex = Math.floor(Math.trunc(sequence) / PORTFOLIO_EXPLORE_EVERY) % excluded.length;
     const explore = excluded[exploreIndex];
     selected[selected.length - 1] = explore;
