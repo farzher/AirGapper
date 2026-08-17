@@ -1,0 +1,31 @@
+name: v190 optics memory cleanup
+
+on:
+  push:
+    paths:
+      - .github/v190_patch.py
+      - .github/workflows/agent-v190-optics-memory-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v0.5.190
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          python3 .github/v190_patch.py
+          node --check main.js
+          node --check receive/main.js
+          git diff --check
+          rm -f .github/v190_patch.py .github/workflows/agent-v190-optics-memory-cleanup.yml
+          git add -A
+          git commit -m "v0.5.190 remember AE-relative optics and prune CPU bands"
+          git push origin HEAD:master
