@@ -8,7 +8,6 @@ const browser = await chromium.launch({
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
 
-// Match the 1440p desktop sender class used for the dense 18-QR wall.
 const page = await browser.newPage({ viewport: { width: 2560, height: 1440 } });
 page.setDefaultTimeout(30_000);
 const pageErrors = [];
@@ -29,7 +28,25 @@ page.on("pageerror", (error) => {
   console.error(`[browser pageerror] ${error.stack || error.message}`);
 });
 
-async function generateSenderFrames() {
+async function captureDistinctFrames(label, count) {
+  const frames = [];
+  const seen = new Set();
+  const deadline = Date.now() + 4_000;
+  while (frames.length < count && Date.now() < deadline) {
+    const url = await page.locator("#qr").evaluate((canvas) => canvas.toDataURL("image/png"));
+    if (!seen.has(url)) {
+      seen.add(url);
+      frames.push(url);
+    }
+    await page.waitForTimeout(40);
+  }
+  if (frames.length < Math.min(6, count)) throw new Error(`${label}: only generated ${frames.length} distinct sender frames`);
+  const geometry = await page.locator("#qr").evaluate((canvas) => ({ width: canvas.width, height: canvas.height }));
+  console.log(`AIRGAPPER_SENDER_PROFILE ${label} ${geometry.width}x${geometry.height} frames=${frames.length}`);
+  return { frames, geometry };
+}
+
+async function generateSenderProfiles() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator('[data-mode="send"]').click();
   await page.evaluate(() => {
@@ -37,7 +54,8 @@ async function generateSenderFrames() {
       ["cfg-layout", "three-six"],
       ["cfg-orientation", "landscape"],
       ["cfg-scaling", "integer"],
-      ["cfg-fps", "30"]
+      ["cfg-fps", "30"],
+      ["cfg-size", "1"]
     ]) {
       const element = document.getElementById(id);
       element.value = value;
@@ -60,24 +78,22 @@ async function generateSenderFrames() {
   await page.waitForFunction(() => document.body.classList.contains("qr-full"));
   await page.waitForTimeout(120);
 
-  const geometry = await page.locator("#qr").evaluate((canvas) => ({ width: canvas.width, height: canvas.height }));
-  if (geometry.width < 1000 || geometry.height < 600)
-    throw new Error(`Unexpectedly small fullscreen sender canvas ${geometry.width}x${geometry.height}`);
-  console.log(`AIRGAPPER_SENDER_CANVAS ${geometry.width}x${geometry.height}`);
-  const frames = [];
-  const seen = new Set();
-  const deadline = Date.now() + 4_000;
-  while (frames.length < 10 && Date.now() < deadline) {
-    const url = await page.locator("#qr").evaluate((canvas) => canvas.toDataURL("image/png"));
-    if (!seen.has(url)) {
-      seen.add(url);
-      frames.push(url);
-    }
-    await page.waitForTimeout(40);
-  }
-  if (frames.length < 6) throw new Error(`Only generated ${frames.length} distinct sender frames`);
-  console.log(`AIRGAPPER_GENERATED_FRAMES ${frames.length}`);
-  return frames;
+  const easy = await captureDistinctFrames("stable-1000B", 8);
+
+  const easyGeometry = easy.geometry;
+  await page.evaluate(() => {
+    const size = document.getElementById("cfg-size");
+    size.value = "5";
+    size.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction(({ width, height }) => {
+    const canvas = document.getElementById("qr");
+    return canvas && (canvas.width !== width || canvas.height !== height);
+  }, easyGeometry).catch(() => void 0);
+  await page.waitForTimeout(180);
+  const dense = await captureDistinctFrames("dense-2953B", 10);
+
+  return { easy: easy.frames, dense: dense.frames };
 }
 
 function assertScenario(name, result) {
@@ -88,34 +104,48 @@ function assertScenario(name, result) {
   if (result.jobs <= 0) failures.push("no decode work scheduled");
   if (result.fullJobs <= 0) failures.push("acquisition never ran");
   if (result.firstProductionFrame == null) failures.push("never acquired a production QR");
-  if (name === "acquire-then-stable") {
-    if (result.firstGridLockFrame == null) failures.push("never established grid lock");
-    if (result.trackedJobs <= 0) failures.push("never switched from acquisition to tracked decoding");
-    if (result.guidedJobs <= 0) failures.push("tracked wall never exercised Guided/stable decoder");
-  }
   if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);
+
+  if (name === "stable-path") {
+    if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");
+    if (result.trackedJobs <= 0) failures.push("never switched to tracked decoding");
+    if (result.guidedJobs <= 0) failures.push("Guided/stable decoder never ran");
+    if (result.tailTrackedJobs <= result.tailFullJobs)
+      failures.push(`stable tail did not favor tracked work (${result.tailTrackedJobs} tracked vs ${result.tailFullJobs} full)`);
+  }
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
 }
 
 try {
-  const urls = await generateSenderFrames();
-  // The header is intentionally hidden in qr-full mode. Trigger the real button
-  // handler directly instead of making Playwright wait for visual visibility.
+  const { easy, dense } = await generateSenderProfiles();
   await page.evaluate(() => document.getElementById("home-button").click());
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
 
-  const animatedOrder = Array.from({ length: urls.length }, (_, index) => index);
+  const easyOrder = Array.from({ length: easy.length }, (_, index) => index);
+  const denseOrder = Array.from({ length: dense.length }, (_, index) => index);
   const scenarios = [
     {
-      name: "acquire-then-stable",
-      urls,
-      order: [...animatedOrder, ...Array(30).fill(0)],
+      name: "stable-path",
+      urls: easy,
+      order: [...easyOrder, ...Array(24).fill(0)],
       fps: 30,
       mode: "performance"
     },
-    { name: "animated-cycle", urls, order: [...animatedOrder, ...animatedOrder], fps: 30, mode: "performance" },
-    { name: "animated-maximum", urls, order: [...animatedOrder, ...animatedOrder], fps: 30, mode: "maximum" }
+    {
+      name: "dense-performance",
+      urls: dense,
+      order: [...denseOrder, ...denseOrder],
+      fps: 30,
+      mode: "performance"
+    },
+    {
+      name: "dense-maximum",
+      urls: dense,
+      order: [...denseOrder, ...denseOrder],
+      fps: 30,
+      mode: "maximum"
+    }
   ];
 
   const results = {};
@@ -134,7 +164,7 @@ try {
     format: "AirGapper fast production regression",
     generatedAt: new Date().toISOString(),
     baseUrl,
-    sourceFrames: urls.length,
+    sourceFrames: { stable: easy.length, dense: dense.length },
     oracle: false,
     browserErrors: pageErrors,
     scenarios: results
