@@ -19,4 +19,14 @@ old='''  const guidedOutputs = sumGuided("successful");\n  const guided = {\n   
 new='''  const guidedOutputs = sumGuided("successful");\n  const moduleWeighted = guidedMetrics.reduce((sum, metrics) => sum + (Number(metrics.moduleSizeAvg) || 0) * (Number(metrics.tracks) || 0), 0);\n  const moduleMins = guidedMetrics.map((metrics) => Number(metrics.moduleSizeMin) || 0).filter((value) => value > 0);\n  const moduleMaxes = guidedMetrics.map((metrics) => Number(metrics.moduleSizeMax) || 0).filter((value) => value > 0);\n  const guided = {\n    jobs: guidedJobs,\n    moduleSizeAvg: guidedTracks ? moduleWeighted / guidedTracks : 0,\n    moduleSizeMin: moduleMins.length ? Math.min(...moduleMins) : 0,\n    moduleSizeMax: moduleMaxes.length ? Math.max(...moduleMaxes) : 0,'''
 if old not in s: raise SystemExit('benchmark guided builder anchor missing')
 s=s.replace(old,new,1)
+if 'const RECEIVER_RUNTIME_BUILD = "v0.5.232";' not in s: raise SystemExit('receiver version anchor missing')
+s=s.replace('const RECEIVER_RUNTIME_BUILD = "v0.5.232";', 'const RECEIVER_RUNTIME_BUILD = "v0.5.233";', 1)
 p.write_text(s)
+
+for path in ['main.js','index.html']:
+    q=Path(path); text=q.read_text()
+    if 'v0.5.232' not in text: raise SystemExit(f'{path}: app version anchor missing')
+    q.write_text(text.replace('v0.5.232','v0.5.233'))
+q=Path('sw.js'); text=q.read_text()
+if 'airgapper-static-js-v188' not in text: raise SystemExit('sw cache anchor missing')
+q.write_text(text.replace('airgapper-static-js-v188','airgapper-static-js-v189',1))
