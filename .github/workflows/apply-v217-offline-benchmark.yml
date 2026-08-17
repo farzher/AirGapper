@@ -10,8 +10,9 @@ on:
       - send/main.js
       - main.js
       - index.html
+      - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v223_data_plan_patch.py
+      - .github/v224_translation_nearest_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,19 +26,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply cached CRC-Turbo data-plan candidate
+      - name: Apply v224 translation-only sampler candidate
         id: candidate
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            if ! grep -q 'struct TurboDataPlan' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-              python3 .github/v223_data_plan_patch.py
+            if ! grep -q 'GUIDED_TURBO_NEAREST_MIN_MODULE' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+              python3 .github/v224_translation_nearest_patch.py
               echo 'changed=true' >> "$GITHUB_OUTPUT"
             else
               echo 'changed=false' >> "$GITHUB_OUTPUT"
             fi
-          } 2>&1 | tee /tmp/v223-patch.log
+          } 2>&1 | tee /tmp/v224-patch.log
 
       - name: Cache decimen toolchain
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
@@ -59,7 +60,7 @@ jobs:
           {
             DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
             DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
-          } 2>&1 | tee /tmp/v223-build.log
+          } 2>&1 | tee /tmp/v224-build.log
 
       - uses: actions/setup-node@v4
         if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
@@ -82,7 +83,7 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v223-regression.log
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v224-regression.log
           echo '--- fast regression summary ---'
           cat benchmark/offline-summary.json
 
@@ -121,32 +122,33 @@ jobs:
             echo "regression=$REGRESSION_OUTCOME"
             echo
             echo '--- patch tail ---'
-            tail -n 120 /tmp/v223-patch.log 2>/dev/null || true
+            tail -n 120 /tmp/v224-patch.log 2>/dev/null || true
             echo
             echo '--- build tail ---'
-            tail -n 180 /tmp/v223-build.log 2>/dev/null || true
+            tail -n 180 /tmp/v224-build.log 2>/dev/null || true
             echo
             echo '--- regression tail ---'
-            tail -n 240 /tmp/v223-regression.log 2>/dev/null || true
-          } > benchmark/v223-ci.log
+            tail -n 260 /tmp/v224-regression.log 2>/dev/null || true
+          } > benchmark/v224-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/v223-ci.log
-          git commit -m "record v223 candidate CI failure"
+          git add benchmark/v224-ci.log
+          git commit -m "record v224 candidate CI failure"
           git push origin HEAD:master
           exit 1
 
-      - name: Commit passing cached data plan
+      - name: Commit passing v224 candidate
         if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          cp benchmark/offline-summary.json benchmark/v223-result.json
+          cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
           git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
+                  vendor/decimen-codec/source/VERSION \
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
-                  benchmark/v223-result.json
-          git commit -m "v0.5.223 cache CRC-Turbo QR data plans"
+                  main.js receive/main.js index.html sw.js benchmark/latest-result.json
+          git commit -m "v0.5.224 fast sample stable translated QR walls"
           git push origin HEAD:master
