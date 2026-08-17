@@ -374,11 +374,12 @@ static void noteGuidedSparseOutcome(int id, bool success)
         state.cooldown[id] = 0;
         return;
     }
-    if (++state.failures[id] >= 2) {
+    if (++state.failures[id] >= 4) {
         state.failures[id] = 0;
-        // A weak geometry should not pay an extra RS decode every frame.
-        // Re-probe periodically because a later pose/framing can be friendlier.
-        state.cooldown[id] = 10;
+        // Sparse sampling is materially cheaper than full SampleQR and often
+        // recovers on the very next animated frame. Back off only briefly after
+        // a real miss streak; the old 10-appearance cooldown stranded good slots.
+        state.cooldown[id] = 2;
     }
 }
 
@@ -431,7 +432,8 @@ static void noteGuidedFallbackOutcome(int id, bool success)
 
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const DecimenGuidedTrack& track,
-                                         const QRCode::FinderPatternSet& fp)
+                                         const QRCode::FinderPatternSet& fp,
+                                         int* alignmentFoundOut)
 {
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
@@ -522,6 +524,7 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
         }
     }
 
+    if (alignmentFoundOut) *alignmentFoundOut = alignmentFound;
     // If fewer than half of the real sparse alignment controls were found,
     // avoid a likely-wasted RS decode and use full SampleQR immediately.
     if (alignmentFound < 3)
@@ -619,27 +622,43 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 return true;
             };
 
-            // Sparse distortion-aware tiled sample. Two consecutive misses for
-            // this slot put the experiment on a short cooldown, bounding the
-            // worst-case cost when a particular pose needs full SampleQR.
+            // Sparse distortion-aware tiled sample. It stays hot unless a slot
+            // produces a sustained miss streak. When all six real sparse alignment
+            // controls are present, first try the parser without QR Reed-Solomon;
+            // AirGapper CRC is the oracle. A miss immediately pays normal RS, so
+            // this cannot reduce decode yield versus the sparse path it replaces.
             if (guidedSparseAllowed(track.id)) {
                 ++metrics->fastDecodeAttempts;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet);
+                int sparseAlignmentFound = 0;
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet, &sparseAlignmentFound);
                 if (sparse.isValid() && sparse.bits().width() == track.dimension) {
                     metrics->sampleAttempts++;
                     const double fastStart = guidedNowMs();
-                    auto decoded = QRCode::Decode(sparse.bits());
+                    if (sparseAlignmentFound >= 6) {
+                        ++metrics->sparseNoRsAttempts;
+                        auto fast = decodeWithoutErrorCorrection(sparse.bits());
+                        if (fast.isValid() && !fast.content().bytes.empty() && hasValidCRC32(fast.content().bytes)) {
+                            decodedTrack = commitDecoded(sparse, fast);
+                            if (decodedTrack) ++metrics->sparseNoRsSuccesses;
+                        }
+                    }
+                    if (!decodedTrack) {
+                        ++metrics->sparseRsFallbacks;
+                        auto decoded = QRCode::Decode(sparse.bits());
+                        decodedTrack = commitDecoded(sparse, decoded);
+                    }
                     const double fastElapsed = guidedNowMs() - fastStart;
                     metrics->fastDecodeMs += fastElapsed;
                     metrics->decodeMs += fastElapsed;
                     decodeSpent += fastElapsed;
-                    decodedTrack = commitDecoded(sparse, decoded);
                     if (decodedTrack) {
                         ++metrics->fastDecodeSuccesses;
                         noteGuidedFallbackOutcome(track.id, true);
                     }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
+            } else {
+                ++metrics->sparseSkipped;
             }
 
             // Sparse misses retain the exact proven decoder, but repeated full

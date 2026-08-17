@@ -45,7 +45,7 @@ const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 112;
+const GUIDED_METRICS_BYTES = 128;
 const GUIDED_OUTPUT_BYTES = 128 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -109,7 +109,11 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
     genericDecodeMs: metricsView.getFloat64(88, true),
     genericFallbackTracks: metricsView.getUint32(96, true),
     genericFallbackSuccesses: metricsView.getUint32(100, true),
-    genericFallbackSkipped: metricsView.getUint32(104, true)
+    genericFallbackSkipped: metricsView.getUint32(104, true),
+    sparseNoRsAttempts: metricsView.getUint32(108, true),
+    sparseNoRsSuccesses: metricsView.getUint32(112, true),
+    sparseRsFallbacks: metricsView.getUint32(116, true),
+    sparseSkipped: metricsView.getUint32(120, true)
   };
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);

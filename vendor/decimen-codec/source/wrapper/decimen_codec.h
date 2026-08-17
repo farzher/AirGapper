@@ -60,6 +60,10 @@ struct DecimenGuidedMetrics {
 	uint32_t genericFallbackTracks;
 	uint32_t genericFallbackSuccesses;
 	uint32_t genericFallbackSkipped;
+	uint32_t sparseNoRsAttempts;
+	uint32_t sparseNoRsSuccesses;
+	uint32_t sparseRsFallbacks;
+	uint32_t sparseSkipped;
 	uint32_t reserved;
 };
 
