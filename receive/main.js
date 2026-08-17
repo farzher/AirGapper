@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.166";
+const RECEIVER_RUNTIME_BUILD = "v0.5.167";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -972,6 +972,55 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
   }
   guidedRollout.state = "active";
 }
+const SLOT_METRIC_COUNT = 64;
+const slotAttemptCounts = new Uint32Array(SLOT_METRIC_COUNT);
+const slotHitCounts = new Uint32Array(SLOT_METRIC_COUNT);
+function resetSlotMetrics() {
+  slotAttemptCounts.fill(0);
+  slotHitCounts.fill(0);
+}
+function noteSlotMetric(slot, hit) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return;
+  slotAttemptCounts[index]++;
+  if (hit) slotHitCounts[index]++;
+}
+function formatSlotMetric(slot) {
+  const attempts = slotAttemptCounts[slot] || 0;
+  const hits = slotHitCounts[slot] || 0;
+  return `s${slot} ${hits}/${attempts}${attempts ? ` ${(hits / attempts * 100).toFixed(0)}%` : ""}`;
+}
+function cornerSlotMetrics() {
+  const candidates = regions.filter((region) =>
+    region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN" &&
+    [region.x, region.y, region.w, region.h].every(Number.isFinite)
+  );
+  if (candidates.length < 2) return "";
+  const center = (region) => ({ x: region.x + region.w / 2, y: region.y + region.h / 2 });
+  const pick = (score, largest = false) => candidates.reduce((best, region) => {
+    const value = score(center(region));
+    if (!best || (largest ? value > best.value : value < best.value)) return { region, value };
+    return best;
+  }, null)?.region;
+  const tl = pick((p) => p.x + p.y);
+  const tr = pick((p) => p.x - p.y, true);
+  const bl = pick((p) => p.y - p.x, true);
+  const br = pick((p) => p.x + p.y, true);
+  const corner = (label, region) => region ? `${label} ${formatSlotMetric(region.gridSlot)}` : "";
+  const measured = candidates
+    .map((region) => {
+      const slot = region.gridSlot;
+      const attempts = slotAttemptCounts[slot] || 0;
+      const hits = slotHitCounts[slot] || 0;
+      return { slot, attempts, hits, rate: attempts ? hits / attempts : 1 };
+    })
+    .filter((item, index, array) => item.attempts >= 4 && array.findIndex((other) => other.slot === item.slot) === index)
+    .sort((a, b) => a.rate - b.rate || b.attempts - a.attempts)
+    .slice(0, 4);
+  const weak = measured.length ? ` · weak ${measured.map((item) => formatSlotMetric(item.slot)).join(" · ")}` : "";
+  return `Corners  ${[corner("TL", tl), corner("TR", tr), corner("BL", bl), corner("BR", br)].filter(Boolean).join(" · ")}${weak}`;
+}
+
 const livePipeline = {
   startedAt: 0,
   captures: 0,
@@ -1037,6 +1086,7 @@ function resetLivePipeline(now = receiverNow()) {
     workerWaitMs: 0, otherMs: 0, readFullAttempts: 0, timeouts: 0, errors: 0, lastCompletedAt: 0,
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
+  resetSlotMetrics();
   resetGuidedRollout();
 }
 function pushLiveLatency(target, value) {
@@ -1803,6 +1853,7 @@ function noteDecodeCompleted(id, completion) {
     region.lastAttemptAt = receiverNow();
     region.averageDecodeCostMs = region.averageDecodeCostMs ? region.averageDecodeCostMs * 0.8 + completion.latencyMs * 0.2 : completion.latencyMs;
     const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === region);
+    if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
     region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
     if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
       region.consecutiveMisses++;
@@ -3132,6 +3183,7 @@ function renderFocusDiagnostics() {
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · scheduled frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
     `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
+    cornerSlotMetrics(),
     `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
