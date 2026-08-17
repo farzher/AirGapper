@@ -6,9 +6,8 @@ const GRID_LAYOUTS = [
   { id: 3, cols: 2, rows: 3 },
   { id: 4, cols: 3, rows: 4 },
   { id: 5, cols: 3, rows: 5 },
-  { id: 6, cols: 5, rows: 3 },
-  { id: 7, cols: 3, rows: 6 },
-  { id: 8, cols: 5, rows: 9 }
+  { id: 6, cols: 5, rows: 9 },
+  { id: 7, cols: 3, rows: 6 }
 ];
 function gridLayoutById(id) {
   return GRID_LAYOUTS.find((layout) => layout.id === id);
