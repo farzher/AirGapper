@@ -1,0 +1,32 @@
+name: Agent v162 45-slot metadata fix
+on:
+  push:
+    paths:
+      - '.github/v162_patch.py'
+      - '.github/workflows/agent-v162-45slot-metadata.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v162_patch.py
+      - name: Smoke check
+        run: |
+          node --check send/main.js
+          node --check receive/main.js
+          node --check shared/protocol.js
+          node --check shared/grid-layout.js
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js shared/grid-layout.js shared/protocol.js sw.js
+          git commit -m 'v0.5.162 fit 45-slot layout into frame metadata'
+          git push origin master
