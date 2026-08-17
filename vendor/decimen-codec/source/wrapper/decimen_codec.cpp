@@ -427,6 +427,10 @@ struct GuidedTurboTrack
     std::vector<PointF> samples;
     uint8_t misses = 0;
     uint8_t cooldown = 0;
+    // CRC-backed Stable-RS successes qualify this calibrated map for the even
+    // cheaper data-only probe. This is per physical slot and is reset whenever
+    // Guided replaces the map.
+    uint8_t stableSuccesses = 0;
 };
 
 struct GuidedTurboAdaptive
@@ -569,6 +573,7 @@ static void seedGuidedTurbo(int id, int dim, const Position& pos,
     cache->samples = std::move(samples);
     cache->misses = 0;
     cache->cooldown = 0;
+    cache->stableSuccesses = 0;
 }
 
 static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -1311,16 +1316,43 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         // job's Guided fallback rebuild it instead of cooling it.
                         stableNeedsRefresh = true;
                     } else {
-                        stableRsAttempted = true;
-                        ++metrics->sampleAttempts;
-                        ++metrics->sparseRsFallbacks;
-                        ++metrics->stableRsAttempts;
-                        auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
-                                                           yPlane, width, height, stride,
-                                                           dx, dy, levels, *metrics);
-                        success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
-                        if (success)
-                            ++metrics->stableRsSuccesses;
+                        // Once this exact distortion-aware map has repeatedly
+                        // survived QR RS + AirGapper CRC, try the existing
+                        // data-only decoder first on sufficiently resolved QRs.
+                        // Its CRC is still an exact acceptance gate. A miss pays
+                        // no correctness cost: Stable-RS runs immediately below
+                        // and the data-only probe backs off briefly.
+                        const bool stableDirectEligible =
+                            guidedModuleSize(track) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
+                            cache->stableSuccesses >= 2 && !cache->cooldown;
+                        if (stableDirectEligible) {
+                            directAttempted = true;
+                            ++metrics->sampleAttempts;
+                            ++metrics->sparseNoRsAttempts;
+                            auto decoded = decodeTurboDataOnly(*cache, track, frameTransform,
+                                                               yPlane, width, height, stride,
+                                                               dx, dy, levels, *metrics);
+                            directSuccess = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                            success = directSuccess;
+                            if (directSuccess)
+                                ++metrics->sparseNoRsSuccesses;
+                            else
+                                cache->cooldown = std::max<uint8_t>(cache->cooldown, 2);
+                        }
+                        if (!success) {
+                            stableRsAttempted = true;
+                            ++metrics->sampleAttempts;
+                            ++metrics->sparseRsFallbacks;
+                            ++metrics->stableRsAttempts;
+                            auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
+                                                               yPlane, width, height, stride,
+                                                               dx, dy, levels, *metrics);
+                            success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                            if (success) {
+                                ++metrics->stableRsSuccesses;
+                                cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
+                            }
+                        }
                     }
                 }
             }
@@ -1330,17 +1362,22 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (success) {
                 ++metrics->turboSuccesses;
                 cache->misses = 0;
-                cache->cooldown = 0;
+                // A failed data-only probe recovered by Stable-RS is useful
+                // evidence to pause only that probe; do not erase its backoff.
+                if (!(stableEligible && directAttempted && !directSuccess))
+                    cache->cooldown = 0;
             } else if (stableNeedsRefresh) {
                 // Guided runs later in this same batch. Marking only this map
                 // stale makes turboSeedEligible() capture its fresh sparse map.
                 cache->misses = 0;
                 cache->cooldown = 0;
+                cache->stableSuccesses = 0;
                 cache->distortionAware = false;
             } else if (stableRsAttempted) {
                 // A single RS miss can be sender/camera phase noise. Repeated
                 // misses mean the calibrated map is no longer earning its keep;
                 // relearn it from the Guided fallback instead of parking it.
+                cache->stableSuccesses = 0;
                 if (++cache->misses >= 2) {
                     cache->misses = 0;
                     cache->cooldown = 0;
@@ -1358,7 +1395,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             // The global adaptive controller now governs only the weaker
             // data-only Turbo experiment. Stable-RS is slot-local and must not
             // promote, demote, pause, or invalidate other calibrated maps.
-            if (!stableRsAttempted && !turboAdaptive.promoted) {
+            if (!stableEligible && !stableRsAttempted && !turboAdaptive.promoted) {
                 if (!directAttempted)
                     continue;
                 ++turboAdaptive.canaryAttempts;
@@ -1383,7 +1420,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 } else if (turboAdaptive.canaryAttempts >= 10) {
                     pauseTurbo(false);
                 }
-            } else if (!stableRsAttempted && turboAdaptive.promoted && directAttempted) {
+            } else if (!stableEligible && !stableRsAttempted && turboAdaptive.promoted && directAttempted) {
                 ++turboAdaptive.promotedAttempts;
                 turboAdaptive.promotedSuccesses += int(success);
                 const int evaluationWindow = 36;
