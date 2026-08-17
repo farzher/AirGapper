@@ -47,6 +47,10 @@ async function generateSenderFrames() {
 
 try {
   const urls = await generateSenderFrames();
+  // Stop sender animation before timing receiver work. The benchmark should
+  // measure only the receive/decoder pipeline, not compete with QR generation.
+  await page.locator("#home-button").click();
+  await page.waitForTimeout(100);
   await page.waitForFunction(() => typeof window.__airgapperRunOfflineImages === "function");
 
   const scenarios = [
