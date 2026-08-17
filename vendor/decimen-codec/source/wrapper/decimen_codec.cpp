@@ -341,23 +341,10 @@ static std::optional<ConcentricPattern> locateGuidedAlignment(const BitMatrix& i
     return std::nullopt;
 }
 
-constexpr uint8_t GUIDED_SPARSE_REUSE_SUCCESSES = 6;
-
-struct GuidedSparseSlotState
-{
-    uint8_t failures{};
-    uint8_t cooldown{};
-    uint8_t reuseRemaining{};
-    uint16_t validMask{};
-    int dimension{};
-    float moduleSize{};
-    PointF center{};
-    std::array<PointF, 9> normalizedOffsets{};
-};
-
 struct GuidedSparseState
 {
-    std::array<GuidedSparseSlotState, 64> slots{};
+    std::array<uint8_t, 64> failures{};
+    std::array<uint8_t, 64> cooldown{};
 };
 
 static GuidedSparseState& guidedSparseState()
@@ -366,57 +353,39 @@ static GuidedSparseState& guidedSparseState()
     return state;
 }
 
-static GuidedSparseSlotState* guidedSparseSlot(int id)
-{
-    auto& slots = guidedSparseState().slots;
-    return id >= 0 && id < int(slots.size()) ? &slots[id] : nullptr;
-}
-
-static void clearGuidedSparseGeometry(GuidedSparseSlotState& slot)
-{
-    slot.reuseRemaining = 0;
-    slot.validMask = 0;
-    slot.dimension = 0;
-    slot.moduleSize = 0;
-}
-
 static bool guidedSparseAllowed(int id)
 {
-    auto* slot = guidedSparseSlot(id);
-    if (!slot)
+    if (id < 0 || id >= int(guidedSparseState().cooldown.size()))
         return true;
-    if (!slot->cooldown)
+    auto& cooldown = guidedSparseState().cooldown[id];
+    if (!cooldown)
         return true;
-    --slot->cooldown;
+    --cooldown;
     return false;
 }
 
 static void noteGuidedSparseOutcome(int id, bool success)
 {
-    auto* slot = guidedSparseSlot(id);
-    if (!slot)
+    if (id < 0 || id >= int(guidedSparseState().failures.size()))
         return;
+    auto& state = guidedSparseState();
     if (success) {
-        slot->failures = 0;
-        slot->cooldown = 0;
+        state.failures[id] = 0;
+        state.cooldown[id] = 0;
         return;
     }
-    clearGuidedSparseGeometry(*slot);
-    if (++slot->failures >= 2) {
-        slot->failures = 0;
+    if (++state.failures[id] >= 2) {
+        state.failures[id] = 0;
         // A weak geometry should not pay an extra RS decode every frame.
         // Re-probe periodically because a later pose/framing can be friendlier.
-        slot->cooldown = 10;
+        state.cooldown[id] = 10;
     }
 }
 
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const DecimenGuidedTrack& track,
-                                         const QRCode::FinderPatternSet& fp,
-                                         bool& usedCache, bool& refreshed)
+                                         const QRCode::FinderPatternSet& fp)
 {
-    usedCache = false;
-    refreshed = false;
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
@@ -462,25 +431,9 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
         return currentPrediction(prior(centered(PointI{centers[x], centers[y]})));
     };
 
-    const double moduleSize = std::max(1.0f, guidedModuleSize(track));
-    const PointF trackCenter{
-        (track.x0 + track.x1 + track.x2 + track.x3) * 0.25,
-        (track.y0 + track.y1 + track.y2 + track.y3) * 0.25
-    };
-    auto* slot = guidedSparseSlot(track.id);
-    bool cacheUsable = slot && slot->validMask && slot->reuseRemaining && slot->dimension == dim && slot->moduleSize > 0;
-    if (cacheUsable) {
-        const double scaleDrift = std::abs(std::log2(moduleSize / slot->moduleSize));
-        const double centerDrift = distance(trackCenter, slot->center);
-        if (scaleDrift > 0.08 || centerDrift > std::max(8.0, moduleSize * 10.0)) {
-            clearGuidedSparseGeometry(*slot);
-            cacheUsable = false;
-        }
-    }
-
-    // Base transform is the fallback only for sparse controls that were not
-    // found. Current finder centers still re-anchor translation/rotation/scale
-    // on every frame, including cache-reuse frames.
+    // Base transform is only the fallback for missing sparse controls. Its
+    // fourth point is the previous bottom-right alignment prediction after the
+    // exact current finder affine correction, not a stale raw corner.
     const PointF predictedBR = projectControl(N, N);
     if (!image.isIn(predictedBR))
         return {};
@@ -492,78 +445,40 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
         return {};
 
     Matrix<std::optional<PointF>> controls(3, 3);
-    if (cacheUsable) {
-        usedCache = true;
-        for (int y = 0; y <= N; ++y) {
-            for (int x = 0; x <= N; ++x) {
-                const int index = y * 3 + x;
-                if (!(slot->validMask & (uint16_t(1) << index)))
-                    continue;
-                const PointF predicted = projectControl(x, y);
-                const PointF offset = slot->normalizedOffsets[index];
-                controls.set(x, y, predicted + PointF{offset.x * moduleSize, offset.y * moduleSize});
+    auto seedFinderCorner = [&](int x, int y, const ConcentricPattern& finder) {
+        const PointF predicted = projectControl(x, y);
+        controls.set(x, y, predicted);
+        if (auto corners = FindConcentricPatternCorners(image, finder, finder.size, 2)) {
+            for (auto corner : *corners) {
+                if (distance(corner, predicted) < finder.size / 2) {
+                    controls.set(x, y, corner);
+                    break;
+                }
             }
         }
-        --slot->reuseRemaining;
-    } else {
-        refreshed = true;
-        if (slot)
-            clearGuidedSparseGeometry(*slot);
+    };
+    seedFinderCorner(0, 0, fp.tl);
+    seedFinderCorner(0, N, fp.bl);
+    seedFinderCorner(N, 0, fp.tr);
 
-        auto rememberControl = [&](int x, int y, PointF predicted, PointF actual) {
-            controls.set(x, y, actual);
-            if (!slot)
-                return;
-            const int index = y * 3 + x;
-            const PointF delta = actual - predicted;
-            slot->normalizedOffsets[index] = PointF{delta.x / moduleSize, delta.y / moduleSize};
-            slot->validMask |= uint16_t(1) << index;
-        };
-        auto seedFinderCorner = [&](int x, int y, const ConcentricPattern& finder) {
+    const int moduleSize = std::max(1, int(std::lround(guidedModuleSize(track))));
+    int alignmentFound = 0;
+    for (int y = 0; y <= N; ++y) {
+        for (int x = 0; x <= N; ++x) {
+            if ((x == 0 && y == 0) || (x == 0 && y == N) || (x == N && y == 0))
+                continue;
             const PointF predicted = projectControl(x, y);
-            PointF actual = predicted;
-            if (auto corners = FindConcentricPatternCorners(image, finder, finder.size, 2)) {
-                for (auto corner : *corners) {
-                    if (distance(corner, predicted) < finder.size / 2) {
-                        actual = corner;
-                        break;
-                    }
-                }
+            if (auto found = locateGuidedAlignment(image, moduleSize, predicted)) {
+                controls.set(x, y, PointF(*found));
+                ++alignmentFound;
             }
-            rememberControl(x, y, predicted, actual);
-        };
-        seedFinderCorner(0, 0, fp.tl);
-        seedFinderCorner(0, N, fp.bl);
-        seedFinderCorner(N, 0, fp.tr);
-
-        const int moduleSizePx = std::max(1, int(std::lround(moduleSize)));
-        int alignmentFound = 0;
-        for (int y = 0; y <= N; ++y) {
-            for (int x = 0; x <= N; ++x) {
-                if ((x == 0 && y == 0) || (x == 0 && y == N) || (x == N && y == 0))
-                    continue;
-                const PointF predicted = projectControl(x, y);
-                if (auto found = locateGuidedAlignment(image, moduleSizePx, predicted)) {
-                    rememberControl(x, y, predicted, PointF(*found));
-                    ++alignmentFound;
-                }
-            }
-        }
-
-        // If fewer than half of the real sparse alignment controls were found,
-        // avoid a likely-wasted RS decode and use full SampleQR immediately.
-        if (alignmentFound < 3) {
-            if (slot)
-                clearGuidedSparseGeometry(*slot);
-            return {};
-        }
-        if (slot) {
-            slot->dimension = dim;
-            slot->moduleSize = float(moduleSize);
-            slot->center = trackCenter;
-            slot->reuseRemaining = GUIDED_SPARSE_REUSE_SUCCESSES;
         }
     }
+
+    // If fewer than half of the real sparse alignment controls were found,
+    // avoid a likely-wasted RS decode and use full SampleQR immediately.
+    if (alignmentFound < 3)
+        return {};
 
     return SampleGrid(image, dim, dim, base, std::move(controls), centers, centers);
 }
@@ -662,13 +577,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             // worst-case cost when a particular pose needs full SampleQR.
             if (guidedSparseAllowed(track.id)) {
                 ++metrics->fastDecodeAttempts;
-                bool usedSparseCache = false;
-                bool refreshedSparse = false;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet, usedSparseCache, refreshedSparse);
-                if (usedSparseCache)
-                    ++metrics->sparseCacheAttempts;
-                if (refreshedSparse)
-                    ++metrics->sparseRefreshes;
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet);
                 if (sparse.isValid() && sparse.bits().width() == track.dimension) {
                     metrics->sampleAttempts++;
                     const double fastStart = guidedNowMs();
@@ -678,11 +587,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     metrics->decodeMs += fastElapsed;
                     decodeSpent += fastElapsed;
                     decodedTrack = commitDecoded(sparse, decoded);
-                    if (decodedTrack) {
+                    if (decodedTrack)
                         ++metrics->fastDecodeSuccesses;
-                        if (usedSparseCache)
-                            ++metrics->sparseCacheSuccesses;
-                    }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             }
