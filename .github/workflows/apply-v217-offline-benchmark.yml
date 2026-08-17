@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - .github/v217_offline_patch.py
+      - benchmark/offline-runner.mjs
       - .github/workflows/apply-v217-offline-benchmark.yml
 
 permissions:
@@ -12,7 +13,7 @@ permissions:
 jobs:
   apply-and-benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
