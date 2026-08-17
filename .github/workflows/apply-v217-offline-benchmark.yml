@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v233_threshold_plane_patch.py
+      - .github/camera_regression_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,98 +25,60 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v233 threshold-plane candidate
+      - name: Apply camera-realistic benchmark update
         id: candidate
-        continue-on-error: true
         run: |
-          set -o pipefail
-          { if ! grep -q 'thresholdXStep' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then python3 .github/v233_threshold_plane_patch.py; echo 'changed=true' >> "$GITHUB_OUTPUT"; else echo 'changed=false' >> "$GITHUB_OUTPUT"; fi; } 2>&1 | tee /tmp/v233-patch.log
-
-      - name: Cache codec toolchain
-        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            vendor/decimen-codec/source/emsdk
-            vendor/decimen-codec/source/third_party
-            vendor/decimen-codec/source/build-simd
-            vendor/decimen-codec/source/build-scalar
-          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
-
-      - name: Build codecs
-        id: build
-        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true'
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          { DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh; DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh; } 2>&1 | tee /tmp/v233-build.log
+          set -euo pipefail
+          if [ -f .github/camera_regression_patch.py ] && ! grep -q 'camera-dense-y8' benchmark/offline-runner.mjs; then
+            python3 .github/camera_regression_patch.py
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
-        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         with: { node-version: 22 }
 
       - name: Prepare Chrome
-        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
         run: npm install --no-save --package-lock=false playwright@1.55.0
 
       - name: Run production regression
         id: regression
-        if: steps.candidate.outcome == 'success' && steps.build.outcome != 'failure'
-        continue-on-error: true
         run: |
-          set -o pipefail
-          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 & SERVER_PID=$!; trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v233-regression.log
-
-      - name: Require useful threshold-plane win
-        id: performance
-        if: steps.candidate.outputs.changed == 'true' && steps.regression.outcome == 'success'
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          node <<'NODE' 2>&1 | tee /tmp/v233-performance.log
-          const fs=require('fs');
-          const b=JSON.parse(fs.readFileSync('benchmark/latest-result.json','utf8')).scenarios;
-          const a=JSON.parse(fs.readFileSync('benchmark/offline-summary.json','utf8')).scenarios;
-          const bs=b['stable-y8'],as=a['stable-y8'],bm=b['motion-y8'],am=a['motion-y8'],bd=b['dense-y8'],ad=a['dense-y8'];
-          const p=[];
-          const beforeSample=(bs.normalized.sampleMsPerTrack+bd.normalized.sampleMsPerTrack)/2;
-          const afterSample=(as.normalized.sampleMsPerTrack+ad.normalized.sampleMsPerTrack)/2;
-          if(afterSample>beforeSample*.98) p.push(`mean stable+dense sample/track ${afterSample.toFixed(3)} did not beat ${beforeSample.toFixed(3)} by 2%`);
-          if(as.normalized.sampleMsPerTrack>bs.normalized.sampleMsPerTrack*1.05) p.push('stable sample cost regressed');
-          if(ad.normalized.sampleMsPerTrack>bd.normalized.sampleMsPerTrack*1.05) p.push('dense sample cost regressed');
-          if(as.normalized.guidedOutputYield<.98 || as.normalized.dataOnlyYield<.98 || as.decodeP50Ms>12) p.push('stable correctness/latency regressed');
-          if(ad.normalized.guidedOutputYield<.98 || ad.normalized.dataOnlyYield<.95 || ad.normalized.stableRsYield<.98 || ad.decodeP50Ms>38) p.push('dense correctness/latency regressed');
-          if(am.finalState!=='TRACK' || am.tailFullJobs!==0 || am.normalized.guidedOutputYield<bm.normalized.guidedOutputYield*.90 || am.decodeP95Ms>60) p.push('motion recovery regressed');
-          console.log(JSON.stringify({stable:{before:bs.normalized,after:as.normalized,p50:[bs.decodeP50Ms,as.decodeP50Ms]},motion:{before:bm.normalized,after:am.normalized,p95:[bm.decodeP95Ms,am.decodeP95Ms]},dense:{before:bd.normalized,after:ad.normalized,p50:[bd.decodeP50Ms,ad.decodeP50Ms]},meanSample:[beforeSample,afterSample]},null,2));
-          if(p.length) throw new Error(p.join('; '));
-          NODE
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/regression.log
 
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: "airgapper-fast-regression-${{ github.sha }}", path: benchmark/offline-summary.json, if-no-files-found: ignore, retention-days: 14 }
+        with:
+          name: airgapper-fast-regression-${{ github.sha }}
+          path: benchmark/offline-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Commit camera benchmark update
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          cp benchmark/offline-summary.json benchmark/latest-result.json
+          rm -rf node_modules benchmark/offline-summary.json
+          git rm .github/camera_regression_patch.py
+          git add benchmark/offline-runner.mjs benchmark/latest-result.json
+          git commit -m "add camera-realistic dense receiver regression"
+          git push origin HEAD:master
 
       - name: Record normal regression
-        if: steps.regression.outcome == 'success' && steps.candidate.outputs.changed != 'true'
+        if: steps.candidate.outputs.changed != 'true'
         run: |
           set -euo pipefail
-          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
-          cp benchmark/offline-summary.json benchmark/latest-result.json; rm -rf node_modules benchmark/offline-summary.json
-          git add benchmark/latest-result.json; git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
-
-      - name: Record rejected candidate
-        if: steps.candidate.outcome == 'failure' || steps.build.outcome == 'failure' || steps.regression.outcome == 'failure' || (steps.candidate.outputs.changed == 'true' && steps.performance.outcome == 'failure')
-        run: |
-          set -euo pipefail
-          git reset --hard HEAD
-          { echo "patch=${{ steps.candidate.outcome }} build=${{ steps.build.outcome }} regression=${{ steps.regression.outcome }} performance=${{ steps.performance.outcome }}"; cat /tmp/v233-performance.log 2>/dev/null || true; tail -n 180 /tmp/v233-build.log 2>/dev/null || true; tail -n 240 /tmp/v233-regression.log 2>/dev/null || true; } > benchmark/v233-ci.log
-          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"; git add benchmark/v233-ci.log; git commit -m "record v233 candidate rejection"; git push origin HEAD:master; exit 1
-
-      - name: Commit passing v233 candidate
-        if: steps.candidate.outcome == 'success' && steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success' && steps.performance.outcome == 'success'
-        run: |
-          set -euo pipefail
-          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
-          cp benchmark/offline-summary.json benchmark/latest-result.json; rm -rf node_modules benchmark/offline-summary.json
-          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/VERSION vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm main.js receive/main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.233 precompute stable threshold plane"; git push origin HEAD:master
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          cp benchmark/offline-summary.json benchmark/latest-result.json
+          rm -rf node_modules benchmark/offline-summary.json
+          git add benchmark/latest-result.json
+          git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
