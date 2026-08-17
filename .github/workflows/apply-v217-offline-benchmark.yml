@@ -11,11 +11,12 @@ on:
       - main.js
       - index.html
       - benchmark/offline-runner.mjs
+      - .github/v218_rgba_tracked_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   fast-regression:
@@ -23,6 +24,17 @@ jobs:
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply candidate tracked-path optimization
+        id: candidate
+        run: |
+          set -euo pipefail
+          if grep -q 'usedDirectFrame || pixelFormat === "rgba"' receive/worker.js; then
+            python3 .github/v218_rgba_tracked_patch.py
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -51,3 +63,14 @@ jobs:
           path: benchmark/offline-summary.json
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Commit passing candidate
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -rf node_modules benchmark/offline-summary.json
+          git add receive/worker.js
+          git commit -m "v0.5.218 prefer tracked decode for buffered RGBA"
+          git push origin HEAD:master
