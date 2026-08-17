@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.150";
+const RECEIVER_RUNTIME_BUILD = "v0.5.151";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2164,7 +2164,12 @@ function describeAutoIsoProbe(probe) {
   return `${Math.round(probe.iso)}:${probe.rate.toFixed(0)}/s ${(probe.yieldRate * 100).toFixed(0)}%`;
 }
 async function tuneAutomaticQrIso(track, exposure, baseIso, isoRange, maxAutoIso) {
-  if (!automaticIsoAxis || !automaticOpticsSessionAlive(track)) return { iso: baseIso, probes: [] };
+  // The per-axis Auto flags belong to manual Optics mode. When the top-level
+  // Optics controller is Auto, it owns exposure + gain for its one-time camera
+  // calibration. A previously hand-pinned ISO must not silently disable this
+  // search while the manual controls are hidden. Preserve the pin for the next
+  // time the user explicitly switches Optics off, but ignore it here.
+  if (!automaticOpticsSessionAlive(track)) return { iso: baseIso, probes: [] };
   autoOpticsRuntimeState = "tuning";
   autoOpticsTuneSummary = "calibrating ISO";
 
