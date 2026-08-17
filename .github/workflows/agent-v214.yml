@@ -1,0 +1,34 @@
+name: v214 warped stable RS
+on:
+  push:
+    paths:
+      - .github/v214_warped_stable_rs.py
+      - .github/workflows/agent-v214.yml
+permissions:
+  contents: write
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply warped Stable-RS patch
+        run: python .github/v214_warped_stable_rs.py
+      - name: Build SIMD codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. ./build.sh
+      - name: Build scalar codec
+        run: |
+          cd vendor/decimen-codec/source
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android ./build.sh
+      - name: Commit v0.5.214
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v214_warped_stable_rs.py .github/workflows/agent-v214.yml
+          git add index.html main.js receive/main.js sw.js vendor/decimen-codec vendor/decimen-codec-android
+          git commit -m "v0.5.214 warp stable RS onto live geometry"
+          git push origin master
