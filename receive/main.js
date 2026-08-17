@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.216";
+const RECEIVER_RUNTIME_BUILD = "v0.5.217";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5730,7 +5730,18 @@ async function captureFrame(source) {
     // to track exact observed slots; do not spend a full-frame finder pass on
     // camera pixels that cannot contain the declared wall.
     const provisionalCrop = preLatticeDiscovery && provisionalUnknownVisible.length > 0;
-    const boundedScanCandidates = provisionalCrop ? provisionalUnknownVisible : lockedGeometryCandidates;
+    // A generic decoder over the bounding box of *all* provisional unknowns is
+    // almost a full-wall scan again. Dense walls then rediscover the same first
+    // physical row on every pass (the decoder has a bounded result count), so
+    // the lattice may never collect cross-axis geometry and never lock. Probe one
+    // predicted unknown slot at a time instead. Rotating these tiny crops both
+    // cuts acquisition pixels and guarantees discovery pressure moves around the
+    // declared wall instead of repeatedly rewarding the easiest row.
+    let boundedScanCandidates = lockedGeometryCandidates;
+    if (provisionalCrop) {
+      const target = provisionalUnknownVisible[acquisitionTileCursor++ % provisionalUnknownVisible.length];
+      boundedScanCandidates = target ? [target] : [];
+    }
     if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
       const points = boundedScanCandidates.flatMap((region) => [
         region.quad.topLeft,
@@ -7004,7 +7015,7 @@ async function inspectBenchmarkFrame(index) {
     return `${(_a = item.slot) != null ? _a : "?"}: ${missedReason(trace, item.slot)}`;
   }).join(", ") || "none"}`;
 }
-async function runReceiverBenchmark() {
+async function runReceiverBenchmark({ productionOnly = false } = {}) {
   var _a, _b, _c, _d, _e, _f, _g, _h;
   if (replayRunning) return;
   runBenchmarkBtn.disabled = true;
@@ -7067,24 +7078,28 @@ async function runReceiverBenchmark() {
       });
     }
     await waitForWorkers();
-    const savedReference = window.__airgapperBenchmarkReference;
-    const savedCorpus = savedReference == null ? void 0 : savedReference.corpus;
-    const savedFrames = savedReference == null ? void 0 : savedReference.frames;
     let oracleLatencies = [];
-    if ((savedCorpus == null ? void 0 : savedCorpus.width) === corpus.header.width && savedCorpus.height === corpus.header.height && savedCorpus.startedAt === corpus.header.startedAt && savedCorpus.framesStored === corpus.header.framesStored && (savedFrames == null ? void 0 : savedFrames.length) === benchmarkTraces.length && savedFrames.every((item, index) => item.sequence === benchmarkTraces[index].sequence)) {
-      for (let index = 0; index < benchmarkTraces.length; index++) {
-        benchmarkTraces[index].reference = savedFrames[index].reference;
-      }
-      benchmarkStatus.textContent = "Reference map reused";
+    if (productionOnly) {
+      benchmarkStatus.textContent = "Production replay complete";
     } else {
-      oracleLatencies = await runOracle(corpus);
-    }
-    for (const trace of benchmarkTraces) {
-      const known = new Set(trace.reference.map((item) => item.esi));
-      for (const packet of trace.decoded) {
-        if (known.has(packet.esi)) continue;
-        known.add(packet.esi);
-        trace.reference.push({ slot: packet.slot, esi: packet.esi, quad: packet.quad });
+      const savedReference = window.__airgapperBenchmarkReference;
+      const savedCorpus = savedReference == null ? void 0 : savedReference.corpus;
+      const savedFrames = savedReference == null ? void 0 : savedReference.frames;
+      if ((savedCorpus == null ? void 0 : savedCorpus.width) === corpus.header.width && savedCorpus.height === corpus.header.height && savedCorpus.startedAt === corpus.header.startedAt && savedCorpus.framesStored === corpus.header.framesStored && (savedFrames == null ? void 0 : savedFrames.length) === benchmarkTraces.length && savedFrames.every((item, index) => item.sequence === benchmarkTraces[index].sequence)) {
+        for (let index = 0; index < benchmarkTraces.length; index++) {
+          benchmarkTraces[index].reference = savedFrames[index].reference;
+        }
+        benchmarkStatus.textContent = "Reference map reused";
+      } else {
+        oracleLatencies = await runOracle(corpus);
+      }
+      for (const trace of benchmarkTraces) {
+        const known = new Set(trace.reference.map((item) => item.esi));
+        for (const packet of trace.decoded) {
+          if (known.has(packet.esi)) continue;
+          known.add(packet.esi);
+          trace.reference.push({ slot: packet.slot, esi: packet.esi, quad: packet.quad });
+        }
       }
     }
     const durationSeconds = Math.max(1e-3, (((_d = (_c = corpus.meta(corpus.length - 1)) == null ? void 0 : _c.callbackTimeMs) != null ? _d : firstTime) - firstTime) / 1e3);
@@ -7116,7 +7131,7 @@ async function runReceiverBenchmark() {
     for (const packet of productionPackets) if (!uniquePackets.has(packet.esi)) uniquePackets.set(packet.esi, packet);
     const uniqueUseful = uniquePackets.size;
     const uniqueUsefulBytes = [...uniquePackets.values()].reduce((sum, packet) => sum + packet.bytes, 0);
-    const extraPackets = benchmarkTraces.flatMap((trace) => {
+    const extraPackets = productionOnly ? [] : benchmarkTraces.flatMap((trace) => {
       const reference = new Set(trace.reference.map((item) => item.esi));
       return trace.decoded.filter((item) => !reference.has(item.esi));
     });
@@ -7218,14 +7233,15 @@ async function runReceiverBenchmark() {
       }));
     });
     benchmarkResult = {
-      format: "AirGapper receiver benchmark",
+      format: productionOnly ? "AirGapper fast production regression" : "AirGapper receiver benchmark",
+      productionOnly,
       version: (_e = document.querySelector(".app-version")) == null ? void 0 : _e.textContent,
       corpus: corpus.header,
       replay: { mode: replayMode.value, workers: pool.size, deviceLabel: deviceLabel?.value.trim() || null, device: navigator.userAgent },
       acquisition: { firstReferenceFrame: firstReference < 0 ? null : benchmarkTraces[firstReference].sequence, firstProductionFrame: firstProduction < 0 ? null : benchmarkTraces[firstProduction].sequence, deltaFrames: firstReference < 0 || firstProduction < 0 ? null : firstProduction - firstReference, deltaMs: firstReference < 0 || firstProduction < 0 ? null : benchmarkTraces[firstProduction].timestampMs - benchmarkTraces[firstReference].timestampMs, firstLayoutFrame: firstLayout < 0 ? null : benchmarkTraces[firstLayout].sequence, firstGridLockFrame: firstLock < 0 ? null : benchmarkTraces[firstLock].sequence },
       recovery: { lockLossFrame: lockLoss < 0 ? null : benchmarkTraces[lockLoss].sequence, localRecoveryStartFrame: localRecovery < 0 ? null : benchmarkTraces[localRecovery].sequence, globalReacquisitionStartFrame: globalRecovery < 0 ? null : benchmarkTraces[globalRecovery].sequence, firstRecoveredValidFrame: firstRecovered < 0 ? null : benchmarkTraces[firstRecovered].sequence, fullLockRestoredFrame: restored < 0 ? null : benchmarkTraces[restored].sequence },
       throughput: { durationSeconds, referenceOpportunities: opportunities, productionCaptured: captured, opportunityCapturePercent: opportunities ? captured / opportunities * 100 : 0, lockedReferenceOpportunities: lockedOpportunities, lockedProductionCaptured: lockedCaptured, lockedOpportunityCapturePercent: lockedOpportunities ? lockedCaptured / lockedOpportunities * 100 : 0, extraValidDecodes: extraPackets.length, extraUniqueSymbols, qrPerSecond: productionPackets.length / durationSeconds, uniqueUsefulQrPerSecond: uniqueUseful / durationSeconds, uniqueUsefulVerifiedBytesPerSecond: uniqueUsefulBytes / durationSeconds, verifiedKBPerFrame: benchmarkVerifiedBytes / 1024 / Math.max(1, benchmarkTraces.length), verifiedKBPerSecond: benchmarkVerifiedBytes / 1024 / durationSeconds },
-      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(1e-3, processedPixels / 1e6), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(1e-3, processedPixels / 1e6), decodeP50Ms: percentile(decodeLatencies, 0.5), decodeP95Ms: percentile(decodeLatencies, 0.95), oracleP50Ms: percentile(oracleLatencies, 0.5), workerBusyDrops: capturesDropped, byKind },
+      performance: { frameDropPercent: benchmarkTraces.length ? capturesDropped / benchmarkTraces.length * 100 : 0, workerBusyPercent: benchmarkTraces.length ? benchmarkTraces.reduce((sum, trace) => sum + trace.workerBusyFraction, 0) / benchmarkTraces.length * 100 : 0, pixelsPerSecond: jobs.reduce((sum, job) => sum + job.pixels, 0) / durationSeconds, processedPixelsPerSecond: processedPixels / durationSeconds, bytesRead: jobs.reduce((sum, job) => sum + job.bytes, 0), uniqueUsefulQrPerCpuSecond: uniqueUseful / workerCpuSeconds, uniqueUsefulBytesPerCpuSecond: uniqueUsefulBytes / workerCpuSeconds, uniqueUsefulQrPerMegapixel: uniqueUseful / Math.max(1e-3, processedPixels / 1e6), uniqueUsefulBytesPerMegapixel: uniqueUsefulBytes / Math.max(1e-3, processedPixels / 1e6), decodeP50Ms: percentile(decodeLatencies, 0.5), decodeP95Ms: percentile(decodeLatencies, 0.95), oracleP50Ms: productionOnly ? null : percentile(oracleLatencies, 0.5), workerBusyDrops: capturesDropped, byKind },
       hotPath,
       transitions,
       failures,
@@ -7268,6 +7284,160 @@ misses        ${failures.length}`;
     runBenchmarkBtn.disabled = false;
   }
 }
+
+async function fastRegressionImage(url) {
+  const response = await fetch(url);
+  if (!response.ok && !url.startsWith("data:")) throw new Error(`Benchmark image failed: ${response.status}`);
+  const bitmap = await createImageBitmap(await response.blob());
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(bitmap, 0, 0);
+    return context.getImageData(0, 0, canvas.width, canvas.height);
+  } finally {
+    bitmap.close();
+  }
+}
+function fastRegressionResult(result, expectedFrames) {
+  const frames = result?.frames ?? [];
+  const jobs = frames.flatMap((frame) => frame.jobs ?? []);
+  const decoded = frames.flatMap((frame) => frame.decoded ?? []);
+  const unique = new Set(decoded.map((packet) => packet.esi));
+  const slotCounts = {};
+  for (const packet of decoded) {
+    const slot = Number(packet.slot);
+    if (Number.isInteger(slot) && slot >= 0) slotCounts[slot] = (slotCounts[slot] ?? 0) + 1;
+  }
+  const guidedKinds = Object.entries(result?.performance?.byKind ?? {})
+    .filter(([kind]) => kind.includes("GUIDED") || kind.includes("TRACKED"));
+  const guidedJobs = guidedKinds.reduce((sum, [, value]) => sum + (value.jobs ?? 0), 0);
+  const guidedTracks = guidedKinds.reduce((sum, [, value]) => sum + (value.tracks ?? 0), 0);
+  const guidedOutputs = guidedKinds.reduce((sum, [, value]) => sum + (value.outputSymbols ?? 0), 0);
+  const fullJobs = jobs.filter((job) => job.full).length;
+  const trackedJobs = jobs.length - fullJobs;
+  const decodeErrors = jobs.filter((job) => job.error).map((job) => String(job.error));
+  const lockedStates = new Set(["GRID_LOCK", "TRACK", "PARTIAL_LOSS"]);
+  const firstLockedStateFrame = frames.findIndex((frame) => lockedStates.has(frame.stateBefore) || lockedStates.has(frame.stateAfter));
+  const stateCounts = {};
+  for (const frame of frames) {
+    const state = frame.stateBefore ?? "unknown";
+    stateCounts[state] = (stateCounts[state] ?? 0) + 1;
+  }
+  const tail = frames.slice(Math.floor(frames.length / 2));
+  const tailJobs = tail.flatMap((frame) => frame.jobs ?? []);
+  const tailFullJobs = tailJobs.filter((job) => job.full).length;
+  const tailTrackedJobs = tailJobs.length - tailFullJobs;
+  const resultObject = {
+    version: result?.version,
+    productionOnly: result?.productionOnly === true,
+    frames: frames.length,
+    expectedFrames,
+    decodedPackets: decoded.length,
+    uniqueSymbols: unique.size,
+    decodedSlots: Object.keys(slotCounts).map(Number).sort((a, b) => a - b),
+    slotCounts,
+    qrPerSecond: result?.throughput?.qrPerSecond ?? 0,
+    uniqueUsefulQrPerSecond: result?.throughput?.uniqueUsefulQrPerSecond ?? 0,
+    verifiedKBPerSecond: result?.throughput?.verifiedKBPerSecond ?? 0,
+    firstProductionFrame: result?.acquisition?.firstProductionFrame,
+    firstGridLockFrame: result?.acquisition?.firstGridLockFrame,
+    firstLockedStateFrame: firstLockedStateFrame >= 0 ? firstLockedStateFrame : null,
+    stateCounts,
+    finalState: frames.at(-1)?.stateAfter ?? frames.at(-1)?.stateBefore ?? null,
+    transitions: result?.transitions?.length ?? 0,
+    jobs: jobs.length,
+    fullJobs,
+    trackedJobs,
+    guidedJobs,
+    guidedTracks,
+    guidedOutputs,
+    tailFullJobs,
+    tailTrackedJobs,
+    decodeP50Ms: result?.performance?.decodeP50Ms ?? 0,
+    decodeP95Ms: result?.performance?.decodeP95Ms ?? 0,
+    workerBusyPercent: result?.performance?.workerBusyPercent ?? 0,
+    hotPath: result?.hotPath,
+    byKind: result?.performance?.byKind ?? {},
+    decodeErrors
+  };
+  resultObject.checks = {
+    productionOnly: resultObject.productionOnly,
+    allFramesReplayed: resultObject.frames === expectedFrames,
+    decodedSomething: resultObject.decodedPackets > 0,
+    discoveredLayout: resultObject.firstProductionFrame !== null && resultObject.firstProductionFrame !== void 0,
+    scheduledWork: resultObject.jobs > 0,
+    noDecodeErrors: resultObject.decodeErrors.length === 0,
+    oracleSkipped: result?.performance?.oracleP50Ms === null
+  };
+  resultObject.ok = Object.values(resultObject.checks).every(Boolean);
+  return resultObject;
+}
+window.__airgapperRunFastRegression = async ({ urls, order, repeats = 1, fps = 30, mode = "performance" }) => {
+  if (!Array.isArray(urls) || !urls.length) throw new Error("Fast regression needs images");
+  const images = [];
+  for (const url of urls) images.push(await fastRegressionImage(url));
+  const width = images[0].width;
+  const height = images[0].height;
+  if (images.some((image) => image.width !== width || image.height !== height))
+    throw new Error("Fast regression images must have matching dimensions");
+  let frameOrder;
+  if (Array.isArray(order) && order.length) {
+    frameOrder = order.map((index) => {
+      if (!Number.isInteger(index) || index < 0 || index >= images.length) throw new Error(`Invalid fast regression frame index ${index}`);
+      return index;
+    });
+  } else {
+    frameOrder = [];
+    for (let repeat = 0; repeat < Math.max(1, repeats); repeat++)
+      for (let index = 0; index < images.length; index++) frameOrder.push(index);
+  }
+  const frameMs = 1000 / Math.max(1, fps);
+  const records = [];
+  for (let sequence = 0; sequence < frameOrder.length; sequence++) {
+    const image = images[frameOrder[sequence]];
+    const at = sequence * frameMs;
+    records.push({
+      meta: {
+        sequence,
+        width,
+        height,
+        stride: width * 4,
+        callbackTimeMs: at,
+        mediaTimeMs: at,
+        presentationTimeMs: at,
+        expectedDisplayTimeMs: at
+      },
+      pixels: new Uint8ClampedArray(image.data)
+    });
+  }
+  benchmarkCorpus = AgcapCorpus.fromRecords({
+    format: "AirGapper fast production regression corpus",
+    formatVersion: 4,
+    pixelFormat: "RGBA8888",
+    compression: "raw",
+    width,
+    height,
+    stride: width * 4,
+    framesStored: records.length,
+    recorderDrops: 0,
+    estimatedCameraDrops: 0,
+    cameraSettings: { width, height, frameRate: fps },
+    startedAt: `fast-${width}x${height}-${images.length}-${records.length}`
+  }, records);
+  benchmarkPendingBlob = void 0;
+  replayMode.value = mode;
+  await runReceiverBenchmark({ productionOnly: true });
+  if (!benchmarkResult) throw new Error(benchmarkStatus.textContent || "Fast regression failed to produce a result");
+  const summary = fastRegressionResult(benchmarkResult, records.length);
+  if (!summary.ok) {
+    const failed = Object.entries(summary.checks).filter(([, ok]) => !ok).map(([name]) => name).join(", ");
+    throw new Error(`Fast regression invariant failed: ${failed} · ${JSON.stringify(summary)}`);
+  }
+  return summary;
+};
+
 function updateStats(forceDiagnostics = false) {
   if (done) return;
   const now = receiverNow();
