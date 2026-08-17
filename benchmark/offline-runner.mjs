@@ -38,7 +38,15 @@ async function generateSenderFrames() {
       element.dispatchEvent(new Event("change", { bubbles: true }));
     }
   });
-  const payload = Array.from({ length: 42_000 }, (_, index) => String.fromCharCode(33 + index % 90)).join("");
+  // Deterministic but deliberately incompressible enough that the sender cannot
+  // collapse this into the static/direct path. A repeating pattern accidentally
+  // gzip-compressed to one frame and therefore was not an animated regression.
+  let seed = 0x6d2b79f5;
+  let payload = "";
+  for (let index = 0; index < 48_000; index++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    payload += String.fromCharCode(33 + seed % 90);
+  }
   await page.fill("#snippet-text", payload);
   await page.locator("#send-snippet").click();
   await page.waitForFunction(() => {
