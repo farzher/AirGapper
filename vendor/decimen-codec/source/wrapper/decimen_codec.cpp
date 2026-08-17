@@ -592,14 +592,18 @@ static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& t
     return residual <= std::max(4.0f, module * 2.0f);
 }
 
-static bool turboStableRigidEligible(const GuidedTurboTrack& cache,
-                                      const DecimenGuidedTrack& track, float residual)
+static bool turboStableWarpEligible(const GuidedTurboTrack& cache,
+                                     const DecimenGuidedTrack& track, float residual)
 {
     if (!cache.distortionAware)
         return false;
     const float module = guidedModuleSize(track);
+    // Stable-RS now warps the calibrated distortion map from its seed quad to
+    // the coherent live track quad. Keep only the broad stale-cache sanity gate
+    // used by projective Turbo; the old ~1 px near-translation fence starved
+    // >90% of a perfectly stationary wall before RS could even be attempted.
     return module >= GUIDED_TURBO_CANARY_MIN_MODULE &&
-           residual <= std::max(1.0f, module * 0.40f);
+           residual <= std::max(4.0f, module * 2.0f);
 }
 
 static PerspectiveTransform turboFrameTransform(const GuidedTurboTrack& cache,
@@ -831,89 +835,6 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
     return decoded;
 }
 
-static TurboLevels turboReadLevelsRigid(const GuidedTurboTrack& cache,
-                                         const uint8_t* yPlane, int width, int height, int stride,
-                                         float dx, float dy)
-{
-    TurboLevels out;
-    const int dim = cache.dimension;
-    const PointI starts[3] = {{0, 0}, {dim - 7, 0}, {0, dim - 7}};
-    int thresholds[3] = {};
-    int minSep = 255;
-    int matches = 0;
-    for (int finder = 0; finder < 3; ++finder) {
-        int blackSum = 0, whiteSum = 0, blackCount = 0, whiteCount = 0;
-        int values[49];
-        bool expected[49];
-        int n = 0;
-        for (int my = 0; my < 7; ++my)
-            for (int mx = 0; mx < 7; ++mx) {
-                const int sx = starts[finder].x + mx;
-                const int sy = starts[finder].y + my;
-                const PointF p = cache.samples[size_t(sy) * dim + sx];
-                const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
-                if (lum < 0)
-                    return {};
-                const bool black = turboFinderIdeal(mx, my);
-                values[n] = lum;
-                expected[n++] = black;
-                if (black) { blackSum += lum; ++blackCount; }
-                else { whiteSum += lum; ++whiteCount; }
-            }
-        const int black = blackSum / std::max(1, blackCount);
-        const int white = whiteSum / std::max(1, whiteCount);
-        const int sep = white - black;
-        if (sep < 26)
-            return {};
-        minSep = std::min(minSep, sep);
-        thresholds[finder] = (black + white) / 2;
-        for (int i = 0; i < n; ++i)
-            matches += ((values[i] <= thresholds[finder]) == expected[i]);
-    }
-    out.tl = thresholds[0];
-    out.tr = thresholds[1];
-    out.bl = thresholds[2];
-    out.separation = minSep;
-    out.matches = matches;
-    out.ok = matches >= 132;
-    return out;
-}
-
-static std::optional<PointF> turboRefineRigidOffset(const GuidedTurboTrack& cache,
-                                                    const uint8_t* yPlane, int width, int height, int stride,
-                                                    float predictedX, float predictedY)
-{
-    PointF best{predictedX, predictedY};
-    int bestScore = -1;
-    int bestMatches = -1;
-    auto consider = [&](float dx, float dy) {
-        const auto levels = turboReadLevelsRigid(cache, yPlane, width, height, stride, dx, dy);
-        if (!levels.ok) return;
-        const int score = levels.matches * 4 + levels.separation;
-        if (score > bestScore) {
-            bestScore = score;
-            bestMatches = levels.matches;
-            best = PointF{dx, dy};
-        }
-    };
-    for (int oy = -1; oy <= 1; ++oy)
-        for (int ox = -1; ox <= 1; ++ox)
-            consider(predictedX + ox, predictedY + oy);
-    if (bestMatches < 143) {
-        for (int oy = -2; oy <= 2; ++oy)
-            for (int ox = -2; ox <= 2; ++ox)
-                if (std::max(std::abs(ox), std::abs(oy)) == 2)
-                    consider(predictedX + ox, predictedY + oy);
-    }
-    if (bestScore < 0)
-        return std::nullopt;
-    const PointF coarse = best;
-    for (int hy = -1; hy <= 1; ++hy)
-        for (int hx = -1; hx <= 1; ++hx)
-            consider(coarse.x + hx * 0.5f, coarse.y + hy * 0.5f);
-    return best;
-}
-
 // Model-2 data placement never changes for a given dimension. Stable-RS runs
 // this traversal thousands of times, so build the function-pattern/mask walk
 // once per QR version and keep only packed {x,y,mask4} entries.
@@ -956,6 +877,7 @@ static const std::vector<uint32_t>& turboCodewordPlan(int dim)
 
 static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                          const DecimenGuidedTrack& track,
+                                         const PerspectiveTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
                                          DecimenGuidedMetrics& metrics)
@@ -973,6 +895,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         return {};
     const double sampleStarted = guidedNowMs();
     ByteArray raw(totalCodewords);
+    const float moduleSize = guidedModuleSize(track);
     bool failed = false;
     for (int codeword = 0; codeword < totalCodewords && !failed; ++codeword) {
         uint8_t value = 0;
@@ -983,8 +906,9 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
             const int threshold = turboThreshold(levels, xx, y, dim);
-            const PointF p = cache.samples[size_t(y) * dim + xx];
-            const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+            const int lum = turboModuleLum(cache, track, frameTransform,
+                                           yPlane, width, height, stride,
+                                           xx, y, dx, dy, threshold, moduleSize);
             if (lum < 0) { failed = true; break; }
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
         }
@@ -1232,9 +1156,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
         int canaryIndex = -1;
         if (!turboAdaptive.promoted && !turboAdaptive.cooldown) {
-            // First choice: a distortion-aware map whose seed->live shape is
-            // actually rigid on this frame. This makes Stable-RS probation test
-            // the stable wall, not whichever QR happened to decode first.
+            // First choice: any distortion-aware map whose cached geometry is
+            // still close enough for a projective seed->live warp. Stable-RS no
+            // longer requires the seed quad to remain near-translation rigid.
             for (int i = 0; i < trackCount; ++i) {
                 auto* cache = guidedTurboTrack(tracks[i].id);
                 if (!cache || !cache->seeded || !cache->distortionAware || cache->cooldown ||
@@ -1242,7 +1166,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     continue;
                 float dx = 0, dy = 0, residual = 0;
                 if (turboPose(*cache, tracks[i], dx, dy, residual) &&
-                    turboStableRigidEligible(*cache, tracks[i], residual)) {
+                    turboStableWarpEligible(*cache, tracks[i], residual)) {
                     canaryIndex = i;
                     break;
                 }
@@ -1270,7 +1194,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // single proving slot participates, so a soft/old camera cannot turn
         // this experiment into a second full decoder.
         float wallCorrectionX = 0, wallCorrectionY = 0;
-        if (!turboAdaptive.promoted || !turboAdaptive.rsMode) {
+        if (!turboAdaptive.cooldown) {
             for (int i = 0; i < trackCount; ++i) {
                 auto* cache = guidedTurboTrack(tracks[i].id);
                 if (!cache || !cache->seeded || !turboAllowed(i))
@@ -1289,28 +1213,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             }
         }
 
-        // Stable-RS uses the calibrated distortion map as-is plus a single
-        // shared residual translation. It is enabled only when the live quad is
-        // still rigidly consistent with that map; handheld/projective motion stays
-        // on the existing projective direct canary + Guided recovery chain.
-        float stableResidualX = 0, stableResidualY = 0;
-        int stableReferenceTries = 0;
-        for (int i = 0; i < trackCount && stableReferenceTries < 3; ++i) {
-            auto* cache = guidedTurboTrack(tracks[i].id);
-            if (!cache || !cache->seeded || !cache->distortionAware || cache->cooldown)
-                continue;
-            float poseX = 0, poseY = 0, residual = 0;
-            if (!turboPose(*cache, tracks[i], poseX, poseY, residual) ||
-                !turboStableRigidEligible(*cache, tracks[i], residual))
-                continue;
-            ++stableReferenceTries;
-            const auto refined = turboRefineRigidOffset(*cache, yPlane, width, height, stride, poseX, poseY);
-            if (!refined)
-                continue;
-            stableResidualX = refined->x - poseX;
-            stableResidualY = refined->y - poseY;
-            break;
-        }
+        // Stable-RS uses the same coherent projective seed->live warp as
+        // direct Turbo, plus the one shared sub-pixel residual refined above.
+        // RS + AirGapper CRC remain the acceptance oracle, so a stale warp only
+        // causes a cheap miss and Guided fallback.
 
         for (int i = 0; i < trackCount; ++i) {
             const auto& track = tracks[i];
@@ -1322,10 +1228,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             float poseX = 0, poseY = 0, residual = 0;
             if (!turboPose(*cache, track, poseX, poseY, residual))
                 continue;
-            // `rigid` now means exactly what diagnostics need: this cache/track
-            // geometry can use the rigid Stable-RS sampler. Finder contrast is a
-            // separate, cheap per-slot gate and must not erase this opportunity.
-            const bool stableEligible = turboStableRigidEligible(*cache, track, residual);
+            // `stable` means the calibrated map can be projectively warped onto
+            // this live track. Finder contrast is a separate cheap per-slot gate.
+            const bool stableEligible = turboStableWarpEligible(*cache, track, residual);
             if (stableEligible)
                 ++metrics->stableEligibleTracks;
             const bool stableProbation = !turboAdaptive.promoted && stableEligible && cache->distortionAware;
@@ -1364,19 +1269,24 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             // it becomes the primary full-wall path and avoids the duplicate
             // data-only sampling entirely.
             if (!success && stableEligible && (!turboAdaptive.promoted || turboAdaptive.rsMode)) {
-                const float dx = poseX + stableResidualX;
-                const float dy = poseY + stableResidualY;
-                const auto levels = turboReadLevelsRigid(*cache, yPlane, width, height, stride, dx, dy);
-                if (levels.ok) {
-                    stableRsAttempted = true;
-                    ++metrics->sampleAttempts;
-                    ++metrics->sparseRsFallbacks;
-                    ++metrics->stableRsAttempts;
-                    auto decoded = decodeTurboStableRS(*cache, track, yPlane, width, height, stride,
-                                                       dx, dy, levels, *metrics);
-                    success = commitTurbo(i, decoded, stableResidualX, stableResidualY);
-                    if (success)
-                        ++metrics->stableRsSuccesses;
+                const auto frameTransform = turboFrameTransform(*cache, track);
+                if (frameTransform.isValid()) {
+                    const float dx = wallCorrectionX;
+                    const float dy = wallCorrectionY;
+                    const auto levels = turboReadLevels(*cache, track, frameTransform,
+                                                        yPlane, width, height, stride, dx, dy);
+                    if (levels.ok) {
+                        stableRsAttempted = true;
+                        ++metrics->sampleAttempts;
+                        ++metrics->sparseRsFallbacks;
+                        ++metrics->stableRsAttempts;
+                        auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
+                                                           yPlane, width, height, stride,
+                                                           dx, dy, levels, *metrics);
+                        success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                        if (success)
+                            ++metrics->stableRsSuccesses;
+                    }
                 }
             }
 
