@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.172";
+const RECEIVER_RUNTIME_BUILD = "v0.5.173";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1048,6 +1048,7 @@ const PORTFOLIO_MIN_SLOTS = 6;
 const PORTFOLIO_MIN_FRACTION = 0.6;
 const PORTFOLIO_LEARN_SAMPLES = 12;
 const PORTFOLIO_EVAL_MS = 2400;
+const PORTFOLIO_POST_OPTICS_CLEAN_MS = PORTFOLIO_EVAL_MS;
 const PORTFOLIO_DECISION_COOLDOWN_MS = 800;
 const PORTFOLIO_RETRY_MS = 5000;
 const PORTFOLIO_SHRINK_STEP = 1;
@@ -1076,6 +1077,7 @@ const decodePortfolio = {
   sourceRate: 0,
   sourceFramesTotal: 0,
   sourceFramesAt: 0,
+  cleanAfter: 0,
   scheduleRate: 0,
   utilization: 0,
   busyRate: 0,
@@ -1086,7 +1088,7 @@ function resetDecodePortfolio() {
     budget: 0, maxSlots: 0, minSlots: 0, mode: "all", lastDecisionAt: 0,
     lowerBlockedUntil: 0, upperBlockedUntil: 0, probe: null, selectedSlots: [],
     excludedSlots: [], exploreSlot: void 0, uniqueRate: 0, captureRate: 0, demandRate: 0,
-    sourceRate: 0, sourceFramesTotal: 0, sourceFramesAt: 0, scheduleRate: 0,
+    sourceRate: 0, sourceFramesTotal: 0, sourceFramesAt: 0, cleanAfter: 0, scheduleRate: 0,
     utilization: 0, busyRate: 0, pressure: false
   });
 }
@@ -1151,19 +1153,25 @@ function portfolioSlotScore(region) {
   const slot = Number(region.gridSlot);
   const measured = Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT;
   const samples = measured ? slotQualitySamples[slot] : 0;
-  const learned = samples >= 4 ? slotQualityScores[slot] : 0.55;
-  const decode = Number.isFinite(region.decodeConfidence) ? region.decodeConfidence : learned;
+  const recent = samples >= 4 ? slotQualityScores[slot] : 0.55;
+  const attempts = measured ? slotAttemptCounts[slot] : 0;
+  const hits = measured ? slotHitCounts[slot] : 0;
+  const lifetime = attempts ? hits / attempts : recent;
+  // Rank by observed payload yield. A short miss streak already depresses the
+  // recent EWMA, so heavily penalizing LOST again made good 30-50% slots fall
+  // out of the portfolio and then recover only through sparse probes.
   const success = samples >= PORTFOLIO_LEARN_SAMPLES
-    ? learned * 0.78 + decode * 0.22
-    : Math.max(0.5, learned * 0.6 + decode * 0.4);
+    ? Math.max(recent * 0.72 + lifetime * 0.28, lifetime * 0.68)
+    : Math.max(0.5, recent * 0.65 + lifetime * 0.35);
   const stateWeight = region.slotState === "ACTIVE" ? 1
-    : region.slotState === "LOST" ? 0.62
-    : region.slotState === "LOW_QUALITY" ? 0.52
-    : region.slotState === "PARTIAL" ? 0.32 : 0;
-  const ppm = Math.max(0.55, Math.min(1.15, (region.pixelsPerModule || 2) / 2.5));
-  const priorSelected = decodePortfolio.selectedSlots.includes(slot) ? 0.035 : 0;
-  return stateWeight * Math.max(0.1, region.visibleFraction || 0) * ppm * (0.12 + success) + priorSelected;
+    : region.slotState === "LOST" ? 0.9
+    : region.slotState === "LOW_QUALITY" ? 0.78
+    : region.slotState === "PARTIAL" ? 0.5 : 0;
+  const ppm = Math.max(0.7, Math.min(1.1, (region.pixelsPerModule || 2) / 2.5));
+  const priorSelected = decodePortfolio.selectedSlots.includes(slot) ? 0.006 : 0;
+  return stateWeight * Math.max(0.2, region.visibleFraction || 0) * ppm * (0.12 + success) + priorSelected;
 }
+
 function portfolioLearnedEnough(candidates) {
   const required = Math.min(6, candidates.length);
   let learned = 0;
@@ -1220,14 +1228,24 @@ function updateDecodePortfolio(candidates, now, enabled) {
   if (!opticsStable) {
     // An exposure/ISO mutation changes both slot yield and decoder cost. Any
     // portfolio comparison spanning that boundary is invalid. Reopen the wall
-    // immediately so the new optics gets fresh evidence instead of inheriting
-    // an old low-K decision and taking many seconds to grow back.
+    // immediately and require one completely post-mutation measurement window
+    // before another K decision; otherwise the rolling rate still contains the
+    // tuning pause and falsely reports severe CPU pressure for ~2 seconds.
     decodePortfolio.budget = maxSlots;
     decodePortfolio.probe = null;
     decodePortfolio.lowerBlockedUntil = 0;
     decodePortfolio.upperBlockedUntil = 0;
     decodePortfolio.lastDecisionAt = now;
+    decodePortfolio.cleanAfter = now + PORTFOLIO_POST_OPTICS_CLEAN_MS;
     decodePortfolio.mode = "hold-optics";
+    decodePortfolio.pressure = false;
+    return maxSlots;
+  }
+  if (now < decodePortfolio.cleanAfter) {
+    decodePortfolio.budget = maxSlots;
+    decodePortfolio.probe = null;
+    decodePortfolio.mode = "clean-window";
+    decodePortfolio.pressure = false;
     return maxSlots;
   }
   if (!portfolioLearnedEnough(candidates)) {
@@ -1323,7 +1341,10 @@ function decodePortfolioSummary() {
   const delivered = decodePortfolio.captureRate + 0.5 < decodePortfolio.demandRate
     ? ` · delivered ${decodePortfolio.captureRate.toFixed(1)}`
     : "";
-  return `Portfolio ${decodePortfolio.budget}/${decodePortfolio.maxSlots} · ${decodePortfolio.mode}${decodePortfolio.pressure ? " · CPU pressure" : ""} · ${decodePortfolio.scheduleRate.toFixed(1)}/${decodePortfolio.demandRate.toFixed(1)} fps${delivered} · ${(decodePortfolio.utilization * 100).toFixed(0)}% busy${explore}${skipped}`;
+  const clean = decodePortfolio.mode === "clean-window"
+    ? ` · clean ${(Math.max(0, decodePortfolio.cleanAfter - receiverNow()) / 1e3).toFixed(1)}s`
+    : "";
+  return `Portfolio ${decodePortfolio.budget}/${decodePortfolio.maxSlots} · ${decodePortfolio.mode}${decodePortfolio.pressure ? " · CPU pressure" : ""}${clean} · ${decodePortfolio.scheduleRate.toFixed(1)}/${decodePortfolio.demandRate.toFixed(1)} fps${delivered} · ${(decodePortfolio.utilization * 100).toFixed(0)}% busy${explore}${skipped}`;
 }
 function cornerSlotMetrics() {
   const candidates = regions.filter((region) =>
