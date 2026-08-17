@@ -1412,7 +1412,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->sampleAttempts;
                             ++metrics->sparseRsFallbacks;
                             ++metrics->stableRsAttempts;
-                            const bool centerOnlyRs = frameTransform.translationOnly;
+                            const bool centerOnlyRs = frameTransform.translationOnly &&
+                                guidedModuleSize(track) < GUIDED_TURBO_NEAREST_MIN_MODULE;
                             auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                yPlane, width, height, stride,
                                                                dx, dy, levels, *metrics, centerOnlyRs);
