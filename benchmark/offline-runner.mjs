@@ -8,17 +8,12 @@ const browser = await chromium.launch({
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
 
-// Match the 1440p desktop sender class used for the dense 18-QR wall. At the
-// current maximum payload this yields roughly 2 display pixels per QR module,
-// instead of accidentally testing an unrealistically tiny ~0.56 MP wall.
+// Match the 1440p desktop sender class used for the dense 18-QR wall.
 const page = await browser.newPage({ viewport: { width: 2560, height: 1440 } });
 page.setDefaultTimeout(90_000);
 const pageErrors = [];
 page.on("console", (message) => {
-  if (message.type() !== "error") return;
-  // Chrome logs a generic console error for a missing implicit favicon. Actual
-  // HTTP failures are checked below with their URL, so do not double-count it.
-  if (message.text().startsWith("Failed to load resource:")) return;
+  if (message.type() !== "error" || message.text().startsWith("Failed to load resource:")) return;
   pageErrors.push(message.text());
   console.error(`[browser error] ${message.text()}`);
 });
@@ -88,8 +83,11 @@ function assertScenario(name, result) {
   if (result.jobs <= 0) failures.push("no decode work scheduled");
   if (result.fullJobs <= 0) failures.push("acquisition never ran");
   if (result.firstProductionFrame == null) failures.push("never acquired a production QR");
-  if (name === "static-repeat" && result.trackedJobs <= 0) failures.push("static replay never reached tracked decoding");
-  if (name === "static-repeat" && result.firstGridLockFrame == null) failures.push("static replay never established grid lock");
+  if (name === "acquire-then-stable") {
+    if (result.firstGridLockFrame == null) failures.push("never established grid lock");
+    if (result.trackedJobs <= 0) failures.push("never switched from acquisition to tracked decoding");
+    if (result.guidedJobs <= 0) failures.push("tracked wall never exercised Guided/stable decoder");
+  }
   if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
 }
@@ -100,10 +98,20 @@ try {
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
 
+  const animatedOrder = Array.from({ length: urls.length }, (_, index) => index);
   const scenarios = [
-    { name: "static-repeat", urls: [urls[0]], repeats: 30, fps: 30, mode: "performance" },
-    { name: "animated-cycle", urls, repeats: 2, fps: 30, mode: "performance" },
-    { name: "animated-maximum", urls, repeats: 2, fps: 30, mode: "maximum" }
+    // Let production acquire on real changing symbols, then freeze the exact
+    // wall for 30 frames. After lock, full scans should give way to tracked
+    // Guided/stable decoding; this is the deterministic tripod/stability test.
+    {
+      name: "acquire-then-stable",
+      urls,
+      order: [...animatedOrder, ...Array(30).fill(0)],
+      fps: 30,
+      mode: "performance"
+    },
+    { name: "animated-cycle", urls, order: [...animatedOrder, ...animatedOrder], fps: 30, mode: "performance" },
+    { name: "animated-maximum", urls, order: [...animatedOrder, ...animatedOrder], fps: 30, mode: "maximum" }
   ];
 
   const results = {};
