@@ -1,0 +1,33 @@
+name: Agent v176 acquisition responsiveness
+on:
+  push:
+    paths:
+      - '.github/v176_patch.py'
+      - '.github/workflows/agent-v176-acquisition.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v176_patch.py
+      - name: Remove generated codec build trees
+        run: git rm -r --ignore-unmatch vendor/decimen-codec/source/build-scalar vendor/decimen-codec/source/build-simd
+      - name: Check syntax
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          node --check receive/focus-controller.js
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js receive/focus-controller.js sw.js .gitignore vendor/decimen-codec/source/.gitignore
+          git commit -m 'v0.5.176 retry AF during cold acquisition'
+          git push origin master
