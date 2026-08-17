@@ -36,7 +36,7 @@ jobs:
         run: |
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git rm .github/v208_cleanup.py .github/workflows/agent-v208.yml .github/workflows/agent-v208-retry.yml
+          git rm -f .github/v208_cleanup.py .github/workflows/agent-v208.yml .github/workflows/agent-v208-retry.yml
           git add index.html main.js receive/main.js receive/grid-lattice.js receive/worker.js sw.js \
             vendor/decimen-codec/source/VERSION \
             vendor/decimen-codec/source/wrapper/decimen_codec.cpp \
