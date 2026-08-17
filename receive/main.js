@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.178";
+const RECEIVER_RUNTIME_BUILD = "v0.5.179";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5258,7 +5258,12 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     return;
   }
 }
-  if (batchTracks.length > 1) {
+  // A single tracked grid slot must use the same bounded shared-crop hot
+  // path as a multi-QR wall. The legacy per-region crop below is intentionally
+  // only for non-grid/provisional regions: unlike this path it is not clamped
+  // and quantized to the camera frame, which can mis-map a large 1-QR crop and
+  // strand guided decoding while periodic full scans still succeed.
+  if (batchTracks.length >= 1) {
     const points = batchTracks.flatMap((track) => [
       track.quad.topLeft,
       track.quad.topRight,
