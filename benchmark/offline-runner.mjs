@@ -56,9 +56,6 @@ async function generateSenderFrames() {
     const canvas = document.getElementById("qr");
     return canvas && canvas.width > 100 && canvas.height > 100 && !document.getElementById("stage").hidden;
   });
-  // The real sender is used fullscreen. AirGapper toggles its own qr-full layout
-  // synchronously on click before asking the browser Fullscreen API, so this also
-  // works in headless Chrome even if native fullscreen is unavailable.
   await page.locator("#qr").click({ position: { x: 4, y: 4 } });
   await page.waitForFunction(() => document.body.classList.contains("qr-full"));
   await page.waitForTimeout(120);
@@ -102,7 +99,9 @@ function assertScenario(name, result) {
 
 try {
   const urls = await generateSenderFrames();
-  await page.locator("#home-button").click();
+  // The header is intentionally hidden in qr-full mode. Trigger the real button
+  // handler directly instead of making Playwright wait for visual visibility.
+  await page.evaluate(() => document.getElementById("home-button").click());
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
 
