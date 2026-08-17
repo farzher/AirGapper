@@ -1,0 +1,26 @@
+name: v212 focus acquisition
+on:
+  push:
+    paths:
+      - .github/v212_focus_acquisition.py
+      - .github/workflows/agent-v212.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply focus acquisition patch
+        run: python .github/v212_focus_acquisition.py
+      - name: Commit focus acquisition fix
+        run: |
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v212_focus_acquisition.py .github/workflows/agent-v212.yml
+          git add index.html main.js receive/main.js receive/focus-controller.js sw.js
+          git commit -m "v0.5.212 make autofocus decode-driven"
+          git push origin master
