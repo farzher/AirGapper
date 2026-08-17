@@ -57,6 +57,9 @@ struct DecimenGuidedMetrics {
 	uint32_t genericDecodeAttempts;
 	double fastDecodeMs;
 	double genericDecodeMs;
+	uint32_t sparseCacheAttempts;
+	uint32_t sparseCacheSuccesses;
+	uint32_t sparseRefreshes;
 };
 
 struct DecimenBatchMetrics {
