@@ -48,29 +48,38 @@ jobs:
           key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
 
       - name: Build SIMD and scalar codecs
+        id: build
         if: steps.candidate.outputs.changed == 'true'
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
-          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
+          set -o pipefail
+          {
+            DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
+            DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
+          } 2>&1 | tee /tmp/v222-build.log
 
       - uses: actions/setup-node@v4
+        if: steps.build.outcome != 'failure'
         with:
           node-version: 22
 
       - name: Prepare runner Chrome
+        if: steps.build.outcome != 'failure'
         run: |
           set -euo pipefail
           npm install --no-save --package-lock=false playwright@1.55.0
           google-chrome --version
 
       - name: Run production-only receiver regression
+        id: regression
+        if: steps.build.outcome != 'failure'
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -o pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs
+          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v222-regression.log
           echo '--- fast regression summary ---'
           cat benchmark/offline-summary.json
 
@@ -82,8 +91,33 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Commit failure diagnostics
+        if: steps.build.outcome == 'failure' || steps.regression.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          BUILD_OUTCOME='${{ steps.build.outcome }}'
+          REGRESSION_OUTCOME='${{ steps.regression.outcome }}'
+          git reset --hard HEAD
+          mkdir -p benchmark
+          {
+            echo "build=$BUILD_OUTCOME"
+            echo "regression=$REGRESSION_OUTCOME"
+            echo
+            echo '--- build tail ---'
+            tail -n 160 /tmp/v222-build.log 2>/dev/null || true
+            echo
+            echo '--- regression tail ---'
+            tail -n 220 /tmp/v222-regression.log 2>/dev/null || true
+          } > benchmark/v222-ci.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add benchmark/v222-ci.log
+          git commit -m "record v222 candidate CI failure"
+          git push origin HEAD:master
+          exit 1
+
       - name: Commit passing stable data-only candidate
-        if: steps.candidate.outputs.changed == 'true'
+        if: steps.candidate.outputs.changed == 'true' && steps.build.outcome == 'success' && steps.regression.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
