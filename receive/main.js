@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.199";
+const RECEIVER_RUNTIME_BUILD = "v0.5.200";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1910,6 +1910,9 @@ let lastStreamDecodeAt = 0;
 let geometryRecoveryProbes = 0;
 let geometryRecoveryResets = 0;
 let geometrySightingNudges = 0;
+let geometryCoverageHealthy = false;
+let geometryCoverageCollapseStreak = 0;
+let geometryCoverageCollapseLastAt = 0;
 let recoveryWorkerRestarts = 0;
 let recoveryAbortedJobs = 0;
 let recoveryAbortedWorkerMs = 0;
@@ -2053,6 +2056,29 @@ function noteDecodeCompleted(id, completion) {
   }
   hotPathJobMode.delete(id);
   const auditThisCompletion = Boolean(auditMode && auditMode.generation === hotPathAuditGeneration && auditMode.strict === strictHotPathEnabled);
+  if (!replayRunning && auditThisCompletion && !auditMode?.full && gridLattice.locked &&
+      auditMode.tracks >= GEOMETRY_COLLAPSE_MIN_TRACKS) {
+    const now = receiverNow();
+    const trackedOutputs = Math.min(auditMode.tracks, Math.max(0, Number(completion.symbolCount) || 0));
+    const coverage = trackedOutputs / auditMode.tracks;
+    if (coverage >= GEOMETRY_COLLAPSE_HEALTHY_RATIO) {
+      geometryCoverageHealthy = true;
+      geometryCoverageCollapseStreak = 0;
+      geometryCoverageCollapseLastAt = 0;
+    } else if (geometryCoverageHealthy && coverage <= GEOMETRY_COLLAPSE_BAD_RATIO) {
+      if (now - geometryCoverageCollapseLastAt > GEOMETRY_COLLAPSE_MAX_GAP_MS)
+        geometryCoverageCollapseStreak = 0;
+      geometryCoverageCollapseLastAt = now;
+      geometryCoverageCollapseStreak++;
+      if (geometryCoverageCollapseStreak >= GEOMETRY_COLLAPSE_STREAK) {
+        notePipelineEvent("geometry-coverage-collapse", trackedOutputs);
+        enterGeometryRecovery(`tracked coverage collapsed ${trackedOutputs}/${auditMode.tracks}; fresh acquisition`, now, true);
+      }
+    } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
+      geometryCoverageCollapseStreak = 0;
+      geometryCoverageCollapseLastAt = 0;
+    }
+  }
   const benchmarkTrace = benchmarkJobFrames.get(id);
   const benchmarkJob = benchmarkTrace == null ? void 0 : benchmarkTrace.jobs.find((job) => job.id === id);
   if (benchmarkJob) {
@@ -2213,6 +2239,15 @@ const FULL_SCAN_DEGRADED_MS = 250;
 const LOCKED_RECOVERY_SCAN_MS = 220;
 const GEOMETRY_PROBE_SILENCE_MS = 650;
 const GEOMETRY_COLD_MISSES = 3;
+// A hard camera bump often leaves a few old slots readable. Waiting for *zero*
+// hits lets those survivors pin a badly displaced lattice indefinitely. Once a
+// locked wall has demonstrated healthy coverage, treat a short run of severe
+// per-job coverage collapse as camera motion and reacquire immediately.
+const GEOMETRY_COLLAPSE_MIN_TRACKS = 4;
+const GEOMETRY_COLLAPSE_HEALTHY_RATIO = 0.55;
+const GEOMETRY_COLLAPSE_BAD_RATIO = 0.28;
+const GEOMETRY_COLLAPSE_STREAK = 4;
+const GEOMETRY_COLLAPSE_MAX_GAP_MS = 650;
 // A short synchronized miss burst is common when a camera exposure crosses a
 // display transition. Keep proven geometry alive long enough for tracked
 // decoding and occasional generic rescue probes to recover it.
@@ -4174,6 +4209,9 @@ function stopReceiver() {
   lastStreamDecodeAt = 0;
   geometryRecoveryProbes = 0;
   geometryRecoveryResets = 0;
+  geometryCoverageHealthy = false;
+  geometryCoverageCollapseStreak = 0;
+  geometryCoverageCollapseLastAt = 0;
   recoveryWorkerRestarts = 0;
   recoveryAbortedJobs = 0;
   recoveryAbortedWorkerMs = 0;
@@ -4648,6 +4686,9 @@ function holdDecoderForCameraMutation(reason, settleMs = CAMERA_MUTATION_SETTLE_
 
 function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = true) {
   geometryRecoveryResets++;
+  geometryCoverageHealthy = false;
+  geometryCoverageCollapseStreak = 0;
+  geometryCoverageCollapseLastAt = 0;
   decoderFreshnessHoldActive = false;
   decoderFreshnessHoldUntil = 0;
   discardInFlightDecodeWork(reason, restartWorkers);
