@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.170";
+const RECEIVER_RUNTIME_BUILD = "v0.5.171";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1047,16 +1047,16 @@ const PORTFOLIO_MIN_WALL = 8;
 const PORTFOLIO_MIN_SLOTS = 6;
 const PORTFOLIO_MIN_FRACTION = 0.5;
 const PORTFOLIO_LEARN_SAMPLES = 12;
-const PORTFOLIO_EVAL_MS = 1500;
+const PORTFOLIO_EVAL_MS = 2200;
 const PORTFOLIO_DECISION_COOLDOWN_MS = 800;
 const PORTFOLIO_RETRY_MS = 5000;
-const PORTFOLIO_SHRINK_STEP = 2;
+const PORTFOLIO_SHRINK_STEP = 1;
 const PORTFOLIO_EXPLORE_EVERY = 10;
-const PORTFOLIO_PRESSURE_UTIL = 0.86;
-const PORTFOLIO_PRESSURE_COVERAGE = 0.90;
-const PORTFOLIO_HEADROOM_UTIL = 0.72;
-const PORTFOLIO_KEEP_SHRINK_RATIO = 0.97;
-const PORTFOLIO_KEEP_GROW_RATIO = 1.02;
+const PORTFOLIO_PRESSURE_UTIL = 0.84;
+const PORTFOLIO_PRESSURE_COVERAGE = 0.92;
+const PORTFOLIO_HEADROOM_UTIL = 0.78;
+const PORTFOLIO_KEEP_SHRINK_RATIO = 1.01;
+const PORTFOLIO_KEEP_GROW_RATIO = 0.99;
 const decodePortfolio = {
   budget: 0,
   maxSlots: 0,
@@ -1107,11 +1107,16 @@ function portfolioLoadSnapshot(now) {
   }
   utilization = samples ? utilization / samples : pool.size ? pool.busyCount / pool.size : 0;
   const coverage = captureRate > 0 ? scheduleRate / captureRate : 1;
+  // Throughput-first pressure: worker-busy events are harmless when we are
+  // still consuming nearly every camera frame. Only shrink the QR portfolio
+  // when saturation is causing real schedule loss. This prevents the controller
+  // from trading useful QR opportunities merely to make worker occupancy pretty.
+  const overloaded = utilization >= PORTFOLIO_PRESSURE_UTIL || busyRate >= 2;
   const pressure = captureRate >= 12 && (
-    utilization >= PORTFOLIO_PRESSURE_UTIL || busyRate >= 2 ||
-    coverage < PORTFOLIO_PRESSURE_COVERAGE && utilization >= 0.7
+    coverage < PORTFOLIO_PRESSURE_COVERAGE && overloaded ||
+    coverage < 0.97 && utilization >= 0.95
   );
-  const headroom = captureRate >= 12 && coverage >= 0.94 && utilization <= PORTFOLIO_HEADROOM_UTIL && busyRate < 1;
+  const headroom = captureRate >= 12 && coverage >= 0.94 && utilization <= PORTFOLIO_HEADROOM_UTIL;
   return { captureRate, scheduleRate, uniqueRate, busyRate, utilization, coverage, pressure, headroom };
 }
 function portfolioSlotScore(region) {
