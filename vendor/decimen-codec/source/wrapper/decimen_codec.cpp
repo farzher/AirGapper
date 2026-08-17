@@ -915,17 +915,11 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const bool mask = ((entry >> 16) & 1) != 0;
             const int threshold = turboThreshold(levels, xx, y, dim);
             int lum;
-            const bool provenDenseNearest =
-                frameTransform.translationOnly &&
-                moduleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
-                cache.stableSuccesses >= 4;
-            if (frameTransform.translationOnly &&
-                (moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE || provenDenseNearest)) {
-                // CRC-Turbo has no QR RS, so dense nearest-center sampling is
-                // allowed only after this exact calibrated slot has repeatedly
-                // passed Stable-RS + AirGapper CRC. A wrong center bit cannot be
-                // accepted: CRC failure falls through to Stable-RS immediately
-                // and the caller backs the probe off.
+            if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
+                // High-resolution CRC-Turbo can use one calibrated center byte.
+                // Dense CRC-Turbo deliberately retains the conservative
+                // bilinear/ambiguity-voted sampler below; its win comes from
+                // skipping RS, not from weakening optical sampling.
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
@@ -1401,7 +1395,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             frameTransform.translationOnly &&
                             stableModuleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
                             stableModuleSize < GUIDED_TURBO_CANARY_MIN_MODULE &&
-                            cache->stableSuccesses >= 4;
+                            cache->stableSuccesses >= 2;
                         const bool stableDirectEligible = !cache->cooldown && (
                             (stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE && cache->stableSuccesses >= 2) ||
                             denseDirectCanary
