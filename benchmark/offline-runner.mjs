@@ -8,7 +8,7 @@ const browser = await chromium.launch({
 });
 
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-page.setDefaultTimeout(10 * 60 * 1000);
+page.setDefaultTimeout(5 * 60 * 1000);
 page.on("console", (message) => {
   if (["error", "warning"].includes(message.type())) console.error(`[browser ${message.type()}] ${message.text()}`);
 });
@@ -31,8 +31,8 @@ async function generateSenderFrames() {
 
   const frames = [];
   const seen = new Set();
-  const deadline = Date.now() + 7000;
-  while (frames.length < 18 && Date.now() < deadline) {
+  const deadline = Date.now() + 5000;
+  while (frames.length < 12 && Date.now() < deadline) {
     const url = await page.locator("#qr").evaluate((canvas) => canvas.toDataURL("image/png"));
     if (!seen.has(url)) {
       seen.add(url);
@@ -47,16 +47,14 @@ async function generateSenderFrames() {
 
 try {
   const urls = await generateSenderFrames();
-  // Stop sender animation before timing receiver work. The benchmark should
-  // measure only the receive/decoder pipeline, not compete with QR generation.
   await page.locator("#home-button").click();
   await page.waitForTimeout(100);
   await page.waitForFunction(() => typeof window.__airgapperRunOfflineImages === "function");
 
   const scenarios = [
-    { name: "static-repeat", urls: [urls[0]], repeats: 120, fps: 30, mode: "performance" },
-    { name: "animated-cycle", urls, repeats: 8, fps: 30, mode: "performance" },
-    { name: "animated-maximum", urls, repeats: 6, fps: 30, mode: "maximum" }
+    { name: "static-repeat", urls: [urls[0]], repeats: 36, fps: 30, mode: "performance" },
+    { name: "animated-cycle", urls, repeats: 3, fps: 30, mode: "performance" },
+    { name: "animated-maximum", urls, repeats: 2, fps: 30, mode: "maximum" }
   ];
 
   const results = {};
