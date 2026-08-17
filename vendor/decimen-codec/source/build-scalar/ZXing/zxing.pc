@@ -1,8 +1,0 @@
-libdir=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cache/sysroot/lib
-includedir=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cache/sysroot/include
-
-Name: ZXing
-Description: ZXing-C++ library
-Version: 3.1.1
-Libs: -L${libdir} -lZXing
-Cflags: -I${includedir} 

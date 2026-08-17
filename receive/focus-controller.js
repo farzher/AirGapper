@@ -18,6 +18,10 @@ const CAMERA_TUNING = {
   stabilizingRetryMs: 2500,
   poorFocusRetryMs: 480,
   maxStabilizingAfRetries: 2,
+  seekingAfRetryMs: 850,
+  seekingAfSlowRetryMs: 1500,
+  seekingAfFastRetries: 5,
+  seekingAfGoodFocus: 0.58,
   recoverySamples: 3,
   severeFocusScore: 0.24,
   convincingFocusScore: 0.62,
@@ -113,10 +117,13 @@ class FocusController {
     __publicField(this, "completionTimes", []);
     __publicField(this, "optimizeMovementSince", 0);
     __publicField(this, "transitions", []);
-    /** Automatic focus is configured at most once per camera track. After that,
-     *  AirGapper treats focus as read-only: exposure optimization, acquisition,
-     *  target loss, and decoder recovery are forbidden from touching the lens. */
+    /** Initial AF mode configuration is one-time. While acquisition has no
+     *  usable QR evidence, bounded single-shot sweeps may be retriggered; any
+     *  fresh decode or convincingly sharp optical target stops those retries. */
     __publicField(this, "automaticFocusConfigured", false);
+    __publicField(this, "seekingAfRetries", 0);
+    __publicField(this, "lastSeekingAfAt", -Infinity);
+    __publicField(this, "seekingAfRunning", false);
     __publicField(this, "waiter");
     this.strategy = strategy;
     this.manualDistance = manualDistance;
@@ -152,6 +159,9 @@ class FocusController {
     this.stableSince = 0;
     this.targetMissingSince = 0;
     this.automaticFocusConfigured = false;
+    this.seekingAfRetries = 0;
+    this.lastSeekingAfAt = -Infinity;
+    this.seekingAfRunning = false;
     this.optimizeMovementSince = 0;
     this.initialLockMs = void 0;
     this.optimizeState = "idle";
@@ -187,7 +197,7 @@ class FocusController {
     this.autoExposureTrimDirection = 0;
     this.autoExposureTrimConfirmations = 0;
     if (this.strategy === "auto") {
-      this.transition("SEEKING", "camera track changed; one hardware AF sweep, then focus held by camera");
+      this.transition("SEEKING", "camera track changed; hardware AF acquisition retries armed until QR decode");
       void this.configureInitialHardwareFocusOnce().then(() => this.enterAutomaticExposureState("camera opened", this.generation, true));
     } else {
       this.transition("OVERRIDE", "camera track changed; developer owns focus");
@@ -212,7 +222,7 @@ class FocusController {
       this.optimizeCandidates = [];
       this.candidateExposureTime = void 0;
       this.candidateIso = void 0;
-      this.transition("SEEKING", "automatic focus selected; one hardware AF sweep + hardware AE");
+      this.transition("SEEKING", "automatic focus selected; hardware AF retries + hardware AE");
       this.automaticFocusConfigured = false;
       void this.configureInitialHardwareFocusOnce().then(() => this.enterAutomaticExposureState("automatic focus selected", this.generation, true));
     } else {
@@ -938,6 +948,7 @@ class FocusController {
       return;
     }
     if (!this.isAcquiring()) return;
+    void this.maybeRetrySeekingAutofocus(now, metrics);
     if (!this.stableGeometry || this.geometryChanged(geometry, this.stableGeometry)) {
       this.stableGeometry = geometry;
       this.stableSince = now;
@@ -968,6 +979,7 @@ class FocusController {
       this.stableSince = 0;
       this.transition("SEEKING", "target absent; camera state retained while decoding continues");
     }
+    if (this.isAcquiring()) void this.maybeRetrySeekingAutofocus(now);
     this.changed();
   }
   diagnostics() {
@@ -1000,6 +1012,7 @@ class FocusController {
       requestedExposure: this.requestedExposure,
       requestedIso: this.requestedIso,
       focusProbes: this.focusProbes,
+      seekingAfRetries: this.seekingAfRetries,
       exposureProbes: this.exposureProbes,
       optical,
       targetDetected: Boolean(this.latest && !this.targetMissingSince),
@@ -1187,6 +1200,38 @@ class FocusController {
     this.lastReason = this.state === "SEEKING" ? "target absent; camera focus and exposure retained" : this.lastReason;
     this.changed();
   }
+  async maybeRetrySeekingAutofocus(now = performance.now(), metrics) {
+    if (this.seekingAfRunning || this.strategy !== "auto" || !this.isAcquiring() || this.isOptimizing()) return;
+    const track = this.track;
+    if (!track || track.readyState !== "live" || !this.focusModes().includes("single-shot")) return;
+    const silence = this.decodeSilence(now);
+    if (this.validDecodesInGeneration > 0 && silence < 2200) return;
+    if (metrics && metrics.confidence >= 0.78 && metrics.focusScore >= CAMERA_TUNING.seekingAfGoodFocus) return;
+    const interval = this.seekingAfRetries < CAMERA_TUNING.seekingAfFastRetries
+      ? CAMERA_TUNING.seekingAfRetryMs
+      : CAMERA_TUNING.seekingAfSlowRetryMs;
+    if (now - this.lastSeekingAfAt < interval) return;
+
+    const generation = this.generation;
+    this.seekingAfRunning = true;
+    this.lastSeekingAfAt = now;
+    this.requestedMode = "single-shot";
+    this.focusProbes++;
+    this.focusRefinementCount++;
+    try {
+      const accepted = await this.apply(track, { focusMode: "single-shot" });
+      if (accepted && this.current(generation)) {
+        this.seekingAfRetries++;
+        const actual = this.settings();
+        this.committedFocusMode = actual.focusMode;
+        this.committedFocusDistance = actual.focusDistance;
+        this.lastReason = `acquisition autofocus retry ${this.seekingAfRetries}; hardware AE retained`;
+        this.changed();
+      }
+    } finally {
+      this.seekingAfRunning = false;
+    }
+  }
   async configureInitialHardwareFocusOnce() {
     if (this.automaticFocusConfigured || this.strategy !== "auto") return;
     this.automaticFocusConfigured = true;
@@ -1202,7 +1247,7 @@ class FocusController {
     await this.apply(track, { focusMode: "single-shot" });
     this.committedFocusMode = this.settings().focusMode;
     this.committedFocusDistance = this.settings().focusDistance;
-    this.lastReason = "single hardware autofocus sweep requested; no automatic refocuses will follow";
+    this.lastReason = "initial hardware autofocus sweep requested; acquisition retries remain armed until QR decode";
     this.changed();
   }
   async applyDeveloperFocus() {

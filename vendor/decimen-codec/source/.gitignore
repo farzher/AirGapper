@@ -1,4 +1,6 @@
 build/
+build-scalar/
+build-simd/
 dist/
 emsdk/
 third_party/
