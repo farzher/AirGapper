@@ -45,7 +45,7 @@ const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
 const NATIVE_TRACK_OK = 1;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 128;
+const GUIDED_METRICS_BYTES = 144;
 const GUIDED_OUTPUT_BYTES = 128 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -66,7 +66,7 @@ function ensureGuidedBatch(zx) {
   guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
   return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
 }
-function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
+function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff) {
   if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > NATIVE_BATCH_MAX_TRACKS) return null;
   let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
   for (let i = 0; i < tracks.length; i++) {
@@ -86,7 +86,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
     guidedTracksPtr, tracks.length,
     guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
     guidedOutputPtr, GUIDED_OUTPUT_BYTES,
-    tracks.length, guidedMetricsPtr
+    tracks.length, fallbackAllowedMask >>> 0, guidedMetricsPtr
   );
   const metricsView = new DataView(zx.HEAPU8.buffer, guidedMetricsPtr, GUIDED_METRICS_BYTES);
   const metrics = {
@@ -113,7 +113,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
     sparseNoRsAttempts: metricsView.getUint32(108, true),
     sparseNoRsSuccesses: metricsView.getUint32(112, true),
     sparseRsFallbacks: metricsView.getUint32(116, true),
-    sparseSkipped: metricsView.getUint32(120, true)
+    sparseSkipped: metricsView.getUint32(120, true),
+    fallbackAttemptMask: metricsView.getUint32(128, true),
+    fallbackSuccessMask: metricsView.getUint32(132, true),
+    sparseSuccessMask: metricsView.getUint32(136, true)
   };
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
@@ -425,7 +428,7 @@ function repeatSignatureDistance(current, previous) {
 
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, guidedFallbackMask = 0xffffffff, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let ownedVideoFrame = videoFrame;
@@ -666,7 +669,7 @@ ctx.onmessage = async (e) => {
         // cost on every fresh frame. Sparse dense-robust scouts remain the
         // independent recovery path selected by the main-thread scheduler.
         const guided = decodeGuidedBatch(
-          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks
+          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks, guidedFallbackMask
         );
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();

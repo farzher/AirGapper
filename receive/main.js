@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.184";
+const RECEIVER_RUNTIME_BUILD = "v0.5.185";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -240,6 +240,11 @@ const AUTO_OPTICS_FINE_SAMPLE_MS = 360;
 const AUTO_OPTICS_FINE_SETTLE_MS = 220;
 const AUTO_OPTICS_FINE_FACTOR = Math.pow(2, 1 / 6);
 const AUTO_OPTICS_FINE_IMPROVEMENT = 1.018;
+// A relative winner is meaningless when the whole local ISO neighborhood is
+// unusable. Below this per-QR yield, abandon manual tuning and let hardware AE
+// re-establish a sane exposure product before trying the motion-safe handoff.
+const AUTO_OPTICS_COLLAPSE_YIELD = 0.12;
+const AUTO_OPTICS_COLLAPSE_RETRY_MS = 900;
 let autoOpticsTuneSummary = "";
 let autoOpticsRuntimeState = "ae";
 let autoOpticsMutationRunning = false;
@@ -257,6 +262,8 @@ let preferredFocusDistance;
 let preferredIso;
 let exposureApplyGeneration = 0;
 let manualOpticsReapplyGeneration = 0;
+let manualOpticsCheckAt = 0;
+let manualOpticsRepairRunning = false;
 let cameraMutationQueue = Promise.resolve();
 let desiredCamera = {};
 let lastCameraMutation;
@@ -651,6 +658,39 @@ async function reapplyManualOpticsAfterFreshFrames(track, reason) {
   }
   lastRecoveryReason = `${reason}; manual optics restored`;
 }
+function manualOpticsNeedsRepair(track) {
+  if (automaticOptics || automaticExposureAxis && automaticIsoAxis) return false;
+  const actual = track.getSettings();
+  const caps = track.getCapabilities?.() ?? {};
+  const close = (value, target, step) => {
+    if (target === undefined) return true;
+    if (!Number.isFinite(value)) return false;
+    const tolerance = Math.max((step ?? 0) * 0.75, Math.abs(target) * 0.02, 1e-6);
+    return Math.abs(value - target) <= tolerance;
+  };
+  return !automaticExposureAxis && preferredExposureTime !== undefined &&
+      !close(actual.exposureTime, preferredExposureTime, caps.exposureTime?.step) ||
+    !automaticIsoAxis && preferredIso !== undefined &&
+      !close(actual.iso, preferredIso, caps.iso?.step);
+}
+async function maintainManualOptics(now) {
+  if (automaticOptics || replayRunning || optimizerPipelineActive || optimizeRunning ||
+      manualOpticsRepairRunning || now < manualOpticsCheckAt) return;
+  const track = stream?.getVideoTracks()[0];
+  if (!track || track.readyState !== "live") return;
+  manualOpticsCheckAt = now + 500;
+  if (!manualOpticsNeedsRepair(track)) return;
+  manualOpticsRepairRunning = true;
+  manualOpticsCheckAt = now + 1200;
+  manualSensorSessionActive = false;
+  try {
+    await applyExposureSetting(track);
+    notePipelineEvent("manual-optics-watchdog");
+    lastRecoveryReason = "manual optics drift corrected";
+  } finally {
+    manualOpticsRepairRunning = false;
+  }
+}
 focusMode.value = manualFocusMode;
 const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
 const settingsToggleTimes = [];
@@ -986,6 +1026,59 @@ const slotQualitySamples = new Uint16Array(SLOT_METRIC_COUNT);
 const slotQualityScores = new Float32Array(SLOT_METRIC_COUNT);
 const slotAdaptiveWeak = new Uint8Array(SLOT_METRIC_COUNT);
 
+// Full SampleQR fallback is expensive enough that six independent worker-local
+// histories learn far too slowly. Own the policy here, keyed by physical grid
+// slot, and send each guided job one allow-mask. The thresholds intentionally
+// match v175's conservative policy; only the evidence is now shared globally.
+const GUIDED_FALLBACK_SLOT_COUNT = 32;
+const guidedFallbackMisses = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
+const guidedFallbackCooldown = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
+const guidedFallbackBackoff = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
+function resetGuidedFallbackSlot(slot) {
+  guidedFallbackMisses[slot] = 0;
+  guidedFallbackCooldown[slot] = 0;
+  guidedFallbackBackoff[slot] = 0;
+}
+function resetGuidedFallbackPolicy() {
+  guidedFallbackMisses.fill(0);
+  guidedFallbackCooldown.fill(0);
+  guidedFallbackBackoff.fill(0);
+}
+function guidedFallbackMaskForTracks(tracks) {
+  let mask = 0;
+  for (const track of tracks ?? []) {
+    const slot = Number(track.slot ?? track.id);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= GUIDED_FALLBACK_SLOT_COUNT) continue;
+    if (guidedFallbackCooldown[slot]) {
+      guidedFallbackCooldown[slot]--;
+      continue;
+    }
+    mask = (mask | ((1 << slot) >>> 0)) >>> 0;
+  }
+  return mask >>> 0;
+}
+function noteGuidedFallbackMetrics(guided) {
+  if (!guided) return;
+  const sparseSuccess = Number(guided.sparseSuccessMask) >>> 0;
+  const fallbackAttempt = Number(guided.fallbackAttemptMask) >>> 0;
+  const fallbackSuccess = Number(guided.fallbackSuccessMask) >>> 0;
+  for (let slot = 0; slot < GUIDED_FALLBACK_SLOT_COUNT; slot++) {
+    const bit = (1 << slot) >>> 0;
+    if (sparseSuccess & bit) {
+      resetGuidedFallbackSlot(slot);
+      continue;
+    }
+    if (!(fallbackAttempt & bit)) continue;
+    if (fallbackSuccess & bit) {
+      resetGuidedFallbackSlot(slot);
+      continue;
+    }
+    if (++guidedFallbackMisses[slot] < 4) continue;
+    guidedFallbackMisses[slot] = 0;
+    guidedFallbackBackoff[slot] = Math.min(3, guidedFallbackBackoff[slot] + 1);
+    guidedFallbackCooldown[slot] = guidedFallbackBackoff[slot];
+  }
+}
 function resetSlotMetrics() {
   slotAttemptCounts.fill(0);
   slotHitCounts.fill(0);
@@ -1153,6 +1246,7 @@ function resetLivePipeline(now = receiverNow()) {
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
   });
   resetSlotMetrics();
+  resetGuidedFallbackPolicy();
   resetGuidedRollout();
 }
 function pushLiveLatency(target, value) {
@@ -1746,6 +1840,7 @@ function noteDecodeCompleted(id, completion) {
     const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     const guided = completion.guidedMetrics;
+    if (guided) noteGuidedFallbackMetrics(guided);
     const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
@@ -2598,6 +2693,10 @@ async function tuneAutomaticQrIso(track, exposure, aeBaseIso, isoRange, maxAutoI
     return { iso: base, probes, deferred: true };
   }
   const best = valid.reduce((winner, item) => item.score > winner.score ? item : winner);
+  if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
+    autoOpticsTuneSummary = `${remembered ? `memory ${Math.round(remembered)} · ` : ""}${probes.map(describeAutoIsoProbe).join(" · ")} · collapsed ${(best.yieldRate * 100).toFixed(0)}%`;
+    return { iso: base, probes, best, collapsed: true };
+  }
   const finalIso = quantizeCameraRange(Math.min(cap, best.iso || best.requestedIso || base), isoRange);
   if (automaticOpticsSessionAlive(track)) {
     const actual = Number(track.getSettings().iso);
@@ -2658,14 +2757,20 @@ async function settleAutomaticQrOptics(track, now) {
     const rememberedIso = loadAutomaticOpticsMemory(track, exposure, isoRange, maxAutoIso);
     const tuned = await tuneAutomaticQrIso(track, exposure, iso, isoRange, maxAutoIso, rememberedIso);
     if (!automaticOpticsSessionAlive(track)) return;
-    if (tuned.deferred) {
-      // The camera moved or framing collapsed during every useful measurement.
-      // Restore hardware AE and try again only after a fresh stable QR lock;
-      // never commit a random ISO winner from incomparable scene geometry.
+    if (tuned.deferred || tuned.collapsed) {
+      // Movement makes samples incomparable; catastrophic yield means the whole
+      // local manual neighborhood is wrong. In either case, restore hardware AE
+      // instead of preserving a bad relative winner.
+      const collapsedYield = tuned.best?.yieldRate ?? 0;
       await applyExposureSetting(track);
       autoOpticsRuntimeState = "ae";
       autoOpticsLockSince = 0;
-      autoOpticsRetryAt = receiverNow() + 800;
+      autoOpticsAcquisitionSince = receiverNow();
+      autoOpticsRetryAt = receiverNow() + (tuned.collapsed ? AUTO_OPTICS_COLLAPSE_RETRY_MS : 800);
+      if (tuned.collapsed) {
+        autoOpticsTuneSummary = `collapsed ${(collapsedYield * 100).toFixed(0)}% · hardware AE reacquire`;
+        focusController.adoptAutomaticCameraState("automatic optics collapsed; hardware AE reacquire");
+      }
       return;
     }
     autoOpticsRuntimeState = "manual";
@@ -2718,6 +2823,17 @@ async function fineTuneAutomaticQrOptics(track, now) {
       autoOpticsFineTuneAt = receiverNow() + 2200;
       return;
     }
+    if (baseline.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
+      const collapsedYield = baseline.yieldRate;
+      await applyExposureSetting(track);
+      autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = receiverNow();
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_COLLAPSE_RETRY_MS;
+      autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(collapsedYield * 100).toFixed(0)}% · hardware AE reacquire`;
+      focusController.adoptAutomaticCameraState("automatic optics collapsed; hardware AE reacquire");
+      return;
+    }
     const candidate = await measureAutomaticIsoCandidate(track, exposure, candidateIso, isoRange, {
       settleMs: AUTO_OPTICS_FINE_SETTLE_MS,
       sampleMs: AUTO_OPTICS_FINE_SAMPLE_MS,
@@ -2743,7 +2859,7 @@ async function fineTuneAutomaticQrOptics(track, now) {
       autoOpticsFineTuneAt = receiverNow() + AUTO_OPTICS_FINE_INTERVAL_MS;
     }
   } finally {
-    autoOpticsRuntimeState = "manual";
+    if (autoOpticsRuntimeState === "fine") autoOpticsRuntimeState = "manual";
     autoOpticsMutationRunning = false;
   }
 }
@@ -3399,6 +3515,7 @@ cameraExposureAuto.addEventListener("change", () => {
   const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (!automaticOptics) {
     setOptimizeEnabled(false);
+    manualOpticsCheckAt = 0;
     if (track) void applyAndValidateManualExposure(track);
     return;
   }
@@ -4321,6 +4438,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     return false;
   }
   const guidedStage = chooseGuidedStage(message);
+  if (guidedStage) message.guidedFallbackMask = guidedFallbackMaskForTracks(message.tracks);
   const auditMode = {
     generation: hotPathAuditGeneration,
     strict: Boolean(message.strictHotPath),
@@ -4822,6 +4940,7 @@ async function captureFrame(source) {
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   const now = receiverNow();
+  void maintainManualOptics(now);
   maintainAutomaticQrOptics(now);
   const trace = replayRunning ? {
     sequence: source.sequence,
@@ -5486,6 +5605,7 @@ function resetActiveTransfer() {
   pendingLaneReplaceTimes.length = 0;
   resetHotPathAudit();
   resetGuidedRollout();
+  resetGuidedFallbackPolicy();
   strictHotPathLockSeen = false;
   lastDistinctArrivalAt = 0;
   transferFinalizing = false;
@@ -6688,7 +6808,7 @@ Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.t
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
 Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}
