@@ -8,17 +8,24 @@ const browser = await chromium.launch({
 });
 
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-page.setDefaultTimeout(5 * 60 * 1000);
+page.setDefaultTimeout(90_000);
+const pageErrors = [];
 page.on("console", (message) => {
-  if (["error", "warning"].includes(message.type())) console.error(`[browser ${message.type()}] ${message.text()}`);
+  if (message.type() === "error") {
+    pageErrors.push(message.text());
+    console.error(`[browser error] ${message.text()}`);
+  }
 });
-page.on("pageerror", (error) => console.error(`[browser pageerror] ${error.stack || error.message}`));
+page.on("pageerror", (error) => {
+  pageErrors.push(error.stack || error.message);
+  console.error(`[browser pageerror] ${error.stack || error.message}`);
+});
 
 async function generateSenderFrames() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator('[data-mode="send"]').click();
-  // These controls are intentionally hidden until a transfer starts. Configure
-  // them directly so the headless harness does not wait for UI visibility.
+  // Sender settings are hidden until a transfer exists; configure the actual
+  // controls directly so the test never waits on presentation state.
   await page.evaluate(() => {
     for (const [id, value] of [
       ["cfg-layout", "three-six"],
@@ -31,7 +38,7 @@ async function generateSenderFrames() {
       element.dispatchEvent(new Event("change", { bubbles: true }));
     }
   });
-  const payload = Array.from({ length: 42000 }, (_, index) => String.fromCharCode(33 + index % 90)).join("");
+  const payload = Array.from({ length: 42_000 }, (_, index) => String.fromCharCode(33 + index % 90)).join("");
   await page.fill("#snippet-text", payload);
   await page.locator("#send-snippet").click();
   await page.waitForFunction(() => {
@@ -41,43 +48,73 @@ async function generateSenderFrames() {
 
   const frames = [];
   const seen = new Set();
-  const deadline = Date.now() + 5000;
-  while (frames.length < 12 && Date.now() < deadline) {
+  const deadline = Date.now() + 4_000;
+  while (frames.length < 10 && Date.now() < deadline) {
     const url = await page.locator("#qr").evaluate((canvas) => canvas.toDataURL("image/png"));
     if (!seen.has(url)) {
       seen.add(url);
       frames.push(url);
     }
-    await page.waitForTimeout(45);
+    await page.waitForTimeout(40);
   }
   if (frames.length < 6) throw new Error(`Only generated ${frames.length} distinct sender frames`);
   console.log(`AIRGAPPER_GENERATED_FRAMES ${frames.length}`);
   return frames;
 }
 
+function assertScenario(name, result) {
+  const failures = [];
+  if (!result.ok) failures.push("receiver invariants failed");
+  if (!result.productionOnly) failures.push("oracle path was not disabled");
+  if (result.decodedPackets <= 0) failures.push("no QR packets decoded");
+  if (result.jobs <= 0) failures.push("no decode work scheduled");
+  if (result.fullJobs <= 0) failures.push("acquisition never ran");
+  if (result.firstProductionFrame == null) failures.push("never acquired a production QR");
+  if (name === "static-repeat" && result.trackedJobs <= 0) failures.push("static replay never reached tracked decoding");
+  if (name === "static-repeat" && result.firstGridLockFrame == null) failures.push("static replay never established grid lock");
+  if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);
+  if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
+}
+
 try {
   const urls = await generateSenderFrames();
   await page.locator("#home-button").click();
-  await page.waitForTimeout(100);
-  await page.waitForFunction(() => typeof window.__airgapperRunOfflineImages === "function");
+  await page.waitForTimeout(50);
+  await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
 
   const scenarios = [
-    { name: "static-repeat", urls: [urls[0]], repeats: 36, fps: 30, mode: "performance" },
-    { name: "animated-cycle", urls, repeats: 3, fps: 30, mode: "performance" },
+    // Identical input is the strongest cache/stability regression: acquire once,
+    // then the production tracked path must take over without geometry churn.
+    { name: "static-repeat", urls: [urls[0]], repeats: 30, fps: 30, mode: "performance" },
+    // Changing sender frames exercises normal 18-slot production decoding.
+    { name: "animated-cycle", urls, repeats: 2, fps: 30, mode: "performance" },
+    // Same decoder with pacing removed exposes raw throughput/worker behavior.
     { name: "animated-maximum", urls, repeats: 2, fps: 30, mode: "maximum" }
   ];
 
   const results = {};
   for (const scenario of scenarios) {
-    console.log(`AIRGAPPER_BENCHMARK_START ${scenario.name}`);
-    const result = await page.evaluate(async (input) => window.__airgapperRunOfflineImages(input), scenario);
+    console.log(`AIRGAPPER_FAST_REGRESSION_START ${scenario.name}`);
+    const started = performance.now();
+    const result = await page.evaluate(async (input) => window.__airgapperRunFastRegression(input), scenario);
+    result.wallTimeMs = Math.round(performance.now() - started);
+    assertScenario(scenario.name, result);
     results[scenario.name] = result;
-    console.log(`AIRGAPPER_BENCHMARK_RESULT ${scenario.name} ${JSON.stringify(result)}`);
+    console.log(`AIRGAPPER_FAST_REGRESSION_RESULT ${scenario.name} ${JSON.stringify(result)}`);
   }
 
-  const output = { generatedAt: new Date().toISOString(), baseUrl, sourceFrames: urls.length, scenarios: results };
+  if (pageErrors.length) throw new Error(`Browser emitted ${pageErrors.length} error(s): ${pageErrors.join(" | ")}`);
+  const output = {
+    format: "AirGapper fast production regression",
+    generatedAt: new Date().toISOString(),
+    baseUrl,
+    sourceFrames: urls.length,
+    oracle: false,
+    browserErrors: pageErrors,
+    scenarios: results
+  };
   await fs.writeFile("benchmark/offline-summary.json", JSON.stringify(output, null, 2));
-  console.log(`AIRGAPPER_OFFLINE_SUMMARY ${JSON.stringify(output)}`);
+  console.log(`AIRGAPPER_FAST_REGRESSION_PASS ${JSON.stringify(output)}`);
 } finally {
   await browser.close();
 }
