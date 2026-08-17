@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.186";
+const RECEIVER_RUNTIME_BUILD = "v0.5.187";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -251,6 +251,9 @@ const AUTO_OPTICS_FINE_IMPROVEMENT = 1.018;
 // re-establish a sane exposure product before trying the motion-safe handoff.
 const AUTO_OPTICS_COLLAPSE_YIELD = 0.12;
 const AUTO_OPTICS_COLLAPSE_RETRY_MS = 900;
+const AUTO_OPTICS_HOLD_SAMPLE_MS = 700;
+const AUTO_OPTICS_HOLD_COLLAPSE_MS = 1400;
+const AUTO_OPTICS_HOLD_MIN_ATTEMPTS = 40;
 let autoOpticsTuneSummary = "";
 let autoOpticsRuntimeState = "ae";
 let autoOpticsMutationRunning = false;
@@ -260,6 +263,8 @@ let autoOpticsAcquisitionSince = 0;
 let autoOpticsRescueRetryAt = 0;
 let autoOpticsFineTuneAt = 0;
 let autoOpticsFineTuneDirection = 1;
+let autoOpticsHoldSample;
+let autoOpticsHoldCollapseSince = 0;
 // These are the user's persistent MANUAL optics profile. Automatic optics
 // may use arbitrary temporary sensor values, but must never overwrite these.
 let preferredExposureTime;
@@ -2395,6 +2400,8 @@ function resetAutomaticOpticsRuntime() {
   autoOpticsRescueRetryAt = 0;
   autoOpticsFineTuneAt = 0;
   autoOpticsFineTuneDirection = 1;
+  autoOpticsHoldSample = void 0;
+  autoOpticsHoldCollapseSince = 0;
   autoOpticsTuneSummary = "";
 }
 function quantizeCameraRange(value, range) {
@@ -2516,6 +2523,26 @@ function autoOpticsPipelineSnapshot() {
     attempts: Number(livePipeline?.submittedTracks || 0),
     jobs: Number(livePipeline?.submittedTracked || 0)
   };
+}
+async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held optics collapsed") {
+  if (autoOpticsMutationRunning || !automaticOptics || !automaticOpticsSessionAlive(track)) return;
+  autoOpticsMutationRunning = true;
+  try {
+    forgetAutomaticOptics(track);
+    await applyExposureSetting(track);
+    if (!automaticOpticsSessionAlive(track)) return;
+    autoOpticsRuntimeState = "ae";
+    autoOpticsLockSince = 0;
+    autoOpticsAcquisitionSince = receiverNow();
+    autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_COLLAPSE_RETRY_MS;
+    autoOpticsHoldSample = void 0;
+    autoOpticsHoldCollapseSince = 0;
+    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · memory cleared · hardware AE reacquire`;
+    focusController.adoptAutomaticCameraState("automatic optics live yield collapsed; hardware AE reacquire");
+    notePipelineEvent("auto-optics-hold-collapse");
+  } finally {
+    autoOpticsMutationRunning = false;
+  }
 }
 async function waitForAutoOptics(ms, track) {
   const until = performance.now() + ms;
@@ -2788,6 +2815,8 @@ async function settleAutomaticQrOptics(track, now) {
       return;
     }
     autoOpticsRuntimeState = "manual";
+    autoOpticsHoldSample = autoOpticsPipelineSnapshot();
+    autoOpticsHoldCollapseSince = 0;
     // Hold the winner, but keep Auto Optics alive as a very low-duty-cycle
     // controller. It may test one nearby ISO later when geometry is stable.
     autoOpticsRetryAt = Infinity;
@@ -2878,6 +2907,10 @@ async function fineTuneAutomaticQrOptics(track, now) {
     }
   } finally {
     if (autoOpticsRuntimeState === "fine") autoOpticsRuntimeState = "manual";
+    if (autoOpticsRuntimeState === "manual") {
+      autoOpticsHoldSample = autoOpticsPipelineSnapshot();
+      autoOpticsHoldCollapseSince = 0;
+    }
     autoOpticsMutationRunning = false;
   }
 }
@@ -2976,7 +3009,31 @@ function maintainAutomaticQrOptics(now) {
   if (!autoOpticsAcquisitionSince) autoOpticsAcquisitionSince = now;
 
   if (autoOpticsRuntimeState === "manual") {
-    if (now >= autoOpticsFineTuneAt && gridLattice.locked && autoOpticsPoseUsable(autoOpticsPoseSnapshot()))
+    const poseUsable = gridLattice.locked && autoOpticsPoseUsable(autoOpticsPoseSnapshot());
+    if (!poseUsable) {
+      autoOpticsHoldSample = void 0;
+      autoOpticsHoldCollapseSince = 0;
+    } else if (!autoOpticsHoldSample || now - autoOpticsHoldSample.at >= AUTO_OPTICS_HOLD_SAMPLE_MS) {
+      const sample = autoOpticsPipelineSnapshot();
+      if (autoOpticsHoldSample) {
+        const attempts = Math.max(0, sample.attempts - autoOpticsHoldSample.attempts);
+        const outputs = Math.max(0, sample.outputs - autoOpticsHoldSample.outputs);
+        if (attempts >= AUTO_OPTICS_HOLD_MIN_ATTEMPTS) {
+          const yieldRate = outputs / attempts;
+          if (yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
+            if (!autoOpticsHoldCollapseSince) autoOpticsHoldCollapseSince = now;
+            else if (now - autoOpticsHoldCollapseSince >= AUTO_OPTICS_HOLD_COLLAPSE_MS) {
+              void recoverCollapsedAutomaticOptics(track, yieldRate);
+              return;
+            }
+          } else {
+            autoOpticsHoldCollapseSince = 0;
+          }
+        }
+      }
+      autoOpticsHoldSample = sample;
+    }
+    if (now >= autoOpticsFineTuneAt && poseUsable)
       void fineTuneAutomaticQrOptics(track, now);
     return;
   }
