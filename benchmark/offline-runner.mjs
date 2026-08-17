@@ -3,6 +3,7 @@ import { chromium } from "playwright";
 
 const baseUrl = process.env.AIRGAPPER_URL || "http://127.0.0.1:8080/";
 const browser = await chromium.launch({
+  channel: "chrome",
   headless: true,
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
@@ -24,8 +25,6 @@ page.on("pageerror", (error) => {
 async function generateSenderFrames() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator('[data-mode="send"]').click();
-  // Sender settings are hidden until a transfer exists; configure the actual
-  // controls directly so the test never waits on presentation state.
   await page.evaluate(() => {
     for (const [id, value] of [
       ["cfg-layout", "three-six"],
@@ -38,9 +37,6 @@ async function generateSenderFrames() {
       element.dispatchEvent(new Event("change", { bubbles: true }));
     }
   });
-  // Deterministic but deliberately incompressible enough that the sender cannot
-  // collapse this into the static/direct path. A repeating pattern accidentally
-  // gzip-compressed to one frame and therefore was not an animated regression.
   let seed = 0x6d2b79f5;
   let payload = "";
   for (let index = 0; index < 48_000; index++) {
@@ -91,12 +87,8 @@ try {
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
 
   const scenarios = [
-    // Identical input is the strongest cache/stability regression: acquire once,
-    // then the production tracked path must take over without geometry churn.
     { name: "static-repeat", urls: [urls[0]], repeats: 30, fps: 30, mode: "performance" },
-    // Changing sender frames exercises normal 18-slot production decoding.
     { name: "animated-cycle", urls, repeats: 2, fps: 30, mode: "performance" },
-    // Same decoder with pacing removed exposes raw throughput/worker behavior.
     { name: "animated-maximum", urls, repeats: 2, fps: 30, mode: "maximum" }
   ];
 
