@@ -1,0 +1,30 @@
+name: Agent v166 healthy scout cadence
+on:
+  push:
+    paths:
+      - '.github/v166_patch.py'
+      - '.github/workflows/agent-v166-healthy-scout-cadence.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v166_patch.py
+      - name: Smoke check
+        run: |
+          node --check main.js
+          node --check receive/main.js
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add index.html main.js receive/main.js sw.js
+          git commit -m 'v0.5.166 reduce healthy robust scout cadence'
+          git push origin master
