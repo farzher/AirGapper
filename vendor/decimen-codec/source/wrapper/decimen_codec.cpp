@@ -382,6 +382,53 @@ static void noteGuidedSparseOutcome(int id, bool success)
     }
 }
 
+// Full SampleQR is substantially more expensive than the sparse stage because it
+// searches the complete alignment lattice before RS decode. Keep it hot while it
+// is producing packets, but progressively thin it after repeated *proven* misses.
+// This is deliberately local to the fallback itself: medium-quality QR slots stay
+// in every camera frame, and any success immediately restores full fallback cadence.
+struct GuidedFallbackState
+{
+    std::array<uint8_t, 64> misses{};
+    std::array<uint8_t, 64> cooldown{};
+    std::array<uint8_t, 64> backoff{};
+};
+
+static GuidedFallbackState& guidedFallbackState()
+{
+    static GuidedFallbackState state;
+    return state;
+}
+
+static bool guidedFallbackAllowed(int id)
+{
+    if (id < 0 || id >= int(guidedFallbackState().cooldown.size()))
+        return true;
+    auto& cooldown = guidedFallbackState().cooldown[id];
+    if (!cooldown)
+        return true;
+    --cooldown;
+    return false;
+}
+
+static void noteGuidedFallbackOutcome(int id, bool success)
+{
+    if (id < 0 || id >= int(guidedFallbackState().misses.size()))
+        return;
+    auto& state = guidedFallbackState();
+    if (success) {
+        state.misses[id] = 0;
+        state.cooldown[id] = 0;
+        state.backoff[id] = 0;
+        return;
+    }
+    if (++state.misses[id] < 4)
+        return;
+    state.misses[id] = 0;
+    state.backoff[id] = std::min<uint8_t>(3, state.backoff[id] + 1);
+    state.cooldown[id] = state.backoff[id];
+}
+
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const DecimenGuidedTrack& track,
                                          const QRCode::FinderPatternSet& fp)
@@ -587,31 +634,44 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     metrics->decodeMs += fastElapsed;
                     decodeSpent += fastElapsed;
                     decodedTrack = commitDecoded(sparse, decoded);
-                    if (decodedTrack)
+                    if (decodedTrack) {
                         ++metrics->fastDecodeSuccesses;
+                        noteGuidedFallbackOutcome(track.id, true);
+                    }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             }
 
-            // Sparse misses retain the exact proven decoder. No persistent
-            // pixel map and no reduced ECC: SampleQR remains the correctness
-            // oracle and refreshes the returned quad for the lattice.
+            // Sparse misses retain the exact proven decoder, but repeated full
+            // fallback misses are no longer allowed to monopolize the worker.
+            // Four consecutive misses introduce a one-frame skip; continued
+            // misses grow that to at most three. A sparse or fallback success
+            // resets the backoff immediately.
             if (!decodedTrack) {
-                for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
-                    metrics->sampleAttempts++;
-                    if (!detected.isValid() || detected.bits().width() != track.dimension)
-                        continue;
-                    ++metrics->genericDecodeAttempts;
-                    const double genericStart = guidedNowMs();
-                    auto decoded = QRCode::Decode(detected.bits());
-                    const double genericElapsed = guidedNowMs() - genericStart;
-                    metrics->genericDecodeMs += genericElapsed;
-                    metrics->decodeMs += genericElapsed;
-                    decodeSpent += genericElapsed;
-                    if (commitDecoded(detected, decoded)) {
-                        decodedTrack = true;
-                        break;
+                if (!guidedFallbackAllowed(track.id)) {
+                    ++metrics->genericFallbackSkipped;
+                } else {
+                    ++metrics->genericFallbackTracks;
+                    bool fallbackSuccess = false;
+                    for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
+                        metrics->sampleAttempts++;
+                        if (!detected.isValid() || detected.bits().width() != track.dimension)
+                            continue;
+                        ++metrics->genericDecodeAttempts;
+                        const double genericStart = guidedNowMs();
+                        auto decoded = QRCode::Decode(detected.bits());
+                        const double genericElapsed = guidedNowMs() - genericStart;
+                        metrics->genericDecodeMs += genericElapsed;
+                        metrics->decodeMs += genericElapsed;
+                        decodeSpent += genericElapsed;
+                        if (commitDecoded(detected, decoded)) {
+                            fallbackSuccess = true;
+                            decodedTrack = true;
+                            ++metrics->genericFallbackSuccesses;
+                            break;
+                        }
                     }
+                    noteGuidedFallbackOutcome(track.id, fallbackSuccess);
                 }
             }
             metrics->sampleMs += std::max(0.0, guidedNowMs() - sampleStart - decodeSpent);

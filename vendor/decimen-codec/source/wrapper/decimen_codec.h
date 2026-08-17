@@ -57,6 +57,10 @@ struct DecimenGuidedMetrics {
 	uint32_t genericDecodeAttempts;
 	double fastDecodeMs;
 	double genericDecodeMs;
+	uint32_t genericFallbackTracks;
+	uint32_t genericFallbackSuccesses;
+	uint32_t genericFallbackSkipped;
+	uint32_t reserved;
 };
 
 struct DecimenBatchMetrics {
