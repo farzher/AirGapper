@@ -12,8 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/camera_regression_patch.py
-      - .github/benchmark_lock_semantics_patch.py
+      - .github/module_size_diagnostics_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -26,20 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply benchmark infrastructure updates
+      - name: Apply v233 diagnostics candidate
         id: candidate
         run: |
           set -euo pipefail
-          changed=false
-          if [ -f .github/camera_regression_patch.py ] && ! grep -q 'optical-dense-y8' benchmark/offline-runner.mjs; then
-            python3 .github/camera_regression_patch.py 2>&1 | tee /tmp/camera-patch.log
-            changed=true
+          if [ -f .github/module_size_diagnostics_patch.py ] && ! grep -q 'moduleSizeAvg' receive/worker.js; then
+            python3 .github/module_size_diagnostics_patch.py 2>&1 | tee /tmp/diag-patch.log
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
-          if [ -f .github/benchmark_lock_semantics_patch.py ] && ! grep -q 'lockTriggerSourceFrame' receive/main.js; then
-            python3 .github/benchmark_lock_semantics_patch.py 2>&1 | tee /tmp/lock-patch.log
-            changed=true
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
@@ -64,7 +59,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit benchmark infrastructure update
+      - name: Commit passing diagnostics
         if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -72,10 +67,9 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          [ ! -f .github/camera_regression_patch.py ] || git rm .github/camera_regression_patch.py
-          [ ! -f .github/benchmark_lock_semantics_patch.py ] || git rm .github/benchmark_lock_semantics_patch.py
-          git add benchmark/offline-runner.mjs receive/main.js benchmark/latest-result.json
-          git commit -m "add camera-realistic receiver regression"
+          git rm .github/module_size_diagnostics_patch.py
+          git add receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
+          git commit -m "v0.5.233 report tracked QR module size"
           git push origin HEAD:master
 
       - name: Record normal regression
@@ -89,22 +83,19 @@ jobs:
           git add benchmark/latest-result.json
           git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
 
-      - name: Record regression failure
+      - name: Record diagnostics failure
         if: failure()
         run: |
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "camera benchmark failed at $(date -u +%FT%TZ)"
-            echo "candidate changed=${{ steps.candidate.outputs.changed }}"
-            cat /tmp/camera-patch.log 2>/dev/null || true
-            cat /tmp/lock-patch.log 2>/dev/null || true
-            tail -n 320 /tmp/regression.log 2>/dev/null || true
-            tail -n 100 /tmp/airgapper-http.log 2>/dev/null || true
-          } > benchmark/camera-regression-ci.log
+            echo "diagnostics regression failed at $(date -u +%FT%TZ)"
+            cat /tmp/diag-patch.log 2>/dev/null || true
+            tail -n 340 /tmp/regression.log 2>/dev/null || true
+          } > benchmark/v233-diagnostics-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/camera-regression-ci.log
-          git commit -m "record camera regression setup failure"
+          git add benchmark/v233-diagnostics-ci.log
+          git commit -m "record v233 diagnostics rejection"
           git push origin HEAD:master
           exit 1
