@@ -390,7 +390,6 @@ static void noteGuidedSparseOutcome(int id, bool success)
 
 
 constexpr float GUIDED_TURBO_CANARY_MIN_MODULE = 2.25f;
-constexpr float GUIDED_TURBO_FULL_MIN_MODULE = 3.05f;
 constexpr int GUIDED_TURBO_RS_BUDGET = 4;
 constexpr int GUIDED_TURBO_BAD_COOLDOWN = 6;
 constexpr int GUIDED_TURBO_CANARY_COOLDOWN = 24;
@@ -456,13 +455,8 @@ static void coolLowDensityTurbo()
 static bool turboSeedEligible(const DecimenGuidedTrack& track)
 {
     auto* cache = guidedTurboTrack(track.id);
-    if (!cache)
+    if (!cache || guidedModuleSize(track) < GUIDED_TURBO_CANARY_MIN_MODULE)
         return false;
-    const float module = guidedModuleSize(track);
-    if (module < GUIDED_TURBO_CANARY_MIN_MODULE)
-        return false;
-    if (module >= GUIDED_TURBO_FULL_MIN_MODULE)
-        return true;
     auto& adaptive = guidedTurboAdaptive();
     if (adaptive.cooldown)
         return false;
@@ -582,19 +576,19 @@ static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& t
     return residual <= std::max(4.0f, module * 2.0f);
 }
 
-static PointF turboWarpedPoint(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track, int x, int y)
+static PerspectiveTransform turboFrameTransform(const GuidedTurboTrack& cache,
+                                                const DecimenGuidedTrack& track)
 {
     const auto current = turboTrackQuad(track);
-    const float fx = (x + 0.5f) / std::max(1, track.dimension);
-    const float fy = (y + 0.5f) / std::max(1, track.dimension);
-    PointF d[4];
-    for (int i = 0; i < 4; ++i)
-        d[i] = current[i] - cache.seedQuad[i];
-    const PointF top{d[0].x + (d[1].x - d[0].x) * fx, d[0].y + (d[1].y - d[0].y) * fx};
-    const PointF bottom{d[3].x + (d[2].x - d[3].x) * fx, d[3].y + (d[2].y - d[3].y) * fx};
-    const PointF delta{top.x + (bottom.x - top.x) * fy, top.y + (bottom.y - top.y) * fy};
-    const PointF p = cache.samples[size_t(y) * cache.dimension + x];
-    return PointF{p.x + delta.x, p.y + delta.y};
+    return PerspectiveTransform(
+        QuadrilateralF{cache.seedQuad[0], cache.seedQuad[1], cache.seedQuad[2], cache.seedQuad[3]},
+        QuadrilateralF{current[0], current[1], current[2], current[3]});
+}
+
+static PointF turboWarpedPoint(const GuidedTurboTrack& cache,
+                               const PerspectiveTransform& frameTransform, int x, int y)
+{
+    return frameTransform(cache.samples[size_t(y) * cache.dimension + x]);
 }
 
 static bool turboFinderIdeal(int x, int y)
@@ -632,6 +626,7 @@ static int turboLum(const uint8_t* yPlane, int width, int height, int stride, Po
 }
 
 static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                   const PerspectiveTransform& frameTransform,
                                    const uint8_t* yPlane, int width, int height, int stride, float dx, float dy)
 {
     TurboLevels out;
@@ -650,7 +645,7 @@ static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenG
                 const int sx = starts[finder].x + mx;
                 const int sy = starts[finder].y + my;
                 const int lum = turboLum(yPlane, width, height, stride,
-                    turboWarpedPoint(cache, track, sx, sy), dx, dy);
+                    turboWarpedPoint(cache, frameTransform, sx, sy), dx, dy);
                 if (lum < 0)
                     return {};
                 const bool black = turboFinderIdeal(mx, my);
@@ -689,10 +684,11 @@ static int turboThreshold(const TurboLevels& levels, int x, int y, int dim)
 }
 
 static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                          const PerspectiveTransform& frameTransform,
                           const uint8_t* yPlane, int width, int height, int stride, int x, int y,
                           float dx, float dy, int threshold, float moduleSize)
 {
-    const PointF p = turboWarpedPoint(cache, track, x, y);
+    const PointF p = turboWarpedPoint(cache, frameTransform, x, y);
     int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
     if (lum < 0 || moduleSize < GUIDED_TURBO_CANARY_MIN_MODULE ||
         std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
@@ -703,10 +699,10 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
     // cross a QR edge; using fractions of neighboring module-center vectors
     // stays safely inside the cell even under perspective.
     const int dim = track.dimension;
-    const PointF left = turboWarpedPoint(cache, track, std::max(0, x - 1), y);
-    const PointF right = turboWarpedPoint(cache, track, std::min(dim - 1, x + 1), y);
-    const PointF up = turboWarpedPoint(cache, track, x, std::max(0, y - 1));
-    const PointF down = turboWarpedPoint(cache, track, x, std::min(dim - 1, y + 1));
+    const PointF left = turboWarpedPoint(cache, frameTransform, std::max(0, x - 1), y);
+    const PointF right = turboWarpedPoint(cache, frameTransform, std::min(dim - 1, x + 1), y);
+    const PointF up = turboWarpedPoint(cache, frameTransform, x, std::max(0, y - 1));
+    const PointF down = turboWarpedPoint(cache, frameTransform, x, std::min(dim - 1, y + 1));
     const float xDiv = (x > 0 && x + 1 < dim) ? 2.0f : 1.0f;
     const float yDiv = (y > 0 && y + 1 < dim) ? 2.0f : 1.0f;
     const PointF ux{(right.x - left.x) / xDiv, (right.y - left.y) / xDiv};
@@ -729,6 +725,7 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
 }
 
 static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                         const PerspectiveTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
                                          DecimenGuidedMetrics& metrics)
@@ -767,7 +764,7 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
                 if (functionPattern.get(xx, y))
                     continue;
                 const int threshold = turboThreshold(levels, xx, y, dim);
-                const int lum = turboModuleLum(cache, track, yPlane, width, height, stride,
+                const int lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
                                                xx, y, dx, dy, threshold, moduleSize);
                 if (lum < 0) { failed = true; break; }
                 const bool black = lum <= threshold;
@@ -809,6 +806,7 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
 }
 
 static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                       const PerspectiveTransform& frameTransform,
                                        const uint8_t* yPlane, int width, int height, int stride,
                                        float dx, float dy, const TurboLevels& levels,
                                        DecimenGuidedMetrics& metrics)
@@ -820,7 +818,7 @@ static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const Deci
     for (int y = 0; y < dim; ++y)
         for (int x = 0; x < dim; ++x) {
             const int threshold = turboThreshold(levels, x, y, dim);
-            const int lum = turboModuleLum(cache, track, yPlane, width, height, stride,
+            const int lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
                                            x, y, dx, dy, threshold, moduleSize);
             if (lum < 0)
                 return {};
@@ -835,16 +833,31 @@ static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const Deci
 }
 
 static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                    const PerspectiveTransform& frameTransform,
                                     const uint8_t* yPlane, int width, int height, int stride,
                                     float predictedX, float predictedY)
 {
     PointF best{predictedX, predictedY};
     int bestScore = -1;
-    for (int oy = -2; oy <= 2; ++oy)
-        for (int ox = -2; ox <= 2; ++ox) {
+    for (int oy = -3; oy <= 3; ++oy)
+        for (int ox = -3; ox <= 3; ++ox) {
             const float dx = predictedX + ox;
             const float dy = predictedY + oy;
-            const auto levels = turboReadLevels(cache, track, yPlane, width, height, stride, dx, dy);
+            const auto levels = turboReadLevels(cache, track, frameTransform, yPlane, width, height, stride, dx, dy);
+            if (!levels.ok)
+                continue;
+            const int score = levels.matches * 4 + levels.separation;
+            if (score > bestScore) {
+                bestScore = score;
+                best = PointF{dx, dy};
+            }
+        }
+    const PointF coarse = best;
+    for (int hy = -1; hy <= 1; ++hy)
+        for (int hx = -1; hx <= 1; ++hx) {
+            const float dx = coarse.x + hx * 0.5f;
+            const float dy = coarse.y + hy * 0.5f;
+            const auto levels = turboReadLevels(cache, track, frameTransform, yPlane, width, height, stride, dx, dy);
             if (!levels.ok)
                 continue;
             const int score = levels.matches * 4 + levels.separation;
@@ -1016,17 +1029,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         if (turboAdaptive.cooldown)
             --turboAdaptive.cooldown;
 
-        bool highDensityTurbo = false;
-        for (int i = 0; i < trackCount; ++i) {
-            auto* cache = guidedTurboTrack(tracks[i].id);
-            if (cache && cache->seeded && guidedModuleSize(tracks[i]) >= GUIDED_TURBO_FULL_MIN_MODULE) {
-                highDensityTurbo = true;
-                break;
-            }
-        }
-
         int canaryIndex = -1;
-        if (!highDensityTurbo && !turboAdaptive.promoted && !turboAdaptive.cooldown) {
+        if (!turboAdaptive.promoted && !turboAdaptive.cooldown) {
             for (int i = 0; i < trackCount; ++i) {
                 auto* cache = guidedTurboTrack(tracks[i].id);
                 if (cache && cache->seeded && guidedModuleSize(tracks[i]) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
@@ -1037,10 +1041,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             }
         }
         auto turboAllowed = [&](int i) {
-            const float module = guidedModuleSize(tracks[i]);
-            if (module >= GUIDED_TURBO_FULL_MIN_MODULE)
-                return true;
-            if (module < GUIDED_TURBO_CANARY_MIN_MODULE || turboAdaptive.cooldown)
+            if (guidedModuleSize(tracks[i]) < GUIDED_TURBO_CANARY_MIN_MODULE || turboAdaptive.cooldown)
                 return false;
             return turboAdaptive.promoted || i == canaryIndex;
         };
@@ -1056,10 +1057,13 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             float dx = 0, dy = 0, residual = 0;
             if (!turboPose(*cache, tracks[i], dx, dy, residual))
                 continue;
-            // The per-module bilinear warp already carries the current quad's
-            // translation/scale/perspective. Search only the small residual wall
-            // motion left by worker latency / lattice prediction.
-            const PointF refined = turboRefineWallOffset(*cache, tracks[i], yPlane, width, height, stride, 0, 0);
+            const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
+            if (!frameTransform.isValid())
+                continue;
+            // The projective frame warp carries current translation/scale/perspective.
+            // Search only the small residual left by lattice/worker latency.
+            const PointF refined = turboRefineWallOffset(*cache, tracks[i], frameTransform,
+                                                          yPlane, width, height, stride, 0, 0);
             wallCorrectionX = refined.x;
             wallCorrectionY = refined.y;
             break;
@@ -1078,11 +1082,13 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             float dx = 0, dy = 0, residual = 0;
             if (!turboPose(*cache, track, dx, dy, residual))
                 continue;
-            // dx/dy now means only residual correction; the current tracked quad
-            // itself is applied to every cached module by turboWarpedPoint().
+            const auto frameTransform = turboFrameTransform(*cache, track);
+            if (!frameTransform.isValid())
+                continue;
             dx = wallCorrectionX;
             dy = wallCorrectionY;
-            const auto levels = turboReadLevels(*cache, track, yPlane, width, height, stride, dx, dy);
+            const auto levels = turboReadLevels(*cache, track, frameTransform,
+                                                yPlane, width, height, stride, dx, dy);
             if (!levels.ok)
                 continue;
 
@@ -1090,15 +1096,15 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             ++metrics->sampleAttempts;
             ++metrics->sparseNoRsAttempts;
             const double turboStarted = guidedNowMs();
-            auto decoded = decodeTurboDataOnly(*cache, track, yPlane, width, height, stride,
+            auto decoded = decodeTurboDataOnly(*cache, track, frameTransform, yPlane, width, height, stride,
                                                dx, dy, levels, *metrics);
             bool success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
             if (success) {
                 ++metrics->sparseNoRsSuccesses;
-            } else if (rsBudget > 0) {
+            } else if (turboAdaptive.promoted && rsBudget > 0) {
                 --rsBudget;
                 ++metrics->sparseRsFallbacks;
-                decoded = decodeTurboWithRS(*cache, track, yPlane, width, height, stride,
+                decoded = decodeTurboWithRS(*cache, track, frameTransform, yPlane, width, height, stride,
                                             dx, dy, levels, *metrics);
                 success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
             }
@@ -1112,14 +1118,14 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
             }
 
-            if (guidedModuleSize(track) < GUIDED_TURBO_FULL_MIN_MODULE) {
+            {
                 if (!turboAdaptive.promoted) {
                     ++turboAdaptive.canaryAttempts;
                     turboAdaptive.canarySuccesses += int(success);
-                    const bool earlyWin = turboAdaptive.canaryAttempts >= 2 &&
+                    const bool earlyWin = turboAdaptive.canaryAttempts >= 4 &&
                                           turboAdaptive.canarySuccesses == turboAdaptive.canaryAttempts;
-                    if (earlyWin || turboAdaptive.canaryAttempts >= 6) {
-                        if (earlyWin || turboAdaptive.canarySuccesses * 2 >= turboAdaptive.canaryAttempts) {
+                    if (earlyWin || turboAdaptive.canaryAttempts >= 8) {
+                        if (earlyWin || turboAdaptive.canarySuccesses * 4 >= turboAdaptive.canaryAttempts * 3) {
                             turboAdaptive.promoted = true;
                             turboAdaptive.canaryAttempts = 0;
                             turboAdaptive.canarySuccesses = 0;
@@ -1131,7 +1137,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     ++turboAdaptive.promotedAttempts;
                     turboAdaptive.promotedSuccesses += int(success);
                     if (turboAdaptive.promotedAttempts >= 36) {
-                        if (turboAdaptive.promotedSuccesses * 4 < turboAdaptive.promotedAttempts)
+                        if (turboAdaptive.promotedSuccesses * 2 < turboAdaptive.promotedAttempts)
                             coolLowDensityTurbo();
                         else {
                             turboAdaptive.promotedAttempts = 0;
