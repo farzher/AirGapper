@@ -57,7 +57,6 @@ let nativeOutputPtr = 0;
 let nativeMetricsPtr = 0;
 let nativeConfigured = [];
 let nativeCropOrigin = "";
-let nativeCachePrimed = false;
 const nativeRefresh = /* @__PURE__ */ new Set();
 function ensureGuidedBatch(zx) {
   if (guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr) return true;
@@ -67,7 +66,7 @@ function ensureGuidedBatch(zx) {
   guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
   return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
 }
-function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, seedHandle = 0) {
+function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks) {
   if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > NATIVE_BATCH_MAX_TRACKS) return null;
   let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
   for (let i = 0; i < tracks.length; i++) {
@@ -82,16 +81,13 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, seed
       view.setFloat32(base + 12 + p * 8, points[p].y - oy, true);
     }
   }
-  const guidedArgs = [
+  const count = zx._decodeGuidedBatchY(
     yPtr, width, height, stride,
     guidedTracksPtr, tracks.length,
     guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
     guidedOutputPtr, GUIDED_OUTPUT_BYTES,
     tracks.length, guidedMetricsPtr
-  ];
-  const count = scalarCodec
-    ? zx._decodeGuidedBatchY(...guidedArgs)
-    : zx._decodeGuidedBatchY(...guidedArgs, seedHandle);
+  );
   const metricsView = new DataView(zx.HEAPU8.buffer, guidedMetricsPtr, GUIDED_METRICS_BYTES);
   const metrics = {
     totalMs: metricsView.getFloat64(0, true),
@@ -155,7 +151,6 @@ function ensureNativeBatch(zx) {
   nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
   nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
   zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
-  zx._setTrackedDecoderAutoCalibration?.(nativeBatchHandle, 0);
   return Boolean(nativeResultsPtr && nativeOutputPtr && nativeMetricsPtr);
 }
 function translatedQuad(q, dx, dy) {
@@ -194,7 +189,6 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   if (!ensureNativeBatch(zx) || tracks.length > NATIVE_BATCH_MAX_TRACKS) return void 0;
   const origin = `${ox},${oy}`;
   const originChanged = origin !== nativeCropOrigin;
-  let configurationChanged = originChanged;
   const byId = /* @__PURE__ */ new Map();
   for (let slot = 0; slot < tracks.length; slot++) {
     const track = tracks[slot];
@@ -202,7 +196,6 @@ function configureNativeBatch(zx, tracks, ox, oy) {
     const previous = nativeConfigured[slot];
     const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
     if (mustConfigure) {
-      configurationChanged = true;
       const q = track.quad;
       if (!validQuad(q)) return void 0;
       const accepted = zx._setTrackedDecoderTrack(
@@ -231,7 +224,6 @@ function configureNativeBatch(zx, tracks, ox, oy) {
   }
   nativeConfigured.length = tracks.length;
   nativeCropOrigin = origin;
-  if (configurationChanged) nativeCachePrimed = false;
   return byId;
 }
 function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
@@ -661,34 +653,15 @@ ctx.onmessage = async (e) => {
     }
     if (!full && tracks?.length && robustLaneFirst) {
       if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 2) {
-        // Guided remains the correctness oracle, but successful guided finder
-        // triplets now seed the codec's distortion-corrected module cache. On
-        // following frames, point-sample that cache first and send only misses
-        // through expensive SampleQR. Unlike the old native pre-pass, cache
-        // misses never trigger an independent whole-crop calibration scan.
-        const configured = !scalarCodec ? configureNativeBatch(zx, tracks, ox, oy) : undefined;
-        let native;
-        let remainingTracks = tracks;
-        if (configured && nativeCachePrimed) {
-          native = decodeNativeBatch(
-            zx, ptr + inputOffset, pw, ph, ox, oy, tracks, "y8", inputStride
-          );
-          if (native?.symbols.length) {
-            symbols.push(...native.symbols);
-            const nativeSlots = new Set(native.symbols.map((symbol) => symbol.header?.slotIndex).filter((slot) => slot !== undefined));
-            remainingTracks = tracks.filter((track) => track.slot === undefined || !nativeSlots.has(track.slot));
-          }
-        }
-        const guided = remainingTracks.length
-          ? decodeGuidedBatch(
-              zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, remainingTracks,
-              configured ? nativeBatchHandle : 0
-            )
-          : null;
-        if (guided?.symbols.length) {
-          symbols.push(...guided.symbols);
-          if (configured) nativeCachePrimed = true;
-        }
+        // Guided is the production tracked decoder. The v147 OP12R trace showed
+        // 1776 guided outputs in 25.9 worker-seconds, while the native pre-pass
+        // spent 35.3 worker-seconds for only 149 CRC hits (2.7%). Do not pay that
+        // cost on every fresh frame. Sparse dense-robust scouts remain the
+        // independent recovery path selected by the main-thread scheduler.
+        const guided = decodeGuidedBatch(
+          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks
+        );
+        if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();
         ctx.postMessage({
           id,
@@ -702,12 +675,11 @@ ctx.onmessage = async (e) => {
           readFullAttempts: 0,
           workerWaitMs,
           frameCopyMs,
-          nativeMetrics: native?.metrics,
           guidedMetrics: guided?.metrics,
-          nativeAssistTracks: native?.metrics?.tracks ?? 0,
-          nativeAssistHits: native?.symbols.length ?? 0,
-          guidedAssistTracks: remainingTracks.length,
-          pixelPath: native ? (guided ? "y8-cache+guided" : "y8-cache") : "y8-guided",
+          nativeAssistTracks: 0,
+          nativeAssistHits: 0,
+          guidedAssistTracks: tracks.length,
+          pixelPath: "y8-guided",
           guidedError: guided?.error,
           latencyMs: performance.now() - startedAt
         });
