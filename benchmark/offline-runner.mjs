@@ -8,14 +8,26 @@ const browser = await chromium.launch({
   args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
 
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+// Match the 1440p desktop sender class used for the dense 18-QR wall. At the
+// current maximum payload this yields roughly 2 display pixels per QR module,
+// instead of accidentally testing an unrealistically tiny ~0.56 MP wall.
+const page = await browser.newPage({ viewport: { width: 2560, height: 1440 } });
 page.setDefaultTimeout(90_000);
 const pageErrors = [];
 page.on("console", (message) => {
-  if (message.type() === "error") {
-    pageErrors.push(message.text());
-    console.error(`[browser error] ${message.text()}`);
-  }
+  if (message.type() !== "error") return;
+  // Chrome logs a generic console error for a missing implicit favicon. Actual
+  // HTTP failures are checked below with their URL, so do not double-count it.
+  if (message.text().startsWith("Failed to load resource:")) return;
+  pageErrors.push(message.text());
+  console.error(`[browser error] ${message.text()}`);
+});
+page.on("response", (response) => {
+  if (response.status() < 400) return;
+  const url = response.url();
+  if (url.endsWith("/favicon.ico")) return;
+  pageErrors.push(`HTTP ${response.status()} ${url}`);
+  console.error(`[browser http] ${response.status()} ${url}`);
 });
 page.on("pageerror", (error) => {
   pageErrors.push(error.stack || error.message);
@@ -47,9 +59,11 @@ async function generateSenderFrames() {
   await page.locator("#send-snippet").click();
   await page.waitForFunction(() => {
     const canvas = document.getElementById("qr");
-    return canvas && canvas.width > 100 && canvas.height > 100 && !document.getElementById("stage").hidden;
+    return canvas && canvas.width > 1600 && canvas.height > 700 && !document.getElementById("stage").hidden;
   });
 
+  const geometry = await page.locator("#qr").evaluate((canvas) => ({ width: canvas.width, height: canvas.height }));
+  console.log(`AIRGAPPER_SENDER_CANVAS ${geometry.width}x${geometry.height}`);
   const frames = [];
   const seen = new Set();
   const deadline = Date.now() + 4_000;
