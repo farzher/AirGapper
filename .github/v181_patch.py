@@ -46,3 +46,5 @@ replace_once(
     '''    } else {\n      await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: exposure, iso: currentIso });\n      preferredIso = currentIso;\n      autoOpticsFineTuneDirection = -direction;''',
     '''    } else {\n      await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: exposure, iso: currentIso });\n      autoOpticsFineTuneDirection = -direction;'''
 )
+
+# workflow trigger
