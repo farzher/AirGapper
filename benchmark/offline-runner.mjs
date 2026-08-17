@@ -99,8 +99,7 @@ async function generateSenderProfiles() {
   return { easy: easy.frames, dense: dense.frames };
 }
 
-function assertScenario(name, result) {
-  const failures = [];
+function commonAssertions(name, result, failures) {
   if (!result.ok) failures.push("receiver invariants failed");
   if (!result.productionOnly) failures.push("oracle path was not disabled");
   if (result.decodedPackets <= 0) failures.push("no QR packets decoded");
@@ -108,32 +107,41 @@ function assertScenario(name, result) {
   if (result.fullJobs <= 0) failures.push("acquisition never ran");
   if (result.firstProductionFrame == null) failures.push("never acquired a production QR");
   if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);
+  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");
+  else if (result.firstLockedStateFrame > 8) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>8)`);
+  if (result.fullJobs > 5) failures.push(`too many acquisition scans (${result.fullJobs} > 5)`);
+  if (result.tailFullJobs !== 0) failures.push(`stable tail used ${result.tailFullJobs} full scans`);
+}
 
-  // Floors are intentionally much looser than the current baseline so ordinary
-  // hosted-runner variance does not fail CI. They exist to catch architectural
-  // regressions: slow/no lock, a return to repeated full scans, or a large loss
-  // of useful dense-wall throughput.
-  if (name === "stable-path") {
-    if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");
-    else if (result.firstLockedStateFrame > 8) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>8)`);
-    if (result.fullJobs > 5) failures.push(`too many acquisition scans (${result.fullJobs} > 5)`);
+function assertScenario(name, result) {
+  const failures = [];
+  commonAssertions(name, result, failures);
+
+  // Y8 scenarios are the live-camera-equivalent path. These floors are broad:
+  // they verify that the real Guided lane is active and useful without encoding
+  // any expectation about these exact generated images.
+  if (name === "stable-y8") {
     if (result.trackedJobs < 20) failures.push(`too little tracked work (${result.trackedJobs} < 20)`);
-    if (result.guidedJobs < 20) failures.push(`too little Guided/stable work (${result.guidedJobs} < 20)`);
-    if (result.guidedOutputs < 150) failures.push(`too few tracked outputs (${result.guidedOutputs} < 150)`);
-    if (result.tailFullJobs !== 0) failures.push(`stable tail used ${result.tailFullJobs} full scans`);
+    if (result.guidedJobs < 12) failures.push(`too little actual Guided work (${result.guidedJobs} < 12)`);
+    if (result.guidedTracks < 120) failures.push(`too few Guided track attempts (${result.guidedTracks} < 120)`);
+    if (result.guidedOutputs < 80) failures.push(`too few Guided outputs (${result.guidedOutputs} < 80)`);
     if (result.tailTrackedJobs < 12) failures.push(`stable tail only scheduled ${result.tailTrackedJobs} tracked jobs (<12)`);
-    if (result.decodeP95Ms > 120) failures.push(`stable p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 120ms`);
+    if (result.decodeP95Ms > 180) failures.push(`stable Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 180ms`);
   }
-  if (name === "dense-performance") {
-    if (result.firstLockedStateFrame == null) failures.push("dense wall never locked");
-    else if (result.firstLockedStateFrame > 8) failures.push(`dense lock regressed to frame ${result.firstLockedStateFrame} (>8)`);
-    if (result.fullJobs > 5) failures.push(`dense acquisition used ${result.fullJobs} full scans (>5)`);
+  if (name === "dense-y8") {
     if (result.trackedJobs < 10) failures.push(`dense tracked jobs ${result.trackedJobs} < 10`);
-    if (result.guidedOutputs < 70) failures.push(`dense tracked outputs ${result.guidedOutputs} < 70`);
-    if (result.tailFullJobs !== 0) failures.push(`dense tail still used ${result.tailFullJobs} full scans`);
-    if (result.uniqueUsefulQrPerSecond < 80) failures.push(`dense useful rate ${result.uniqueUsefulQrPerSecond.toFixed(1)} QR/s < 80`);
-    if (result.qrPerSecond < 120) failures.push(`dense total rate ${result.qrPerSecond.toFixed(1)} QR/s < 120`);
-    if (result.decodeP95Ms > 140) failures.push(`dense p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 140ms`);
+    if (result.guidedJobs < 7) failures.push(`dense actual Guided jobs ${result.guidedJobs} < 7`);
+    if (result.guidedOutputs < 45) failures.push(`dense Guided outputs ${result.guidedOutputs} < 45`);
+    if (result.uniqueUsefulQrPerSecond < 60) failures.push(`dense useful rate ${result.uniqueUsefulQrPerSecond.toFixed(1)} QR/s < 60`);
+    if (result.decodeP95Ms > 220) failures.push(`dense Y8 p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 220ms`);
+  }
+  // Keep a short buffered-path guard because corpus replay and non-TrackProcessor
+  // inputs are real product paths too. Geometry-aware native decode should win
+  // decisively before generic recovery on this clean stable wall.
+  if (name === "buffered-rgba") {
+    if ((result.hotPath?.nativeTracks ?? 0) < 80) failures.push("buffered path did not exercise native tracked decode");
+    if ((result.hotPath?.crcFastPercent ?? 0) < 80) failures.push(`buffered native CRC yield ${(result.hotPath?.crcFastPercent ?? 0).toFixed(1)}% < 80%`);
+    if ((result.hotPath?.localRecoveryAttempts ?? 0) > 4) failures.push(`buffered path used ${result.hotPath.localRecoveryAttempts} local recoveries (>4)`);
   }
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
 }
@@ -148,18 +156,28 @@ try {
   const denseOrder = Array.from({ length: dense.length }, (_, index) => index);
   const scenarios = [
     {
-      name: "stable-path",
+      name: "stable-y8",
       urls: easy,
       order: [...easyOrder, ...Array(24).fill(0)],
       fps: 30,
-      mode: "performance"
+      mode: "performance",
+      cameraPath: true
     },
     {
-      name: "dense-performance",
+      name: "dense-y8",
       urls: dense,
       order: [...denseOrder, ...denseOrder],
       fps: 30,
-      mode: "performance"
+      mode: "performance",
+      cameraPath: true
+    },
+    {
+      name: "buffered-rgba",
+      urls: easy,
+      order: [...easyOrder, ...Array(12).fill(0)],
+      fps: 30,
+      mode: "performance",
+      cameraPath: false
     }
   ];
 
