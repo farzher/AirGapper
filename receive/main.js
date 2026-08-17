@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.180";
+const RECEIVER_RUNTIME_BUILD = "v0.5.181";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -249,6 +249,8 @@ let autoOpticsAcquisitionSince = 0;
 let autoOpticsRescueRetryAt = 0;
 let autoOpticsFineTuneAt = 0;
 let autoOpticsFineTuneDirection = 1;
+// These are the user's persistent MANUAL optics profile. Automatic optics
+// may use arbitrary temporary sensor values, but must never overwrite these.
 let preferredExposureTime;
 let manualFocusMode = "camera-auto";
 let preferredFocusDistance;
@@ -2270,8 +2272,8 @@ async function applyExposureSetting(track) {
   const requestedExposure = automaticExposureAxis ? active.exposureTime : preferredExposureTime;
   const requestedIso = automaticIsoAxis ? active.iso : preferredIso;
   if (requestedExposure === void 0) return;
-  preferredExposureTime = requestedExposure;
-  if (requestedIso !== void 0) preferredIso = requestedIso;
+  // Per-axis Auto borrows the sensor's current value for this transaction only.
+  // Do not turn that live AE/ISO reading into the user's saved manual profile.
   if (automaticIsoAxis) delete desiredCamera.iso;
   await applyCameraConstraint(track, {
     exposureMode: "manual",
@@ -2669,10 +2671,9 @@ async function settleAutomaticQrOptics(track, now) {
     // controller. It may test one nearby ISO later when geometry is stable.
     autoOpticsRetryAt = Infinity;
     autoOpticsFineTuneAt = receiverNow() + AUTO_OPTICS_FINE_INTERVAL_MS;
-    preferredExposureTime = track.getSettings().exposureTime ?? exposure;
-    preferredIso = track.getSettings().iso ?? tuned.iso ?? iso;
-    if (tuned.best?.valid) rememberAutomaticOptics(track, preferredExposureTime, preferredIso, tuned.best.score);
-    saveCameraSettings();
+    const tunedExposure = track.getSettings().exposureTime ?? exposure;
+    const tunedIso = track.getSettings().iso ?? tuned.iso ?? iso;
+    if (tuned.best?.valid) rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score);
     focusController.adoptAutomaticCameraState("automatic QR exposure tuned against live tracked decode yield");
   } finally {
     autoOpticsMutationRunning = false;
@@ -2728,15 +2729,12 @@ async function fineTuneAutomaticQrOptics(track, now) {
     }
     const improved = candidate.score > baseline.score * AUTO_OPTICS_FINE_IMPROVEMENT;
     if (improved) {
-      preferredIso = candidate.iso;
       autoOpticsFineTuneDirection = direction;
       rememberAutomaticOptics(track, exposure, candidate.iso, candidate.score);
-      saveCameraSettings();
       autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(baseline.yieldRate * 100).toFixed(0)}% · probe ${Math.round(candidate.iso)}:${(candidate.yieldRate * 100).toFixed(0)}% → ${Math.round(candidate.iso)}`;
       autoOpticsFineTuneAt = receiverNow() + Math.round(AUTO_OPTICS_FINE_INTERVAL_MS * 0.75);
     } else {
       await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: exposure, iso: currentIso });
-      preferredIso = currentIso;
       autoOpticsFineTuneDirection = -direction;
       rememberAutomaticOptics(track, exposure, currentIso, baseline.score);
       autoOpticsTuneSummary = `steady ${Math.round(currentIso)}:${(baseline.yieldRate * 100).toFixed(0)}% · probe ${Math.round(candidate.iso)}:${(candidate.yieldRate * 100).toFixed(0)}% → keep`;
