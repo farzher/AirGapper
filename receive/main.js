@@ -3086,8 +3086,8 @@ function maintainAutomaticQrOptics(now) {
   // Cold acquisition stays on hardware AE. Remembered manual exposure can be
   // badly wrong when ambient/screen brightness changed since the last session;
   // applying it before the first QR used to create multi-second startup stalls.
-  // Memory is still the first fallback in acquisition rescue and is reused after
-  // lock for the normal motion-safe shutter/ISO tuning pass.
+  // Remembered ISO is deliberately not used before first lock; memory is reused
+  // only after acquisition for the normal motion-safe shutter/ISO tuning pass.
   if (!gridLattice.locked) {
     autoOpticsLockSince = 0;
     if (now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS && now >= autoOpticsRescueRetryAt)
