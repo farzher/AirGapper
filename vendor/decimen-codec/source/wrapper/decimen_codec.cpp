@@ -1395,7 +1395,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             frameTransform.translationOnly &&
                             stableModuleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
                             stableModuleSize < GUIDED_TURBO_CANARY_MIN_MODULE &&
-                            cache->stableSuccesses >= 2;
+                            // Dense no-RS sampling is more expensive than the
+                            // nearest-center Stable-RS lane. Require four exact
+                            // RS+CRC proofs before spending that probe; v229
+                            // measured this as the better crossover point.
+                            cache->stableSuccesses >= 4;
                         const bool stableDirectEligible = !cache->cooldown && (
                             (stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE && cache->stableSuccesses >= 2) ||
                             denseDirectCanary
