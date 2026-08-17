@@ -109,18 +109,31 @@ function assertScenario(name, result) {
   if (result.firstProductionFrame == null) failures.push("never acquired a production QR");
   if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);
 
+  // Floors are intentionally much looser than the current baseline so ordinary
+  // hosted-runner variance does not fail CI. They exist to catch architectural
+  // regressions: slow/no lock, a return to repeated full scans, or a large loss
+  // of useful dense-wall throughput.
   if (name === "stable-path") {
     if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");
-    if (result.trackedJobs <= 0) failures.push("never switched to tracked decoding");
-    if (result.guidedJobs <= 0) failures.push("Guided/stable decoder never ran");
-    if (result.tailTrackedJobs <= result.tailFullJobs)
-      failures.push(`stable tail did not favor tracked work (${result.tailTrackedJobs} tracked vs ${result.tailFullJobs} full)`);
+    else if (result.firstLockedStateFrame > 8) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>8)`);
+    if (result.fullJobs > 5) failures.push(`too many acquisition scans (${result.fullJobs} > 5)`);
+    if (result.trackedJobs < 20) failures.push(`too little tracked work (${result.trackedJobs} < 20)`);
+    if (result.guidedJobs < 20) failures.push(`too little Guided/stable work (${result.guidedJobs} < 20)`);
+    if (result.guidedOutputs < 150) failures.push(`too few tracked outputs (${result.guidedOutputs} < 150)`);
+    if (result.tailFullJobs !== 0) failures.push(`stable tail used ${result.tailFullJobs} full scans`);
+    if (result.tailTrackedJobs < 12) failures.push(`stable tail only scheduled ${result.tailTrackedJobs} tracked jobs (<12)`);
+    if (result.decodeP95Ms > 120) failures.push(`stable p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 120ms`);
   }
   if (name === "dense-performance") {
     if (result.firstLockedStateFrame == null) failures.push("dense wall never locked");
-    if (result.trackedJobs <= result.fullJobs) failures.push("dense wall did not move decisively to tracked decoding");
+    else if (result.firstLockedStateFrame > 8) failures.push(`dense lock regressed to frame ${result.firstLockedStateFrame} (>8)`);
+    if (result.fullJobs > 5) failures.push(`dense acquisition used ${result.fullJobs} full scans (>5)`);
+    if (result.trackedJobs < 10) failures.push(`dense tracked jobs ${result.trackedJobs} < 10`);
+    if (result.guidedOutputs < 70) failures.push(`dense tracked outputs ${result.guidedOutputs} < 70`);
     if (result.tailFullJobs !== 0) failures.push(`dense tail still used ${result.tailFullJobs} full scans`);
-    if (result.uniqueUsefulQrPerSecond <= 0) failures.push("dense wall produced no useful symbol rate");
+    if (result.uniqueUsefulQrPerSecond < 80) failures.push(`dense useful rate ${result.uniqueUsefulQrPerSecond.toFixed(1)} QR/s < 80`);
+    if (result.qrPerSecond < 120) failures.push(`dense total rate ${result.qrPerSecond.toFixed(1)} QR/s < 120`);
+    if (result.decodeP95Ms > 140) failures.push(`dense p95 decode ${result.decodeP95Ms.toFixed(1)}ms > 140ms`);
   }
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);
 }
