@@ -12,6 +12,7 @@ on:
       - index.html
       - benchmark/offline-runner.mjs
       - .github/v217_offline_patch.py
+      - .github/v217_fast_diag_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -31,6 +32,7 @@ jobs:
           set -euo pipefail
           if grep -q 'RECEIVER_RUNTIME_BUILD = "v0.5.216"' receive/main.js; then
             python3 .github/v217_offline_patch.py
+            python3 .github/v217_fast_diag_patch.py
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
