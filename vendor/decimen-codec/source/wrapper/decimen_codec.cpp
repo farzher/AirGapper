@@ -383,52 +383,9 @@ static void noteGuidedSparseOutcome(int id, bool success)
     }
 }
 
-// Full SampleQR is substantially more expensive than the sparse stage because it
-// searches the complete alignment lattice before RS decode. Keep it hot while it
-// is producing packets, but progressively thin it after repeated *proven* misses.
-// This is deliberately local to the fallback itself: medium-quality QR slots stay
-// in every camera frame, and any success immediately restores full fallback cadence.
-struct GuidedFallbackState
-{
-    std::array<uint8_t, 64> misses{};
-    std::array<uint8_t, 64> cooldown{};
-    std::array<uint8_t, 64> backoff{};
-};
-
-static GuidedFallbackState& guidedFallbackState()
-{
-    static GuidedFallbackState state;
-    return state;
-}
-
-static bool guidedFallbackAllowed(int id)
-{
-    if (id < 0 || id >= int(guidedFallbackState().cooldown.size()))
-        return true;
-    auto& cooldown = guidedFallbackState().cooldown[id];
-    if (!cooldown)
-        return true;
-    --cooldown;
-    return false;
-}
-
-static void noteGuidedFallbackOutcome(int id, bool success)
-{
-    if (id < 0 || id >= int(guidedFallbackState().misses.size()))
-        return;
-    auto& state = guidedFallbackState();
-    if (success) {
-        state.misses[id] = 0;
-        state.cooldown[id] = 0;
-        state.backoff[id] = 0;
-        return;
-    }
-    if (++state.misses[id] < 4)
-        return;
-    state.misses[id] = 0;
-    state.backoff[id] = std::min<uint8_t>(3, state.backoff[id] + 1);
-    state.cooldown[id] = state.backoff[id];
-}
+// Full SampleQR fallback policy is owned by the main thread so every worker
+// learns from the same physical-slot history. The codec only executes the
+// supplied allow-mask and reports per-slot outcomes back.
 
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const DecimenGuidedTrack& track,
@@ -539,7 +496,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                    const DecimenGuidedTrack* tracks, int trackCount,
                                    DecimenGuidedResult* results, int resultCapacity,
                                    uint8_t* output, int outputCapacity, int maxSymbols,
-                                   DecimenGuidedMetrics* metrics)
+                                   uint32_t fallbackAllowedMask, DecimenGuidedMetrics* metrics)
 {
     if (!metrics)
         return -1;
@@ -644,7 +601,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     decodeSpent += fastElapsed;
                     if (decodedTrack) {
                         ++metrics->fastDecodeSuccesses;
-                        noteGuidedFallbackOutcome(track.id, true);
+                        if (track.id >= 0 && track.id < 32)
+                            metrics->sparseSuccessMask |= uint32_t(1) << track.id;
                     }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
@@ -652,16 +610,19 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 ++metrics->sparseSkipped;
             }
 
-            // Sparse misses retain the exact proven decoder, but repeated full
-            // fallback misses are no longer allowed to monopolize the worker.
-            // Four consecutive misses introduce a one-frame skip; continued
-            // misses grow that to at most three. A sparse or fallback success
-            // resets the backoff immediately.
+            // Sparse misses retain the exact proven decoder. Full SampleQR is
+            // gated by the receiver-wide physical-slot policy supplied with this
+            // job, so one bad slot cannot relearn the same miss independently in
+            // every worker.
             if (!decodedTrack) {
-                if (!guidedFallbackAllowed(track.id)) {
+                const bool fallbackAllowed = track.id < 0 || track.id >= 32 ||
+                    (fallbackAllowedMask & (uint32_t(1) << track.id)) != 0;
+                if (!fallbackAllowed) {
                     ++metrics->genericFallbackSkipped;
                 } else {
                     ++metrics->genericFallbackTracks;
+                    if (track.id >= 0 && track.id < 32)
+                        metrics->fallbackAttemptMask |= uint32_t(1) << track.id;
                     bool fallbackSuccess = false;
                     for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
                         metrics->sampleAttempts++;
@@ -678,10 +639,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             fallbackSuccess = true;
                             decodedTrack = true;
                             ++metrics->genericFallbackSuccesses;
+                            if (track.id >= 0 && track.id < 32)
+                                metrics->fallbackSuccessMask |= uint32_t(1) << track.id;
                             break;
                         }
                     }
-                    noteGuidedFallbackOutcome(track.id, fallbackSuccess);
                 }
             }
             metrics->sampleMs += std::max(0.0, guidedNowMs() - sampleStart - decodeSpent);

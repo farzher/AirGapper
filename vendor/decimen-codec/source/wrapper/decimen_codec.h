@@ -65,6 +65,10 @@ struct DecimenGuidedMetrics {
 	uint32_t sparseRsFallbacks;
 	uint32_t sparseSkipped;
 	uint32_t reserved;
+	uint32_t fallbackAttemptMask;
+	uint32_t fallbackSuccessMask;
+	uint32_t sparseSuccessMask;
+	uint32_t reserved2;
 };
 
 struct DecimenBatchMetrics {
@@ -108,7 +112,7 @@ int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
 						 const DecimenGuidedTrack* tracks, int trackCount,
 						 DecimenGuidedResult* results, int resultCapacity,
 						 uint8_t* output, int outputCapacity, int maxSymbols,
-						 DecimenGuidedMetrics* metrics);
+						 uint32_t fallbackAllowedMask, DecimenGuidedMetrics* metrics);
 
 int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
 						DecimenTrackedResult* results, int resultCapacity,
