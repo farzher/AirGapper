@@ -575,7 +575,26 @@ static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& t
     for (const auto& d : delta)
         residual = std::max(residual, float(std::hypot(d.x - dx, d.y - dy)));
     const float module = guidedModuleSize(track);
-    return residual <= std::max(1.0f, module * 0.48f);
+    // v197 only tolerated nearly-pure translation. At ~2.5 px/module that
+    // rejects or mis-samples perfectly trackable handheld scale/perspective
+    // changes. The hot sampler below now warps every cached module by the
+    // current tracked quad, so this is only a stale-geometry sanity gate.
+    return residual <= std::max(4.0f, module * 2.0f);
+}
+
+static PointF turboWarpedPoint(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track, int x, int y)
+{
+    const auto current = turboTrackQuad(track);
+    const float fx = (x + 0.5f) / std::max(1, track.dimension);
+    const float fy = (y + 0.5f) / std::max(1, track.dimension);
+    PointF d[4];
+    for (int i = 0; i < 4; ++i)
+        d[i] = current[i] - cache.seedQuad[i];
+    const PointF top{d[0].x + (d[1].x - d[0].x) * fx, d[0].y + (d[1].y - d[0].y) * fx};
+    const PointF bottom{d[3].x + (d[2].x - d[3].x) * fx, d[3].y + (d[2].y - d[3].y) * fx};
+    const PointF delta{top.x + (bottom.x - top.x) * fy, top.y + (bottom.y - top.y) * fy};
+    const PointF p = cache.samples[size_t(y) * cache.dimension + x];
+    return PointF{p.x + delta.x, p.y + delta.y};
 }
 
 static bool turboFinderIdeal(int x, int y)
@@ -593,13 +612,27 @@ struct TurboLevels
 
 static int turboLum(const uint8_t* yPlane, int width, int height, int stride, PointF p, float dx, float dy)
 {
-    const int x = int(std::lround(p.x + dx));
-    const int y = int(std::lround(p.y + dy));
-    return x < 0 || y < 0 || x >= width || y >= height ? -1 : int(yPlane[size_t(y) * stride + x]);
+    // Preserve the sub-pixel location Guided calibrated instead of snapping every
+    // module center to one camera pixel. Bilinear Y sampling is especially useful
+    // around 2-3 px/module where a half-pixel phase error is a large fraction of
+    // the module width.
+    const float px = float(p.x) + dx;
+    const float py = float(p.y) + dy;
+    const int x0 = int(std::floor(px));
+    const int y0 = int(std::floor(py));
+    if (x0 < 0 || y0 < 0 || x0 + 1 >= width || y0 + 1 >= height)
+        return -1;
+    const float fx = px - x0;
+    const float fy = py - y0;
+    const size_t r0 = size_t(y0) * stride;
+    const size_t r1 = size_t(y0 + 1) * stride;
+    const float a = yPlane[r0 + x0] + (yPlane[r0 + x0 + 1] - yPlane[r0 + x0]) * fx;
+    const float b = yPlane[r1 + x0] + (yPlane[r1 + x0 + 1] - yPlane[r1 + x0]) * fx;
+    return int(std::lround(a + (b - a) * fy));
 }
 
-static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const uint8_t* yPlane,
-                                   int width, int height, int stride, float dx, float dy)
+static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                   const uint8_t* yPlane, int width, int height, int stride, float dx, float dy)
 {
     TurboLevels out;
     const int dim = cache.dimension;
@@ -617,7 +650,7 @@ static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const uint8_t*
                 const int sx = starts[finder].x + mx;
                 const int sy = starts[finder].y + my;
                 const int lum = turboLum(yPlane, width, height, stride,
-                    cache.samples[size_t(sy) * dim + sx], dx, dy);
+                    turboWarpedPoint(cache, track, sx, sy), dx, dy);
                 if (lum < 0)
                     return {};
                 const bool black = turboFinderIdeal(mx, my);
@@ -655,22 +688,44 @@ static int turboThreshold(const TurboLevels& levels, int x, int y, int dim)
     return std::clamp(int(std::lround(t)), lo, hi);
 }
 
-static int turboModuleLum(const GuidedTurboTrack& cache, const uint8_t* yPlane,
-                          int width, int height, int stride, int x, int y,
+static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                          const uint8_t* yPlane, int width, int height, int stride, int x, int y,
                           float dx, float dy, int threshold, float moduleSize)
 {
-    const PointF p = cache.samples[size_t(y) * cache.dimension + x];
+    const PointF p = turboWarpedPoint(cache, track, x, y);
     int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
-    if (lum < 0 || moduleSize < 3.35f || std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
+    if (lum < 0 || moduleSize < GUIDED_TURBO_CANARY_MIN_MODULE ||
+        std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
         return lum;
-    const int cx = int(std::lround(p.x + dx));
-    const int cy = int(std::lround(p.y + dy));
-    if (cx <= 0 || cy <= 0 || cx + 1 >= width || cy + 1 >= height)
-        return lum;
-    const size_t row = size_t(cy) * stride;
-    const int sum = lum * 2 + yPlane[row + cx - 1] + yPlane[row + cx + 1] +
-                    yPlane[row - stride + cx] + yPlane[row + stride + cx];
-    return sum / 6;
+
+    // Ambiguous low-density modules get a tiny five-point vote *inside the
+    // module's own warped basis*. Using +/-1 camera pixels at 2.5 px/module can
+    // cross a QR edge; using fractions of neighboring module-center vectors
+    // stays safely inside the cell even under perspective.
+    const int dim = track.dimension;
+    const PointF left = turboWarpedPoint(cache, track, std::max(0, x - 1), y);
+    const PointF right = turboWarpedPoint(cache, track, std::min(dim - 1, x + 1), y);
+    const PointF up = turboWarpedPoint(cache, track, x, std::max(0, y - 1));
+    const PointF down = turboWarpedPoint(cache, track, x, std::min(dim - 1, y + 1));
+    const float xDiv = (x > 0 && x + 1 < dim) ? 2.0f : 1.0f;
+    const float yDiv = (y > 0 && y + 1 < dim) ? 2.0f : 1.0f;
+    const PointF ux{(right.x - left.x) / xDiv, (right.y - left.y) / xDiv};
+    const PointF uy{(down.x - up.x) / yDiv, (down.y - up.y) / yDiv};
+    const float inset = moduleSize < 3.0f ? 0.16f : 0.22f;
+    const PointF probes[4] = {
+        PointF{p.x + ux.x * inset, p.y + ux.y * inset},
+        PointF{p.x - ux.x * inset, p.y - ux.y * inset},
+        PointF{p.x + uy.x * inset, p.y + uy.y * inset},
+        PointF{p.x - uy.x * inset, p.y - uy.y * inset}
+    };
+    int values[5] = {lum, 0, 0, 0, 0};
+    for (int i = 0; i < 4; ++i) {
+        values[i + 1] = turboLum(yPlane, width, height, stride, probes[i], dx, dy);
+        if (values[i + 1] < 0)
+            return lum;
+    }
+    std::sort(std::begin(values), std::end(values));
+    return values[2];
 }
 
 static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -712,7 +767,7 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
                 if (functionPattern.get(xx, y))
                     continue;
                 const int threshold = turboThreshold(levels, xx, y, dim);
-                const int lum = turboModuleLum(cache, yPlane, width, height, stride,
+                const int lum = turboModuleLum(cache, track, yPlane, width, height, stride,
                                                xx, y, dx, dy, threshold, moduleSize);
                 if (lum < 0) { failed = true; break; }
                 const bool black = lum <= threshold;
@@ -765,7 +820,7 @@ static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const Deci
     for (int y = 0; y < dim; ++y)
         for (int x = 0; x < dim; ++x) {
             const int threshold = turboThreshold(levels, x, y, dim);
-            const int lum = turboModuleLum(cache, yPlane, width, height, stride,
+            const int lum = turboModuleLum(cache, track, yPlane, width, height, stride,
                                            x, y, dx, dy, threshold, moduleSize);
             if (lum < 0)
                 return {};
@@ -779,8 +834,9 @@ static DecoderResult decodeTurboWithRS(const GuidedTurboTrack& cache, const Deci
     return decoded;
 }
 
-static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const uint8_t* yPlane,
-                                    int width, int height, int stride, float predictedX, float predictedY)
+static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+                                    const uint8_t* yPlane, int width, int height, int stride,
+                                    float predictedX, float predictedY)
 {
     PointF best{predictedX, predictedY};
     int bestScore = -1;
@@ -788,7 +844,7 @@ static PointF turboRefineWallOffset(const GuidedTurboTrack& cache, const uint8_t
         for (int ox = -2; ox <= 2; ++ox) {
             const float dx = predictedX + ox;
             const float dy = predictedY + oy;
-            const auto levels = turboReadLevels(cache, yPlane, width, height, stride, dx, dy);
+            const auto levels = turboReadLevels(cache, track, yPlane, width, height, stride, dx, dy);
             if (!levels.ok)
                 continue;
             const int score = levels.matches * 4 + levels.separation;
@@ -1000,9 +1056,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             float dx = 0, dy = 0, residual = 0;
             if (!turboPose(*cache, tracks[i], dx, dy, residual))
                 continue;
-            const PointF refined = turboRefineWallOffset(*cache, yPlane, width, height, stride, dx, dy);
-            wallCorrectionX = refined.x - dx;
-            wallCorrectionY = refined.y - dy;
+            // The per-module bilinear warp already carries the current quad's
+            // translation/scale/perspective. Search only the small residual wall
+            // motion left by worker latency / lattice prediction.
+            const PointF refined = turboRefineWallOffset(*cache, tracks[i], yPlane, width, height, stride, 0, 0);
+            wallCorrectionX = refined.x;
+            wallCorrectionY = refined.y;
             break;
         }
 
@@ -1019,9 +1078,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             float dx = 0, dy = 0, residual = 0;
             if (!turboPose(*cache, track, dx, dy, residual))
                 continue;
-            dx += wallCorrectionX;
-            dy += wallCorrectionY;
-            const auto levels = turboReadLevels(*cache, yPlane, width, height, stride, dx, dy);
+            // dx/dy now means only residual correction; the current tracked quad
+            // itself is applied to every cached module by turboWarpedPoint().
+            dx = wallCorrectionX;
+            dy = wallCorrectionY;
+            const auto levels = turboReadLevels(*cache, track, yPlane, width, height, stride, dx, dy);
             if (!levels.ok)
                 continue;
 
