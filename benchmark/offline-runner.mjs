@@ -10,7 +10,7 @@ const browser = await chromium.launch({
 
 // Match the 1440p desktop sender class used for the dense 18-QR wall.
 const page = await browser.newPage({ viewport: { width: 2560, height: 1440 } });
-page.setDefaultTimeout(90_000);
+page.setDefaultTimeout(30_000);
 const pageErrors = [];
 page.on("console", (message) => {
   if (message.type() !== "error" || message.text().startsWith("Failed to load resource:")) return;
@@ -54,10 +54,18 @@ async function generateSenderFrames() {
   await page.locator("#send-snippet").click();
   await page.waitForFunction(() => {
     const canvas = document.getElementById("qr");
-    return canvas && canvas.width > 1600 && canvas.height > 700 && !document.getElementById("stage").hidden;
+    return canvas && canvas.width > 100 && canvas.height > 100 && !document.getElementById("stage").hidden;
   });
+  // The real sender is used fullscreen. AirGapper toggles its own qr-full layout
+  // synchronously on click before asking the browser Fullscreen API, so this also
+  // works in headless Chrome even if native fullscreen is unavailable.
+  await page.locator("#qr").click({ position: { x: 4, y: 4 } });
+  await page.waitForFunction(() => document.body.classList.contains("qr-full"));
+  await page.waitForTimeout(120);
 
   const geometry = await page.locator("#qr").evaluate((canvas) => ({ width: canvas.width, height: canvas.height }));
+  if (geometry.width < 1000 || geometry.height < 600)
+    throw new Error(`Unexpectedly small fullscreen sender canvas ${geometry.width}x${geometry.height}`);
   console.log(`AIRGAPPER_SENDER_CANVAS ${geometry.width}x${geometry.height}`);
   const frames = [];
   const seen = new Set();
@@ -100,9 +108,6 @@ try {
 
   const animatedOrder = Array.from({ length: urls.length }, (_, index) => index);
   const scenarios = [
-    // Let production acquire on real changing symbols, then freeze the exact
-    // wall for 30 frames. After lock, full scans should give way to tracked
-    // Guided/stable decoding; this is the deterministic tripod/stability test.
     {
       name: "acquire-then-stable",
       urls,
