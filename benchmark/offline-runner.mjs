@@ -17,10 +17,20 @@ page.on("pageerror", (error) => console.error(`[browser pageerror] ${error.stack
 async function generateSenderFrames() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.locator('[data-mode="send"]').click();
-  await page.selectOption("#cfg-layout", "three-six");
-  await page.selectOption("#cfg-orientation", "landscape");
-  await page.selectOption("#cfg-scaling", "integer");
-  await page.selectOption("#cfg-fps", "30");
+  // These controls are intentionally hidden until a transfer starts. Configure
+  // them directly so the headless harness does not wait for UI visibility.
+  await page.evaluate(() => {
+    for (const [id, value] of [
+      ["cfg-layout", "three-six"],
+      ["cfg-orientation", "landscape"],
+      ["cfg-scaling", "integer"],
+      ["cfg-fps", "30"]
+    ]) {
+      const element = document.getElementById(id);
+      element.value = value;
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
   const payload = Array.from({ length: 42000 }, (_, index) => String.fromCharCode(33 + index % 90)).join("");
   await page.fill("#snippet-text", payload);
   await page.locator("#send-snippet").click();
