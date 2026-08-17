@@ -1391,9 +1391,16 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         // Its CRC is still an exact acceptance gate. A miss pays
                         // no correctness cost: Stable-RS runs immediately below
                         // and the data-only probe backs off briefly.
-                        const bool stableDirectEligible =
-                            guidedModuleSize(track) >= GUIDED_TURBO_CANARY_MIN_MODULE &&
-                            cache->stableSuccesses >= 2 && !cache->cooldown;
+                        const float stableModuleSize = guidedModuleSize(track);
+                        const bool denseDirectCanary =
+                            frameTransform.translationOnly &&
+                            stableModuleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
+                            stableModuleSize < GUIDED_TURBO_CANARY_MIN_MODULE &&
+                            cache->stableSuccesses >= 4;
+                        const bool stableDirectEligible = !cache->cooldown && (
+                            (stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE && cache->stableSuccesses >= 2) ||
+                            denseDirectCanary
+                        );
                         if (stableDirectEligible) {
                             directAttempted = true;
                             ++metrics->sampleAttempts;
