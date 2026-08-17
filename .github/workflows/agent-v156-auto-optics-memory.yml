@@ -1,0 +1,30 @@
+name: Agent v156 stable remembered auto optics
+on:
+  push:
+    paths:
+      - '.github/v156_patch.py'
+      - '.github/workflows/agent-v156-auto-optics-memory.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .github/v156_patch.py
+      - name: Smoke check
+        run: |
+          node --check receive/main.js
+          node --check receive/worker.js
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add receive/main.js index.html main.js sw.js
+          git commit -m 'v0.5.156 remember and quality-gate Auto Optics'
+          git push origin master
