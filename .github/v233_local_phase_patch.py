@@ -1,7 +1,7 @@
 from pathlib import Path
 
-p=Path('vendor/decimen-codec/source/wrapper/decimen_codec.cpp')
-s=p.read_text()
+cpp=Path('vendor/decimen-codec/source/wrapper/decimen_codec.cpp')
+s=cpp.read_text()
 
 anchor='''static DetectorResult sampleGuidedSparse(const BitMatrix& image,'''
 helper=r'''struct TurboLocalPhase {
@@ -10,13 +10,11 @@ helper=r'''struct TurboLocalPhase {
     bool moved = false;
 };
 
-// The coherent wall offset is intentionally shared, but a real camera can put
-// individual dense QRs at a slightly different sub-pixel phase because of lens
-// distortion, lattice prediction error and display/camera resampling. When a
-// slot's finder evidence or RS decode disagrees, search only its immediate
-// sub-pixel neighborhood before paying HybridBinarizer + sparse Guided. This is
-// a recovery tier, never an acceptance shortcut: QR RS + AirGapper CRC still
-// decide whether any locally-refined sample is usable.
+// A stable wall has one coherent coarse translation, but real camera optics and
+// display resampling leave small per-slot phase errors. Search only the local
+// sub-pixel neighborhood after cached decoding proves the shared phase is not
+// enough. This never accepts bytes by geometry: QR RS + AirGapper CRC remain the
+// acceptance gates, and a miss falls through to the existing sparse decoder.
 static std::optional<TurboLocalPhase> turboRefineLocalPhase(
     const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
     const TurboFrameTransform& frameTransform,
@@ -45,9 +43,6 @@ static std::optional<TurboLocalPhase> turboRefineLocalPhase(
             if (ox || oy)
                 consider(predictedX + ox * step, predictedY + oy * step);
 
-    // If the shared correction did not even land on a valid finder template,
-    // widen once to roughly one camera pixel. Do not run the old +/-3px wall
-    // search for every slot; local recovery must remain cheaper than Guided.
     if (bestScore < 0) {
         const float wide = std::max(0.75f, step * 2.0f);
         for (int oy = -1; oy <= 1; ++oy)
@@ -83,30 +78,27 @@ new='''                    float dx = wallCorrectionX;
                     auto levels = turboReadLevels(*cache, track, frameTransform,
                                                   yPlane, width, height, stride, dx, dy);
                     if (!levels.ok) {
+                        ++metrics->stableLevelMisses;
+                        ++metrics->localPhaseSearches;
                         if (const auto local = turboRefineLocalPhase(*cache, track, frameTransform,
                                                                      yPlane, width, height, stride,
                                                                      dx, dy, false)) {
                             dx = local->offset.x;
                             dy = local->offset.y;
                             levels = local->levels;
+                            ++metrics->localPhaseFinderRecoveries;
                         }
                     }
                     if (!levels.ok) {
-                        // The shared wall phase can be wrong for one optically
-                        // distorted slot. Only declare the map stale after the
-                        // cheap local phase search also fails.
                         stableNeedsRefresh = true;
                     } else {'''
 if old not in s: raise SystemExit('stable levels block missing')
 s=s.replace(old,new,1)
 
-# In the stable block, accepted geometry must use the slot-local correction.
-# Restrict replacements to the section between the stable block and metrics tail.
 start=s.index('// Every calibrated slot may use warped Stable-RS immediately.')
 end=s.index('            metrics->fastDecodeMs += guidedNowMs() - turboStarted;', start)
 section=s[start:end]
 section=section.replace('commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY)', 'commitTurbo(i, decoded, dx, dy)')
-
 needle='''                            if (!success && centerOnlyRs) {
                                 // No correctness regression: if single-center RS
                                 // cannot reconstruct an exact CRC-valid packet,
@@ -119,23 +111,17 @@ needle='''                            if (!success && centerOnlyRs) {
                             }
                             if (success) {'''
 retry=r'''                            if (!success && centerOnlyRs) {
-                                // No correctness regression: if single-center RS
-                                // cannot reconstruct an exact CRC-valid packet,
-                                // retry the old ambiguity-voted sampler before
-                                // handing the slot to sparse Guided recovery.
                                 decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                               yPlane, width, height, stride,
                                                               dx, dy, levels, *metrics, false);
                                 success = commitTurbo(i, decoded, dx, dy);
                             }
                             if (!success) {
-                                // Finder evidence can remain valid while the
-                                // cached data-cell phase is half a camera pixel
-                                // off. On an RS miss, test the best neighboring
-                                // finder phase once before invoking sparse Guided.
+                                ++metrics->localPhaseSearches;
                                 if (const auto local = turboRefineLocalPhase(*cache, track, frameTransform,
                                                                              yPlane, width, height, stride,
                                                                              dx, dy, true)) {
+                                    ++metrics->localPhaseFinderRecoveries;
                                     const float localDx = local->offset.x;
                                     const float localDy = local->offset.y;
                                     auto retry = decodeTurboStableRS(*cache, track, frameTransform,
@@ -150,29 +136,55 @@ retry=r'''                            if (!success && centerOnlyRs) {
                                                                     *metrics, false);
                                         success = commitTurbo(i, retry, localDx, localDy);
                                     }
+                                    if (success)
+                                        ++metrics->localPhaseDecodeRecoveries;
                                 }
                             }
                             if (success) {'''
 if needle not in section: raise SystemExit('stable RS retry anchor missing')
 section=section.replace(needle,retry,1)
 s=s[:start]+section+s[end:]
+cpp.write_text(s)
 
-p.write_text(s)
+# Extend the guided metrics ABI with diagnostic-only phase counters.
+h=Path('vendor/decimen-codec/source/wrapper/decimen_codec.h')
+s=h.read_text()
+old='''\tuint32_t stableRsAttempts;\n\tuint32_t stableRsSuccesses;\n\tuint32_t stableEligibleTracks;\n};'''
+new='''\tuint32_t stableRsAttempts;\n\tuint32_t stableRsSuccesses;\n\tuint32_t stableEligibleTracks;\n\tuint32_t stableLevelMisses;\n\tuint32_t localPhaseSearches;\n\tuint32_t localPhaseFinderRecoveries;\n\tuint32_t localPhaseDecodeRecoveries;\n};'''
+if old not in s: raise SystemExit('guided metrics header anchor missing')
+h.write_text(s.replace(old,new,1))
 
-# Version/cache bump only when the candidate is actually applied.
+w=Path('receive/worker.js')
+s=w.read_text()
+if 'const GUIDED_METRICS_BYTES = 160;' not in s: raise SystemExit('guided metrics byte size missing')
+s=s.replace('const GUIDED_METRICS_BYTES = 160;', 'const GUIDED_METRICS_BYTES = 176;', 1)
+old='''    stableRsAttempts: metricsView.getUint32(144, true),\n    stableRsSuccesses: metricsView.getUint32(148, true),\n    stableEligibleTracks: metricsView.getUint32(152, true)'''
+new='''    stableRsAttempts: metricsView.getUint32(144, true),\n    stableRsSuccesses: metricsView.getUint32(148, true),\n    stableEligibleTracks: metricsView.getUint32(152, true),\n    stableLevelMisses: metricsView.getUint32(156, true),\n    localPhaseSearches: metricsView.getUint32(160, true),\n    localPhaseFinderRecoveries: metricsView.getUint32(164, true),\n    localPhaseDecodeRecoveries: metricsView.getUint32(168, true)'''
+if old not in s: raise SystemExit('guided metrics JS anchor missing')
+w.write_text(s.replace(old,new,1))
+
+m=Path('receive/main.js')
+s=m.read_text()
+old='''stable ${lastGuidedMetrics.stableEligibleTracks ?? 0} · module ${(lastGuidedMetrics.moduleSizeAvg ?? 0).toFixed(2)}px [${(lastGuidedMetrics.moduleSizeMin ?? 0).toFixed(2)}–${(lastGuidedMetrics.moduleSizeMax ?? 0).toFixed(2)}] · RS'''
+new='''stable ${lastGuidedMetrics.stableEligibleTracks ?? 0} · phase ${lastGuidedMetrics.localPhaseDecodeRecoveries ?? 0}/${lastGuidedMetrics.localPhaseSearches ?? 0} (finder ${lastGuidedMetrics.localPhaseFinderRecoveries ?? 0}, level miss ${lastGuidedMetrics.stableLevelMisses ?? 0}) · module ${(lastGuidedMetrics.moduleSizeAvg ?? 0).toFixed(2)}px [${(lastGuidedMetrics.moduleSizeMin ?? 0).toFixed(2)}–${(lastGuidedMetrics.moduleSizeMax ?? 0).toFixed(2)}] · RS'''
+if old not in s: raise SystemExit('guided diagnostics module anchor missing')
+s=s.replace(old,new,1)
+old='''    stableRsSuccesses: sumGuided("stableRsSuccesses"),\n    dataOnlyAttempts: sumGuided("sparseNoRsAttempts"),'''
+new='''    stableRsSuccesses: sumGuided("stableRsSuccesses"),\n    stableLevelMisses: sumGuided("stableLevelMisses"),\n    localPhaseSearches: sumGuided("localPhaseSearches"),\n    localPhaseFinderRecoveries: sumGuided("localPhaseFinderRecoveries"),\n    localPhaseDecodeRecoveries: sumGuided("localPhaseDecodeRecoveries"),\n    dataOnlyAttempts: sumGuided("sparseNoRsAttempts"),'''
+if old not in s: raise SystemExit('benchmark guided metrics anchor missing')
+s=s.replace(old,new,1)
+m.write_text(s)
+
+# v0.5.233 is the diagnostic baseline; this candidate becomes v0.5.234.
 for path, old, new in [
     ('vendor/decimen-codec/source/VERSION','0.1.42','0.1.43'),
-    ('main.js','v0.5.232','v0.5.233'),
-    ('receive/main.js','v0.5.232','v0.5.233'),
-    ('index.html','v0.5.232','v0.5.233'),
+    ('main.js','v0.5.233','v0.5.234'),
+    ('receive/main.js','v0.5.233','v0.5.234'),
+    ('index.html','v0.5.233','v0.5.234'),
 ]:
     q=Path(path); text=q.read_text()
     if old not in text: raise SystemExit(f'{path}: version target missing')
     q.write_text(text.replace(old,new))
-
 q=Path('sw.js'); text=q.read_text()
-import re
-m=re.search(r'airgapper-static-js-v(\d+)',text)
-if not m: raise SystemExit('sw cache version missing')
-text=text[:m.start(1)]+str(int(m.group(1))+1)+text[m.end(1):]
-q.write_text(text)
+if 'airgapper-static-js-v189' not in text: raise SystemExit('sw cache target missing')
+q.write_text(text.replace('airgapper-static-js-v189','airgapper-static-js-v190',1))
