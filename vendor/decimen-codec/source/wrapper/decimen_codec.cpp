@@ -459,6 +459,25 @@ static void coolLowDensityTurbo()
     }
 }
 
+static void demoteTurboPreserveCache()
+{
+    auto& adaptive = guidedTurboAdaptive();
+    adaptive.canaryAttempts = 0;
+    adaptive.canarySuccesses = 0;
+    adaptive.canaryDirectSuccesses = 0;
+    adaptive.canaryStableEligible = 0;
+    adaptive.promotedAttempts = 0;
+    adaptive.promotedSuccesses = 0;
+    adaptive.promoted = false;
+    adaptive.rsMode = false;
+    // Briefly stop probing, but keep every calibrated distortion-aware map.
+    adaptive.cooldown = 8;
+    for (auto& cache : guidedTurboTracks()) {
+        cache.misses = 0;
+        cache.cooldown = 0;
+    }
+}
+
 static bool turboSeedEligible(const DecimenGuidedTrack& track)
 {
     auto* cache = guidedTurboTrack(track.id);
@@ -1331,6 +1350,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 ++metrics->reserved2; // Turbo successes (ABI-reserved field)
                 cache->misses = 0;
                 cache->cooldown = 0;
+            } else if (turboAdaptive.promoted && turboAdaptive.rsMode) {
+                if (++cache->misses >= 4) {
+                    cache->misses = 0;
+                    cache->cooldown = 2;
+                }
             } else if (++cache->misses >= 2) {
                 cache->misses = 0;
                 cache->cooldown = GUIDED_TURBO_BAD_COOLDOWN;
@@ -1352,12 +1376,15 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                            turboAdaptive.canaryAttempts * 3;
                     const bool stableRsWin = turboAdaptive.canaryStableEligible >= 6 &&
                                              turboAdaptive.canarySuccesses * 8 >=
-                                             turboAdaptive.canaryAttempts * 5;
+                                             turboAdaptive.canaryAttempts * 3;
                     if (directWin || stableRsWin) {
                         turboAdaptive.promoted = true;
                         turboAdaptive.rsMode = !directWin;
                     } else {
-                        coolLowDensityTurbo();
+                        if (turboAdaptive.canaryStableEligible >= 6)
+                            demoteTurboPreserveCache();
+                        else
+                            coolLowDensityTurbo();
                     }
                 }
                 if (turboAdaptive.promoted) {
@@ -1371,12 +1398,17 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             } else {
                 ++turboAdaptive.promotedAttempts;
                 turboAdaptive.promotedSuccesses += int(success);
-                if (turboAdaptive.promotedAttempts >= 36) {
-                    // Full-wall Turbo must clear at least half of attempted slots
-                    // to repay itself versus going straight to Guided.
-                    if (turboAdaptive.promotedSuccesses * 2 < turboAdaptive.promotedAttempts)
-                        coolLowDensityTurbo();
-                    else {
+                const int evaluationWindow = turboAdaptive.rsMode ? 72 : 36;
+                if (turboAdaptive.promotedAttempts >= evaluationWindow) {
+                    const bool tooWeak = turboAdaptive.rsMode
+                        ? turboAdaptive.promotedSuccesses * 10 < turboAdaptive.promotedAttempts * 3
+                        : turboAdaptive.promotedSuccesses * 2 < turboAdaptive.promotedAttempts;
+                    if (tooWeak) {
+                        if (turboAdaptive.rsMode)
+                            demoteTurboPreserveCache();
+                        else
+                            coolLowDensityTurbo();
+                    } else {
                         turboAdaptive.promotedAttempts = 0;
                         turboAdaptive.promotedSuccesses = 0;
                     }
