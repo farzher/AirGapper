@@ -371,22 +371,20 @@ class GridLattice {
     const candidate = this.candidate;
     const count = candidate.layout.cols * candidate.layout.rows;
     const modules = candidate.observations[0].modules;
-    // The whole-grid homography is a prediction model, not a replacement for
-    // measured per-QR geometry. Real phone lenses distort a large QR field in
-    // ways a single projective transform cannot represent. Once a slot has
-    // actually decoded, keep that exact CRC-backed quad and use the lattice
-    // only for cells that have not yet been observed.
+    // The whole-grid homography owns frame-to-frame pose. CRC-backed local
+    // observations remain useful for freshness/identity and for learning the
+    // persistent per-slot lens residual, but raw one-frame quads are never
+    // published directly into the tracking hot path.
     const newestAt = candidate.observations.reduce((latest, observation) => Math.max(latest, observation.at), 0);
-    // Exact per-QR geometry is best only while it is fresh. After camera motion,
-    // the current lattice projection is a better aim point than a formerly exact
-    // quad from another pose. This also lets a fresh decode on one part of the
-    // wall move stale cells immediately instead of waiting for each cell to win.
+    // Freshness still records which slots have recently decoded; geometry is
+    // global pose plus the slowly learned local correction below.
     const observed = new Map(candidate.observations
       .filter((observation) => newestAt - observation.at <= EXACT_GEOMETRY_MS)
       .map((observation) => [observation.slotIndex, observation]));
     const decoded = new Set(observed.keys());
     const slots = [];
     for (let index = 0; index < count; index++) {
+      const observation = observed.get(index);
       // Never publish a raw per-frame QR quad. The whole wall moves through one
       // homography; each slot carries only its persistent local lens residual.
       // This removes independent overlay/track jitter while preserving the
