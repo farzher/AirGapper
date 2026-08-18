@@ -1,0 +1,1 @@
+v0.5.304 add selectable synchronous/fixed/dispersed wall timing and band-aware hot-slot scheduling
