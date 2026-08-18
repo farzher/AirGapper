@@ -1,0 +1,78 @@
+name: v261 fixed AirGapper RS correctness
+
+on:
+  push:
+    paths:
+      - .github/v261_fixed_rs_patch.py
+      - .github/workflows/v261-fixed-rs.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply v261 candidate
+        run: |
+          set -euo pipefail
+          python3 .github/v261_fixed_rs_patch.py
+      - name: Cache codec toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/decimen-codec/source/emsdk
+            vendor/decimen-codec/source/third_party
+            vendor/decimen-codec/source/build-simd
+            vendor/decimen-codec/source/build-scalar
+          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+      - name: Build SIMD and scalar codecs
+        run: |
+          set -euo pipefail
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Run existing benchmark unchanged
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=2 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v261-regression.log
+      - name: Promote passing v261
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -rf node_modules benchmark/offline-summary.json
+          git rm .github/v261_fixed_rs_patch.py .github/workflows/v261-fixed-rs.yml
+          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/VERSION \
+                  vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+                  vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
+                  receive/main.js main.js index.html sw.js
+          git commit -m "v0.5.261 fixed AirGapper RS workspace"
+          git pull --rebase origin master
+          git push origin HEAD:master
+      - name: Record rejected v261
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          {
+            echo "v261 fixed RS rejected at $(date -u +%FT%TZ)"
+            tail -n 600 /tmp/v261-regression.log 2>/dev/null || true
+          } > benchmark/v261-fixed-rs-ci.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm -f .github/v261_fixed_rs_patch.py .github/workflows/v261-fixed-rs.yml || true
+          git add benchmark/v261-fixed-rs-ci.log
+          git commit -m "record v261 fixed RS rejection" || true
+          git pull --rebase origin master
+          git push origin HEAD:master
+          exit 1
