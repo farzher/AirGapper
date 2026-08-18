@@ -34,7 +34,7 @@ const AUTO_GRID_MIN_MODULE_PX = 2;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.303";
+const SEND_RUNTIME_BUILD = "v0.5.304";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -143,10 +143,15 @@ const speedControl = cfgFps.closest(".speed-control");
 const cfgSize = document.getElementById("cfg-size");
 const cfgScaling = document.getElementById("cfg-scaling");
 const cfgLayout = document.getElementById("cfg-layout");
+const cfgUpdatePattern = document.getElementById("cfg-update-pattern");
 const cfgOrientation = document.getElementById("cfg-orientation");
 function selectedFps() {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
   return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 15;
+}
+function selectedUpdatePattern() {
+  const value = cfgUpdatePattern?.value;
+  return value === "synchronous" || value === "fixed" || value === "dispersed" ? value : "dispersed";
 }
 function selectFps(fps) {
   var _a;
@@ -522,6 +527,7 @@ function restoreSendSettings() {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
+    if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
     if (saved.layout === "auto" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
       cfgLayout.value = saved.layout;
     } else if (saved.layout === "five-three") {
@@ -541,6 +547,7 @@ function saveSendSettings() {
       sizeLevel: Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
+      updatePattern: selectedUpdatePattern(),
       orientation: selectedOrientation()
     }));
   } catch {
@@ -601,7 +608,7 @@ async function main() {
   // FPS is a live scheduler parameter. Size/layout/scaling/orientation still
   // rebuild geometry/transport as needed, but a speed change must never blank
   // the already-visible QR wall or cold-start the render workers.
-  for (const el of [cfgSize, cfgScaling, cfgLayout, cfgOrientation]) {
+  for (const el of [cfgSize, cfgScaling, cfgLayout, cfgUpdatePattern, cfgOrientation]) {
     el.addEventListener("change", () => {
       if (el === cfgLayout) updateAutoGridControlState();
       saveSendSettings();
@@ -682,19 +689,23 @@ async function startStream(revealStage = false) {
     : layoutGrid(layoutMode);
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = resolvedGrid;
   const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
+  const updatePattern = selectedUpdatePattern();
+  const synchronousUpdates = updatePattern === "synchronous";
   const temporalOrder = spatiallyDispersedOrder(gridCols, gridRows);
   const phaseStep = temporalPhaseStep(gridCodes);
   const temporalSourceOffset = (pageId, phase) => {
-    if (gridCodes <= 1) return 0;
+    if (gridCodes <= 1 || updatePattern === "fixed" || updatePattern === "synchronous") return phase;
     const rotation = pageId * phaseStep % gridCodes;
     let index = (phase + rotation) % gridCodes;
     if (pageId & 1) index = gridCodes - 1 - index;
     return temporalOrder[index];
   };
+  const updatePatternLabel = updatePattern === "synchronous" ? "synchronous wall" : updatePattern === "fixed" ? "fixed phased" : "dispersed rotating phases";
   const describeGrid = () => {
-    if (!autoGrid || staticStream) return "";
+    if (staticStream) return "";
+    if (!autoGrid) return `Update ${updatePatternLabel}`;
     const fallback = autoGrid.constrained ? "" : " · fallback constraints";
-    return `Auto Grid · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · dispersed rotating phases${fallback}`;
+    return `Auto Grid · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -1191,11 +1202,11 @@ async function startStream(revealStage = false) {
     scheduleDispatch();
 
     let pageInterval = 1e3 / txFps;
-    let cellInterval = pageInterval / gridCodes;
+    let cellInterval = synchronousUpdates ? pageInterval : pageInterval / gridCodes;
     let nextCellAt = 0;
     activeSendFpsSetter = (fps) => {
       pageInterval = 1e3 / Math.max(1, fps);
-      cellInterval = pageInterval / gridCodes;
+      cellInterval = synchronousUpdates ? pageInterval : pageInterval / gridCodes;
       // Speed changes are live: keep the current sweep and warm workers. If the
       // new rate is faster, pull the next phase forward; never blank/restart.
       if (nextCellAt)
@@ -1256,6 +1267,30 @@ async function startStream(revealStage = false) {
       // still catch up exactly as before.
       if (!nextCellAt || now - nextCellAt > 250)
         nextCellAt = now + cellInterval;
+
+      if (synchronousUpdates) {
+        if (now + 0.25 < nextCellAt) return;
+        try {
+          // Commit one already-rendered wall in one compositor-facing paint.
+          // The physical display scanout may still create one rolling-shutter
+          // transition stripe, but JS never creates many independent QR seams.
+          drawPage(currentPage);
+        } catch (error) {
+          closePage(currentPage);
+          currentPage = null;
+          fail(error);
+          return;
+        }
+        closePage(currentPage);
+        currentPage = null;
+        currentCellOffset = 0;
+        nextPresentPageId++;
+        scheduleDispatch();
+        nextCellAt += pageInterval;
+        // Never repay missed wall frames as a burst of whole-screen changes.
+        if (now - nextCellAt > pageInterval) nextCellAt = now + pageInterval;
+        return;
+      }
 
       let painted = 0;
       while (currentPage && now + 0.25 >= nextCellAt && painted < gridCodes) {

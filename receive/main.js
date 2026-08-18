@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.303";
+const RECEIVER_RUNTIME_BUILD = "v0.5.304";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1186,6 +1186,18 @@ const SLOT_VERY_WEAK_SCORE = 0.03;
 const SLOT_VERY_WEAK_MISSES = 6;
 const SLOT_WEAK_MIN_WALL = 6;
 const SLOT_WEAK_MIN_HEALTHY = 4;
+const TEMPORAL_BAND_MIN_TRACKS = 6;
+const TEMPORAL_BAND_MIN_HITS = 3;
+const TEMPORAL_BAND_MIN_MISSES = 2;
+const TEMPORAL_BAND_MAX_REPEAT = 3;
+const TEMPORAL_BAND_SKIP_SOURCE_FRAMES = 1;
+const temporalBandSkipThroughSource = new Int32Array(SLOT_METRIC_COUNT);
+temporalBandSkipThroughSource.fill(-1);
+let temporalBandDetections = 0;
+let temporalBandSkippedTracks = 0;
+let temporalBandLastKey = "";
+let temporalBandLastSource = -1;
+let temporalBandRepeat = 0;
 const slotAttemptCounts = new Uint32Array(SLOT_METRIC_COUNT);
 const slotHitCounts = new Uint32Array(SLOT_METRIC_COUNT);
 const slotQualitySamples = new Uint16Array(SLOT_METRIC_COUNT);
@@ -1275,6 +1287,60 @@ function noteSlotMetric(slot, hit) {
       slotQualityScores[index] < SLOT_WEAK_ENTER_SCORE) {
     slotAdaptiveWeak[index] = 1;
   }
+}
+function temporalBandMissSlots(auditMode, completion) {
+  const layout = lastGridSnapshot?.layout;
+  const sourceSequence = Number(auditMode?.sourceSequence);
+  if (!layout || auditMode?.full || auditMode?.autoOpticsProbe || !Number.isFinite(sourceSequence)) return new Set();
+  const submitted = [...new Set((auditMode.trackSlots ?? []).map(Number).filter((slot) =>
+    Number.isInteger(slot) && slot >= 0 && slot < layout.cols * layout.rows
+  ))];
+  if (submitted.length < TEMPORAL_BAND_MIN_TRACKS) return new Set();
+  const output = new Set((completion.symbols ?? []).map((symbol) => Number(symbol.header?.slotIndex)).filter(Number.isInteger));
+  const hits = submitted.filter((slot) => output.has(slot));
+  const misses = submitted.filter((slot) => !output.has(slot));
+  if (hits.length < TEMPORAL_BAND_MIN_HITS || misses.length < TEMPORAL_BAND_MIN_MISSES || misses.length > submitted.length * 0.45) return new Set();
+
+  const uniqueSorted = (values) => [...new Set(values)].sort((a, b) => a - b);
+  const adjacent = (values) => values.length > 0 && values.length <= 2 && values[values.length - 1] - values[0] <= 1;
+  const missCols = uniqueSorted(misses.map((slot) => slot % layout.cols));
+  const missRows = uniqueSorted(misses.map((slot) => Math.floor(slot / layout.cols)));
+  const colSet = new Set(missCols);
+  const rowSet = new Set(missRows);
+  const columnBand = adjacent(missCols) && hits.some((slot) => !colSet.has(slot % layout.cols));
+  const rowBand = adjacent(missRows) && hits.some((slot) => !rowSet.has(Math.floor(slot / layout.cols)));
+  if (!columnBand && !rowBand) return new Set();
+  const useColumn = columnBand && (!rowBand || missCols.length <= missRows.length);
+  const key = `${useColumn ? "c" : "r"}:${(useColumn ? missCols : missRows).join(",")}`;
+
+  if (sourceSequence >= temporalBandLastSource) {
+    if (key === temporalBandLastKey && sourceSequence - temporalBandLastSource <= 2) temporalBandRepeat++;
+    else temporalBandRepeat = 1;
+    temporalBandLastKey = key;
+    temporalBandLastSource = sourceSequence;
+  }
+  // A stripe that stays in the exact same place indefinitely is probably a
+  // genuinely weak/occluded region, not a moving temporal seam. Let normal
+  // weak-slot learning resume after a few consecutive identical detections.
+  if (temporalBandRepeat > TEMPORAL_BAND_MAX_REPEAT) return new Set();
+
+  temporalBandDetections++;
+  for (const slot of misses) {
+    temporalBandSkipThroughSource[slot] = Math.max(
+      temporalBandSkipThroughSource[slot],
+      Math.trunc(sourceSequence) + TEMPORAL_BAND_SKIP_SOURCE_FRAMES
+    );
+  }
+  notePipelineEvent("temporal-band", misses.length);
+  return new Set(misses);
+}
+function shouldScheduleTemporalBandSlot(region, sourceSequence) {
+  const slot = Number(region.gridSlot);
+  const sequence = Number(sourceSequence);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !Number.isFinite(sequence)) return true;
+  if (sequence > temporalBandSkipThroughSource[slot]) return true;
+  temporalBandSkippedTracks++;
+  return false;
 }
 function adaptiveWeakSlotScheduling(candidates) {
   if (strictHotPathActive() || candidates.length < SLOT_WEAK_MIN_WALL) return false;
@@ -2388,6 +2454,7 @@ function noteDecodeCompleted(id, completion) {
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
   if (!attempts || completion.repeatSkipped) return;
+  const temporalMisses = !auditMode?.autoOpticsProbe ? temporalBandMissSlots(auditMode, completion) : new Set();
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
@@ -2399,11 +2466,18 @@ function noteDecodeCompleted(id, completion) {
       return Boolean(symbol.box && regionAt(symbol.box) === region);
     });
     if (!auditMode?.autoOpticsProbe) {
-      if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
-      region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
-      if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
-        region.consecutiveMisses++;
-        if (region.consecutiveMisses >= 3) region.decoded = false;
+      const temporalBandMiss = !hit && temporalMisses.has(Number(region.gridSlot));
+      // A coherent rolling-shutter seam is an erasure of this camera frame,
+      // not evidence that the physical QR slot is intrinsically weak. Keep
+      // successful slots training normally, but quarantine seam misses from
+      // the long-lived weak-slot/confidence model.
+      if (!temporalBandMiss) {
+        if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
+        region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
+        if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
+          region.consecutiveMisses++;
+          if (region.consecutiveMisses >= 3) region.decoded = false;
+        }
       }
     }
   }
@@ -4441,7 +4515,7 @@ function renderFocusDiagnostics() {
     `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · validating recent winner" : autoOpticsRuntimeState === "seed" ? " · short-shutter bootstrap" : autoOpticsRuntimeState === "rescue" ? " · acquisition exposure search" : autoOpticsRuntimeState === "ae" ? " · AE meter/fallback" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · temporal bands ${temporalBandDetections}/${temporalBandSkippedTracks} skips · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -6591,6 +6665,12 @@ async function captureFrame(source) {
   let batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
+  // If a just-completed tracked frame showed a narrow coherent temporal stripe,
+  // avoid spending the immediately following source frame on those same slots.
+  // With normal worker latency this often expires before scheduling and costs
+  // nothing; on a fast worker it saves work while the stripe is still nearby.
+  // The slot automatically re-enters on the next source frame after that.
+  batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence));
 
   // Weak-slot throttling is good when a few QRs are genuinely poor, but it can
   // self-lock a partially stale wall: stale geometry misses, becomes weak, then
