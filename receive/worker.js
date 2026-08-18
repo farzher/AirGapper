@@ -1141,6 +1141,14 @@ ctx.onmessage = async (e) => {
         const readDenseSeed = (maxSymbols = 1) => decodePixelFormat === "y8"
           ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, maxSymbols)
           : zx.readFull(ptr, pw, ph, true, maxSymbols, false);
+        const acquireWithScaleFallback = (maxSymbols = 1) => {
+          readFullAttempts++;
+          appendResults(readDenseSeed(maxSymbols), false);
+          if (symbols.length === 0 && decodePixelFormat === "y8" && Math.max(pw, ph) >= 900) {
+            readFullAttempts++;
+            appendResults(readFull(true, maxSymbols, false), false);
+          }
+        };
         if (fullMode === "thorough") {
           readFullAttempts++;
           appendResults(readFull(true, 16, false), false);
@@ -1177,14 +1185,12 @@ ctx.onmessage = async (e) => {
               if (symbols.length > before) targetedSuccesses++;
             }
           }
-          if (!targetedAttempts) {
-            readFullAttempts++;
-            appendResults(readDenseSeed(1), false);
-          }
-        } else {
-          // Cold acquisition still returns the first useful packet immediately.
+          if (symbols.length === 0) acquireWithScaleFallback(1);
+        } else if (fullMode === "seed") {
           readFullAttempts++;
-          appendResults(readDenseSeed(), false);
+          appendResults(readDenseSeed(1), false);
+        } else {
+          acquireWithScaleFallback(1);
         }
       } else {
         readFullAttempts++;

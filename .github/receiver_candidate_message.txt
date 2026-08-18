@@ -1,1 +1,0 @@
-v0.5.297 add scale-pyramid fallback for giant close-up QR acquisition
