@@ -28,7 +28,7 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-const SEND_RUNTIME_BUILD = "v0.5.260";
+const SEND_RUNTIME_BUILD = "v0.5.267";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -182,7 +182,7 @@ function monitorDisplayRefreshRate() {
           cfgFps.value = displayOption.value;
           if (previousValue !== displayOption.value) {
             saveSendSettings();
-            void startStream();
+            if (!applyLiveSenderFps()) void startStream();
           }
         }
       }
@@ -199,10 +199,17 @@ let resizeDisplay = null;
 let activeTransportEncoder = null;
 let activeTransportCursor = null;
 let activeSendRendererCleanup = null;
+let activeSendFpsSetter = null;
 function stopSendRenderer() {
   const cleanup = activeSendRendererCleanup;
   activeSendRendererCleanup = null;
+  activeSendFpsSetter = null;
   cleanup?.();
+}
+function applyLiveSenderFps() {
+  if (!activeSendFpsSetter) return false;
+  activeSendFpsSetter(selectedFps());
+  return true;
 }
 const specsLine = statusLine(specs);
 const setStatus = specsLine.setStatus;
@@ -447,11 +454,16 @@ async function main() {
     cfgFpsCustom.hidden = cfgFps.value !== "custom";
     speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
     if (!cfgFpsCustom.hidden) cfgFpsCustom.focus();
+    saveSendSettings();
+    if (selectedFile && !applyLiveSenderFps()) void startStream();
   });
   const resizeForViewport = () => resizeDisplay == null ? void 0 : resizeDisplay();
   window.addEventListener("resize", resizeForViewport);
   (_a = window.visualViewport) == null ? void 0 : _a.addEventListener("resize", resizeForViewport);
-  for (const el of [cfgFps, cfgSize, cfgScaling, cfgLayout, cfgOrientation]) {
+  // FPS is a live scheduler parameter. Size/layout/scaling/orientation still
+  // rebuild geometry/transport as needed, but a speed change must never blank
+  // the already-visible QR wall or cold-start the render workers.
+  for (const el of [cfgSize, cfgScaling, cfgLayout, cfgOrientation]) {
     el.addEventListener("change", () => {
       saveSendSettings();
       void startStream();
@@ -462,7 +474,7 @@ async function main() {
     if (!cfgFpsCustom.value) return;
     customFpsTimer = setTimeout(() => {
       saveSendSettings();
-      void startStream();
+      if (selectedFile && !applyLiveSenderFps()) void startStream();
     }, 100);
   });
   monitorDisplayRefreshRate();
@@ -603,10 +615,16 @@ async function startStream(revealStage = false) {
     }
     const availableScale = Math.min(budgetW * dpr / displayW, budgetH * dpr / displayH);
     scale = fitScaling || availableScale < 1 ? Math.max(Number.EPSILON, availableScale) : Math.floor(availableScale);
-    staging.width = totalW;
-    staging.height = totalH;
-    canvas.width = Math.max(1, Math.round(displayW * scale));
-    canvas.height = Math.max(1, Math.round(displayH * scale));
+    if (staging.width !== totalW || staging.height !== totalH) {
+      staging.width = totalW;
+      staging.height = totalH;
+    }
+    const canvasW = Math.max(1, Math.round(displayW * scale));
+    const canvasH = Math.max(1, Math.round(displayH * scale));
+    if (canvas.width !== canvasW || canvas.height !== canvasH) {
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+    }
     const cssNativeW = displayW * scale / dpr;
     const cssNativeH = displayH * scale / dpr;
     canvas.style.width = `${cssNativeW}px`;
@@ -617,8 +635,12 @@ async function startStream(revealStage = false) {
       if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
     });
     if (fitStaging) {
-      fitStaging.width = totalW * FIT_SUPERSAMPLE;
-      fitStaging.height = totalH * FIT_SUPERSAMPLE;
+      const fitW = totalW * FIT_SUPERSAMPLE;
+      const fitH = totalH * FIT_SUPERSAMPLE;
+      if (fitStaging.width !== fitW || fitStaging.height !== fitH) {
+        fitStaging.width = fitW;
+        fitStaging.height = fitH;
+      }
       const fitCtx = fitStaging.getContext("2d");
       fitCtx.imageSmoothingEnabled = false;
       fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
@@ -748,6 +770,9 @@ async function startStream(revealStage = false) {
     let nextPageId = 0;
     let nextPresentPageId = 0;
     let nextGenerateOrdinal = symbolOrdinal;
+    let currentPage = null;
+    let currentCellOffset = 0;
+    let seededWall = false;
 
     const closePage = (page) => page?.bitmap?.close?.();
     activeSendRendererCleanup = () => {
@@ -755,6 +780,8 @@ async function startStream(revealStage = false) {
       dispatchTimer = 0;
       for (const worker of workers) worker.terminate();
       for (const page of readyPages.values()) closePage(page);
+      closePage(currentPage);
+      currentPage = null;
       readyPages.clear();
       pageMeta.clear();
     };
@@ -833,28 +860,43 @@ async function startStream(revealStage = false) {
       showStreamPanels(true);
       setStatus("");
     };
-    const drawPage = (page) => {
+    const ensurePageSource = (page, totalW, totalH) => {
+      if (page.bitmap) return page.bitmap;
+      if (page.sourceCanvas) return page.sourceCanvas;
+      if (!page.pixels) return null;
+      const source = document.createElement("canvas");
+      source.width = totalW;
+      source.height = totalH;
+      source.getContext("2d").putImageData(
+        new ImageData(new Uint8ClampedArray(page.pixels), totalW, totalH), 0, 0
+      );
+      page.sourceCanvas = source;
+      return source;
+    };
+    const validatePage = (page) => {
       initializeGeometry(page);
       const totalW = modules * gridCols + gridMargin * (gridCols + 1);
       const totalH = modules * gridRows + gridMargin * (gridRows + 1);
       if (page.width !== totalW || page.height !== totalH)
         throw new Error(`Sender page geometry mismatch ${page.width}×${page.height}`);
-      let source = page.bitmap;
-      if (!source && page.pixels) {
-        staging.width = totalW;
-        staging.height = totalH;
-        staging.getContext("2d").putImageData(
-          new ImageData(new Uint8ClampedArray(page.pixels), totalW, totalH), 0, 0
-        );
-        source = staging;
-      }
+      const source = ensurePageSource(page, totalW, totalH);
       if (!source) throw new Error("Sender worker returned no page pixels");
+      return { source, totalW, totalH };
+    };
+    const drawPage = (page) => {
+      const { source, totalW, totalH } = validatePage(page);
+      const stagingCtx = staging.getContext("2d");
+      stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
+      stagingCtx.globalCompositeOperation = "copy";
+      stagingCtx.imageSmoothingEnabled = false;
+      stagingCtx.drawImage(source, 0, 0, totalW, totalH);
+      stagingCtx.globalCompositeOperation = "source-over";
       if (fitStaging) {
         const fitCtx = fitStaging.getContext("2d");
         fitCtx.setTransform(1, 0, 0, 1, 0, 0);
         fitCtx.globalCompositeOperation = "copy";
         fitCtx.imageSmoothingEnabled = false;
-        fitCtx.drawImage(source, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
+        fitCtx.drawImage(staging, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
         fitCtx.globalCompositeOperation = "source-over";
         renderFitCanvas();
       } else {
@@ -865,13 +907,86 @@ async function startStream(revealStage = false) {
           ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
         else
           ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
-        ctx.drawImage(source, 0, 0);
+        ctx.drawImage(staging, 0, 0);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalCompositeOperation = "source-over";
       }
-      page.bitmap?.close?.();
       if (activeTransportCursor?.key === transportKey)
         activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, page.endOrdinal);
+    };
+    const drawPageCell = (page, offset) => {
+      const { source, totalW, totalH } = validatePage(page);
+      const ordinal = page.startOrdinal + offset;
+      const slotIndex = ordinal % gridCodes;
+      const stride = modules + gridMargin;
+      const ox = slotIndex % gridCols * stride + gridMargin;
+      const oy = Math.floor(slotIndex / gridCols) * stride + gridMargin;
+
+      // Keep a persistent module-resolution wall. This is what makes cell-phase
+      // presentation cheap: a QR update touches only its own module square, not
+      // a full 4:7 wall rescale/repaint.
+      const stagingCtx = staging.getContext("2d");
+      stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
+      stagingCtx.globalCompositeOperation = "source-over";
+      stagingCtx.imageSmoothingEnabled = false;
+      stagingCtx.drawImage(source, ox, oy, modules, modules, ox, oy, modules, modules);
+      stagingCtx.globalCompositeOperation = "source-over";
+
+      const landscape = landscapeGrid();
+      const targetW = landscape ? canvas.height : canvas.width;
+      const targetH = landscape ? canvas.width : canvas.height;
+      const ctx = canvas.getContext("2d");
+      ctx.globalCompositeOperation = "source-over";
+      if (landscape)
+        ctx.setTransform(0, 1, -1, 0, canvas.width, 0);
+      else
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      if (fitStaging) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.setTransform(1, 0, 0, 1, 0, 0);
+        fitCtx.globalCompositeOperation = "source-over";
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(
+          source,
+          ox, oy, modules, modules,
+          ox * FIT_SUPERSAMPLE, oy * FIT_SUPERSAMPLE,
+          modules * FIT_SUPERSAMPLE, modules * FIT_SUPERSAMPLE
+        );
+        fitCtx.globalCompositeOperation = "source-over";
+
+        // Include one logical white-border pixel so high-quality downsampling
+        // sees the same edge neighborhood as a whole-wall draw. The expensive
+        // operation is now proportional to one QR region, never the full wall.
+        const rx = Math.max(0, ox - 1);
+        const ry = Math.max(0, oy - 1);
+        const rr = Math.min(totalW, ox + modules + 1);
+        const rb = Math.min(totalH, oy + modules + 1);
+        const rw = rr - rx;
+        const rh = rb - ry;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(
+          fitStaging,
+          rx * FIT_SUPERSAMPLE, ry * FIT_SUPERSAMPLE,
+          rw * FIT_SUPERSAMPLE, rh * FIT_SUPERSAMPLE,
+          rx * targetW / totalW, ry * targetH / totalH,
+          rw * targetW / totalW, rh * targetH / totalH
+        );
+      } else {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(
+          staging,
+          ox, oy, modules, modules,
+          ox * targetW / totalW, oy * targetH / totalH,
+          modules * targetW / totalW, modules * targetH / totalH
+        );
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+
+      if (activeTransportCursor?.key === transportKey)
+        activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, ordinal + 1);
     };
 
     for (let i = 0; i < workerCount; ++i) {
@@ -902,27 +1017,88 @@ async function startStream(revealStage = false) {
     }
     scheduleDispatch();
 
-    const interval = 1e3 / txFps;
-    let nextAt = 0;
+    let pageInterval = 1e3 / txFps;
+    let cellInterval = pageInterval / gridCodes;
+    let nextCellAt = 0;
+    activeSendFpsSetter = (fps) => {
+      pageInterval = 1e3 / Math.max(1, fps);
+      cellInterval = pageInterval / gridCodes;
+      // Speed changes are live: keep the current sweep and warm workers. If the
+      // new rate is faster, pull the next phase forward; never blank/restart.
+      if (nextCellAt)
+        nextCellAt = Math.min(nextCellAt, performance.now() + cellInterval);
+    };
+    const takeReadyPage = () => {
+      const page = readyPages.get(nextPresentPageId);
+      if (!page) return null;
+      readyPages.delete(nextPresentPageId);
+      pageMeta.delete(nextPresentPageId);
+      return page;
+    };
     const tickParallel = (now) => {
       if (gen !== generation || failed) return;
       requestAnimationFrame(tickParallel);
-      const page = readyPages.get(nextPresentPageId);
-      if (!page) return;
-      if (!nextAt) nextAt = now;
-      if (now + 0.25 < nextAt) return;
-      readyPages.delete(nextPresentPageId);
-      pageMeta.delete(nextPresentPageId);
-      try {
-        drawPage(page);
-      } catch (error) {
+
+      // Seed the wall with one complete frame so startup never reveals a white
+      // checkerboard one QR at a time. Every following page transitions in
+      // phases over exactly one sender frame period.
+      if (!seededWall) {
+        const page = takeReadyPage();
+        if (!page) return;
+        try {
+          drawPage(page);
+        } catch (error) {
+          closePage(page);
+          fail(error);
+          return;
+        }
         closePage(page);
-        fail(error);
+        nextPresentPageId++;
+        seededWall = true;
+        nextCellAt = now + cellInterval;
+        scheduleDispatch();
         return;
       }
-      nextPresentPageId++;
-      nextAt = (now - nextAt > interval ? now : nextAt) + interval;
-      scheduleDispatch();
+
+      if (!currentPage) {
+        currentPage = takeReadyPage();
+        currentCellOffset = 0;
+        if (!currentPage) {
+          // Encoding fell behind. Do not burst a whole stale page when it catches
+          // up; restart the phase clock when a fresh page is actually available.
+          nextCellAt = 0;
+          return;
+        }
+        if (!nextCellAt) nextCellAt = now;
+      }
+
+      let painted = 0;
+      while (currentPage && now + 0.25 >= nextCellAt && painted < gridCodes) {
+        try {
+          drawPageCell(currentPage, currentCellOffset);
+        } catch (error) {
+          closePage(currentPage);
+          currentPage = null;
+          fail(error);
+          return;
+        }
+        currentCellOffset++;
+        painted++;
+        nextCellAt += cellInterval;
+        if (currentCellOffset < gridCodes) continue;
+
+        closePage(currentPage);
+        currentPage = null;
+        currentCellOffset = 0;
+        nextPresentPageId++;
+        scheduleDispatch();
+        if (now + 0.25 < nextCellAt) break;
+        currentPage = takeReadyPage();
+        if (!currentPage) {
+          nextCellAt = 0;
+          break;
+        }
+      }
     };
     requestAnimationFrame(tickParallel);
     return;
@@ -989,9 +1165,16 @@ async function startStream(revealStage = false) {
     return true;
   };
   paintPage();
-  if (staticStream) return;
-  const interval = 1e3 / txFps;
+  if (staticStream) {
+    activeSendFpsSetter = () => {};
+    return;
+  }
+  let interval = 1e3 / txFps;
   let nextAt = performance.now() + interval;
+  activeSendFpsSetter = (fps) => {
+    interval = 1e3 / Math.max(1, fps);
+    nextAt = Math.min(nextAt, performance.now() + interval);
+  };
   const tick = (now) => {
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
