@@ -1,0 +1,69 @@
+name: v266 staggered sender correctness
+
+on:
+  push:
+    paths:
+      - .github/v266_staggered_sender_patch.py
+      - .github/workflows/v266-staggered-sender.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply v266 candidate
+        run: |
+          set -euo pipefail
+          python3 .github/v266_staggered_sender_patch.py 2>&1 | tee /tmp/v266-patch.log
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+
+      - name: Run production regression
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=2 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v266-regression.log
+
+      - name: Promote v266
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          cp benchmark/offline-summary.json benchmark/latest-result.json
+          rm -rf node_modules benchmark/offline-summary.json
+          git rm .github/v266_staggered_sender_patch.py .github/workflows/v266-staggered-sender.yml
+          git add send/main.js main.js index.html sw.js benchmark/latest-result.json
+          git commit -m "v0.5.266 stagger sender QR phases"
+          git pull --rebase origin master
+          git push origin HEAD:master
+
+      - name: Record v266 rejection
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          {
+            echo "v266 staggered sender rejected at $(date -u +%FT%TZ)"
+            cat /tmp/v266-patch.log 2>/dev/null || true
+            tail -n 520 /tmp/v266-regression.log 2>/dev/null || true
+          } > benchmark/v266-staggered-sender-ci.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v266_staggered_sender_patch.py .github/workflows/v266-staggered-sender.yml
+          git add benchmark/v266-staggered-sender-ci.log
+          git commit -m "record v266 staggered sender rejection"
+          git pull --rebase origin master
+          git push origin HEAD:master
+          exit 1
