@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.270";
+const RECEIVER_RUNTIME_BUILD = "v0.5.271";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -680,11 +680,20 @@ async function refreshCameraDevices(activeTrack) {
     if (activeId && automaticCameraDeviceId && activeId !== automaticCameraDeviceId &&
         !automaticCameraUpgradeAttempted && stream && !done) {
       automaticCameraUpgradeAttempted = true;
+      const upgradeTrack = activeTrack;
+      // enumerateDevices() completes after decoding has already started. Never
+      // tear down a camera that proved it can see AirGapper; that looked like a
+      // random startup freeze. Give the current camera a short acquisition race,
+      // and only reopen if it still has not produced one valid packet.
       setTimeout(() => {
-        if (!stream || done || preferredCameraDeviceId) return;
+        if (!stream || done || preferredCameraDeviceId || stream.getVideoTracks()[0] !== upgradeTrack) return;
+        if (gridLattice.identity || lastStreamDecodeAt >= cameraStartedTs) {
+          notePipelineEvent("camera-upgrade-skipped-after-qr");
+          return;
+        }
         stopReceiver();
         void start();
-      }, 0);
+      }, 700);
     }
   } else if (activeExists) {
     preferredCameraDeviceId = activeId;
@@ -2302,12 +2311,19 @@ function noteDecodeCompleted(id, completion) {
 }
 const REGION_TTL_MS = 5e3;
 const SIGHTING_REGION_TTL_MS = 3e3;
-const ACQUISITION_SCAN_MS = 45;
-const ACQUISITION_FULL_EVERY = 4;
+const ACQUISITION_SCAN_MS = 20;
+// The first acquisition frame is global. After that, prefer the much cheaper
+// overlapping seed windows; with one-QR lock there is no reason to repeatedly
+// scan the whole dense wall while waiting for cross-axis confirmation.
+const ACQUISITION_FULL_EVERY = 10;
 const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
-const LOCKED_RECOVERY_SCAN_MS = 220;
-const GEOMETRY_PROBE_SILENCE_MS = 650;
+// Recovery probes exist only when a proven wall stops producing packets. They
+// therefore cannot consume CPU in the healthy LOCKED throughput path.
+const LOCKED_RECOVERY_SCAN_MS = 90;
+const GEOMETRY_FAST_HIT_MS = 220;
+const GEOMETRY_FAST_PROBE_SILENCE_MS = 180;
+const GEOMETRY_PROBE_SILENCE_MS = 500;
 const GEOMETRY_COLD_MISSES = 3;
 // A hard camera bump often leaves a few old slots readable. Waiting for *zero*
 // hits lets those survivors pin a badly displaced lattice indefinitely. Once a
@@ -5654,9 +5670,15 @@ async function captureFrame(source) {
   const recentLockedHits = lockedGeometryCandidates.reduce((count, region) =>
     count + Number(now - (region.decodedSeen ?? -Infinity) < 900), 0
   );
+  const freshLockedHits = lockedGeometryCandidates.reduce((count, region) =>
+    count + Number(now - (region.decodedSeen ?? -Infinity) < GEOMETRY_FAST_HIT_MS), 0
+  );
   const lockedDecodeSilenceMs = gridLattice.locked && lastStreamDecodeAt ? now - lastStreamDecodeAt : 0;
-  const geometryProbeDue = lockedGeometryTrusted && recentLockedHits === 0 &&
-    lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS;
+  // The old 900 ms recent-hit gate made a small camera bump look frozen for
+  // roughly a second. A short silence now starts a cheap predicted-slot probe;
+  // full-frame recovery remains a later escalation.
+  const geometryProbeDue = lockedGeometryTrusted && freshLockedHits === 0 &&
+    lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS;
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
   // Three tracked misses are evidence for a rescue probe, not evidence that the
@@ -5696,7 +5718,7 @@ async function captureFrame(source) {
     !region.decoded && region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
   ) : [];
   const acquisitionInFlight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
-  const acquisitionLimit = captureHasTrackedWork ? 1 : 2;
+  const acquisitionLimit = captureHasTrackedWork ? 1 : 3;
   // SEARCH/REACQUIRE has a hard liveness invariant: if the camera is producing
   // frames and an acquisition worker is free, stale scheduler bookkeeping may
   // never stop discovery. With useful provisional geometry, keep one discovery
@@ -5737,7 +5759,10 @@ async function captureFrame(source) {
   // and memory bandwidth. Two fresh-frame seed searches are enough to keep
   // acquisition parallel without burying slower phones under duplicate work.
   const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
-  const globalRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked && geometryProbeDue;
+  const globalRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked &&
+    (allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS);
+  const localRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked &&
+    geometryProbeDue && !globalRecoverySeedScan && lockedGeometryCandidates.length > 0;
   if (globalRecoverySeedScan) {
     const recoveryInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
     if (recoveryInflight >= 1) {
@@ -5787,6 +5812,7 @@ async function captureFrame(source) {
     let acquisitionMode = captureNextScan ? "thorough" : fullFrameSeed
       ? fullScans % ACQUISITION_DEEP_EVERY === 0 ? "deep" : "fast"
       : "seed";
+    if (localRecoverySeedScan) acquisitionMode = "seed";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
     if (!captureNextScan && preLatticeDiscovery && !lastGridSnapshot && !fullFrameSeed) {
       const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
@@ -5811,8 +5837,24 @@ async function captureFrame(source) {
     if (provisionalCrop) {
       const target = provisionalUnknownVisible[acquisitionTileCursor++ % provisionalUnknownVisible.length];
       boundedScanCandidates = target ? [target] : [];
+    } else if (localRecoverySeedScan) {
+      // A small bump moves the rigid wall coherently. Probe one central predicted
+      // QR at a time instead of rescanning the whole wall; the first CRC-valid
+      // packet re-homographies every slot. Rotate a few central choices so an
+      // occluded/transitioning code cannot stall reacquisition.
+      const cx = vw / 2, cy = vh / 2;
+      const ranked = [...lockedGeometryCandidates].sort((a, b) => {
+        const ad = Math.hypot(a.x + a.w / 2 - cx, a.y + a.h / 2 - cy);
+        const bd = Math.hypot(b.x + b.w / 2 - cx, b.y + b.h / 2 - cy);
+        return ad - bd;
+      });
+      const poolSize = Math.min(5, ranked.length);
+      const target = ranked[acquisitionTileCursor++ % poolSize];
+      boundedScanCandidates = target ? [target] : [];
+      geometryRecoveryProbes++;
+      notePipelineEvent("local-recovery-probe", geometryRecoveryProbes);
     }
-    if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
+    if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || localRecoverySeedScan || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
       const points = boundedScanCandidates.flatMap((region) => [
         region.quad.topLeft,
         region.quad.topRight,
@@ -5820,7 +5862,7 @@ async function captureFrame(source) {
         region.quad.bottomLeft
       ]);
       const typicalEdge = Math.max(...boundedScanCandidates.map((region) => Math.max(region.w, region.h)));
-      const pad = Math.max(24, Math.round(typicalEdge * (provisionalCrop ? 0.9 : 0.7)));
+      const pad = Math.max(24, Math.round(typicalEdge * (provisionalCrop ? 0.9 : localRecoverySeedScan ? 1.0 : 0.7)));
       const quantum = 16;
       scanX = Math.max(0, Math.floor((Math.min(...points.map((point) => point.x)) - pad) / quantum) * quantum);
       scanY = Math.max(0, Math.floor((Math.min(...points.map((point) => point.y)) - pad) / quantum) * quantum);
