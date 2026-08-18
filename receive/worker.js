@@ -171,6 +171,11 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const slotBit = (1 << slot) >>> 0;
     if (expectedSlotsMask && !(expectedSlotsMask & slotBit) || decodedSlotsMask & slotBit) continue;
     decodedSlotsMask = (decodedSlotsMask | slotBit) >>> 0;
+    const decodePath = metrics.fallbackSuccessMask & slotBit
+      ? "fallback"
+      : metrics.sparseSuccessMask & slotBit
+        ? "sparse"
+        : "hot";
     const quad = {
       topLeft: { x: view.getFloat32(base + 20, true), y: view.getFloat32(base + 24, true) },
       topRight: { x: view.getFloat32(base + 28, true), y: view.getFloat32(base + 32, true) },
@@ -185,6 +190,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       modules,
       tracked: true,
       geometryMeasured: status === NATIVE_TRACK_OK,
+      decodePath,
       header: packet.header
     });
   }
@@ -351,6 +357,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
       quad,
       modules: mapped.input.dim,
       tracked: true,
+      decodePath: "native",
       crc32: mapped.input.crc32,
       verifiedPayload: mapped.input.crc32,
       header
@@ -766,6 +773,7 @@ ctx.onmessage = async (e) => {
             quad: shifted(result.position, ox, oy),
             modules: result.modules,
             tracked: false,
+            decodePath: "robust",
             header: packet.header
           });
         }
@@ -871,6 +879,7 @@ ctx.onmessage = async (e) => {
             quad: shifted(recoveredPosition, ox, oy),
             modules: result.modules,
             tracked: false,
+            decodePath: "fallback",
             header: packet.header
           });
         }
@@ -923,7 +932,8 @@ ctx.onmessage = async (e) => {
             box: boundsOf(trackedPosition, ox, oy),
             quad: shifted(trackedPosition, ox, oy),
             modules: r.modules,
-            tracked: true
+            tracked: true,
+            decodePath: "native"
           });
           trackedHit = true;
         }
@@ -941,7 +951,8 @@ ctx.onmessage = async (e) => {
                 box: boundsOf(r.position, ox, oy),
                 quad: shifted(r.position, ox, oy),
                 modules: r.modules,
-                tracked: false
+                tracked: false,
+                decodePath: full ? "acquire" : "fallback"
               });
             } else if (includeErrors) {
               const box = boundsOf(r.position, ox, oy);

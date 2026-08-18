@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.275";
+const RECEIVER_RUNTIME_BUILD = "v0.5.276";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3667,63 +3667,110 @@ video.addEventListener("loadedmetadata", syncPreviewAspect);
 window.addEventListener("resize", syncPreviewAspect);
 const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
-const QUALITY_PROMOTE_MS = 450;
-const QUALITY_DEMOTE_MS = 1100;
-const QUALITY_COLORS = ["#ff665c", "#ffb23e", "#d5d936", "#35d66f", "#42a5ff", "#00efff"];
+const OVERLAY_PATH_COLORS = {
+  hot: "#00efff",
+  native: "#42a5ff",
+  sparse: "#35d66f",
+  fallback: "#ffb23e",
+  robust: "#ff735c",
+  acquire: "#b486ff"
+};
+const OVERLAY_PATH_LABELS = {
+  hot: "H",
+  native: "N",
+  sparse: "S",
+  fallback: "F",
+  robust: "R",
+  acquire: "A"
+};
+const OVERLAY_GHOST_COLOR = "#b8d3e6";
+const OVERLAY_LOCAL_COLOR = OVERLAY_PATH_COLORS.acquire;
 const overlayCtx = overlay.getContext("2d");
 function captureQualityRate(region, now) {
   pruneSequenceSamples(region, now);
   return region.decodeAttempts ? region.decodeConfidence : region.sequenceSamples.length > 0 ? 0.5 : 0;
 }
-function qualityLevelForRate(rate) {
-  if (rate >= 0.95) return 5;
-  if (rate >= 0.8) return 4;
-  if (rate >= 0.6) return 3;
-  if (rate >= 0.35) return 2;
-  if (rate >= 0.12) return 1;
-  return 0;
+function overlayPathColor(region) {
+  return OVERLAY_PATH_COLORS[region.decodePath] ?? OVERLAY_PATH_COLORS.hot;
 }
-function captureQualityColor(region, rate, now) {
-  // Decode confidence is intentionally responsive; the display is not. Keep
-  // a temporal state so a handful of misses cannot make a dense grid flash
-  // through multiple colors. New regions start at their measured level, then
-  // move only one color at a time after the new level persists.
-  const target = qualityLevelForRate(rate);
-  if (!region.qualityDisplayInitialized) {
-    region.qualityDisplayInitialized = true;
-    region.qualityLevel = target;
-    region.qualityPendingLevel = target;
-    region.qualityPendingSince = now;
-    return QUALITY_COLORS[target];
-  }
-  const current = Math.max(0, Math.min(QUALITY_COLORS.length - 1, region.qualityLevel ?? target));
-  if (target === current) {
-    region.qualityPendingLevel = target;
-    region.qualityPendingSince = now;
-    return QUALITY_COLORS[current];
-  }
-  if (region.qualityPendingLevel !== target) {
-    region.qualityPendingLevel = target;
-    region.qualityPendingSince = now;
-    return QUALITY_COLORS[current];
-  }
-  const holdMs = target > current ? QUALITY_PROMOTE_MS : QUALITY_DEMOTE_MS;
-  if (now - (region.qualityPendingSince ?? now) >= holdMs) {
-    region.qualityLevel = current + Math.sign(target - current);
-    region.qualityPendingSince = now;
-  }
-  return QUALITY_COLORS[region.qualityLevel ?? current];
+function overlayPathLabel(region) {
+  return OVERLAY_PATH_LABELS[region.decodePath] ?? "·";
 }
 function layoutOrder(a, b) {
   const dy = a.y + a.h / 2 - (b.y + b.h / 2);
   if (Math.abs(dy) > Math.max(a.h, b.h) / 2) return dy;
   return a.x + a.w / 2 - (b.x + b.w / 2);
 }
+function drawOverlayCorners(x, y, w, h, len) {
+  overlayCtx.beginPath();
+  overlayCtx.moveTo(x, y + len);
+  overlayCtx.lineTo(x, y);
+  overlayCtx.lineTo(x + len, y);
+  overlayCtx.moveTo(x + w - len, y);
+  overlayCtx.lineTo(x + w, y);
+  overlayCtx.lineTo(x + w, y + len);
+  overlayCtx.moveTo(x + w, y + h - len);
+  overlayCtx.lineTo(x + w, y + h);
+  overlayCtx.lineTo(x + w - len, y + h);
+  overlayCtx.moveTo(x + len, y + h);
+  overlayCtx.lineTo(x, y + h);
+  overlayCtx.lineTo(x, y + h - len);
+  overlayCtx.stroke();
+}
+function drawOverlayDevBadge(region, x, y, w, h, dpr) {
+  if (region.gridSlot === void 0 || Math.min(w, h) < 46 * dpr) return;
+  const slot = Number(region.gridSlot);
+  const attempts = Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT ? slotAttemptCounts[slot] : 0;
+  const hits = Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT ? slotHitCounts[slot] : 0;
+  const weak = Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotAdaptiveWeak[slot] ? "!" : "";
+  const rate = attempts ? `${Math.round(hits / attempts * 100)}%` : "—";
+  const ppm = region.pixelsPerModule > 0 ? `${region.pixelsPerModule.toFixed(1)}px/m` : "—";
+  const line1 = `${slot + 1} ${overlayPathLabel(region)}${weak} ${rate}`;
+  const line2 = ppm;
+  const font1 = 9.5 * dpr;
+  const font2 = 8 * dpr;
+  const padX = 4 * dpr;
+  const padY = 3 * dpr;
+  overlayCtx.shadowBlur = 0;
+  overlayCtx.setLineDash([]);
+  overlayCtx.font = `600 ${font1}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  const width1 = overlayCtx.measureText(line1).width;
+  overlayCtx.font = `500 ${font2}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  const width2 = overlayCtx.measureText(line2).width;
+  const badgeW = Math.max(width1, width2) + padX * 2;
+  const badgeH = font1 + font2 + padY * 3;
+  const bx = x + 4 * dpr;
+  const by = y + 4 * dpr;
+  overlayCtx.globalAlpha = 0.72;
+  overlayCtx.fillStyle = "#071018";
+  overlayCtx.fillRect(bx, by, badgeW, badgeH);
+  overlayCtx.globalAlpha = 0.98;
+  overlayCtx.font = `600 ${font1}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  overlayCtx.fillStyle = overlayPathColor(region);
+  overlayCtx.fillText(line1, bx + padX, by + padY + font1 * 0.86);
+  overlayCtx.font = `500 ${font2}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  overlayCtx.fillStyle = "#e8f2f8";
+  overlayCtx.fillText(line2, bx + padX, by + padY * 2 + font1 + font2 * 0.82);
+}
+function drawOverlayDevLegend(dpr) {
+  const legend = "H hot   S sparse   F fallback   R robust   A acquire   N native";
+  const font = 9 * dpr;
+  const padX = 6 * dpr;
+  const padY = 4 * dpr;
+  overlayCtx.font = `600 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  const width = overlayCtx.measureText(legend).width + padX * 2;
+  const height = font + padY * 2;
+  overlayCtx.globalAlpha = 0.68;
+  overlayCtx.fillStyle = "#071018";
+  overlayCtx.fillRect(7 * dpr, 7 * dpr, width, height);
+  overlayCtx.globalAlpha = 0.95;
+  overlayCtx.fillStyle = "#eef8ff";
+  overlayCtx.fillText(legend, 7 * dpr + padX, 7 * dpr + padY + font * 0.84);
+}
 let lastOverlayDrawAt = -Infinity;
 function drawOverlay(now) {
   if (now - lastOverlayDrawAt < 50) return;
   lastOverlayDrawAt = now;
-  var _a, _b;
   const cw = overlay.clientWidth;
   const ch = overlay.clientHeight;
   const vw = video.videoWidth;
@@ -3740,45 +3787,65 @@ function drawOverlay(now) {
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
   const offY = (ph - vh * scale) / 2;
+  const distributedFit = Boolean(lastGridSnapshot?.distributedFit);
+  const developerOverlay = !receiverDevActions.hidden;
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
   const ordered = [...regions].sort(layoutOrder);
   for (const r of ordered) {
-    const decodedAge = now - ((_a = r.decodedSeen) != null ? _a : -Infinity);
-    const sightingAge = now - ((_b = r.sightedSeen) != null ? _b : r.seen);
+    const gridRegion = r.gridSlot !== void 0;
+    if (gridRegion && r.slotState === "OFFSCREEN") continue;
+    const decodedAge = now - (r.decodedSeen ?? -Infinity);
+    const sightingAge = now - (r.sightedSeen ?? r.seen);
     const successful = decodedAge <= INDICATOR_FADE_MS;
-    if (!successful && sightingAge > SIGHTING_FADE_MS) continue;
-    const quality = captureQualityRate(r, now);
-    const color = captureQualityColor(r, quality, now);
-    overlayCtx.strokeStyle = color;
-    overlayCtx.shadowColor = color;
-    overlayCtx.shadowBlur = successful ? 5 * dpr : 0;
-    overlayCtx.lineWidth = Math.max(successful ? 2.5 : 1.5, (successful ? 2.5 : 1.5) * dpr);
-    overlayCtx.setLineDash(successful ? [] : [5 * dpr, 5 * dpr]);
-    const pad = 0.06 * Math.max(r.w, r.h) * scale;
+    if (!gridRegion && !successful && sightingAge > SIGHTING_FADE_MS) continue;
+    const quality = Math.max(0, Math.min(1, captureQualityRate(r, now)));
+    const pad = 0.055 * Math.max(r.w, r.h) * scale;
     const x = offX + r.x * scale - pad;
     const y = offY + r.y * scale - pad;
     const w = r.w * scale + 2 * pad;
     const h = r.h * scale + 2 * pad;
-    const len = 0.24 * Math.min(w, h);
-    const age = successful ? decodedAge : sightingAge;
-    const fade = successful ? INDICATOR_FADE_MS : SIGHTING_FADE_MS;
-    overlayCtx.globalAlpha = successful ? 1 - 0.65 * age / fade : 0.7 * (1 - age / fade);
-    overlayCtx.beginPath();
-    overlayCtx.moveTo(x, y + len);
-    overlayCtx.lineTo(x, y);
-    overlayCtx.lineTo(x + len, y);
-    overlayCtx.moveTo(x + w - len, y);
-    overlayCtx.lineTo(x + w, y);
-    overlayCtx.lineTo(x + w, y + len);
-    overlayCtx.moveTo(x + w, y + h - len);
-    overlayCtx.lineTo(x + w, y + h);
-    overlayCtx.lineTo(x + w - len, y + h);
-    overlayCtx.moveTo(x + len, y + h);
-    overlayCtx.lineTo(x, y + h);
-    overlayCtx.lineTo(x, y + h - len);
-    overlayCtx.stroke();
+    const minSide = Math.min(w, h);
+    const localGeometry = gridRegion && !distributedFit;
+    const weak = r.slotState === "LOW_QUALITY" || r.slotState === "LOST";
+
+    // Stable constellation: known slots do not disappear merely because a page
+    // did not decode in the last 700 ms. Dash means the whole-wall transform is
+    // still locally/provisionally constrained; opacity carries health.
+    overlayCtx.shadowBlur = 0;
+    overlayCtx.strokeStyle = localGeometry || !gridRegion ? OVERLAY_LOCAL_COLOR : OVERLAY_GHOST_COLOR;
+    overlayCtx.lineWidth = Math.max(1, 1.15 * dpr);
+    overlayCtx.setLineDash(localGeometry || !gridRegion ? [3 * dpr, 4 * dpr] : []);
+    overlayCtx.globalAlpha = gridRegion
+      ? localGeometry
+        ? 0.24
+        : weak
+          ? 0.07
+          : 0.10 + 0.12 * Math.sqrt(quality)
+      : Math.max(0, 0.38 * (1 - sightingAge / SIGHTING_FADE_MS));
+    drawOverlayCorners(x, y, w, h, 0.18 * minSide);
+
+    if (successful) {
+      // Every CRC-valid QR gives a small luminous pop. Color says *how it was
+      // decoded*, not merely whether it was good, so amber/orange immediately
+      // exposes expensive recovery while cyan/green shows the fast wall.
+      const t = Math.max(0, Math.min(1, decodedAge / INDICATOR_FADE_MS));
+      const pulse = 1 - t;
+      const pop = (1.5 + 2.5 * pulse) * dpr;
+      const color = overlayPathColor(r);
+      overlayCtx.strokeStyle = color;
+      overlayCtx.shadowColor = color;
+      overlayCtx.shadowBlur = (3 + 7 * pulse) * dpr;
+      overlayCtx.lineWidth = Math.max(2, (2 + 0.8 * pulse) * dpr);
+      overlayCtx.setLineDash([]);
+      overlayCtx.globalAlpha = 0.30 + 0.70 * pulse;
+      drawOverlayCorners(x - pop, y - pop, w + pop * 2, h + pop * 2, (0.20 + 0.07 * pulse) * minSide);
+    }
+
+    if (developerOverlay && gridRegion) drawOverlayDevBadge(r, x, y, w, h, dpr);
   }
+
+  // Optimizer measurements are deliberately separate from normal path state.
   const optimizerFadeMs = Math.max(INDICATOR_FADE_MS, 650);
   for (let i = optimizerOverlayHits.length - 1; i >= 0; i--) {
     const hit = optimizerOverlayHits[i];
@@ -3793,28 +3860,15 @@ function drawOverlay(now) {
     const y = offY + r.y * scale - pad;
     const w = r.w * scale + 2 * pad;
     const h = r.h * scale + 2 * pad;
-    const len = 0.24 * Math.min(w, h);
     overlayCtx.globalAlpha = 1 - 0.65 * age / optimizerFadeMs;
-    overlayCtx.strokeStyle = "#35d66f";
-    overlayCtx.shadowColor = "#35d66f";
+    overlayCtx.strokeStyle = OVERLAY_PATH_COLORS.sparse;
+    overlayCtx.shadowColor = OVERLAY_PATH_COLORS.sparse;
     overlayCtx.shadowBlur = 5 * dpr;
     overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);
     overlayCtx.setLineDash([]);
-    overlayCtx.beginPath();
-    overlayCtx.moveTo(x, y + len);
-    overlayCtx.lineTo(x, y);
-    overlayCtx.lineTo(x + len, y);
-    overlayCtx.moveTo(x + w - len, y);
-    overlayCtx.lineTo(x + w, y);
-    overlayCtx.lineTo(x + w, y + len);
-    overlayCtx.moveTo(x + w, y + h - len);
-    overlayCtx.lineTo(x + w, y + h);
-    overlayCtx.lineTo(x + w - len, y + h);
-    overlayCtx.moveTo(x + len, y + h);
-    overlayCtx.lineTo(x, y + h);
-    overlayCtx.lineTo(x, y + h - len);
-    overlayCtx.stroke();
+    drawOverlayCorners(x, y, w, h, 0.24 * Math.min(w, h));
   }
+  if (developerOverlay) drawOverlayDevLegend(dpr);
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
@@ -6444,6 +6498,10 @@ function onDecoded(bytes, box, info) {
     }
     if (productionTrace) productionTrace.stateAfter = gridLattice.state;
     activeBenchmarkFrame = priorBenchmarkFrame;
+  }
+  if (decodedRegion && info?.decodePath) {
+    decodedRegion.decodePath = info.decodePath;
+    decodedRegion.decodePathAt = decodedAt;
   }
   if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);
   if (!decoder) {
