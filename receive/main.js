@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.251";
+const RECEIVER_RUNTIME_BUILD = "v0.5.252";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -875,7 +875,9 @@ function noteGridTransition(from, to, reason, at) {
   trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
 }
 const STATS_WINDOW_MS = 1e3;
-const STATS_TICK_MS = 250;
+const STATS_TICK_MS = 100;
+const DIAGNOSTICS_TICK_MS = 250;
+let lastDiagnosticsPaintAt = -Infinity;
 let stream = null;
 let decoder = null;
 function releaseTransportDecoder() {
@@ -7572,7 +7574,11 @@ function updateStats(forceDiagnostics = false) {
   if (done) return;
   const now = receiverNow();
   if (optimizeEnabled) beginOptimizeWhenReady();
-  if (forceDiagnostics || !receiverDevActions.hidden) renderFocusDiagnostics();
+  const paintDiagnostics = forceDiagnostics || !receiverDevActions.hidden && now - lastDiagnosticsPaintAt >= DIAGNOSTICS_TICK_MS;
+  if (paintDiagnostics) {
+    lastDiagnosticsPaintAt = now;
+    renderFocusDiagnostics();
+  }
   const prune = (a) => {
     while (a.length > 0 && a[0] < now - STATS_WINDOW_MS) a.shift();
   };
@@ -7592,7 +7598,7 @@ function updateStats(forceDiagnostics = false) {
   const uniqueRate = perSecond(uniqueQrTimes);
 const duplicateRate = perSecond(duplicateQrTimes);
 const usefulRate = perSecond(usefulFrameTimes);
-if ((forceDiagnostics || !receiverDevActions.hidden) && transportDiagnostics) {
+if (paintDiagnostics && transportDiagnostics) {
   const transportRate = uniqueRate + duplicateRate;
   const duplicatePercent = transportRate > 0 ? duplicateRate / transportRate * 100 : 0;
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
@@ -7681,7 +7687,8 @@ Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
   transportDiagnostics.textContent += `\n${duplicateSourceDeltaSummary()}`;
 }
-  metric("m-cap").textContent = `${cameraRate.toFixed(1)} fps`;
+  // Intentionally CPU/decoder throughput, not camera capture rate.
+  metric("m-cap").textContent = `${completionRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
   const activeJobs = pool.activeJobs;
   const oldestActiveMs = activeJobs.length ? Math.max(...activeJobs.map((job) => job.ageMs)) : 0;
