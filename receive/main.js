@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.271";
+const RECEIVER_RUNTIME_BUILD = "v0.5.272";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1982,6 +1982,7 @@ let geometryCoverageCollapseStreak = 0;
 let geometryCoverageCollapseLastAt = 0;
 let geometryCoverageCollapseStartedAt = 0;
 let geometryCoverageLastScanId = -1;
+let geometryRecoveryAssistUntil = 0;
 let recoveryWorkerRestarts = 0;
 let recoveryAbortedJobs = 0;
 let recoveryAbortedWorkerMs = 0;
@@ -2146,6 +2147,7 @@ function noteDecodeCompleted(id, completion) {
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
       geometryCoverageCollapseStartedAt = 0;
+      geometryRecoveryAssistUntil = 0;
     } else if (geometryCoverageHealthy && coverage <= GEOMETRY_COLLAPSE_BAD_RATIO) {
       if (now - geometryCoverageCollapseLastAt > GEOMETRY_COLLAPSE_MAX_GAP_MS) {
         geometryCoverageCollapseStreak = 0;
@@ -2154,6 +2156,15 @@ function noteDecodeCompleted(id, completion) {
       if (!geometryCoverageCollapseStreak) geometryCoverageCollapseStartedAt = now;
       geometryCoverageCollapseLastAt = now;
       geometryCoverageCollapseStreak++;
+      if (geometryCoverageCollapseStreak >= 2) {
+        // Do not wait for the destructive reacquire threshold before helping.
+        // A predicted-slot seed scan is cheap and one CRC-valid QR can now
+        // re-homography the entire wall. Reset its throttle so the next fresh
+        // camera frame gets a recovery opportunity immediately.
+        geometryRecoveryAssistUntil = Math.max(geometryRecoveryAssistUntil, now + 550);
+        lastFullScan = 0;
+        notePipelineEvent("geometry-recovery-assist", trackedOutputs);
+      }
       if (geometryCoverageCollapseStreak >= GEOMETRY_COLLAPSE_STREAK &&
           now - geometryCoverageCollapseStartedAt >= GEOMETRY_COLLAPSE_MIN_SPAN_MS) {
         notePipelineEvent("geometry-coverage-collapse", trackedOutputs);
@@ -2163,6 +2174,7 @@ function noteDecodeCompleted(id, completion) {
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
       geometryCoverageCollapseStartedAt = 0;
+      geometryRecoveryAssistUntil = 0;
     }
   }
   const benchmarkTrace = benchmarkJobFrames.get(id);
@@ -3950,7 +3962,7 @@ function renderFocusDiagnostics() {
     `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · restoring recent winner" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -4305,6 +4317,7 @@ function stopReceiver() {
   geometryCoverageCollapseLastAt = 0;
   geometryCoverageCollapseStartedAt = 0;
   geometryCoverageLastScanId = -1;
+  geometryRecoveryAssistUntil = 0;
   recoveryWorkerRestarts = 0;
   recoveryAbortedJobs = 0;
   recoveryAbortedWorkerMs = 0;
@@ -4423,13 +4436,7 @@ async function start() {
   // compilation is hidden behind work we already have to wait for instead of
   // beginning only after the live preview is visible.
   pool.resize(selectedWorkerCount());
-  try {
-    await prepareRaptorQ();
-  } catch (error) {
-    if (startAttempt === cameraStartGen) pool.resize(0);
-    offerRetry(`Transport: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
+  const transportReady = prepareRaptorQ().then(() => null, (error) => error);
   if (startAttempt !== cameraStartGen || receiverPaused) return;
   preview.style.display = "";
   preview.classList.add("camera-loading");
@@ -4500,6 +4507,17 @@ async function start() {
     offerRetry(
       denied ? location.protocol === "file:" ? localCameraMessage : "Camera permission denied — allow it, then tap Enable camera again." : `Camera: ${err instanceof Error ? err.message : String(err)}`
     );
+    return;
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) {
+    acquiredStream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  const transportError = await transportReady;
+  if (transportError) {
+    acquiredStream.getTracks().forEach((track) => track.stop());
+    if (startAttempt === cameraStartGen) pool.resize(0);
+    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
     return;
   }
   if (startAttempt !== cameraStartGen || receiverPaused) {
@@ -4730,7 +4748,7 @@ function startFramePump(gen, track) {
           try { reader.releaseLock(); } catch {}
         });
         scheduleFrame(gen);
-      }, 800);
+      }, 250);
       void pumpTrackFrames(gen, reader, processor).finally(() => clearTimeout(startupWatchdog));
       return;
     } catch (error) {
@@ -5677,8 +5695,9 @@ async function captureFrame(source) {
   // The old 900 ms recent-hit gate made a small camera bump look frozen for
   // roughly a second. A short silence now starts a cheap predicted-slot probe;
   // full-frame recovery remains a later escalation.
-  const geometryProbeDue = lockedGeometryTrusted && freshLockedHits === 0 &&
-    lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS;
+  const coverageRecoveryAssist = lockedGeometryTrusted && geometryRecoveryAssistUntil > now;
+  const geometryProbeDue = lockedGeometryTrusted && (coverageRecoveryAssist ||
+    freshLockedHits === 0 && lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS);
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
   // Three tracked misses are evidence for a rescue probe, not evidence that the
@@ -5756,7 +5775,7 @@ async function captureFrame(source) {
   }
   const ctx = grab.getContext("2d", { willReadFrequently: true });
   // Before lock, six simultaneous 3.7 MP finder scans only contend for CPU
-  // and memory bandwidth. Two fresh-frame seed searches are enough to keep
+  // and memory bandwidth. Three fresh-frame seed searches are enough to keep
   // acquisition parallel without burying slower phones under duplicate work.
   const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
   const globalRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked &&
