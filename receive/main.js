@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.293";
+const RECEIVER_RUNTIME_BUILD = "v0.5.294";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -204,7 +204,7 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
-const AUTO_QR_EV_BIAS = -0.8;
+const AUTO_QR_EV_BIAS = 0;
 const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
 let automaticExposureAxis = true;
@@ -220,23 +220,28 @@ const AUTO_OPTICS_FALLBACK_EXPOSURE = 50; // one 5 ms escape hatch for genuinely
 // has chosen 10 ms / ISO 100 and 10 ms / ISO 200 on adjacent runs, while the
 // latter sustained roughly 2-3x more useful throughput. Keep the shutter fixed
 // for motion, then spend a short one-time window finding the useful gain.
-const AUTO_OPTICS_GAIN_SETTLE_MS = 340;
-const AUTO_OPTICS_GAIN_SAMPLE_MS = 520;
+const AUTO_OPTICS_GAIN_SETTLE_MS = 220;
+const AUTO_OPTICS_GAIN_SAMPLE_MS = 380;
 const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 20;
 const AUTO_OPTICS_GAIN_IMPROVEMENT = 1.08;
 // AirGapper is looking at an emissive black/white modem, not making a pleasing
 // photograph. Prefer less light when two candidates decode essentially alike.
 const AUTO_OPTICS_DARK_TIE_RATIO = 0.985;
 const AUTO_OPTICS_STARTUP_HEALTHY_YIELD = 0.45;
-const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.15;
-const AUTO_OPTICS_GAIN_MAX_PROBES = 4;
+const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.55;
+const AUTO_OPTICS_GAIN_MAX_PROBES = 8;
 const AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA = 0.025;
-const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 4.0;
+const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 8.0;
 const AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT = 0.08;
 const AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO = 0.72;
 const AUTO_OPTICS_CONTROL_RETRY_MS = 850;
 const AUTO_OPTICS_COHORT_MAX_SLOTS = 18;
 const AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT = 2;
+const AUTO_OPTICS_HEALTHY_YIELD = 0.50;
+const AUTO_OPTICS_HEALTHY_TAIL_YIELD = 0.20;
+const AUTO_OPTICS_REUSABLE_YIELD = 0.60;
+const AUTO_OPTICS_REUSABLE_TAIL_YIELD = 0.35;
+const AUTO_OPTICS_UNHEALTHY_RETRY_MS = 3000;
 const AUTO_OPTICS_NEAR_BEST_SCORE = 0.97;
 const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.03;
 const AUTO_OPTICS_AE_PRODUCT_CEILING = 6.0;
@@ -250,11 +255,11 @@ const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 650;
 const AUTO_OPTICS_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
-const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v4";
+const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v5";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
 const AUTO_OPTICS_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS = 5 * 60 * 1000;
-const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v4";
+const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v5";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
 const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
@@ -262,7 +267,7 @@ const AUTO_OPTICS_MEMORY_BOOT_MAX_MS = 650;
 // A relative winner is meaningless when the whole local ISO neighborhood is
 // unusable. Below this per-QR yield, abandon manual tuning and let hardware AE
 // re-establish a sane exposure product before trying the motion-safe handoff.
-const AUTO_OPTICS_COLLAPSE_YIELD = 0.12;
+const AUTO_OPTICS_COLLAPSE_YIELD = 0.25;
 const AUTO_OPTICS_COLLAPSE_RETRY_MS = 900;
 const AUTO_OPTICS_HOLD_SAMPLE_MS = 700;
 const AUTO_OPTICS_HOLD_COLLAPSE_MS = 1400;
@@ -1153,9 +1158,9 @@ function noteGuidedRobustBaseline(latencyMs) {
   guidedRollout.robustLatencies.push(latencyMs);
   if (guidedRollout.robustLatencies.length > 24) guidedRollout.robustLatencies.shift();
 }
-function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs) {
+function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs, observational = false) {
   guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
-  if (!stage) return;
+  if (!stage || observational) return;
   // Do not demote a low-latency decoder merely because one animated display
   // frame produced few symbols. A zero-output guided frame is cheap (~10-60ms
   // in the measured run); dense robust frames are the expensive 0.2-2s events.
@@ -2115,7 +2120,7 @@ function noteDecodeCompleted(id, completion) {
     const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     const guided = completion.guidedMetrics;
-    if (guided) noteGuidedFallbackMetrics(guided);
+    if (guided && !auditMode?.autoOpticsProbe) noteGuidedFallbackMetrics(guided);
     const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
@@ -2197,8 +2202,8 @@ function noteDecodeCompleted(id, completion) {
     if (completion.error === "Decode worker timed out") livePipeline.timeouts++;
     else if (completion.error) livePipeline.errors++;
     if (!auditMode.full) {
-      if (auditMode.guided) noteGuidedCompletion(auditMode.guidedStage, outputSymbols, auditMode.tracks, latencyMs);
-      else if (!completion.error && completion.readFullAttempts) noteGuidedRobustBaseline(latencyMs);
+      if (auditMode.guided) noteGuidedCompletion(auditMode.guidedStage, outputSymbols, auditMode.tracks, latencyMs, auditMode.autoOpticsProbe);
+      else if (!auditMode.autoOpticsProbe && !completion.error && completion.readFullAttempts) noteGuidedRobustBaseline(latencyMs);
     }
   }
   if (auditMode) {
@@ -2391,11 +2396,13 @@ function noteDecodeCompleted(id, completion) {
       if (region.gridSlot !== void 0 && Number.isInteger(decodedSlot)) return decodedSlot === region.gridSlot;
       return Boolean(symbol.box && regionAt(symbol.box) === region);
     });
-    if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
-    region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
-    if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
-      region.consecutiveMisses++;
-      if (region.consecutiveMisses >= 3) region.decoded = false;
+    if (!auditMode?.autoOpticsProbe) {
+      if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
+      region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
+      if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
+        region.consecutiveMisses++;
+        if (region.consecutiveMisses >= 3) region.decoded = false;
+      }
     }
   }
 }
@@ -3113,7 +3120,7 @@ function rememberAutomaticOptics(track, exposure, iso, score = 0, yieldRate = 0,
       score: Number.isFinite(score) ? score : 0,
       yieldRate: Number.isFinite(yieldRate) ? yieldRate : 0,
       confirmed: true,
-      controller: 291,
+      controller: 294,
       ...(Number.isFinite(lightScale) ? { lightScale } : {}),
       at: Date.now()
     };
@@ -3344,35 +3351,36 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   if (!automaticOpticsSessionAlive(track)) return { iso: seedIso, probes: [] };
   autoOpticsRuntimeState = "tuning";
   const cap = Math.max(isoRange.min, Math.min(isoRange.max, maxAutoIso));
-  const remembered = Number.isFinite(rememberedIso)
-    ? quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, rememberedIso)), isoRange)
+  const clampIso = (value) => quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, value)), isoRange);
+  const seed = clampIso(seedIso);
+  const remembered = Number.isFinite(rememberedIso) ? clampIso(rememberedIso) : void 0;
+  const manualHint = Number.isFinite(preferredIso)
+    ? clampIso(Number.isFinite(preferredExposureTime) && preferredExposureTime > 0
+      ? preferredIso * preferredExposureTime / Math.max(1e-6, exposure)
+      : preferredIso)
     : void 0;
-  const base = remembered ?? quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, seedIso)), isoRange);
   const probes = [];
-  const measured = new Set();
+  const measured = new Map();
   let invalidatedByMotion = false;
+
   const probe = async (candidate, label, options = {}) => {
-    const requested = quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, candidate)), isoRange);
+    const requested = clampIso(candidate);
     const key = String(requested);
-    if (measured.has(key) && !options.confirm)
-      return probes.find((item) => String(item.requestedIso) === key) || null;
-    if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES && !options.confirm) return null;
-    if (!options.confirm) measured.add(key);
-    autoOpticsTuneSummary = `cohort ${autoOpticsMeasurementSlots?.size || 0} · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
+    if (!options.confirm && measured.has(key)) return measured.get(key);
+    if (!options.confirm && measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES) return null;
+    autoOpticsTuneSummary = `global gain · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
     const result = await measureAutomaticIsoCandidate(track, exposure, requested, isoRange, options);
     if (result?.unstable) invalidatedByMotion = true;
-    if (result && !options.confirm) probes.push(result);
+    if (result && !options.confirm) {
+      measured.set(key, result);
+      probes.push(result);
+    }
     return result;
   };
-  const materiallyBetter = (candidate, reference) => {
-    if (!candidate?.valid) return false;
-    if (!reference?.valid) return true;
-    return candidate.score >= reference.score * AUTO_OPTICS_GAIN_IMPROVEMENT ||
-      candidate.yieldRate >= reference.yieldRate + AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA;
-  };
   const mergeMap = (a, b) => {
-    const merged = new Map(a ?? []);
-    for (const [key, value] of b ?? []) merged.set(key, (merged.get(key) || 0) + value);
+    const merged = new Map();
+    for (const [key, value] of a ?? []) merged.set(key, (merged.get(key) || 0) + Number(value || 0));
+    for (const [key, value] of b ?? []) merged.set(key, (merged.get(key) || 0) + Number(value || 0));
     return merged;
   };
   const combine = (a, b) => {
@@ -3415,95 +3423,165 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
     return yieldDrift <= AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT &&
       scoreRatio >= AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO;
   };
+  const tailFor = (item) => Number.isFinite(item?.tailYield) ? item.tailYield : Number(item?.yieldRate) || 0;
+  const coverageFor = (item) => Number.isFinite(item?.cohortCoverage) ? item.cohortCoverage : 1;
+  const breadthFor = (item) => Number.isFinite(item?.breadth) ? item.breadth : Number(item?.yieldRate > 0);
+  const quality = (item) => {
+    if (!item?.valid) return -Infinity;
+    return coverageFor(item) * (
+      0.70 * item.yieldRate +
+      0.20 * tailFor(item) +
+      0.10 * breadthFor(item)
+    );
+  };
+  const healthy = (item) => Boolean(item?.valid && coverageFor(item) >= 0.95 &&
+    item.yieldRate >= AUTO_OPTICS_HEALTHY_YIELD &&
+    ((item.cohortSize || 0) <= 2 || tailFor(item) >= AUTO_OPTICS_HEALTHY_TAIL_YIELD));
+  const reusable = (item) => Boolean(healthy(item) &&
+    item.yieldRate >= AUTO_OPTICS_REUSABLE_YIELD &&
+    ((item.cohortSize || 0) <= 2 || tailFor(item) >= AUTO_OPTICS_REUSABLE_TAIL_YIELD));
+  const better = (candidate, winner) => {
+    if (!candidate?.valid) return false;
+    if (!winner?.valid) return true;
+    const cq = quality(candidate), wq = quality(winner);
+    if (cq > wq + 0.01) return true;
+    if (wq > cq + 0.01) return false;
+    if (candidate.yieldRate > winner.yieldRate + 0.015) return true;
+    if (winner.yieldRate > candidate.yieldRate + 0.015) return false;
+    if (tailFor(candidate) > tailFor(winner) + 0.03) return true;
+    if (tailFor(winner) > tailFor(candidate) + 0.03) return false;
+    return Number(candidate.requestedIso) < Number(winner.requestedIso);
+  };
+  const bestOf = (items) => items.filter((item) => item?.valid)
+    .reduce((winner, item) => better(item, winner) ? item : winner, null);
+  const moved = (fallbackIso = seed) => ({
+    iso: fallbackIso,
+    probes,
+    deferred: true,
+    retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
+    deferredReason: "global gain sweep invalidated by movement · holding current short shutter"
+  });
+  const confirmCandidate = async (candidate, label = "confirm") => {
+    if (!candidate?.valid) return null;
+    const confirmation = await probe(candidate.requestedIso, label, { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
+    if (!confirmation || confirmation.unstable || !confirmation.valid) return null;
+    if (confirmation.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, candidate.yieldRate - 0.12) ||
+        quality(confirmation) < quality(candidate) - 0.14) return null;
+    return combine(candidate, confirmation);
+  };
 
-  const baseline = await probe(base, remembered !== void 0 ? "memory seed" : "seed");
-  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-  if (invalidatedByMotion) return { iso: base, probes, deferred: true };
+  for (const [hint, label] of [[remembered, "memory"], [manualHint, "manual hint"]]) {
+    if (!Number.isFinite(hint)) continue;
+    const first = await probe(hint, label);
+    if (!automaticOpticsSessionAlive(track)) return { iso: hint, probes };
+    if (invalidatedByMotion) return moved(hint);
+    if (!healthy(first)) continue;
+    const confirmed = await confirmCandidate(first, `${label} confirm`);
+    if (!automaticOpticsSessionAlive(track)) return { iso: hint, probes };
+    if (invalidatedByMotion) return moved(hint);
+    if (confirmed && healthy(confirmed)) {
+      autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(confirmed.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}%`;
+      return { iso: confirmed.iso, probes, best: confirmed, healthy: true, reusable: reusable(confirmed) };
+    }
+  }
 
-  const darker = await probe(base / Math.SQRT2, "darker");
-  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-  if (invalidatedByMotion) return { iso: base, probes, deferred: true };
+  // Global log-space sweep. Crucially, low gain is not allowed to stop brighter
+  // exploration. A flat bad basin at 100/200 must still cross 400/800-class ISO.
+  const baseline = await probe(seed, "sweep 1x");
+  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
+  if (invalidatedByMotion) return moved(seed);
+  for (const [factor, label] of [[2, "sweep 2x"], [4, "sweep 4x"], [8, "sweep 8x"]]) {
+    const candidate = Math.min(cap, seed * factor);
+    if (candidate <= seed * 1.01) continue;
+    await probe(candidate, label);
+    if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
+    if (invalidatedByMotion) return moved(seed);
+  }
+  if (seed > isoRange.min * 1.35 && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES)
+    await probe(seed / 2, "sweep 0.5x");
+  if (cap > seed * 1.01 && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES)
+    await probe(cap, "sweep ceiling");
+  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
+  if (invalidatedByMotion) return moved(seed);
 
-  const brighter = await probe(Math.min(cap, base * 2), "brighter 2x");
-  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-  if (invalidatedByMotion) return { iso: base, probes, deferred: true };
-
-  const control = await probe(base, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
-  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+  const control = await probe(seed, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
+  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
   if (!control || control.unstable || !control.valid || invalidatedByMotion) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · cohort control invalidated · retry after TRACK settles`;
-    return {
-      iso: base,
-      probes,
-      deferred: true,
-      retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-      deferredReason: "same-slot control invalidated · holding short shutter until TRACK settles"
-    };
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global control invalidated · retry`;
+    return moved(seed);
   }
   if (baseline?.valid && !controlStable(baseline, control)) {
     const drift = Math.abs(baseline.yieldRate - control.yieldRate);
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · same-slot base ${Math.round(baseline.yieldRate * 100)}→${Math.round(control.yieldRate * 100)}% · tracker still maturing`;
     return {
-      iso: base,
+      iso: seed,
       probes,
       deferred: true,
       retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-      deferredReason: `same-slot base drifted ${(drift * 100).toFixed(0)} points · holding short shutter until TRACK settles`
+      deferredReason: `global base control drifted ${(drift * 100).toFixed(0)} points · retry after TRACK settles`
     };
   }
-
   const baselineReference = combine(baseline, control);
-  const localValid = [baselineReference, darker, brighter].filter((item) => item?.valid);
-  const localBest = localValid.reduce((winner, item) =>
-    !winner || item.score > winner.score || item.score === winner.score && item.yieldRate > winner.yieldRate ? item : winner, null);
-
-  if (measured.size < AUTO_OPTICS_GAIN_MAX_PROBES && localBest && materiallyBetter(localBest, baselineReference)) {
-    if (localBest.requestedIso < base * 0.99) {
-      await probe(base / 2, "darker boundary");
-    } else if (localBest.requestedIso > base * 1.01) {
-      const brightLimit = Math.min(cap, base * AUTO_OPTICS_GAIN_MAX_BASE_RATIO);
-      if (brightLimit > localBest.requestedIso * 1.01)
-        await probe(brightLimit, "brighter 4x boundary");
-    }
-  }
-  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
-  if (invalidatedByMotion) return { iso: base, probes, deferred: true };
-
-  const decisionCandidates = [
+  let decisionCandidates = [
     baselineReference,
-    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(base))
+    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(seed))
   ].filter((item) => item?.valid);
-  if (!decisionCandidates.length) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · insufficient cohort evidence`;
-    return { iso: base, probes, deferred: true };
+  let coarseBest = bestOf(decisionCandidates);
+  if (!coarseBest) {
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global sweep produced no complete same-slot evidence`;
+    return { iso: seed, probes, deferred: true, retryMs: AUTO_OPTICS_CONTROL_RETRY_MS };
   }
-  const best = decisionCandidates.reduce((winner, item) =>
-    !winner || item.score > winner.score || item.score === winner.score && item.yieldRate > winner.yieldRate ? item : winner, null);
+
+  for (const [candidate, label] of [
+    [coarseBest.requestedIso / Math.SQRT2, "refine darker"],
+    [coarseBest.requestedIso * Math.SQRT2, "refine brighter"]
+  ]) {
+    if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES) break;
+    const clamped = clampIso(candidate);
+    if (Math.abs(clamped - coarseBest.requestedIso) <= Math.max(1, coarseBest.requestedIso * 0.03)) continue;
+    await probe(clamped, label);
+    if (!automaticOpticsSessionAlive(track)) return { iso: coarseBest.requestedIso, probes };
+    if (invalidatedByMotion) return moved(coarseBest.requestedIso);
+  }
+  decisionCandidates = [
+    baselineReference,
+    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(seed))
+  ].filter((item) => item?.valid);
+  const best = bestOf(decisionCandidates) ?? coarseBest;
   if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · collapsed`;
-    return { iso: base, probes, best, collapsed: true };
+    autoOpticsTuneSummary = `cohort ${best.cohortSize || 0} · ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · all gain regions collapsed`;
+    return { iso: best.requestedIso, probes, best, collapsed: true };
   }
-  const yieldFloor = Math.max(AUTO_OPTICS_COLLAPSE_YIELD, best.yieldRate - AUTO_OPTICS_NEAR_BEST_YIELD_DELTA);
+
+  const bestQuality = quality(best);
   const nearBest = decisionCandidates.filter((item) =>
-    item.score >= best.score * AUTO_OPTICS_NEAR_BEST_SCORE && item.yieldRate >= yieldFloor
+    quality(item) >= bestQuality - 0.025 &&
+    item.yieldRate >= best.yieldRate - AUTO_OPTICS_NEAR_BEST_YIELD_DELTA &&
+    tailFor(item) >= tailFor(best) - 0.08
   ).sort((a, b) => a.requestedIso - b.requestedIso);
   const selected = nearBest[0] ?? best;
+  const selectedIsSeed = String(selected.requestedIso) === String(seed);
+  const confirmed = selectedIsSeed
+    ? baselineReference
+    : await confirmCandidate(selected);
+  if (!confirmed) {
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global winner confirmation disagreed · retry`;
+    return { iso: selected.requestedIso, probes, deferred: true, retryMs: AUTO_OPTICS_CONTROL_RETRY_MS };
+  }
 
-  const selectedIsBase = String(selected.requestedIso) === String(base);
-  const confirm = selectedIsBase
-    ? control
-    : await probe(selected.requestedIso, "confirm", { confirm: true, sampleMs: 560 });
-  if (!confirm || confirm.unstable || !confirm.valid) {
-    return { iso: selected.requestedIso, probes, deferred: true };
+  const isHealthy = healthy(confirmed);
+  const canReuse = reusable(confirmed);
+  autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · global ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} → ISO ${Math.round(confirmed.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}%`;
+  if (!isHealthy) {
+    return {
+      iso: confirmed.iso,
+      probes,
+      best: confirmed,
+      deferred: true,
+      retryMs: AUTO_OPTICS_UNHEALTHY_RETRY_MS,
+      deferredReason: `global sweep best ISO ${Math.round(confirmed.iso)} only ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}% · temporary, not remembered`
+    };
   }
-  if (!selectedIsBase && (confirm.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, selected.yieldRate - 0.10) ||
-      confirm.score < selected.score * 0.84)) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · same-slot confirmation disagreed · retry later`;
-    return { iso: selected.requestedIso, probes, deferred: true };
-  }
-  const confirmed = selectedIsBase ? baselineReference : combine(selected, confirm);
-  autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · control ${Math.round(control.yieldRate * 100)}% → ISO ${Math.round(confirm.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round((confirmed.tailYield || 0) * 100)}%`;
-  return { iso: confirm.iso, probes, best: confirmed };
+  return { iso: confirmed.iso, probes, best: confirmed, healthy: true, reusable: canReuse };
 }
 async function settleAutomaticQrOptics(track, now) {
   if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
@@ -3607,12 +3685,12 @@ async function settleAutomaticQrOptics(track, now) {
     const actual = track.getSettings();
     const tunedExposure = Number(actual.exposureTime) || exposure;
     const tunedIso = Number(actual.iso) || tuned.iso;
-    const reusableWinner = tuned.best.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD;
+    const reusableWinner = tuned.reusable === true && tuned.best.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD;
     if (reusableWinner)
       rememberAutomaticOptics(track, tunedExposure, tunedIso, tuned.best.score, tuned.best.yieldRate, aeExposureProduct);
     autoOpticsTuneSummary += reusableWinner ? " · remembered" : " · transient";
     autoOpticsAeBaseline = void 0;
-    focusController.adoptAutomaticCameraState("short-shutter automatic optics converged on a confirmed local decoder optimum");
+    focusController.adoptAutomaticCameraState("short-shutter automatic optics converged on a globally swept, independently confirmed decoder optimum");
     notePipelineEvent("auto-optics-converged", Math.round(tuned.best.yieldRate * 100));
   } finally {
     autoOpticsMeasurementSlots = void 0;
@@ -3663,7 +3741,9 @@ function buildAutomaticOpticsAcquisitionCandidates(track, aeBaseline, exposureRa
   const fasterExposure = quantizeCameraRange(Math.max(exposureRange.min, seed.exposure / Math.SQRT2), exposureRange);
   add(fasterExposure, seed.targetProduct / Math.max(exposureRange.min, fasterExposure), "faster");
   add(seed.exposure, seed.iso * Math.SQRT2, "brighter");
-  add(seed.exposure, seed.iso * 2, "bright rescue");
+  add(seed.exposure, seed.iso * 2, "bright rescue 2x");
+  add(seed.exposure, seed.iso * 4, "bright rescue 4x");
+  add(seed.exposure, seed.iso * 8, "bright rescue 8x");
   const lowLightExposure = quantizeCameraRange(
     Math.min(exposureRange.max, AUTO_OPTICS_FALLBACK_EXPOSURE, 1e4 / fps * 0.18),
     exposureRange
@@ -3747,14 +3827,8 @@ async function rescueAutomaticQrAcquisition(track, now) {
       autoOpticsAcquisitionSince = receiverNow();
       autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_RESCUE_RETRY_MS;
       autoOpticsTuneSummary = `race hit · ${winner.candidate.label} · ${formatExposureMs(winner.exposure)} · ISO ${Math.round(winner.iso)} · ${p.validDecodes} QR`;
-      rememberAutomaticOptics(
-        track,
-        winner.exposure,
-        winner.iso,
-        p.perQrAttemptSuccessRate,
-        p.perQrAttemptSuccessRate,
-        aeBaseline.exposure * aeBaseline.iso
-      );
+      // Acquisition race winners remain session evidence only. Durable
+      // automatic-optics memory is written after the post-lock global sweep.
       focusController.adoptAutomaticCameraState("acquisition optics race found a QR-proven setting");
       notePipelineEvent("auto-optics-acquisition-race-hit");
       return;
@@ -5475,6 +5549,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     full: Boolean(message.full),
     acquisition: Boolean(message.full && !gridLattice.locked),
     reacquire: Boolean(message.full && gridLattice.locked),
+    autoOpticsProbe: Boolean(autoOpticsMeasurementSlots?.size),
     tracks: Array.isArray(message.tracks) ? message.tracks.length : 0,
     guided: Boolean(guidedStage),
     guidedStage,
@@ -6220,9 +6295,9 @@ async function captureFrame(source) {
   // and memory bandwidth. Three fresh-frame seed searches are enough to keep
   // acquisition parallel without burying slower phones under duplicate work.
   const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
-  const globalRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked &&
+  const globalRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
     (allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS);
-  const localRecoverySeedScan = fullScanDue && !captureNextScan && gridLattice.locked &&
+  const localRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
     geometryProbeDue && !globalRecoverySeedScan && lockedGeometryCandidates.length > 0;
   if (globalRecoverySeedScan) {
     const recoveryInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
