@@ -1,0 +1,55 @@
+name: v254 startup timing correctness
+
+on:
+  push:
+    paths:
+      - .github/v254_startup_timing_patch.py
+      - .github/workflows/v254-startup-timing.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply v254 candidate
+        run: python3 .github/v254_startup_timing_patch.py
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Run existing receiver benchmark unchanged
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=1 node benchmark/offline-runner.mjs
+      - name: Promote passing v254
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -rf node_modules benchmark/offline-summary.json
+          git rm .github/v254_startup_timing_patch.py .github/workflows/v254-startup-timing.yml
+          git add index.html main.js receive/main.js sw.js
+          git commit -m "v0.5.254 fix startup timing diagnostics"
+          git pull --rebase origin master
+          git push origin HEAD:master
+      - name: Record rejected v254
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -f .github/v254_startup_timing_patch.py .github/workflows/v254-startup-timing.yml
+          git add -A
+          git commit -m "record v254 startup timing rejection" || true
+          git pull --rebase origin master
+          git push origin HEAD:master
+          exit 1
