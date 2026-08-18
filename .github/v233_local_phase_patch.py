@@ -144,6 +144,14 @@ retry=r'''                            if (!success && centerOnlyRs) {
 if needle not in section: raise SystemExit('stable RS retry anchor missing')
 section=section.replace(needle,retry,1)
 s=s[:start]+section+s[end:]
+
+# Keep the C++/JS ABI size assertion in sync with the four added counters.
+old_assert='''static_assert(sizeof(DecimenGuidedMetrics) == 160,
+              "DecimenGuidedMetrics JS ABI must allocate 160 bytes");'''
+new_assert='''static_assert(sizeof(DecimenGuidedMetrics) == 176,
+              "DecimenGuidedMetrics JS ABI must allocate 176 bytes");'''
+if old_assert not in s: raise SystemExit('guided metrics static_assert anchor missing')
+s=s.replace(old_assert,new_assert,1)
 cpp.write_text(s)
 
 # Extend the guided metrics ABI with diagnostic-only phase counters.
