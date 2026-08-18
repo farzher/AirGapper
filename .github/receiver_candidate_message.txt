@@ -1,0 +1,1 @@
+v0.5.271 instant acquisition and bump recovery
