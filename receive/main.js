@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.274";
+const RECEIVER_RUNTIME_BUILD = "v0.5.275";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5719,6 +5719,8 @@ async function captureFrame(source) {
   // full-frame acquisition loop; only an active lattice may hand scheduling
   // over to tracked QR work.
   const preLatticeDiscovery = !gridLattice.active;
+  const geometryBootstrap = gridLattice.active && Boolean(lastGridSnapshot) && !lastGridSnapshot.distributedFit;
+  const acquisitionDiscovery = preLatticeDiscovery || geometryBootstrap;
   const gridNeedsDiscovery = preLatticeDiscovery || (lockedGeometryTrusted
     ? allLockedCandidatesCold
     : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST"));
@@ -5733,7 +5735,7 @@ async function captureFrame(source) {
     ? geometryProbeDue || allLockedCandidatesCold || trackingUnhealthy
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
-  const provisionalUnknownVisible = preLatticeDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
+  const provisionalUnknownVisible = acquisitionDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
     !region.decoded && region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
   ) : [];
   const acquisitionInFlight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
@@ -5743,8 +5745,8 @@ async function captureFrame(source) {
   // never stop discovery. With useful provisional geometry, keep one discovery
   // worker on visible unknown neighbors; if every unknown is offscreen, probe
   // globally only occasionally while tracked subsection throughput continues.
-  const provisionalNeedsDiscovery = preLatticeDiscovery && (
-    !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
+  const provisionalNeedsDiscovery = acquisitionDiscovery && (
+    geometryBootstrap || !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
     now - lastFullScan > GEOMETRY_PROBE_SILENCE_MS
   );
   // Once geometry has been proven, never let a transient zero-output window
@@ -5758,7 +5760,7 @@ async function captureFrame(source) {
   const fullScanDue = strictAcquiring
     ? Boolean(captureNextScan) || now - lastFullScan > ACQUISITION_SCAN_MS
     : captureNextScan ? !captureHasTrackedWork
-      : preLatticeDiscovery
+      : acquisitionDiscovery
         ? provisionalNeedsDiscovery && acquisitionInFlight < acquisitionLimit
         : needsRecoveryScan && now - lastFullScan > scanInterval;
   if (!fullScanDue && (strictAcquiring || regions.length === 0)) {
@@ -5833,7 +5835,7 @@ async function captureFrame(source) {
       : "seed";
     if (localRecoverySeedScan) acquisitionMode = "seed";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
-    if (!captureNextScan && preLatticeDiscovery && !lastGridSnapshot && !fullFrameSeed) {
+    if (!captureNextScan && acquisitionDiscovery && (!lastGridSnapshot || geometryBootstrap && provisionalUnknownVisible.length === 0) && !fullFrameSeed) {
       const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
       scanX = seed.x;
       scanY = seed.y;
@@ -5844,7 +5846,7 @@ async function captureFrame(source) {
     // should roughly be. Search visible unknown slots there while continuing
     // to track exact observed slots; do not spend a full-frame finder pass on
     // camera pixels that cannot contain the declared wall.
-    const provisionalCrop = preLatticeDiscovery && provisionalUnknownVisible.length > 0;
+    const provisionalCrop = acquisitionDiscovery && provisionalUnknownVisible.length > 0;
     // A generic decoder over the bounding box of *all* provisional unknowns is
     // almost a full-wall scan again. Dense walls then rediscover the same first
     // physical row on every pass (the decoder has a bounded result count), so
@@ -7763,7 +7765,7 @@ Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fast
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}
-Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} fresh · calibrated ${lastGridSnapshot.correctedSlots ?? 0}/${lastGridSnapshot.slots.length} · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
+Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} fresh · calibrated ${lastGridSnapshot.correctedSlots ?? 0}/${lastGridSnapshot.slots.length} · fit ${lastGridSnapshot.distributedFit ? "distributed" : "local"} · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}
 Pixel path ${lastDirectPixelPath.toUpperCase()}
 Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · acquisition ${hotPathAudit.acquisitionFullScans} · reacquire ${hotPathAudit.reacquireFullScans}`;
   transportDiagnostics.textContent += `\n${duplicateSourceDeltaSummary()}`;

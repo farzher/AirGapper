@@ -92,12 +92,23 @@ function bounds(quad) {
   const bottom = Math.max(...points.map((p) => p.y));
   return { x: left, y: top, w: right - left, h: bottom - top };
 }
-function lockReady(layout, observations) {
-  // One CRC-verified AirGapper QR is a complete geometric seed. The packet
-  // declares the wall layout and this QR's slot; its measured four-corner quad
-  // provides the eight constraints needed for the wall homography. Additional
-  // QRs improve the fit / learn lens residuals, but must never delay acquisition.
+function activationReady(layout, observations) {
+  // One CRC-verified AirGapper QR is enough to predict every declared slot and
+  // begin tracked decoding immediately.
   return observations.length > 0;
+}
+function distributedFitReady(layout, observations) {
+  const count = layout.cols * layout.rows;
+  if (count <= 1) return observations.length > 0;
+  const slots = [...new Set(observations.map((observation) => observation.slotIndex))];
+  if (slots.length < 2) return false;
+  if (layout.cols === 1 || layout.rows === 1) return true;
+  const cols = new Set(slots.map((slot) => slot % layout.cols));
+  const rows = new Set(slots.map((slot) => Math.floor(slot / layout.cols)));
+  // A fresh fit may replace the longer-lived anchors only after observations
+  // span both wall axes. Two diagonal slots are enough. Two slots from one row
+  // or one column are still only a local/provisional geometric seed.
+  return cols.size >= 2 && rows.size >= 2;
 }
 class GridLattice {
   constructor(onTransition) {
@@ -178,7 +189,7 @@ class GridLattice {
       if (!this.candidate) return null;
       // A single CRC-backed packet immediately activates the declared wall.
       // Subsequent packets continuously refine this initial projective seed.
-      if (lockReady(declaredLayout, this.candidate.observations)) {
+      if (activationReady(declaredLayout, this.candidate.observations)) {
         this.transition("GRID_LOCK", "verified QR seeded declared grid", detection.at);
       }
     }
@@ -336,7 +347,7 @@ class GridLattice {
     // evidence. Fall back to the longer-lived anchors only when the visible
     // fragment cannot constrain a 2D wall by itself.
     const current = observations.filter((observation) => newest.at - observation.at <= CURRENT_FIT_MS);
-    if (lockReady(layout, current)) observations = current;
+    if (distributedFitReady(layout, current)) observations = current;
     const pairsFor = (items) => items.flatMap((observation) => {
       const slot = observation.slotIndex;
       return slotWorld(layout, observation.modules, slot).map((world, index) => ({ world, image: corners(observation.quad)[index] }));
@@ -370,7 +381,7 @@ class GridLattice {
     const expectedFraction = 0.68 / Math.sqrt(count);
     const sizePrior = -Math.abs(Math.log(Math.max(0.01, observedFraction) / expectedFraction)) * 8;
     const score = observations.length * 100 - error * 80 + sizePrior + inside / count * 12;
-    return { layout, transform, observations, score, error };
+    return { layout, transform, observations, score, error, distributedFit: distributedFitReady(layout, observations) };
   }
   snapshot() {
     const candidate = this.candidate;
@@ -411,7 +422,7 @@ class GridLattice {
       state: this.state, provisional: !this.active, confidence, layout: candidate.layout, modules, slots,
       observedSlots: observed.size, correctedSlots: this.slotCorrections.size,
       storedSlots: this.observations.length, fitSlots: candidate.observations.length,
-      fitError: candidate.error
+      distributedFit: Boolean(candidate.distributedFit), fitError: candidate.error
     };
   }
 }
