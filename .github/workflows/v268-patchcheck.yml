@@ -1,0 +1,50 @@
+name: v268 patch plumbing check
+
+on:
+  push:
+    branches: ["agent/v268-patchcheck"]
+    paths: [.github/workflows/v268-patchcheck.yml]
+
+permissions: { contents: write }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Apply all v268 source patches
+        run: |
+          set -euo pipefail
+          git fetch origin agent/ambiguity-erasures:refs/remotes/origin/agent/ambiguity-erasures
+          git show origin/agent/ambiguity-erasures:.github/ambiguity_erasures_patch.py >/tmp/erasure.py
+          git show origin/agent/ambiguity-erasures:.github/ambiguity_dense_fence.py >/tmp/fence.py
+          python3 /tmp/erasure.py
+          python3 /tmp/fence.py
+          python3 .github/v268_diagnostics_patch3.py
+          node --check receive/main.js
+          node --check receive/worker.js
+          grep -q 'DecimenGuidedMetrics) == 192' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'erasureRsAttempts' vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+          grep -q 'warp T/A/M/P' receive/main.js
+          git diff --check
+      - name: Record pass
+        if: success()
+        run: |
+          git reset --hard HEAD
+          echo "v268 patch plumbing passed at $(date -u +%FT%TZ)" > benchmark/v268-patchcheck-pass.log
+          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
+          git add benchmark/v268-patchcheck-pass.log
+          git commit -m "record v268 patch plumbing pass"
+          git push origin HEAD:agent/v268-patchcheck
+      - name: Record failure
+        if: failure()
+        run: |
+          git reset --hard HEAD
+          echo "v268 patch plumbing failed at $(date -u +%FT%TZ)" > benchmark/v268-patchcheck-fail.log
+          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
+          git add benchmark/v268-patchcheck-fail.log
+          git commit -m "record v268 patch plumbing failure"
+          git push origin HEAD:agent/v268-patchcheck
+          exit 1
