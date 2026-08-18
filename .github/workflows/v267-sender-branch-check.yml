@@ -1,0 +1,92 @@
+name: isolated v267 sender check
+
+on:
+  push:
+    branches: ["agent/v267-sender-check"]
+    paths:
+      - .github/workflows/v267-sender-branch-check.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Apply existing v267 candidate
+        run: |
+          set -euo pipefail
+          python3 .github/v267_staggered_sender_patch.py
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Start server
+        run: |
+          python3 -m http.server 8080 >/tmp/http.log 2>&1 &
+          echo $! >/tmp/http.pid
+      - name: Verify live FPS change and partial QR phases
+        run: |
+          node <<'NODE' | tee /tmp/sender-check.log
+          const { chromium } = require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
+            const page=await browser.newPage({viewport:{width:1440,height:2560}});
+            const errors=[]; page.on('pageerror',e=>errors.push(e.message));
+            await page.goto('http://127.0.0.1:8080/',{waitUntil:'networkidle'});
+            await page.locator('[data-mode="send"]').click();
+            await page.evaluate(()=>{
+              for(const [id,value] of [['cfg-layout','four-seven'],['cfg-orientation','portrait'],['cfg-scaling','integer'],['cfg-fps','30'],['cfg-size','1']]) {
+                const el=document.getElementById(id); el.value=value; el.dispatchEvent(new Event('change',{bubbles:true}));
+              }
+            });
+            let seed=0x6d2b79f5,payload='';
+            for(let i=0;i<48000;i++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;payload+=String.fromCharCode(33+seed%90);}
+            await page.fill('#snippet-text',payload); await page.locator('#send-snippet').click();
+            await page.waitForFunction(()=>{const c=document.getElementById('qr');return c&&c.width>100&&c.height>100&&!document.getElementById('stage').hidden});
+            await page.waitForTimeout(500);
+            const stats=()=>page.locator('#qr').evaluate(canvas=>{
+              const p=document.createElement('canvas');p.width=196;p.height=343;const x=p.getContext('2d',{alpha:false});x.drawImage(canvas,0,0,p.width,p.height);const d=x.getImageData(0,0,p.width,p.height).data;let dark=0;for(let i=0;i<d.length;i+=4)if(d[i]+d[i+1]+d[i+2]<180)dark++;return{width:canvas.width,height:canvas.height,dark:dark/(d.length/4)};
+            });
+            const before=await stats(); if(before.dark<.08)throw new Error('blank before switch '+JSON.stringify(before));
+            await page.selectOption('#cfg-fps','20');
+            const during=[];for(let i=0;i<20;i++){during.push(await stats());await page.waitForTimeout(6);}
+            const minDark=Math.min(...during.map(x=>x.dark));
+            if(during.some(x=>x.width!==before.width||x.height!==before.height))throw new Error('FPS switch resized canvas');
+            if(minDark<before.dark*.6)throw new Error(`FPS switch blanked wall before=${before.dark} min=${minDark}`);
+            await page.selectOption('#cfg-fps','30');await page.waitForTimeout(100);
+            const changed=await page.locator('#qr').evaluate(async canvas=>{
+              const cols=4,rows=7,p=document.createElement('canvas');p.width=280;p.height=490;const x=p.getContext('2d',{alpha:false});
+              const hash=()=>{x.drawImage(canvas,0,0,p.width,p.height);const d=x.getImageData(0,0,p.width,p.height).data,out=[];const cw=p.width/cols,ch=p.height/rows;for(let gy=0;gy<rows;gy++)for(let gx=0;gx<cols;gx++){let h=2166136261>>>0;for(let y=Math.floor(gy*ch);y<Math.floor((gy+1)*ch);y+=3)for(let xx=Math.floor(gx*cw);xx<Math.floor((gx+1)*cw);xx+=3)h=Math.imul(h^d[(y*p.width+xx)*4],16777619)>>>0;out.push(h);}return out;};
+              const frames=[];for(let i=0;i<14;i++){await new Promise(requestAnimationFrame);frames.push(hash());}const out=[];for(let i=1;i<frames.length;i++){let n=0;for(let j=0;j<28;j++)if(frames[i][j]!==frames[i-1][j])n++;out.push(n);}return out;
+            });
+            if(!changed.some(n=>n>0&&n<28))throw new Error('no partial QR transition '+JSON.stringify(changed));
+            if(errors.length)throw new Error(errors.join('; '));
+            console.log(JSON.stringify({before,minDark,changed})); await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          NODE
+      - name: Receiver regression sanity
+        run: |
+          set -euo pipefail
+          AIRGAPPER_TRIALS=1 node benchmark/offline-runner.mjs >/tmp/regression.log 2>&1
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/http.pid)" 2>/dev/null || true
+      - name: Record pass
+        if: success()
+        run: |
+          git reset --hard HEAD
+          { echo "v267 isolated sender candidate passed at $(date -u +%FT%TZ)"; cat /tmp/sender-check.log; } > benchmark/v267-sender-branch-pass.log
+          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
+          git add benchmark/v267-sender-branch-pass.log; git commit -m "record isolated v267 sender pass"; git push origin HEAD:agent/v267-sender-check
+      - name: Record fail
+        if: failure()
+        run: |
+          git reset --hard HEAD
+          { echo "v267 isolated sender candidate failed at $(date -u +%FT%TZ)"; cat /tmp/sender-check.log 2>/dev/null || true; tail -n 200 /tmp/regression.log 2>/dev/null || true; } > benchmark/v267-sender-branch-fail.log
+          git config user.name "AirGapper Agent"; git config user.email "actions@github.com"
+          git add benchmark/v267-sender-branch-fail.log; git commit -m "record isolated v267 sender failure"; git push origin HEAD:agent/v267-sender-check
+          exit 1
