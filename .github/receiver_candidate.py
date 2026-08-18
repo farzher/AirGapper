@@ -52,6 +52,30 @@ new = '''      const ranked = [...lockedGeometryCandidates].sort((a, b) => {
 if old not in s:
     raise SystemExit('recovery ranking anchor missing')
 s = s.replace(old, new, 1)
+
+# Canvas shadow blur is very expensive on some Android GPUs and can make the
+# UI itself lag while 20-30 QR hits are animating. Keep path color + pulse, but
+# make it a cheap stroke-only animation.
+old = '''      overlayCtx.strokeStyle = color;
+      overlayCtx.shadowColor = color;
+      overlayCtx.shadowBlur = (3 + 7 * pulse) * dpr;
+      overlayCtx.lineWidth = Math.max(2, (2 + 0.8 * pulse) * dpr);'''
+new = '''      overlayCtx.strokeStyle = color;
+      overlayCtx.shadowBlur = 0;
+      overlayCtx.lineWidth = Math.max(2, (2 + 0.8 * pulse) * dpr);'''
+if old not in s:
+    raise SystemExit('overlay glow anchor missing')
+s = s.replace(old, new, 1)
+old = '''    overlayCtx.strokeStyle = OVERLAY_PATH_COLORS.sparse;
+    overlayCtx.shadowColor = OVERLAY_PATH_COLORS.sparse;
+    overlayCtx.shadowBlur = 5 * dpr;
+    overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);'''
+new = '''    overlayCtx.strokeStyle = OVERLAY_PATH_COLORS.sparse;
+    overlayCtx.shadowBlur = 0;
+    overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);'''
+if old not in s:
+    raise SystemExit('optimizer glow anchor missing')
+s = s.replace(old, new, 1)
 p.write_text(s)
 
 rep('main.js', 'const APP_BUILD = "v0.5.276";', 'const APP_BUILD = "v0.5.277";')
