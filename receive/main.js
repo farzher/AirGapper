@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.292";
+const RECEIVER_RUNTIME_BUILD = "v0.5.293";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -231,13 +231,15 @@ const AUTO_OPTICS_STARTUP_HEALTHY_YIELD = 0.45;
 const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.15;
 const AUTO_OPTICS_GAIN_MAX_PROBES = 4;
 const AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA = 0.025;
-const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 2.0;
+const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 4.0;
 const AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT = 0.08;
 const AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO = 0.72;
 const AUTO_OPTICS_CONTROL_RETRY_MS = 850;
-const AUTO_OPTICS_NEAR_BEST_SCORE = 0.94;
-const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.07;
-const AUTO_OPTICS_AE_PRODUCT_CEILING = 1.15;
+const AUTO_OPTICS_COHORT_MAX_SLOTS = 18;
+const AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT = 2;
+const AUTO_OPTICS_NEAR_BEST_SCORE = 0.97;
+const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.03;
+const AUTO_OPTICS_AE_PRODUCT_CEILING = 6.0;
 const AUTO_OPTICS_POSE_STABLE_MS = 140;
 const AUTO_OPTICS_POSE_WAIT_MS = 700;
 const AUTO_OPTICS_POSE_MAX_CENTER_DRIFT = 0.035;
@@ -248,11 +250,11 @@ const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 650;
 const AUTO_OPTICS_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
-const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v3";
+const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v4";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
 const AUTO_OPTICS_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS = 5 * 60 * 1000;
-const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v3";
+const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v4";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
 const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
@@ -282,6 +284,7 @@ let autoOpticsHeldYield = 0;
 let autoOpticsAeBaseline;
 let autoOpticsMemoryBootAt = 0;
 let autoOpticsMemoryBoot;
+let autoOpticsMeasurementSlots;
 // These are the user's persistent MANUAL optics profile. Automatic optics
 // may use arbitrary temporary sensor values, but must never overwrite these.
 let preferredExposureTime;
@@ -2117,16 +2120,20 @@ function noteDecodeCompleted(id, completion) {
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
     if (!auditMode.full && Number.isFinite(auditMode.sourceSequence)) {
-      const submittedSlots = new Set(auditMode.trackSlots ?? []);
+      const submittedSlots = new Set((auditMode.trackSlots ?? []).map(Number).filter(Number.isFinite));
+      const outputSlots = new Set(completion.symbols
+        .map((symbol) => Number(symbol.header?.slotIndex))
+        .filter((slot) => Number.isFinite(slot) && submittedSlots.has(slot)));
+      const slotResults = [...submittedSlots].map((slot) => [slot, outputSlots.has(slot) ? 1 : 0]);
       const attributedOutputs = submittedSlots.size
-        ? completion.symbols.reduce((count, symbol) =>
-            count + Number(submittedSlots.has(Number(symbol.header?.slotIndex))), 0)
+        ? outputSlots.size
         : Math.min(Math.max(0, Number(auditMode.tracks) || 0), outputSymbols);
       autoOpticsCompletionSamples.push({
         at: receiverNow(),
         sourceSequence: auditMode.sourceSequence,
-        tracks: Math.max(0, Number(auditMode.tracks) || 0),
-        outputs: Math.min(Math.max(0, Number(auditMode.tracks) || 0), attributedOutputs)
+        tracks: submittedSlots.size || Math.max(0, Number(auditMode.tracks) || 0),
+        outputs: Math.min(submittedSlots.size || Math.max(0, Number(auditMode.tracks) || 0), attributedOutputs),
+        slotResults
       });
       if (autoOpticsCompletionSamples.length > 512)
         autoOpticsCompletionSamples.splice(0, autoOpticsCompletionSamples.length - 512);
@@ -2750,6 +2757,7 @@ function resetAutomaticOpticsRuntime() {
   autoOpticsAeBaseline = void 0;
   autoOpticsMemoryBootAt = 0;
   autoOpticsMemoryBoot = void 0;
+  autoOpticsMeasurementSlots = void 0;
   autoOpticsTuneSummary = "";
 }
 function quantizeCameraRange(value, range) {
@@ -2783,6 +2791,28 @@ function autoOpticsPoseUsable(pose) {
   if (!pose?.locked || !Number.isFinite(pose.x) || !Number.isFinite(pose.y) || !(pose.scale > 0)) return false;
   const expected = Math.max(1, pose.expected || pose.visible || 1);
   return pose.visible >= Math.min(expected, AUTO_OPTICS_MIN_VISIBLE_SLOTS);
+}
+function beginAutomaticOpticsMeasurementCohort() {
+  const ordered = regions
+    .filter((region) => region.gridSlot !== void 0 && region.quad && region.dim &&
+      region.visibleFraction >= 0.85 && isGridDecodeCandidate(region))
+    .sort((a, b) => Number(a.gridSlot) - Number(b.gridSlot));
+  if (!ordered.length) {
+    autoOpticsMeasurementSlots = void 0;
+    return 0;
+  }
+  let selected = ordered;
+  if (ordered.length > AUTO_OPTICS_COHORT_MAX_SLOTS) {
+    selected = [];
+    for (let i = 0; i < AUTO_OPTICS_COHORT_MAX_SLOTS; i++) {
+      const index = Math.round(i * (ordered.length - 1) / Math.max(1, AUTO_OPTICS_COHORT_MAX_SLOTS - 1));
+      const region = ordered[index];
+      if (region && !selected.includes(region)) selected.push(region);
+    }
+  }
+  autoOpticsMeasurementSlots = new Set(selected.map((region) => Number(region.gridSlot)).filter(Number.isFinite));
+  notePipelineEvent("auto-optics-cohort", autoOpticsMeasurementSlots.size);
+  return autoOpticsMeasurementSlots.size;
 }
 function autoOpticsPoseDrift(a, b) {
   if (!autoOpticsPoseUsable(a) || !autoOpticsPoseUsable(b)) return { center: Infinity, scale: Infinity };
@@ -3156,6 +3186,8 @@ function autoOpticsConfidenceScore(outputs, attempts) {
 function autoOpticsEvidenceSince(firstSequence) {
   let outputs = 0, attempts = 0, jobs = 0;
   let firstAt = Infinity, lastAt = 0;
+  const slotAttempts = new Map();
+  const slotOutputs = new Map();
   for (const sample of autoOpticsCompletionSamples) {
     if (sample.sourceSequence < firstSequence) continue;
     outputs += sample.outputs;
@@ -3163,17 +3195,80 @@ function autoOpticsEvidenceSince(firstSequence) {
     jobs++;
     firstAt = Math.min(firstAt, sample.at);
     lastAt = Math.max(lastAt, sample.at);
+    for (const [slotRaw, hitRaw] of sample.slotResults ?? []) {
+      const slot = Number(slotRaw);
+      if (!Number.isFinite(slot)) continue;
+      slotAttempts.set(slot, (slotAttempts.get(slot) || 0) + 1);
+      slotOutputs.set(slot, (slotOutputs.get(slot) || 0) + Number(Boolean(hitRaw)));
+    }
   }
-  return { outputs, attempts, jobs, firstAt, lastAt };
+  return { outputs, attempts, jobs, firstAt, lastAt, slotAttempts, slotOutputs };
+}
+function automaticOpticsCohortMetrics(evidence) {
+  const cohort = autoOpticsMeasurementSlots;
+  if (!cohort?.size) {
+    const yieldRate = evidence.attempts ? evidence.outputs / evidence.attempts : 0;
+    return {
+      size: 0,
+      outputs: evidence.outputs,
+      attempts: evidence.attempts,
+      coverage: 1,
+      breadth: yieldRate > 0 ? 1 : 0,
+      meanYield: yieldRate,
+      tailYield: yieldRate,
+      minAttempts: evidence.attempts,
+      ready: evidence.attempts >= AUTO_OPTICS_GAIN_MIN_ATTEMPTS
+    };
+  }
+  let outputs = 0;
+  let attempts = 0;
+  let covered = 0;
+  let successful = 0;
+  let minAttempts = Infinity;
+  const slotYields = [];
+  for (const slot of cohort) {
+    const slotAttemptCount = evidence.slotAttempts.get(slot) || 0;
+    const slotOutputCount = Math.min(slotAttemptCount, evidence.slotOutputs.get(slot) || 0);
+    outputs += slotOutputCount;
+    attempts += slotAttemptCount;
+    if (slotAttemptCount > 0) covered++;
+    if (slotOutputCount > 0) successful++;
+    minAttempts = Math.min(minAttempts, slotAttemptCount);
+    slotYields.push(slotAttemptCount ? slotOutputCount / slotAttemptCount : 0);
+  }
+  slotYields.sort((a, b) => a - b);
+  const meanYield = slotYields.length ? slotYields.reduce((sum, value) => sum + value, 0) / slotYields.length : 0;
+  const tailYield = slotYields.length ? slotYields[Math.floor((slotYields.length - 1) * 0.25)] : 0;
+  return {
+    size: cohort.size,
+    outputs,
+    attempts,
+    coverage: covered / cohort.size,
+    breadth: successful / cohort.size,
+    meanYield,
+    tailYield,
+    minAttempts: Number.isFinite(minAttempts) ? minAttempts : 0,
+    ready: covered === cohort.size && minAttempts >= AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT
+  };
+}
+function scoreAutomaticOpticsEvidence(evidence) {
+  const cohort = automaticOpticsCohortMetrics(evidence);
+  const confidence = autoOpticsConfidenceScore(cohort.outputs, cohort.attempts);
+  const score = cohort.size
+    ? confidence * cohort.coverage * (0.72 + 0.18 * cohort.breadth + 0.10 * cohort.tailYield)
+    : confidence;
+  return { ...cohort, score };
 }
 async function sampleAutomaticOpticsQuality(track, iso, firstSequence, sampleMs = AUTO_OPTICS_GAIN_SAMPLE_MS) {
   if (!await waitForStableAutoOpticsPose(track, AUTO_OPTICS_POSE_WAIT_MS)) {
     return { iso, outputs: 0, attempts: 0, jobs: 0, rate: 0, yieldRate: 0, score: 0, valid: false, unstable: true };
   }
   const poseAnchor = autoOpticsPoseSnapshot();
+  const cohortSize = autoOpticsMeasurementSlots?.size || 0;
   const targetAttempts = Math.max(
     AUTO_OPTICS_GAIN_MIN_ATTEMPTS,
-    Math.min(54, Math.ceil(Math.max(1, poseAnchor.visible) * 2))
+    cohortSize * AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT,
+    Math.min(72, Math.ceil(Math.max(1, poseAnchor.visible) * 2))
   );
   const started = performance.now();
   let poseStable = true;
@@ -3191,24 +3286,32 @@ async function sampleAutomaticOpticsQuality(track, iso, firstSequence, sampleMs 
       break;
     }
     evidence = autoOpticsEvidenceSince(firstSequence);
-    if (evidence.jobs >= 2 && evidence.attempts >= targetAttempts && performance.now() - started >= 90) break;
+    const scored = scoreAutomaticOpticsEvidence(evidence);
+    if (evidence.jobs >= 2 && scored.attempts >= targetAttempts && scored.ready && performance.now() - started >= 120) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   evidence = autoOpticsEvidenceSince(firstSequence);
+  const scored = scoreAutomaticOpticsEvidence(evidence);
   const elapsed = Math.max(0.001, (performance.now() - started) / 1e3);
-  const yieldRate = evidence.attempts ? evidence.outputs / evidence.attempts : 0;
   return {
     iso,
-    outputs: evidence.outputs,
-    attempts: evidence.attempts,
+    outputs: scored.outputs,
+    attempts: scored.attempts,
     jobs: evidence.jobs,
-    rate: evidence.outputs / elapsed,
-    yieldRate,
-    score: autoOpticsConfidenceScore(evidence.outputs, evidence.attempts),
+    rate: scored.outputs / elapsed,
+    yieldRate: scored.meanYield,
+    score: scored.score,
+    cohortSize: scored.size,
+    cohortCoverage: scored.coverage,
+    breadth: scored.breadth,
+    tailYield: scored.tailYield,
+    minSlotAttempts: scored.minAttempts,
+    slotAttempts: evidence.slotAttempts,
+    slotOutputs: evidence.slotOutputs,
     maxCenterDrift,
     maxScaleDrift,
     unstable: !poseStable,
-    valid: poseStable && evidence.jobs >= 2 && evidence.attempts >= AUTO_OPTICS_GAIN_MIN_ATTEMPTS
+    valid: poseStable && evidence.jobs >= 2 && scored.attempts >= AUTO_OPTICS_GAIN_MIN_ATTEMPTS && scored.ready
   };
 }
 async function measureAutomaticIsoCandidate(track, exposure, requestedIso, isoRange, options = {}) {
@@ -3234,7 +3337,8 @@ function describeAutoIsoProbe(probe) {
   if (!probe) return "—";
   if (probe.unstable) return `${Math.round(probe.iso)}:moved`;
   if (!probe.valid) return `${Math.round(probe.iso)}:insufficient`;
-  return `${Math.round(probe.iso)}:${(probe.yieldRate * 100).toFixed(0)}%`;
+  const tail = Number.isFinite(probe.tailYield) ? ` p25 ${(probe.tailYield * 100).toFixed(0)}%` : "";
+  return `${Math.round(probe.iso)}:${(probe.yieldRate * 100).toFixed(0)}%${tail}`;
 }
 async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso, rememberedIso) {
   if (!automaticOpticsSessionAlive(track)) return { iso: seedIso, probes: [] };
@@ -3254,7 +3358,7 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
       return probes.find((item) => String(item.requestedIso) === key) || null;
     if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES && !options.confirm) return null;
     if (!options.confirm) measured.add(key);
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
+    autoOpticsTuneSummary = `cohort ${autoOpticsMeasurementSlots?.size || 0} · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
     const result = await measureAutomaticIsoCandidate(track, exposure, requested, isoRange, options);
     if (result?.unstable) invalidatedByMotion = true;
     if (result && !options.confirm) probes.push(result);
@@ -3266,21 +3370,39 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
     return candidate.score >= reference.score * AUTO_OPTICS_GAIN_IMPROVEMENT ||
       candidate.yieldRate >= reference.yieldRate + AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA;
   };
+  const mergeMap = (a, b) => {
+    const merged = new Map(a ?? []);
+    for (const [key, value] of b ?? []) merged.set(key, (merged.get(key) || 0) + value);
+    return merged;
+  };
   const combine = (a, b) => {
     if (!a?.valid) return b;
     if (!b?.valid) return a;
-    const outputs = a.outputs + b.outputs;
-    const attempts = a.attempts + b.attempts;
-    const jobs = a.jobs + b.jobs;
+    const slotAttempts = mergeMap(a.slotAttempts, b.slotAttempts);
+    const slotOutputs = mergeMap(a.slotOutputs, b.slotOutputs);
+    const evidence = {
+      outputs: a.outputs + b.outputs,
+      attempts: a.attempts + b.attempts,
+      slotAttempts,
+      slotOutputs
+    };
+    const scored = scoreAutomaticOpticsEvidence(evidence);
     return {
       ...b,
       requestedIso: a.requestedIso,
-      outputs,
-      attempts,
-      jobs,
-      yieldRate: attempts ? outputs / attempts : 0,
+      outputs: scored.outputs,
+      attempts: scored.attempts,
+      jobs: a.jobs + b.jobs,
+      yieldRate: scored.meanYield,
       rate: (a.rate + b.rate) / 2,
-      score: autoOpticsConfidenceScore(outputs, attempts),
+      score: scored.score,
+      cohortSize: scored.size,
+      cohortCoverage: scored.coverage,
+      breadth: scored.breadth,
+      tailYield: scored.tailYield,
+      minSlotAttempts: scored.minAttempts,
+      slotAttempts,
+      slotOutputs,
       valid: true
     };
   };
@@ -3294,10 +3416,6 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
       scoreRatio >= AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO;
   };
 
-  // Bracket the local search with the same base setting.  If the base improves
-  // or degrades materially while we were testing neighbors, the decoder/tracker
-  // changed underneath the experiment.  Throw the whole comparison away rather
-  // than attributing that time trend to ISO.
   const baseline = await probe(base, remembered !== void 0 ? "memory seed" : "seed");
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
@@ -3306,31 +3424,31 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
-  const brighter = await probe(Math.min(cap, base * Math.SQRT2), "brighter");
+  const brighter = await probe(Math.min(cap, base * 2), "brighter 2x");
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
   const control = await probe(base, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (!control || control.unstable || !control.valid || invalidatedByMotion) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · control invalidated · retry after TRACK settles`;
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · cohort control invalidated · retry after TRACK settles`;
     return {
       iso: base,
       probes,
       deferred: true,
       retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-      deferredReason: "comparison control invalidated · holding short shutter until TRACK settles"
+      deferredReason: "same-slot control invalidated · holding short shutter until TRACK settles"
     };
   }
   if (baseline?.valid && !controlStable(baseline, control)) {
     const drift = Math.abs(baseline.yieldRate - control.yieldRate);
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · base ${Math.round(baseline.yieldRate * 100)}→${Math.round(control.yieldRate * 100)}% · tracker still maturing`;
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · same-slot base ${Math.round(baseline.yieldRate * 100)}→${Math.round(control.yieldRate * 100)}% · tracker still maturing`;
     return {
       iso: base,
       probes,
       deferred: true,
       retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-      deferredReason: `base control drifted ${(drift * 100).toFixed(0)} points · holding short shutter until TRACK settles`
+      deferredReason: `same-slot base drifted ${(drift * 100).toFixed(0)} points · holding short shutter until TRACK settles`
     };
   }
 
@@ -3339,17 +3457,13 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   const localBest = localValid.reduce((winner, item) =>
     !winner || item.score > winner.score || item.score === winner.score && item.yieldRate > winner.yieldRate ? item : winner, null);
 
-  // Only spend the fourth exploratory write when a neighbor actually beat the
-  // time-controlled base.  Boundary candidates are therefore adjacent in time
-  // to the control sample instead of being rewarded merely for occurring later.
   if (measured.size < AUTO_OPTICS_GAIN_MAX_PROBES && localBest && materiallyBetter(localBest, baselineReference)) {
     if (localBest.requestedIso < base * 0.99) {
-      await probe(localBest.requestedIso / Math.SQRT2, "darker boundary");
+      await probe(base / 2, "darker boundary");
     } else if (localBest.requestedIso > base * 1.01) {
       const brightLimit = Math.min(cap, base * AUTO_OPTICS_GAIN_MAX_BASE_RATIO);
-      const nextIso = Math.min(brightLimit, localBest.requestedIso * Math.SQRT2);
-      if (nextIso > localBest.requestedIso * 1.01)
-        await probe(nextIso, "brighter boundary");
+      if (brightLimit > localBest.requestedIso * 1.01)
+        await probe(brightLimit, "brighter 4x boundary");
     }
   }
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
@@ -3360,7 +3474,7 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
     ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(base))
   ].filter((item) => item?.valid);
   if (!decisionCandidates.length) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · insufficient`;
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · insufficient cohort evidence`;
     return { iso: base, probes, deferred: true };
   }
   const best = decisionCandidates.reduce((winner, item) =>
@@ -3375,25 +3489,20 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   ).sort((a, b) => a.requestedIso - b.requestedIso);
   const selected = nearBest[0] ?? best;
 
-  // The end control is already an independent second application of the base.
-  // Reuse it when base wins; otherwise independently reapply/confirm the selected
-  // neighbor after the control boundary.
   const selectedIsBase = String(selected.requestedIso) === String(base);
   const confirm = selectedIsBase
     ? control
-    : await probe(selected.requestedIso, "confirm", { confirm: true, sampleMs: 520 });
+    : await probe(selected.requestedIso, "confirm", { confirm: true, sampleMs: 560 });
   if (!confirm || confirm.unstable || !confirm.valid) {
     return { iso: selected.requestedIso, probes, deferred: true };
   }
-  if (!selectedIsBase && (confirm.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, selected.yieldRate - 0.12) ||
-      confirm.score < selected.score * 0.80)) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · confirmation disagreed · retry later`;
+  if (!selectedIsBase && (confirm.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, selected.yieldRate - 0.10) ||
+      confirm.score < selected.score * 0.84)) {
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · same-slot confirmation disagreed · retry later`;
     return { iso: selected.requestedIso, probes, deferred: true };
   }
-  const confirmed = selectedIsBase
-    ? baselineReference
-    : combine(selected, confirm);
-  autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · control ${Math.round(control.yieldRate * 100)}% → ISO ${Math.round(confirm.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}%`;
+  const confirmed = selectedIsBase ? baselineReference : combine(selected, confirm);
+  autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · control ${Math.round(control.yieldRate * 100)}% → ISO ${Math.round(confirm.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round((confirmed.tailYield || 0) * 100)}%`;
   return { iso: confirm.iso, probes, best: confirmed };
 }
 async function settleAutomaticQrOptics(track, now) {
@@ -3437,6 +3546,14 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsLockSince = 0;
       autoOpticsRetryAt = receiverNow() + 350;
       autoOpticsTuneSummary = "waiting for stable framing · hardware AE";
+      return;
+    }
+    const cohortSize = beginAutomaticOpticsMeasurementCohort();
+    if (!cohortSize) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = 0;
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_CONTROL_RETRY_MS;
+      autoOpticsTuneSummary = "waiting for a stable decodable slot cohort";
       return;
     }
     let exposure = targetExposure;
@@ -3498,6 +3615,7 @@ async function settleAutomaticQrOptics(track, now) {
     focusController.adoptAutomaticCameraState("short-shutter automatic optics converged on a confirmed local decoder optimum");
     notePipelineEvent("auto-optics-converged", Math.round(tuned.best.yieldRate * 100));
   } finally {
+    autoOpticsMeasurementSlots = void 0;
     autoOpticsMutationRunning = false;
   }
 }
@@ -6352,13 +6470,17 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 32);
+  const allBatchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 32);
+  const batchCandidates = autoOpticsMeasurementSlots?.size
+    ? allBatchCandidates.filter((region) => autoOpticsMeasurementSlots.has(Number(region.gridSlot)))
+    : allBatchCandidates;
   // Payload weakness and wall-pose recovery are separate concerns. Motion
   // now comes from CRC-valid whole-wall feedback and missing breadth has its own
   // targeted recovery probe, so do not flood proven-bad payload slots during a
   // motion wobble. That only lengthens Guided jobs and causes newer frames to be
-  // replaced while workers chew on known failures.
-  const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
+  // replaced while workers chew on known failures. Auto Optics is the exception:
+  // its frozen physical-slot cohort must be identical for every candidate.
+  const adaptiveWeakSlots = gridLattice.active && !autoOpticsMeasurementSlots?.size && adaptiveWeakSlotScheduling(batchCandidates);
   let batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
@@ -6613,8 +6735,13 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     activeBenchmarkFrame = void 0;
     return;
   }
-  const eligible = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate).sort((a, b) => slotUsefulness(b) - slotUsefulness(a)) : regions.filter((region) => region.observed && region.decoded);
-  activeDecodeBudget = gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
+  const eligibleBase = gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded);
+  const eligible = autoOpticsMeasurementSlots?.size
+    ? eligibleBase.filter((region) => autoOpticsMeasurementSlots.has(Number(region.gridSlot))).sort((a, b) => Number(a.gridSlot) - Number(b.gridSlot))
+    : eligibleBase.sort((a, b) => slotUsefulness(b) - slotUsefulness(a));
+  activeDecodeBudget = autoOpticsMeasurementSlots?.size
+    ? eligible.length
+    : gridLattice.active ? Math.min(8, Math.max(4, pool.size * 2), eligible.length) : eligible.length;
   const scheduledRegions = eligible.slice(0, activeDecodeBudget);
   const trackedCapacity = Math.max(1, pool.size);
   const perRegionCapacity = gridLattice.locked ? 1 : Math.max(1, Math.floor(trackedCapacity / Math.max(1, scheduledRegions.length)));
