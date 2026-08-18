@@ -75,6 +75,8 @@ struct DecimenGuidedMetrics {
 	uint32_t stableRsAttempts;
 	uint32_t stableRsSuccesses;
 	uint32_t stableEligibleTracks;
+	uint32_t sparseProfileAttempts;
+	uint32_t sparseProfileSuccesses;
 };
 
 struct DecimenBatchMetrics {

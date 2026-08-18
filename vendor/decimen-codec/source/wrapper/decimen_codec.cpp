@@ -70,8 +70,8 @@ static_assert(sizeof(DecimenGuidedTrack) == 40,
               "DecimenGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(DecimenGuidedResult) == 52,
               "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 160,
-              "DecimenGuidedMetrics JS ABI must allocate 160 bytes");
+static_assert(sizeof(DecimenGuidedMetrics) == 168,
+              "DecimenGuidedMetrics JS ABI must allocate 168 bytes");
 static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
               "DecimenGuidedMetrics turboAttempts JS offset changed");
 static_assert(offsetof(DecimenGuidedMetrics, turboSuccesses) == 140,
@@ -982,6 +982,61 @@ static const std::vector<uint32_t>& turboCodewordPlan(int dim)
     return plan;
 }
 
+// AirGapper's streamed QR profile is fixed by Send: Model-2 byte mode,
+// error-correction level L and mask pattern 4. Once Guided has already sampled
+// a normalized QR BitMatrix, running the generic format/mask parser again is
+// redundant. Decode the known placement directly; CRC remains the acceptance
+// gate at commitDecoded(), and the caller immediately retries generic QRCode::
+// Decode on any miss, so non-AirGapper/plain QR compatibility is unchanged.
+static DecoderResult decodeAirGapperSampledBits(const BitMatrix& bits)
+{
+    const int dim = bits.width();
+    if (dim != bits.height() || dim < 21 || dim > 177 || ((dim - 17) & 3))
+        return {};
+    const auto* version = QRCode::Version::Model2((dim - 17) / 4);
+    if (!version)
+        return {};
+    const int totalCodewords = version->totalCodewords();
+    if (totalCodewords <= 0)
+        return {};
+    const auto& plan = turboCodewordPlan(dim);
+    if (plan.size() != size_t(totalCodewords) * 8)
+        return {};
+
+    ByteArray raw(totalCodewords);
+    for (int codeword = 0; codeword < totalCodewords; ++codeword) {
+        uint8_t value = 0;
+        const size_t firstBit = size_t(codeword) * 8;
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint32_t entry = plan[firstBit + bit];
+            const int x = int(entry & 0xff);
+            const int y = int((entry >> 8) & 0xff);
+            const bool mask = ((entry >> 16) & 1) != 0;
+            const bool dark = bits.get(x, y);
+            value = uint8_t((value << 1) | uint8_t(mask != dark));
+        }
+        raw[codeword] = value;
+    }
+
+    auto blocks = QRCode::DataBlock::GetDataBlocks(raw, *version, QRCode::ErrorCorrectionLevel::Low);
+    if (blocks.empty())
+        return {};
+    int dataBytes = 0;
+    for (const auto& block : blocks)
+        dataBytes += block.numDataCodewords();
+    ByteArray data(dataBytes);
+    auto dst = data.begin();
+    for (auto& block : blocks) {
+        auto& codewords = block.codewords();
+        const int dataCount = block.numDataCodewords();
+        const int eccCount = int(codewords.size()) - dataCount;
+        if (eccCount <= 0 || !ReedSolomonDecode(RSField::QRCode, codewords, eccCount))
+            return {};
+        dst = std::copy_n(codewords.begin(), dataCount, dst);
+    }
+    return QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
+}
+
 static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                          const DecimenGuidedTrack& track,
                                          const TurboFrameTransform& frameTransform,
@@ -1613,8 +1668,19 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     metrics->sampleAttempts++;
                     const double fastStart = guidedNowMs();
                     ++metrics->sparseRsFallbacks;
-                    auto decoded = QRCode::Decode(sparse.bits());
+                    ++metrics->sparseProfileAttempts;
+                    auto decoded = decodeAirGapperSampledBits(sparse.bits());
                     decodedTrack = commitDecoded(sparse, decoded);
+                    if (decodedTrack) {
+                        ++metrics->sparseProfileSuccesses;
+                    } else {
+                        // Keep the stock QR decoder as the exact compatibility
+                        // fallback for any unexpected profile/plain QR or fast
+                        // parser miss. This attempt is already on a sampled grid,
+                        // so failure cannot disturb geometry or cache state.
+                        decoded = QRCode::Decode(sparse.bits());
+                        decodedTrack = commitDecoded(sparse, decoded);
+                    }
                     const double fastElapsed = guidedNowMs() - fastStart;
                     metrics->fastDecodeMs += fastElapsed;
                     metrics->decodeMs += fastElapsed;
