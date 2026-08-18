@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.291";
+const RECEIVER_RUNTIME_BUILD = "v0.5.292";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -209,7 +209,7 @@ const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
-const AUTO_OPTICS_LOCK_SETTLE_MS = 450;
+const AUTO_OPTICS_LOCK_SETTLE_MS = 1200;
 const AUTO_OPTICS_RECENT_DECODE_MS = 900;
 const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
 const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
@@ -221,8 +221,8 @@ const AUTO_OPTICS_FALLBACK_EXPOSURE = 50; // one 5 ms escape hatch for genuinely
 // latter sustained roughly 2-3x more useful throughput. Keep the shutter fixed
 // for motion, then spend a short one-time window finding the useful gain.
 const AUTO_OPTICS_GAIN_SETTLE_MS = 340;
-const AUTO_OPTICS_GAIN_SAMPLE_MS = 360;
-const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 10;
+const AUTO_OPTICS_GAIN_SAMPLE_MS = 520;
+const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 20;
 const AUTO_OPTICS_GAIN_IMPROVEMENT = 1.08;
 // AirGapper is looking at an emissive black/white modem, not making a pleasing
 // photograph. Prefer less light when two candidates decode essentially alike.
@@ -232,6 +232,9 @@ const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.15;
 const AUTO_OPTICS_GAIN_MAX_PROBES = 4;
 const AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA = 0.025;
 const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 2.0;
+const AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT = 0.08;
+const AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO = 0.72;
+const AUTO_OPTICS_CONTROL_RETRY_MS = 850;
 const AUTO_OPTICS_NEAR_BEST_SCORE = 0.94;
 const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.07;
 const AUTO_OPTICS_AE_PRODUCT_CEILING = 1.15;
@@ -245,11 +248,11 @@ const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 650;
 const AUTO_OPTICS_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
-const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v2";
+const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v3";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
 const AUTO_OPTICS_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS = 5 * 60 * 1000;
-const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v2";
+const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v3";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
 const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
@@ -3263,26 +3266,83 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
     return candidate.score >= reference.score * AUTO_OPTICS_GAIN_IMPROVEMENT ||
       candidate.yieldRate >= reference.yieldRate + AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA;
   };
+  const combine = (a, b) => {
+    if (!a?.valid) return b;
+    if (!b?.valid) return a;
+    const outputs = a.outputs + b.outputs;
+    const attempts = a.attempts + b.attempts;
+    const jobs = a.jobs + b.jobs;
+    return {
+      ...b,
+      requestedIso: a.requestedIso,
+      outputs,
+      attempts,
+      jobs,
+      yieldRate: attempts ? outputs / attempts : 0,
+      rate: (a.rate + b.rate) / 2,
+      score: autoOpticsConfidenceScore(outputs, attempts),
+      valid: true
+    };
+  };
+  const controlStable = (a, b) => {
+    if (!a?.valid || !b?.valid) return false;
+    const yieldDrift = Math.abs(a.yieldRate - b.yieldRate);
+    const highScore = Math.max(a.score, b.score);
+    const lowScore = Math.min(a.score, b.score);
+    const scoreRatio = highScore > 0 ? lowScore / highScore : 1;
+    return yieldDrift <= AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT &&
+      scoreRatio >= AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO;
+  };
 
-  // Do not infer brightness direction from an absolute decode-yield target.
-  // Dense/tiny-module geometry can depress yield even when the sensor is already
-  // too bright.  Always sample one darker and one brighter neighbor first.
+  // Bracket the local search with the same base setting.  If the base improves
+  // or degrades materially while we were testing neighbors, the decoder/tracker
+  // changed underneath the experiment.  Throw the whole comparison away rather
+  // than attributing that time trend to ISO.
   const baseline = await probe(base, remembered !== void 0 ? "memory seed" : "seed");
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
-  await probe(base / Math.SQRT2, "darker");
+  const darker = await probe(base / Math.SQRT2, "darker");
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
-  await probe(Math.min(cap, base * Math.SQRT2), "brighter");
+  const brighter = await probe(Math.min(cap, base * Math.SQRT2), "brighter");
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
-  const localValid = probes.filter((item) => item.valid);
+  const control = await probe(base, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
+  if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
+  if (!control || control.unstable || !control.valid || invalidatedByMotion) {
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · control invalidated · retry after TRACK settles`;
+    return {
+      iso: base,
+      probes,
+      deferred: true,
+      retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
+      deferredReason: "comparison control invalidated · holding short shutter until TRACK settles"
+    };
+  }
+  if (baseline?.valid && !controlStable(baseline, control)) {
+    const drift = Math.abs(baseline.yieldRate - control.yieldRate);
+    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · base ${Math.round(baseline.yieldRate * 100)}→${Math.round(control.yieldRate * 100)}% · tracker still maturing`;
+    return {
+      iso: base,
+      probes,
+      deferred: true,
+      retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
+      deferredReason: `base control drifted ${(drift * 100).toFixed(0)} points · holding short shutter until TRACK settles`
+    };
+  }
+
+  const baselineReference = combine(baseline, control);
+  const localValid = [baselineReference, darker, brighter].filter((item) => item?.valid);
   const localBest = localValid.reduce((winner, item) =>
     !winner || item.score > winner.score || item.score === winner.score && item.yieldRate > winner.yieldRate ? item : winner, null);
-  if (measured.size < AUTO_OPTICS_GAIN_MAX_PROBES && localBest && materiallyBetter(localBest, baseline)) {
+
+  // Only spend the fourth exploratory write when a neighbor actually beat the
+  // time-controlled base.  Boundary candidates are therefore adjacent in time
+  // to the control sample instead of being rewarded merely for occurring later.
+  if (measured.size < AUTO_OPTICS_GAIN_MAX_PROBES && localBest && materiallyBetter(localBest, baselineReference)) {
     if (localBest.requestedIso < base * 0.99) {
       await probe(localBest.requestedIso / Math.SQRT2, "darker boundary");
     } else if (localBest.requestedIso > base * 1.01) {
@@ -3295,45 +3355,45 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   if (!automaticOpticsSessionAlive(track)) return { iso: base, probes };
   if (invalidatedByMotion) return { iso: base, probes, deferred: true };
 
-  const valid = probes.filter((item) => item.valid);
-  if (!valid.length) {
+  const decisionCandidates = [
+    baselineReference,
+    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(base))
+  ].filter((item) => item?.valid);
+  if (!decisionCandidates.length) {
     autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · insufficient`;
     return { iso: base, probes, deferred: true };
   }
-  const best = valid.reduce((winner, item) =>
+  const best = decisionCandidates.reduce((winner, item) =>
     !winner || item.score > winner.score || item.score === winner.score && item.yieldRate > winner.yieldRate ? item : winner, null);
   if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
     autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · collapsed`;
     return { iso: base, probes, best, collapsed: true };
   }
   const yieldFloor = Math.max(AUTO_OPTICS_COLLAPSE_YIELD, best.yieldRate - AUTO_OPTICS_NEAR_BEST_YIELD_DELTA);
-  const nearBest = valid.filter((item) =>
+  const nearBest = decisionCandidates.filter((item) =>
     item.score >= best.score * AUTO_OPTICS_NEAR_BEST_SCORE && item.yieldRate >= yieldFloor
   ).sort((a, b) => a.requestedIso - b.requestedIso);
   const selected = nearBest[0] ?? best;
 
-  // A candidate cannot become persistent memory from one lucky display phase.
-  // Confirm it independently after another camera-write boundary.  If framing
-  // moves or the repeated yield is materially worse, abandon the comparison.
-  const confirm = await probe(selected.requestedIso, "confirm", { confirm: true, sampleMs: 430 });
+  // The end control is already an independent second application of the base.
+  // Reuse it when base wins; otherwise independently reapply/confirm the selected
+  // neighbor after the control boundary.
+  const selectedIsBase = String(selected.requestedIso) === String(base);
+  const confirm = selectedIsBase
+    ? control
+    : await probe(selected.requestedIso, "confirm", { confirm: true, sampleMs: 520 });
   if (!confirm || confirm.unstable || !confirm.valid) {
     return { iso: selected.requestedIso, probes, deferred: true };
   }
-  if (confirm.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, selected.yieldRate - 0.12) ||
-      confirm.score < selected.score * 0.80) {
+  if (!selectedIsBase && (confirm.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, selected.yieldRate - 0.12) ||
+      confirm.score < selected.score * 0.80)) {
     autoOpticsTuneSummary = `${formatExposureMs(exposure)} · confirmation disagreed · retry later`;
     return { iso: selected.requestedIso, probes, deferred: true };
   }
-  const confirmed = {
-    ...confirm,
-    score: Math.min(selected.score, confirm.score),
-    yieldRate: (selected.yieldRate + confirm.yieldRate) / 2,
-    rate: (selected.rate + confirm.rate) / 2,
-    outputs: selected.outputs + confirm.outputs,
-    attempts: selected.attempts + confirm.attempts,
-    jobs: selected.jobs + confirm.jobs
-  };
-  autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} → ISO ${Math.round(confirm.iso)} · confirmed ${(confirmed.yieldRate * 100).toFixed(0)}%`;
+  const confirmed = selectedIsBase
+    ? baselineReference
+    : combine(selected, confirm);
+  autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · control ${Math.round(control.yieldRate * 100)}% → ISO ${Math.round(confirm.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}%`;
   return { iso: confirm.iso, probes, best: confirmed };
 }
 async function settleAutomaticQrOptics(track, now) {
@@ -3402,9 +3462,11 @@ async function settleAutomaticQrOptics(track, now) {
     if (tuned.deferred) {
       autoOpticsRuntimeState = "ae";
       autoOpticsLockSince = 0;
-      autoOpticsRetryAt = receiverNow() + 350;
-      autoOpticsTuneSummary = "comparison invalidated by movement · holding short shutter";
-      focusController.adoptAutomaticCameraState("automatic optics comparison deferred; current short-shutter setting held until framing stabilizes");
+      autoOpticsRetryAt = receiverNow() + Math.max(350, Number(tuned.retryMs) || 0);
+      autoOpticsTuneSummary = tuned.deferredReason || "comparison invalidated by movement · holding short shutter";
+      focusController.adoptAutomaticCameraState(tuned.deferredReason
+        ? "automatic optics comparison deferred because decoder geometry changed during the control bracket"
+        : "automatic optics comparison deferred; current short-shutter setting held until framing stabilizes");
       return;
     }
     if (tuned.collapsed || !tuned.best?.valid) {
