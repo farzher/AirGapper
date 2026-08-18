@@ -30,14 +30,22 @@ const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 // Sender FPS is always the user's requested presentation rate. Auto Grid may
 // choose QR count/size, but never silently changes the requested FPS.
-const AUTO_GRID_MIN_MODULE_PX = 2;
+const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.307";
+const SEND_RUNTIME_BUILD = "v0.5.308";
 function selectedLayout() {
   const mode = cfgLayout.value;
-  return mode === "auto" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
+  return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
+}
+function isAutoLayout(mode = selectedLayout()) {
+  return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4";
+}
+function autoGridTargetModulePx(mode = selectedLayout()) {
+  if (mode === "auto") return 2;
+  const match = /^auto-([1-4])$/.exec(mode);
+  return match ? Number(match[1]) : 0;
 }
 function selectedOrientation() {
   const orientation = cfgOrientation.value;
@@ -162,9 +170,9 @@ function selectFps(fps) {
   speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
 }
 function updateAutoGridControlState() {
-  const automatic = selectedLayout() === "auto";
+  const automatic = isAutoLayout();
   cfgSize.disabled = automatic;
-  cfgSize.title = automatic ? "Auto Grid chooses QR payload size" : "";
+  cfgSize.title = automatic ? `Auto ${autoGridTargetModulePx()} chooses QR payload size to preserve module density` : "";
 }
 function gcd(a, b) {
   a = Math.abs(Math.trunc(a));
@@ -218,7 +226,8 @@ function spatiallyDispersedOrder(cols, rows) {
   }
   return order;
 }
-function chooseAutoGrid(payloadBytes, txFps, fitScaling) {
+function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGridTargetModulePx()) {
+  const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
   const dpr = window.devicePixelRatio || 1;
   const landscape = landscapeGrid();
   const budgetW = Math.max(1, window.innerWidth * dpr);
@@ -257,24 +266,29 @@ function chooseAutoGrid(payloadBytes, txFps, fitScaling) {
   }
   if (!candidates.length) throw new Error("Auto Grid could not find a valid QR layout for this transfer.");
   const strict = candidates.filter((candidate) =>
-    candidate.moduleScale >= AUTO_GRID_MIN_MODULE_PX &&
+    candidate.moduleScale >= densityTarget &&
     candidate.changesPerRefresh <= AUTO_GRID_MAX_CHANGES_PER_REFRESH
   );
   const pool = strict.length ? strict : candidates;
   const adjustedScore = (candidate) => {
-    if (strict.length) return candidate.payloadPerSecond;
-    const scalePenalty = Math.min(1, candidate.moduleScale / AUTO_GRID_MIN_MODULE_PX);
+    // A rolling-shutter stripe destroys a smaller fraction of a wall made from
+    // more independent QRs. Allow up to an 18% theoretical throughput trade
+    // across the 8→32 QR range when fragmentation improves substantially.
+    const fragmentation = Math.max(0, Math.min(1, (candidate.codes - 8) / 24));
+    const fragmentationBonus = 1 + fragmentation * AUTO_GRID_FRAGMENTATION_BONUS;
+    if (strict.length) return candidate.payloadPerSecond * fragmentationBonus;
+    const scalePenalty = Math.min(1, candidate.moduleScale / densityTarget);
     const transitionPenalty = Math.min(1, AUTO_GRID_MAX_CHANGES_PER_REFRESH / Math.max(0.001, candidate.changesPerRefresh));
-    return candidate.payloadPerSecond * scalePenalty * transitionPenalty;
+    return candidate.payloadPerSecond * fragmentationBonus * scalePenalty * transitionPenalty;
   };
   pool.sort((a, b) =>
     adjustedScore(b) - adjustedScore(a) ||
+    b.codes - a.codes ||
     b.moduleScale - a.moduleScale ||
     b.plan.frameBytes - a.plan.frameBytes ||
-    b.codes - a.codes ||
     a.layout.id - b.layout.id
   );
-  return { ...pool[0], constrained: strict.length > 0 };
+  return { ...pool[0], constrained: strict.length > 0, targetModulePx: densityTarget };
 }
 function monitorDisplayRefreshRate() {
   const intervals = [];
@@ -297,7 +311,7 @@ function monitorDisplayRefreshRate() {
       const refreshRate = Math.abs(nearestCommon - measuredRate) / nearestCommon <= 0.03 ? nearestCommon : Math.round(measuredRate);
       const previousMeasuredHz = measuredDisplayHz;
       measuredDisplayHz = Math.max(30, refreshRate);
-      if (selectedFile && selectedLayout() === "auto" && Math.abs(previousMeasuredHz - measuredDisplayHz) >= 1) {
+      if (selectedFile && isAutoLayout() && Math.abs(previousMeasuredHz - measuredDisplayHz) >= 1) {
         clearTimeout(autoGridRefreshTimer);
         autoGridRefreshTimer = setTimeout(() => void startStream(), 120);
       }
@@ -341,7 +355,7 @@ function stopSendRenderer() {
   cleanup?.();
 }
 function applyLiveSenderFps() {
-  if (selectedLayout() === "auto") return false;
+  if (isAutoLayout()) return false;
   if (!activeSendFpsSetter) return false;
   activeSendFpsSetter(selectedFps());
   return true;
@@ -528,7 +542,11 @@ function restoreSendSettings() {
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
     if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "fixed-columns" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
-    if (saved.layout === "auto" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
+    if (saved.layout === "auto") {
+      // v0.5.307 Auto used a 2 px/module floor. Preserve that behavior when
+      // migrating saved settings into the explicit Auto density family.
+      cfgLayout.value = "auto-2";
+    } else if (saved.layout === "auto-1" || saved.layout === "auto-2" || saved.layout === "auto-3" || saved.layout === "auto-4" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
       cfgLayout.value = saved.layout;
     } else if (saved.layout === "five-three") {
       cfgLayout.value = "three-five";
@@ -598,7 +616,7 @@ async function main() {
   let autoGridResizeTimer;
   const resizeForViewport = () => {
     resizeDisplay == null ? void 0 : resizeDisplay();
-    if (selectedFile && selectedLayout() === "auto") {
+    if (selectedFile && isAutoLayout()) {
       clearTimeout(autoGridResizeTimer);
       autoGridResizeTimer = setTimeout(() => void startStream(), 140);
     }
@@ -655,7 +673,7 @@ async function startStream(revealStage = false) {
   const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
   const ecc = "L";
   const configuredLayout = selectedLayout();
-  const autoMode = configuredLayout === "auto";
+  const autoMode = isAutoLayout(configuredLayout);
   const maximumFrameBytes = autoMode ? FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1] : manualFrameBytes;
   if (!autoMode && !fitsInOneStream(payload.length, manualFrameBytes)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS);
@@ -675,7 +693,7 @@ async function startStream(revealStage = false) {
       frameBytes = maximumFrameBytes;
       transport = directProbe;
     } else {
-      autoGrid = chooseAutoGrid(payload.length, txFps, fitScaling);
+      autoGrid = chooseAutoGrid(payload.length, txFps, fitScaling, autoGridTargetModulePx(configuredLayout));
       frameBytes = autoGrid.maximumFrameBytes;
       transport = autoGrid.plan;
     }
@@ -713,7 +731,7 @@ async function startStream(revealStage = false) {
     if (staticStream) return "";
     if (!autoGrid) return `Update ${updatePatternLabel}`;
     const fallback = autoGrid.constrained ? "" : " · fallback constraints";
-    return `Auto Grid · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${fallback}`;
+    return `Auto ${autoGrid.targetModulePx} · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
