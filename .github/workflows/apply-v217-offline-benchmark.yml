@@ -13,6 +13,7 @@ on:
       - sw.js
       - benchmark/offline-runner.mjs
       - .github/receiver_candidate.py
+      - .github/receiver_candidate_message.txt
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -37,13 +38,19 @@ jobs:
           if [ -f .github/receiver_candidate.py ]; then
             python3 .github/receiver_candidate.py 2>&1 | tee /tmp/receiver-candidate-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
+            if git diff --quiet -- vendor/decimen-codec/source; then
+              echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
+            else
+              echo 'codec_changed=true' >> "$GITHUB_OUTPUT"
+            fi
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
           fi
           git diff --check
 
       - name: Cache codec toolchain
-        if: steps.candidate.outputs.changed == 'true'
+        if: steps.candidate.outputs.codec_changed == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -54,7 +61,7 @@ jobs:
           key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
 
       - name: Build SIMD and scalar codecs
-        if: steps.candidate.outputs.changed == 'true'
+        if: steps.candidate.outputs.codec_changed == 'true'
         run: |
           set -euo pipefail
           DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-simd.log
