@@ -1,0 +1,1 @@
+v0.5.285 guarantee completion paint, brighten fullscreen sender, and back off proven-bad moving slots
