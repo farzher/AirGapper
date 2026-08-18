@@ -1,0 +1,1 @@
+v0.5.287 harden auto optics with exact slot attribution and real independent confirmation
