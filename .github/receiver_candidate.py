@@ -226,7 +226,6 @@ replace_between(
     if (winner.yieldRate > candidate.yieldRate + 0.015) return false;
     if (tailFor(candidate) > tailFor(winner) + 0.03) return true;
     if (tailFor(winner) > tailFor(candidate) + 0.03) return false;
-    // Only now is lower gain a tie-break. Decoder performance owns the decision.
     return Number(candidate.requestedIso) < Number(winner.requestedIso);
   };
   const bestOf = (items) => items.filter((item) => item?.valid)
@@ -247,9 +246,6 @@ replace_between(
     return combine(candidate, confirmation);
   };
 
-  // A durable remembered winner or the user's own manual profile is the safest
-  // possible starting point. Validate it first; if it is healthy, do not disturb
-  // the camera with an unnecessary sweep.
   for (const [hint, label] of [[remembered, "memory"], [manualHint, "manual hint"]]) {
     if (!Number.isFinite(hint)) continue;
     const first = await probe(hint, label);
@@ -284,8 +280,6 @@ replace_between(
   if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
   if (invalidatedByMotion) return moved(seed);
 
-  // Revisit the same base after the global sweep. Calibration misses no longer
-  // mutate production geometry, so this is a clean detector-state drift guard.
   const control = await probe(seed, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
   if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
   if (!control || control.unstable || !control.valid || invalidatedByMotion) {
@@ -313,8 +307,6 @@ replace_between(
     return { iso: seed, probes, deferred: true, retryMs: AUTO_OPTICS_CONTROL_RETRY_MS };
   }
 
-  // Refine only after the global basin is known. This is deliberately secondary:
-  // discovery must never depend on a local gradient again.
   for (const [candidate, label] of [
     [coarseBest.requestedIso / Math.SQRT2, "refine darker"],
     [coarseBest.requestedIso * Math.SQRT2, "refine brighter"]
@@ -336,8 +328,6 @@ replace_between(
     return { iso: best.requestedIso, probes, best, collapsed: true };
   }
 
-  // Among genuinely equivalent candidates, prefer the darker one. The previous
-  // local search used darkness too early; here it is only a final tie-break.
   const bestQuality = quality(best);
   const nearBest = decisionCandidates.filter((item) =>
     quality(item) >= bestQuality - 0.025 &&
@@ -372,7 +362,6 @@ replace_between(
 '''
 )
 
-# Only globally healthy independently-confirmed winners may become durable memory.
 rep(
     'receive/main.js',
     '    const reusableWinner = tuned.best.yieldRate >= AUTO_OPTICS_MEMORY_MIN_YIELD;',
@@ -384,8 +373,6 @@ rep(
     '    focusController.adoptAutomaticCameraState("short-shutter automatic optics converged on a globally swept, independently confirmed decoder optimum");'
 )
 
-# A pre-lock race hit is enough to keep acquiring this session, but one lucky QR
-# is not enough to become durable memory. Post-lock global calibration owns that.
 rep(
     'receive/main.js',
     '''      rememberAutomaticOptics(
@@ -400,8 +387,6 @@ rep(
       // automatic-optics memory is written after the post-lock global sweep.'''
 )
 
-# Acquisition must also be able to cross the same bad low-gain basin. v293 only
-# tried up to 2x seed before falling back.
 rep(
     'receive/main.js',
     '''  add(seed.exposure, seed.iso * Math.SQRT2, "brighter");
@@ -412,6 +397,8 @@ rep(
   add(seed.exposure, seed.iso * 8, "bright rescue 8x");'''
 )
 
+Path('receive/.v294-ci-trigger').unlink(missing_ok=True)
+
 main = Path('receive/main.js').read_text()
 for needle in [
     'const RECEIVER_RUNTIME_BUILD = "v0.5.294";',
@@ -419,7 +406,7 @@ for needle in [
     'const AUTO_OPTICS_GAIN_MAX_PROBES = 8;',
     'airgapper:auto-optics-memory:v5',
     'autoOpticsProbe: Boolean(autoOpticsMeasurementSlots?.size)',
-    'global log-space sweep',
+    'Global log-space sweep',
     'sweep 4x',
     'AUTO_OPTICS_HEALTHY_YIELD',
     'globally swept, independently confirmed decoder optimum'
