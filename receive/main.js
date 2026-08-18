@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.242";
+const RECEIVER_RUNTIME_BUILD = "v0.5.243";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -4469,12 +4469,9 @@ async function start() {
   await video.play().catch(() => void 0);
   preview.classList.remove("camera-loading");
   const activeTrack = stream.getVideoTracks()[0];
-  if (activeTrack) {
-    await refreshCameraDevices(activeTrack);
-    populateBrowserCapabilities(activeTrack);
-    showNegotiatedWebMode(activeTrack);
-    if (!legacyAndroidApp) attachCameraController(activeTrack);
-  }
+
+  // Decoder startup is the critical path. A live <video> must never sit visible
+  // while enumerateDevices/capability UI work delays the first camera frame.
   syncPreviewAspect();
   setStatus("");
   pool.resize(selectedWorkerCount());
@@ -4482,8 +4479,15 @@ async function start() {
   resetLivePipeline(cameraStartedTs);
   captureGen++;
   startFramePump(captureGen, activeTrack);
-  if (activeTrack && !automaticOptics) void reapplyManualOpticsAfterFreshFrames(activeTrack, "camera started");
   statsTimer = setInterval(updateStats, STATS_TICK_MS);
+
+  if (activeTrack) {
+    populateBrowserCapabilities(activeTrack);
+    showNegotiatedWebMode(activeTrack);
+    if (!legacyAndroidApp) attachCameraController(activeTrack);
+    void refreshCameraDevices(activeTrack);
+  }
+  if (activeTrack && !automaticOptics) void reapplyManualOpticsAfterFreshFrames(activeTrack, "camera started");
   await requestScreenWakeLock();
 }
 const CORPUS_DEVICE_NAMES = {
@@ -4660,7 +4664,24 @@ function startFramePump(gen, track) {
       frameTrackProcessor = processor;
       frameTrackReader = reader;
       framePumpMode = "MediaStreamTrackProcessor";
-      void pumpTrackFrames(gen, reader, processor);
+
+      // Some Android camera stacks can leave TrackProcessor.read() pending even
+      // though the <video> preview is already advancing. Do not allow a silent
+      // processor stall to leave Receive at 0 fps indefinitely; rVFC can start
+      // decoding from the same live stream immediately.
+      const startupWatchdog = setTimeout(() => {
+        if (done || gen !== captureGen || frameTrackReader !== reader || framePumpProcessorTotal > 0) return;
+        console.warn("MediaStreamTrackProcessor produced no startup frame; using requestVideoFrameCallback");
+        frameTrackReader = null;
+        frameTrackProcessor = null;
+        framePumpMode = "rVFC startup fallback";
+        notePipelineEvent("frame-pump-startup-fallback");
+        void reader.cancel().catch(() => void 0).finally(() => {
+          try { reader.releaseLock(); } catch {}
+        });
+        scheduleFrame(gen);
+      }, 800);
+      void pumpTrackFrames(gen, reader, processor).finally(() => clearTimeout(startupWatchdog));
       return;
     } catch (error) {
       console.warn("MediaStreamTrackProcessor unavailable; using requestVideoFrameCallback", error);
