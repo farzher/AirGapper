@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.284";
+const RECEIVER_RUNTIME_BUILD = "v0.5.285";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1160,6 +1160,9 @@ const SLOT_WEAK_MIN_SAMPLES = 32;
 const SLOT_WEAK_ENTER_SCORE = 0.08;
 const SLOT_WEAK_RECOVERY_SCORE = 0.25;
 const SLOT_WEAK_PROBE_EVERY = 8;
+const SLOT_VERY_WEAK_PROBE_EVERY = 16;
+const SLOT_VERY_WEAK_SCORE = 0.03;
+const SLOT_VERY_WEAK_MISSES = 6;
 const SLOT_WEAK_MIN_WALL = 6;
 const SLOT_WEAK_MIN_HEALTHY = 4;
 const slotAttemptCounts = new Uint32Array(SLOT_METRIC_COUNT);
@@ -1265,6 +1268,14 @@ function adaptiveWeakSlotScheduling(candidates) {
   // wall bad, there are not enough healthy peers and every slot stays active.
   return healthy >= SLOT_WEAK_MIN_HEALTHY;
 }
+function adaptiveSlotProbeEvery(region) {
+  const slot = Number(region?.gridSlot);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !slotAdaptiveWeak[slot]) return 1;
+  const veryWeak = slotQualitySamples[slot] >= SLOT_WEAK_MIN_SAMPLES * 2 &&
+    slotQualityScores[slot] < SLOT_VERY_WEAK_SCORE &&
+    (region.consecutiveMisses || 0) >= SLOT_VERY_WEAK_MISSES;
+  return veryWeak ? SLOT_VERY_WEAK_PROBE_EVERY : SLOT_WEAK_PROBE_EVERY;
+}
 function shouldScheduleAdaptiveSlot(region, sourceSequence, adaptive) {
   if (!adaptive) return true;
   const slot = Number(region.gridSlot);
@@ -1272,9 +1283,9 @@ function shouldScheduleAdaptiveSlot(region, sourceSequence, adaptive) {
   const sequence = Number(sourceSequence);
   if (!Number.isFinite(sequence)) return true;
   // Stagger weak slots so several bad edge cells do not all consume the same
-  // probe frame. They remain geometrically tracked; only payload decode work is
-  // thinned out. Acquisition/reacquisition is intentionally unaffected.
-  return (Math.trunc(sequence) + slot) % SLOT_WEAK_PROBE_EVERY === 0;
+  // probe frame. A persistently near-zero slot backs off to ~2 probes/s at a
+  // 30-fps source; one CRC-valid hit immediately restores full scheduling.
+  return (Math.trunc(sequence) + slot) % adaptiveSlotProbeEvery(region) === 0;
 }
 function formatSlotMetric(slot) {
   const attempts = slotAttemptCounts[slot] || 0;
@@ -3983,11 +3994,16 @@ function renderFocusDiagnostics() {
   const averageRobustBands = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustBands, 0) / trackedCompletions.length : 0;
   const averageRobustSearchMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustSearchMs, 0) / trackedCompletions.length : 0;
   const visibleSlotCount = regions.reduce((count, region) => count + Number(region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN"), 0);
-  const decodableSlotCount = regions.reduce((count, region) => count + Number(
+  const diagnosticCandidates = regions.filter((region) =>
     region.gridSlot !== void 0 && isGridDecodeCandidate(region) &&
     validTrackedQuad(region, receiverFrameWidth, receiverFrameHeight)
-  ), 0);
-  const qrOpportunityRate = sourceCaptureRate * decodableSlotCount;
+  );
+  const decodableSlotCount = diagnosticCandidates.length;
+  const diagnosticAdaptiveWeak = adaptiveWeakSlotScheduling(diagnosticCandidates);
+  const scheduledSlotEquivalent = diagnosticCandidates.reduce((sum, region) =>
+    sum + (diagnosticAdaptiveWeak ? 1 / adaptiveSlotProbeEvery(region) : 1), 0
+  );
+  const qrOpportunityRate = sourceCaptureRate * scheduledSlotEquivalent;
   const attemptCoverage = qrOpportunityRate > 0 ? attemptedQrRate / qrOpportunityRate : 0;
   const packetInternalBytes = decoder?.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
   const transportMetadataBytes = decoder ? frameOverhead(decoder.mode) + packetInternalBytes : 0;
@@ -4009,7 +4025,7 @@ function renderFocusDiagnostics() {
     `Camera   focus writes ${cameraFocusWritesTotal} · exposure writes ${cameraExposureWritesTotal}`,
     `Source   ${sourceLine}`,
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · scheduled frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
-    `Capacity ${decodableSlotCount || "—"} decodable / ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
+    `Capacity ${decodableSlotCount || "—"} decodable / ${visibleSlotCount || "—"} visible · ${scheduledSlotEquivalent.toFixed(1)} scheduled/frame × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
@@ -6142,11 +6158,12 @@ async function captureFrame(source) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
   const batchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 32);
-  // Weak-slot thinning is a steady-state CPU optimization, not a recovery
-  // policy. While wall breadth is starved, spend the available headroom on all
-  // predicted slots so a repaired pose is recognized on the very next frame.
-  const adaptiveWeakSlots = gridLattice.active && !sustainedCoverageStarvation &&
-    adaptiveWeakSlotScheduling(batchCandidates);
+  // Payload weakness and wall-pose recovery are separate concerns. Motion
+  // now comes from CRC-valid whole-wall feedback and missing breadth has its own
+  // targeted recovery probe, so do not flood proven-bad payload slots during a
+  // motion wobble. That only lengthens Guided jobs and causes newer frames to be
+  // replaced while workers chew on known failures.
+  const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
   const batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
@@ -6732,14 +6749,30 @@ function paintTransferComplete() {
   progressEl.setAttribute("aria-valuenow", "100");
   progressLabel.textContent = "100%";
   transferSizeLabel.textContent = "";
-  etaLabel.textContent = "Finalizing…";
+  etaLabel.textContent = "Processing…";
 }
 async function waitForProgressPaint() {
-  // rAF callbacks run before paint and promise continuations are microtasks, so
-  // a timer task after the rAF gives the compositor an unconditional paint
-  // opportunity before we enter synchronous payload assembly.
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // One rAF is still before paint. Resolve from the following frame: yielding
+  // between the two callbacks gives the browser a guaranteed rendering turn
+  // with the snapped 100% bar and Processing label visible.
+  await new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  );
+}
+function quiesceCompletedTransfer() {
+  // The decoder already has every source symbol it needs. Stop producing and
+  // decoding camera frames before CPU-heavy assembly/verification so completed
+  // work cannot compete with the main-thread finishing path. Keep the last
+  // preview frame mounted until finish() replaces the receive UI.
+  stopFramePump();
+  stream?.getTracks().forEach((track) => track.stop());
+  clearPendingGridLanes();
+  cropAttempts.clear();
+  fullScanJobs.clear();
+  scanCapturedAt.clear();
+  clearInterval(statsTimer);
+  statsTimer = void 0;
+  pool.resize(0);
 }
 async function finalizeCompletedTransfer(payloadId) {
   if (!decoder || done || transferFinalizing) return;
@@ -6753,6 +6786,7 @@ async function finalizeCompletedTransfer(payloadId) {
     return;
   }
   freezeCompletionDiagnostics();
+  quiesceCompletedTransfer();
   const payload = completingDecoder.assemble();
   const seconds = (receiverNow() - startTs) / 1e3;
   const ok = fnv1a(payload) === payloadId;

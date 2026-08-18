@@ -212,7 +212,11 @@ body.receive-mode .preview { width: 100%; height: 100%; max-height: none; aspect
 .status-line.error { color: var(--bad); font-weight: 650; }
 .footer-hint { text-align: center; }
 
-body.qr-full { overflow: hidden; }
+body.qr-full { overflow: hidden; background: #fff; }
+body.qr-full .app,
+body.qr-full .app-main,
+body.qr-full #sendView,
+body.qr-full #stage { background: #fff; }
 body.qr-full .app-header,
 body.qr-full .app-main > :not(#sendView),
 body.qr-full .send-shell > :not(#stage) { display: none !important; }
