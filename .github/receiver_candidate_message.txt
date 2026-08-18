@@ -1,1 +1,0 @@
-v0.5.303 add Auto Grid sizing and rolling-shutter phase interleaving

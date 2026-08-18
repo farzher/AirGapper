@@ -10,7 +10,12 @@ const GRID_LAYOUTS = [
   { id: 7, cols: 3, rows: 6 },
   { id: 8, cols: 4, rows: 6 },
   { id: 9, cols: 4, rows: 8 },
-  { id: 10, cols: 4, rows: 7 }
+  { id: 10, cols: 4, rows: 7 },
+  { id: 11, cols: 2, rows: 4 },
+  { id: 12, cols: 4, rows: 5 },
+  { id: 13, cols: 3, rows: 7 },
+  { id: 14, cols: 5, rows: 5 },
+  { id: 15, cols: 5, rows: 6 }
 ];
 function gridLayoutById(id) {
   return GRID_LAYOUTS.find((layout) => layout.id === id);

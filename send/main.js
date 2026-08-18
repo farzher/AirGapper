@@ -21,20 +21,23 @@ import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
 import { makeZip } from "../shared/zip.js";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings.js";
-import { GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
+import { GRID_LAYOUTS, GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
 const HEADER_MARGIN = 0;
 const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-// Sender FPS is always the user's requested presentation rate. Rolling-shutter
-// mitigation must remain an explicit/testable transport strategy, never a hidden
-// cap that changes the selected rate.
-const SEND_RUNTIME_BUILD = "v0.5.302";
+// Sender FPS is always the user's requested presentation rate. Auto Grid may
+// choose QR count/size, but never silently changes the requested FPS.
+const AUTO_GRID_MIN_MODULE_PX = 2;
+const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
+let measuredDisplayHz = 60;
+let autoGridRefreshTimer;
+const SEND_RUNTIME_BUILD = "v0.5.303";
 function selectedLayout() {
   const mode = cfgLayout.value;
-  return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
+  return mode === "auto" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
 }
 function selectedOrientation() {
   const orientation = cfgOrientation.value;
@@ -153,6 +156,121 @@ function selectFps(fps) {
   cfgFpsCustom.hidden = cfgFps.value !== "custom";
   speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
 }
+function updateAutoGridControlState() {
+  const automatic = selectedLayout() === "auto";
+  cfgSize.disabled = automatic;
+  cfgSize.title = automatic ? "Auto Grid chooses QR payload size" : "";
+}
+function gcd(a, b) {
+  a = Math.abs(Math.trunc(a));
+  b = Math.abs(Math.trunc(b));
+  while (b) [a, b] = [b, a % b];
+  return a || 1;
+}
+function temporalPhaseStep(count) {
+  if (count <= 1) return 1;
+  let step = Math.max(1, Math.round(count * 0.61803398875));
+  while (step < count && gcd(step, count) !== 1) step++;
+  if (step >= count) {
+    step = Math.max(1, Math.floor(count / 2));
+    while (step > 1 && gcd(step, count) !== 1) step--;
+  }
+  return step;
+}
+function spatiallyDispersedOrder(cols, rows) {
+  const count = cols * rows;
+  if (count <= 1) return [0];
+  const point = (slot) => ({
+    x: (slot % cols + 0.5) / cols,
+    y: (Math.floor(slot / cols) + 0.5) / rows
+  });
+  const dist2 = (a, b) => {
+    const pa = point(a), pb = point(b);
+    return (pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2;
+  };
+  const remaining = new Set(Array.from({ length: count }, (_, slot) => slot));
+  const order = [];
+  let current = 0;
+  while (remaining.size) {
+    if (order.length === 0) {
+      current = 0;
+    } else {
+      const recent = order.slice(-Math.min(4, order.length));
+      let best = -1, bestScore = -Infinity;
+      for (const slot of remaining) {
+        const previousDistance = dist2(slot, order[order.length - 1]);
+        const recentDistance = Math.min(...recent.map((other) => dist2(slot, other)));
+        const score = previousDistance + recentDistance * 0.55;
+        if (score > bestScore + 1e-12 || Math.abs(score - bestScore) <= 1e-12 && slot < best) {
+          best = slot;
+          bestScore = score;
+        }
+      }
+      current = best;
+    }
+    order.push(current);
+    remaining.delete(current);
+  }
+  return order;
+}
+function chooseAutoGrid(payloadBytes, txFps, fitScaling) {
+  const dpr = window.devicePixelRatio || 1;
+  const landscape = landscapeGrid();
+  const budgetW = Math.max(1, window.innerWidth * dpr);
+  const budgetH = Math.max(1, window.innerHeight * dpr);
+  const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
+  const candidates = [];
+  for (const maximumFrameBytes of FRAME_BYTES_OPTIONS) {
+    if (!fitsInOneStream(payloadBytes, maximumFrameBytes)) continue;
+    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes);
+    if (plan.mode === "direct") continue;
+    for (const layout of GRID_LAYOUTS) {
+      const codes = layout.cols * layout.rows;
+      if (codes <= 1 || codes > 32) continue;
+      const margin = GRID_MARGIN;
+      const totalW = plan.qrModules * layout.cols + margin * (layout.cols + 1);
+      const totalH = plan.qrModules * layout.rows + margin * (layout.rows + 1);
+      const displayW = landscape ? totalH : totalW;
+      const displayH = landscape ? totalW : totalH;
+      const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
+      const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
+      if (!(moduleScale > 0)) continue;
+      const changesPerRefresh = codes * txFps / refreshHz;
+      const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
+      const payloadPerSecond = sourceBytesPerQr * codes * txFps;
+      candidates.push({
+        maximumFrameBytes,
+        plan,
+        layout,
+        codes,
+        moduleScale,
+        changesPerRefresh,
+        payloadPerSecond,
+        refreshHz
+      });
+    }
+  }
+  if (!candidates.length) throw new Error("Auto Grid could not find a valid QR layout for this transfer.");
+  const strict = candidates.filter((candidate) =>
+    candidate.moduleScale >= AUTO_GRID_MIN_MODULE_PX &&
+    candidate.changesPerRefresh <= AUTO_GRID_MAX_CHANGES_PER_REFRESH
+  );
+  const pool = strict.length ? strict : candidates;
+  const adjustedScore = (candidate) => {
+    if (strict.length) return candidate.payloadPerSecond;
+    const scalePenalty = Math.min(1, candidate.moduleScale / AUTO_GRID_MIN_MODULE_PX);
+    const transitionPenalty = Math.min(1, AUTO_GRID_MAX_CHANGES_PER_REFRESH / Math.max(0.001, candidate.changesPerRefresh));
+    return candidate.payloadPerSecond * scalePenalty * transitionPenalty;
+  };
+  pool.sort((a, b) =>
+    adjustedScore(b) - adjustedScore(a) ||
+    b.moduleScale - a.moduleScale ||
+    b.plan.frameBytes - a.plan.frameBytes ||
+    b.codes - a.codes ||
+    a.layout.id - b.layout.id
+  );
+  return { ...pool[0], constrained: strict.length > 0 };
+}
 function monitorDisplayRefreshRate() {
   const intervals = [];
   let previous = 0;
@@ -172,6 +290,12 @@ function monitorDisplayRefreshRate() {
       const commonRates = [75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
       const nearestCommon = commonRates.reduce((nearest, rate) => Math.abs(rate - measuredRate) < Math.abs(nearest - measuredRate) ? rate : nearest);
       const refreshRate = Math.abs(nearestCommon - measuredRate) / nearestCommon <= 0.03 ? nearestCommon : Math.round(measuredRate);
+      const previousMeasuredHz = measuredDisplayHz;
+      measuredDisplayHz = Math.max(30, refreshRate);
+      if (selectedFile && selectedLayout() === "auto" && Math.abs(previousMeasuredHz - measuredDisplayHz) >= 1) {
+        clearTimeout(autoGridRefreshTimer);
+        autoGridRefreshTimer = setTimeout(() => void startStream(), 120);
+      }
       if (refreshRate > 60) {
         const previousValue = displayOption == null ? void 0 : displayOption.value;
         const wasSelected = cfgFps.value === previousValue;
@@ -212,6 +336,7 @@ function stopSendRenderer() {
   cleanup?.();
 }
 function applyLiveSenderFps() {
+  if (selectedLayout() === "auto") return false;
   if (!activeSendFpsSetter) return false;
   activeSendFpsSetter(selectedFps());
   return true;
@@ -397,7 +522,7 @@ function restoreSendSettings() {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six") {
+    if (saved.layout === "auto" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
       cfgLayout.value = saved.layout;
     } else if (saved.layout === "five-three") {
       cfgLayout.value = "three-five";
@@ -453,6 +578,7 @@ async function main() {
   applyMode();
   Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
   restoreSendSettings();
+  updateAutoGridControlState();
   let customFpsTimer;
   cfgFps.addEventListener("change", () => {
     clearTimeout(customFpsTimer);
@@ -462,7 +588,14 @@ async function main() {
     saveSendSettings();
     if (selectedFile && !applyLiveSenderFps()) void startStream();
   });
-  const resizeForViewport = () => resizeDisplay == null ? void 0 : resizeDisplay();
+  let autoGridResizeTimer;
+  const resizeForViewport = () => {
+    resizeDisplay == null ? void 0 : resizeDisplay();
+    if (selectedFile && selectedLayout() === "auto") {
+      clearTimeout(autoGridResizeTimer);
+      autoGridResizeTimer = setTimeout(() => void startStream(), 140);
+    }
+  };
   window.addEventListener("resize", resizeForViewport);
   (_a = window.visualViewport) == null ? void 0 : _a.addEventListener("resize", resizeForViewport);
   // FPS is a live scheduler parameter. Size/layout/scaling/orientation still
@@ -470,6 +603,7 @@ async function main() {
   // the already-visible QR wall or cold-start the render workers.
   for (const el of [cfgSize, cfgScaling, cfgLayout, cfgOrientation]) {
     el.addEventListener("change", () => {
+      if (el === cfgLayout) updateAutoGridControlState();
       saveSendSettings();
       void startStream();
     });
@@ -511,23 +645,57 @@ async function startStream(revealStage = false) {
   const txFps = selectedFps();
   const sizeLevel = Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
-  const frameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
+  const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
   const ecc = "L";
   const configuredLayout = selectedLayout();
-  if (!fitsInOneStream(payload.length, frameBytes)) {
+  const autoMode = configuredLayout === "auto";
+  const maximumFrameBytes = autoMode ? FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1] : manualFrameBytes;
+  if (!autoMode && !fitsInOneStream(payload.length, manualFrameBytes)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS);
     showSettingsError(
-      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, frameBytes).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
     );
     return;
   }
   const snippetValue = currentMode() === "snippet" ? snippetText.value : null;
-  const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= frameBytes ? snippetValue : null;
-  const transport = selectTransportPlan(payload.length, frameBytes);
+  const plainSnippet = snippetValue !== null && new TextEncoder().encode(snippetValue).length <= maximumFrameBytes ? snippetValue : null;
+  let frameBytes = manualFrameBytes;
+  let autoGrid = null;
+  let transport;
+  if (autoMode && plainSnippet === null) {
+    const directProbe = selectTransportPlan(payload.length, maximumFrameBytes);
+    if (directProbe.mode === "direct") {
+      frameBytes = maximumFrameBytes;
+      transport = directProbe;
+    } else {
+      autoGrid = chooseAutoGrid(payload.length, txFps, fitScaling);
+      frameBytes = autoGrid.maximumFrameBytes;
+      transport = autoGrid.plan;
+    }
+  } else {
+    transport = selectTransportPlan(payload.length, frameBytes);
+  }
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode = staticStream ? "single" : configuredLayout;
-  const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
+  const resolvedGrid = !staticStream && autoGrid
+    ? { cols: autoGrid.layout.cols, rows: autoGrid.layout.rows, codes: autoGrid.codes }
+    : layoutGrid(layoutMode);
+  const { cols: gridCols, rows: gridRows, codes: gridCodes } = resolvedGrid;
   const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
+  const temporalOrder = spatiallyDispersedOrder(gridCols, gridRows);
+  const phaseStep = temporalPhaseStep(gridCodes);
+  const temporalSourceOffset = (pageId, phase) => {
+    if (gridCodes <= 1) return 0;
+    const rotation = pageId * phaseStep % gridCodes;
+    let index = (phase + rotation) % gridCodes;
+    if (pageId & 1) index = gridCodes - 1 - index;
+    return temporalOrder[index];
+  };
+  const describeGrid = () => {
+    if (!autoGrid || staticStream) return "";
+    const fallback = autoGrid.constrained ? "" : " · fallback constraints";
+    return `Auto Grid · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · dispersed rotating phases${fallback}`;
+  };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
   if (transport.mode === "raptorq") {
@@ -703,7 +871,7 @@ async function startStream(revealStage = false) {
       }, 250);
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
-      setStatus("");
+      setStatus(describeGrid());
       if (false) {
         void fetch("/__diagnostics", {
           method: "POST",
@@ -863,7 +1031,7 @@ async function startStream(revealStage = false) {
       }, 250);
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
-      setStatus("");
+      setStatus(describeGrid());
     };
     const ensurePageSource = (page, totalW, totalH) => {
       if (page.bitmap) return page.bitmap;
@@ -990,8 +1158,8 @@ async function startStream(revealStage = false) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalCompositeOperation = "source-over";
 
-      if (activeTransportCursor?.key === transportKey)
-        activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, ordinal + 1);
+      // The durable cursor advances only when this entire page completes;
+      // phase-hopped presentation is intentionally not ordinal order.
     };
 
     for (let i = 0; i < workerCount; ++i) {
@@ -1092,7 +1260,7 @@ async function startStream(revealStage = false) {
       let painted = 0;
       while (currentPage && now + 0.25 >= nextCellAt && painted < gridCodes) {
         try {
-          drawPageCell(currentPage, currentCellOffset);
+          drawPageCell(currentPage, temporalSourceOffset(currentPage.pageId, currentCellOffset));
         } catch (error) {
           closePage(currentPage);
           currentPage = null;
@@ -1104,6 +1272,8 @@ async function startStream(revealStage = false) {
         nextCellAt += cellInterval;
         if (currentCellOffset < gridCodes) continue;
 
+        if (activeTransportCursor?.key === transportKey)
+          activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, currentPage.endOrdinal);
         closePage(currentPage);
         currentPage = null;
         currentCellOffset = 0;

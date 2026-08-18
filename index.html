@@ -26,7 +26,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.302</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.303</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -70,7 +70,7 @@
           <div class="send-controls" id="send-controls" hidden>
             <label class="speed-control"><span>Speed</span><select id="cfg-fps"><option value="1">1 fps</option><option value="5">5 fps</option><option value="10">10 fps</option><option value="15" selected>15 fps</option><option value="20">20 fps</option><option value="24">24 fps</option><option value="30">30 fps</option><option value="55">55 fps</option><option value="60">60 fps</option><option value="custom">Custom…</option></select><input id="cfg-fps-custom" type="number" min="1" max="480" step="1" value="15" aria-label="Custom frames per second" hidden /></label>
             <label><span>Size</span><select id="cfg-size"></select></label>
-            <label><span>Layout</span><select id="cfg-layout"><option value="single" selected>1:1</option><option value="one-two">1:2</option><option value="two-two">2:2</option><option value="two-three">2:3</option><option value="four-three">3:4</option><option value="three-five">3:5</option><option value="three-six">3:6</option><option value="four-six">4:6</option><option value="four-seven">4:7</option><option value="four-eight">4:8</option></select></label>
+            <label><span>Layout</span><select id="cfg-layout"><option value="auto">Auto</option><option value="single" selected>1:1</option><option value="one-two">1:2</option><option value="two-two">2:2</option><option value="two-three">2:3</option><option value="four-three">3:4</option><option value="three-five">3:5</option><option value="three-six">3:6</option><option value="four-six">4:6</option><option value="four-seven">4:7</option><option value="four-eight">4:8</option></select></label>
             <label><span>Orientation</span><select id="cfg-orientation"><option value="auto" selected>Auto</option><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
             <label><span>Scaling</span><select id="cfg-scaling"><option value="integer">Pixel perfect</option><option value="fit">Fit screen</option></select></label>
             <div class="send-link-control"><span>Receive</span><button class="secondary-button" id="send-receiver-link-open" type="button">Show QR</button></div>
@@ -157,6 +157,6 @@
   <a id="receiver-link-url"></a>
 </dialog>
 
-<script type="module" src="./main.js?build=v0.5.302"></script>
+<script type="module" src="./main.js?build=v0.5.303"></script>
 </body>
 </html>
