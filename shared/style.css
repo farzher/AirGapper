@@ -382,6 +382,7 @@ input[type="range"] { accent-color: #222; }
 .complete-label { display: none; color: var(--good); font-size: clamp(28px, 7vw, 38px); line-height: 1; letter-spacing: -.035em; }
 .progress { width: 100%; height: 7px; margin-top: 11px; overflow: hidden; background: var(--line); border-radius: 999px; }
 .progress > div { height: 100%; width: 0; background: var(--ink); border-radius: inherit; transition: width .22s ease-out; animation: progress-pulse 1.4s ease-in-out infinite; }
+.progress > div.finalizing { transition: none; animation: none; opacity: 1; }
 .progress > div.error { background: var(--bad); animation: none; }
 @keyframes progress-pulse { 50% { opacity: .68; } }
 .speed-feedback { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }

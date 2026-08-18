@@ -77,4 +77,18 @@ snapshot = lattice.accept(detection(27, 1380, { dx: 150, dy: 95 }), frameWidth, 
 assert.equal(snapshot.distributedFit, true, "fresh cross-axis evidence should re-establish distributed geometry");
 assert.ok(snapshot.fitSlots >= 2);
 
+// Predicted CRC-valid QRs can now carry a tiny current-frame similarity update.
+// It must move every distributed anchor together, not merely the easy QR that
+// produced the residual.
+const beforeMotion = snapshot.slots[27].quad.topLeft;
+const motion = { a: 1.004, b: 0.003, tx: -3, ty: 2, dx: 1.5, dy: 1.2, maxShift: 4.2, samples: 4 };
+snapshot = lattice.nudgeMotion(motion, 1420);
+assert(snapshot, "safe similarity motion should update a locked lattice");
+const afterMotion = snapshot.slots[27].quad.topLeft;
+assert.ok(Math.abs(afterMotion.x - (motion.a * beforeMotion.x - motion.b * beforeMotion.y + motion.tx)) < 1e-5);
+assert.ok(Math.abs(afterMotion.y - (motion.b * beforeMotion.x + motion.a * beforeMotion.y + motion.ty)) < 1e-5);
+assert.equal(snapshot.distributedFit, true, "motion feedback must preserve trusted distributed geometry");
+assert.equal(lattice.nudgeMotion({ a: 1.2, b: 0, tx: 0, ty: 0, dx: 1, dy: 1, maxShift: 2, samples: 4 }, 1440), null,
+  "unsafe scale jumps must be rejected");
+
 console.log("grid-lattice regression: ok");

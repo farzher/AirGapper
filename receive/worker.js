@@ -196,8 +196,16 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
         const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
         const dx = names.reduce((sum, name) => sum + outputQuad[name].x - input.quad[name].x, 0) / names.length;
         const dy = names.reduce((sum, name) => sum + outputQuad[name].y - input.quad[name].y, 0) / names.length;
-        if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 4.75)
-          predictedMotion.push({ dx, dy });
+        if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 4.75) {
+          const points = [input.quad.topLeft, input.quad.topRight, input.quad.bottomRight, input.quad.bottomLeft];
+          const x = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+          const y = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+          const edge = points.reduce((sum, point, index) => {
+            const next = points[(index + 1) % points.length];
+            return sum + Math.hypot(next.x - point.x, next.y - point.y);
+          }, 0) / points.length;
+          predictedMotion.push({ dx, dy, x, y, edge, slot });
+        }
       }
     }
     symbols.push({
@@ -211,23 +219,128 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       header: packet.header
     });
   }
-  // Full measured geometry wins. Otherwise, two or more CRC-valid predicted
-  // QRs agreeing on the same small current-frame offset are strong wall-motion
-  // evidence. Median + tight consensus rejects per-slot/local residual outliers.
+  // Full independently measured finder geometry remains absolute authority.
+  // Otherwise the Turbo/Stable-RS CRC oracle gives us something almost as
+  // valuable every frame: each successful predicted QR says "the wall is this
+  // many pixels away HERE". Pure camera translation makes those residuals equal;
+  // rotation/scale makes them vary smoothly with position. Fit that residual
+  // field as a tiny similarity transform instead of rejecting it as incoherent.
   if (!measuredGeometryCount && predictedMotion.length >= 2) {
     const median = (values) => {
       const sorted = [...values].sort((a, b) => a - b);
       const mid = sorted.length >> 1;
       return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
     };
-    const dx = median(predictedMotion.map((item) => item.dx));
-    const dy = median(predictedMotion.map((item) => item.dy));
-    const coherent = predictedMotion.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
+    const residualFor = (motion, item) => {
+      const px = motion.a * item.x - motion.b * item.y + motion.tx;
+      const py = motion.b * item.x + motion.a * item.y + motion.ty;
+      return Math.hypot(px - (item.x + item.dx), py - (item.y + item.dy));
+    };
+    const refit = (items) => {
+      const meanX = items.reduce((sum, item) => sum + item.x, 0) / items.length;
+      const meanY = items.reduce((sum, item) => sum + item.y, 0) / items.length;
+      const meanQx = items.reduce((sum, item) => sum + item.x + item.dx, 0) / items.length;
+      const meanQy = items.reduce((sum, item) => sum + item.y + item.dy, 0) / items.length;
+      let denom = 0, real = 0, imag = 0;
+      for (const item of items) {
+        const px = item.x - meanX, py = item.y - meanY;
+        const qx = item.x + item.dx - meanQx, qy = item.y + item.dy - meanQy;
+        denom += px * px + py * py;
+        real += px * qx + py * qy;
+        imag += px * qy - py * qx;
+      }
+      const a = denom > 1 ? real / denom : 1;
+      const b = denom > 1 ? imag / denom : 0;
+      return {
+        a, b,
+        tx: meanQx - a * meanX + b * meanY,
+        ty: meanQy - b * meanX - a * meanY
+      };
+    };
+    const edgeValues = predictedMotion.map((item) => item.edge).filter((value) => Number.isFinite(value) && value > 0);
+    const medianEdge = edgeValues.length ? median(edgeValues) : 64;
+    const minSpan = Math.max(48, medianEdge * 0.65);
     const need = Math.max(2, Math.ceil(predictedMotion.length * 0.6));
-    if (coherent.length >= need && Math.hypot(dx, dy) <= 4.5) {
-      const wallMotion = { dx, dy, samples: coherent.length };
-      for (const symbol of symbols) if (symbol.geometryMeasured === false) symbol.wallMotion = wallMotion;
+    let best = null;
+    // Pair-seeded RANSAC is tiny here (<=32 tracks) and prevents one local
+    // fallback residual from rotating the whole lattice.
+    for (let i = 0; i < predictedMotion.length; i++) {
+      for (let j = i + 1; j < predictedMotion.length; j++) {
+        const p = predictedMotion[i], q = predictedMotion[j];
+        const ux = q.x - p.x, uy = q.y - p.y;
+        const denom = ux * ux + uy * uy;
+        if (denom < minSpan * minSpan) continue;
+        const vx = q.x + q.dx - (p.x + p.dx);
+        const vy = q.y + q.dy - (p.y + p.dy);
+        const a = (ux * vx + uy * vy) / denom;
+        const b = (ux * vy - uy * vx) / denom;
+        const scale = Math.hypot(a, b);
+        const rotation = Math.atan2(b, a);
+        if (scale < 0.975 || scale > 1.025 || Math.abs(rotation) > 0.035) continue;
+        const motion = {
+          a, b,
+          tx: p.x + p.dx - a * p.x + b * p.y,
+          ty: p.y + p.dy - b * p.x - a * p.y
+        };
+        const inliers = predictedMotion.filter((item) => residualFor(motion, item) <= 1.05);
+        if (inliers.length < need) continue;
+        const rms = Math.sqrt(inliers.reduce((sum, item) => {
+          const r = residualFor(motion, item);
+          return sum + r * r;
+        }, 0) / inliers.length);
+        if (!best || inliers.length > best.inliers.length ||
+            inliers.length === best.inliers.length && rms < best.rms)
+          best = { inliers, rms };
+      }
     }
+
+    let wallMotion = null;
+    if (best) {
+      const motion = refit(best.inliers);
+      const scale = Math.hypot(motion.a, motion.b);
+      const rotation = Math.atan2(motion.b, motion.a);
+      const residuals = best.inliers.map((item) => residualFor(motion, item));
+      const maxResidual = Math.max(...residuals);
+      const shifts = best.inliers.map((item) => {
+        const px = motion.a * item.x - motion.b * item.y + motion.tx;
+        const py = motion.b * item.x + motion.a * item.y + motion.ty;
+        return { dx: px - item.x, dy: py - item.y };
+      });
+      const maxShift = Math.max(...shifts.map((item) => Math.hypot(item.dx, item.dy)));
+      const dx = shifts.reduce((sum, item) => sum + item.dx, 0) / shifts.length;
+      const dy = shifts.reduce((sum, item) => sum + item.dy, 0) / shifts.length;
+      if (scale >= 0.975 && scale <= 1.025 && Math.abs(rotation) <= 0.035 &&
+          maxResidual <= 1.15 && maxShift <= 5.1) {
+        wallMotion = {
+          kind: "similarity",
+          ...motion,
+          dx, dy,
+          samples: best.inliers.length,
+          residual: Math.sqrt(residuals.reduce((sum, value) => sum + value * value, 0) / residuals.length),
+          maxShift
+        };
+      }
+    }
+
+    // Keep v279's extremely conservative translation consensus as the fallback
+    // for clustered successes that do not provide a safe rotation/scale baseline.
+    if (!wallMotion) {
+      const dx = median(predictedMotion.map((item) => item.dx));
+      const dy = median(predictedMotion.map((item) => item.dy));
+      const coherent = predictedMotion.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
+      if (coherent.length >= need && Math.hypot(dx, dy) <= 4.5) {
+        wallMotion = {
+          kind: "translation",
+          a: 1, b: 0, tx: dx, ty: dy,
+          dx, dy,
+          samples: coherent.length,
+          residual: Math.max(...coherent.map((item) => Math.hypot(item.dx - dx, item.dy - dy))),
+          maxShift: Math.hypot(dx, dy)
+        };
+      }
+    }
+    if (wallMotion)
+      for (const symbol of symbols) if (symbol.geometryMeasured === false) symbol.wallMotion = wallMotion;
   }
   return { symbols, metrics };
 }

@@ -1,5 +1,5 @@
 (() => {
-  const CACHE = "airgapper-static-js-v228";
+  const CACHE = "airgapper-static-js-v229";
   const PRECACHE = [
     "./main.js",
     "./icon-192.png",

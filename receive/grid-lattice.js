@@ -204,29 +204,70 @@ class GridLattice {
       this.transition("TRACK", "valid predicted packet kept lattice alive", at);
     return true;
   }
-  nudgeTranslation(dx, dy, at = this.lastHitAt) {
-    if (!this.locked || !this.candidate || !Number.isFinite(dx) || !Number.isFinite(dy)) return null;
-    const distance = Math.hypot(dx, dy);
-    if (distance < 0.08 || distance > 4.5 || at < this.lastHitAt) return null;
-    const shiftQuad = (quad) => {
-      const points = corners(quad).map((point) => ({ x: point.x + dx, y: point.y + dy }));
+  nudgeMotion(motion, at = this.lastHitAt) {
+    if (!this.locked || !this.candidate || !motion || at < this.lastHitAt) return null;
+    const a = Number(motion.a ?? 1);
+    const b = Number(motion.b ?? 0);
+    const tx = Number(motion.tx ?? motion.dx);
+    const ty = Number(motion.ty ?? motion.dy);
+    if (![a, b, tx, ty].every(Number.isFinite)) return null;
+    const scale = Math.hypot(a, b);
+    const rotation = Math.atan2(b, a);
+    const representativeShift = Number.isFinite(Number(motion.maxShift))
+      ? Number(motion.maxShift)
+      : Math.hypot(Number(motion.dx ?? tx), Number(motion.dy ?? ty));
+    const linearChange = Math.max(Math.abs(a - 1), Math.abs(b));
+    if (representativeShift < 0.08 && linearChange < 0.0004) return null;
+    if (representativeShift > 5.25 || scale < 0.97 || scale > 1.03 || Math.abs(rotation) > 0.04) return null;
+    const transformPoint = (point) => ({
+      x: a * point.x - b * point.y + tx,
+      y: b * point.x + a * point.y + ty
+    });
+    const transformQuad = (quad) => {
+      const points = corners(quad).map(transformPoint);
       return { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
     };
-    const shiftObservation = (observation) => {
-      const quad = shiftQuad(observation.quad);
+    const transformObservation = (observation) => {
+      const quad = transformQuad(observation.quad);
       return { ...observation, quad, box: bounds(quad) };
     };
-    this.observations = this.observations.map(shiftObservation);
-    const h = [...this.candidate.transform];
-    // Output translation of a projective transform: x'=(N/d)+dx, y'=(M/d)+dy.
-    h[0] += dx * h[6]; h[1] += dx * h[7]; h[2] += dx;
-    h[3] += dy * h[6]; h[4] += dy * h[7]; h[5] += dy;
+    this.observations = this.observations.map(transformObservation);
+
+    const h = this.candidate.transform;
+    // Left-compose the image-space similarity A with the world->camera
+    // homography H. H has an implicit final coefficient of 1.
+    const next = [
+      a * h[0] - b * h[3] + tx * h[6],
+      a * h[1] - b * h[4] + tx * h[7],
+      a * h[2] - b * h[5] + tx,
+      b * h[0] + a * h[3] + ty * h[6],
+      b * h[1] + a * h[4] + ty * h[7],
+      b * h[2] + a * h[5] + ty,
+      h[6],
+      h[7]
+    ];
     this.candidate = {
       ...this.candidate,
-      transform: h,
-      observations: this.candidate.observations.map(shiftObservation)
+      transform: next,
+      observations: this.candidate.observations.map(transformObservation)
     };
+    // Slot corrections are image-space vectors, so rotate/scale the vectors
+    // but never apply the affine translation to them.
+    for (const [slot, residuals] of this.slotCorrections) {
+      this.slotCorrections.set(slot, residuals.map((point) => ({
+        x: a * point.x - b * point.y,
+        y: b * point.x + a * point.y
+      })));
+    }
     return this.snapshot();
+  }
+  nudgeTranslation(dx, dy, at = this.lastHitAt) {
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.hypot(dx, dy) > 4.5) return null;
+    return this.nudgeMotion({
+      kind: "translation",
+      a: 1, b: 0, tx: dx, ty: dy,
+      dx, dy, maxShift: Math.hypot(dx, dy)
+    }, at);
   }
   learnSlotCorrection(detection) {
     const candidate = this.candidate;
