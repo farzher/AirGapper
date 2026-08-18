@@ -28,6 +28,7 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
+const SEND_RUNTIME_BUILD = "v0.5.260";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -197,6 +198,12 @@ let generation = 0;
 let resizeDisplay = null;
 let activeTransportEncoder = null;
 let activeTransportCursor = null;
+let activeSendRendererCleanup = null;
+function stopSendRenderer() {
+  const cleanup = activeSendRendererCleanup;
+  activeSendRendererCleanup = null;
+  cleanup?.();
+}
 const specsLine = statusLine(specs);
 const setStatus = specsLine.setStatus;
 function showError(message) {
@@ -243,6 +250,7 @@ function updateFilePicker() {
   } else selectionSummary.replaceChildren();
 }
 function discardSelectedFile() {
+  stopSendRenderer();
   activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();
   activeTransportEncoder = null;
   activeTransportCursor = null;
@@ -468,6 +476,7 @@ function scrollStageIntoView() {
 async function startStream(revealStage = false) {
   var _a;
   const gen = ++generation;
+  stopSendRenderer();
   activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();
   activeTransportEncoder = null;
   resizeDisplay = null;
@@ -722,6 +731,203 @@ async function startStream(revealStage = false) {
       ordinal
     };
   };
+  // Animated walls generate a complete QR page off the UI thread. At 4:7/30
+  // fps this moves 840 QR encodes/s away from the compositor/main thread. The
+  // main thread still owns transport encoding so the large source payload is
+  // not copied into every worker; workers receive only one page (~80 KiB) of
+  // framed QR bytes and return a transferable ImageBitmap.
+  if (!staticStream && typeof Worker === "function") {
+    const hc = Math.max(1, navigator.hardwareConcurrency || 4);
+    const workerCount = Math.max(1, Math.min(8, hc - 2 || 1));
+    const maxPagesAhead = Math.max(3, Math.min(10, workerCount + 2));
+    const workers = [];
+    const readyPages = new Map();
+    const pageMeta = new Map();
+    let dispatchTimer = 0;
+    let failed = false;
+    let nextPageId = 0;
+    let nextPresentPageId = 0;
+    let nextGenerateOrdinal = symbolOrdinal;
+
+    const closePage = (page) => page?.bitmap?.close?.();
+    activeSendRendererCleanup = () => {
+      clearTimeout(dispatchTimer);
+      dispatchTimer = 0;
+      for (const worker of workers) worker.terminate();
+      for (const page of readyPages.values()) closePage(page);
+      readyPages.clear();
+      pageMeta.clear();
+    };
+    const fail = (error) => {
+      if (failed || gen !== generation) return;
+      failed = true;
+      stopSendRenderer();
+      showError(error instanceof Error ? error.message : String(error));
+    };
+    const buildFrames = (startOrdinal) => {
+      const frames = [];
+      const transfer = [];
+      for (let offset = 0; offset < gridCodes; ++offset) {
+        const ordinal = startOrdinal + offset;
+        const slotIndex = ordinal % gridCodes;
+        const seq = scheduledEsi(encoder.k, ordinal);
+        const bytes = packFrame({ ...header, seq, slotIndex }, encoder.encode(seq));
+        const buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+          ? bytes.buffer
+          : bytes.slice().buffer;
+        frames.push({ slotIndex, buffer });
+        transfer.push(buffer);
+      }
+      return { frames, transfer };
+    };
+    const dispatchOne = (worker) => {
+      if (failed || gen !== generation || worker.busy || nextPageId - nextPresentPageId >= maxPagesAhead)
+        return false;
+      const pageId = nextPageId++;
+      const startOrdinal = nextGenerateOrdinal;
+      nextGenerateOrdinal += gridCodes;
+      pageMeta.set(pageId, { startOrdinal, endOrdinal: startOrdinal + gridCodes });
+      try {
+        const { frames, transfer } = buildFrames(startOrdinal);
+        worker.busy = true;
+        worker.postMessage({
+          type: "render-page",
+          pageId,
+          frames,
+          cols: gridCols,
+          rows: gridRows,
+          margin: gridMargin,
+          version
+        }, transfer);
+        return true;
+      } catch (error) {
+        pageMeta.delete(pageId);
+        fail(error);
+        return false;
+      }
+    };
+    const scheduleDispatch = () => {
+      if (dispatchTimer || failed || gen !== generation) return;
+      dispatchTimer = setTimeout(() => {
+        dispatchTimer = 0;
+        const worker = workers.find((candidate) => !candidate.busy);
+        if (worker && dispatchOne(worker)) scheduleDispatch();
+      }, 0);
+    };
+    const initializeGeometry = (page) => {
+      if (version !== undefined) {
+        if (modules !== page.modules) throw new Error("Sender QR geometry changed");
+        return;
+      }
+      version = page.version;
+      modules = page.modules;
+      sizeCanvas();
+      resizeDisplay = sizeCanvas;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (gen === generation) sizeCanvas();
+      }));
+      setTimeout(() => {
+        if (gen === generation) sizeCanvas();
+      }, 250);
+      if (revealStage) scrollStageIntoView();
+      showStreamPanels(true);
+      setStatus("");
+    };
+    const drawPage = (page) => {
+      initializeGeometry(page);
+      const totalW = modules * gridCols + gridMargin * (gridCols + 1);
+      const totalH = modules * gridRows + gridMargin * (gridRows + 1);
+      if (page.width !== totalW || page.height !== totalH)
+        throw new Error(`Sender page geometry mismatch ${page.width}×${page.height}`);
+      let source = page.bitmap;
+      if (!source && page.pixels) {
+        staging.width = totalW;
+        staging.height = totalH;
+        staging.getContext("2d").putImageData(
+          new ImageData(new Uint8ClampedArray(page.pixels), totalW, totalH), 0, 0
+        );
+        source = staging;
+      }
+      if (!source) throw new Error("Sender worker returned no page pixels");
+      if (fitStaging) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.setTransform(1, 0, 0, 1, 0, 0);
+        fitCtx.globalCompositeOperation = "copy";
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(source, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
+        fitCtx.globalCompositeOperation = "source-over";
+        renderFitCanvas();
+      } else {
+        const ctx = canvas.getContext("2d");
+        ctx.globalCompositeOperation = "copy";
+        ctx.imageSmoothingEnabled = false;
+        if (landscapeGrid())
+          ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+        else
+          ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+        ctx.drawImage(source, 0, 0);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = "source-over";
+      }
+      page.bitmap?.close?.();
+      if (activeTransportCursor?.key === transportKey)
+        activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, page.endOrdinal);
+    };
+
+    for (let i = 0; i < workerCount; ++i) {
+      const worker = new Worker(new URL(`./render-worker.js?build=${SEND_RUNTIME_BUILD}`, import.meta.url), { type: "module" });
+      worker.busy = false;
+      worker.onmessage = (event) => {
+        worker.busy = false;
+        const page = event.data;
+        if (gen !== generation || failed) {
+          closePage(page);
+          return;
+        }
+        if (page?.type === "render-error") {
+          fail(new Error(page.error || "Sender QR worker failed"));
+          return;
+        }
+        const meta = pageMeta.get(page?.pageId);
+        if (!meta || page?.type !== "rendered-page") {
+          closePage(page);
+          fail(new Error("Sender QR worker returned an invalid page"));
+          return;
+        }
+        readyPages.set(page.pageId, { ...page, ...meta });
+        scheduleDispatch();
+      };
+      worker.onerror = (event) => fail(new Error(event.message || "Sender QR worker failed"));
+      workers.push(worker);
+    }
+    scheduleDispatch();
+
+    const interval = 1e3 / txFps;
+    let nextAt = 0;
+    const tickParallel = (now) => {
+      if (gen !== generation || failed) return;
+      requestAnimationFrame(tickParallel);
+      const page = readyPages.get(nextPresentPageId);
+      if (!page) return;
+      if (!nextAt) nextAt = now;
+      if (now + 0.25 < nextAt) return;
+      readyPages.delete(nextPresentPageId);
+      pageMeta.delete(nextPresentPageId);
+      try {
+        drawPage(page);
+      } catch (error) {
+        closePage(page);
+        fail(error);
+        return;
+      }
+      nextPresentPageId++;
+      nextAt = (now - nextAt > interval ? now : nextAt) + interval;
+      scheduleDispatch();
+    };
+    requestAnimationFrame(tickParallel);
+    return;
+  }
+
   let generatorFailed = false;
   const lookahead = staticStream ? 1 : LOOKAHEAD * gridCodes;
   const pump = (max = lookahead) => {
