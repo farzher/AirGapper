@@ -28,7 +28,7 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-const SEND_RUNTIME_BUILD = "v0.5.290";
+const SEND_RUNTIME_BUILD = "v0.5.291";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
