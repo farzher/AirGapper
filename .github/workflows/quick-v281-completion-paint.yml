@@ -1,0 +1,42 @@
+name: quick v281 completion paint
+
+on:
+  push:
+    paths:
+      - .github/workflows/quick-v281-completion-paint.yml
+
+permissions: { contents: write }
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Apply staged UI patch
+        run: |
+          set -euo pipefail
+          test -f .github/receiver_candidate.py
+          python3 .github/receiver_candidate.py
+          git diff --check
+          node --check main.js
+          node --check receive/main.js
+          grep -q 'RECEIVER_RUNTIME_BUILD = "v0.5.281"' receive/main.js
+          grep -q 'APP_BUILD = "v0.5.281"' main.js
+          grep -q 'bar.classList.add("finalizing")' receive/main.js
+          grep -q 'progress > div.finalizing' shared/style.css
+          grep -q 'setTimeout(resolve, 0)' receive/main.js
+
+      - name: Promote exact patch and clean staging
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt
+          rm -f .github/workflows/quick-v281-completion-paint.yml
+          git add -A
+          git commit -m "v0.5.281 paint 100 percent before finalizing"
+          git pull --rebase origin master
+          git push origin HEAD:master
