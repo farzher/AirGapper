@@ -28,7 +28,7 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-const SEND_RUNTIME_BUILD = "v0.5.267";
+const SEND_RUNTIME_BUILD = "v0.5.274";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -200,10 +200,12 @@ let activeTransportEncoder = null;
 let activeTransportCursor = null;
 let activeSendRendererCleanup = null;
 let activeSendFpsSetter = null;
+let activeSendClockRebase = null;
 function stopSendRenderer() {
   const cleanup = activeSendRendererCleanup;
   activeSendRendererCleanup = null;
   activeSendFpsSetter = null;
+  activeSendClockRebase = null;
   cleanup?.();
 }
 function applyLiveSenderFps() {
@@ -1028,6 +1030,11 @@ async function startStream(revealStage = false) {
       if (nextCellAt)
         nextCellAt = Math.min(nextCellAt, performance.now() + cellInterval);
     };
+    activeSendClockRebase = () => {
+      // Background tabs suspend rAF. Resume from the next real presentation
+      // opportunity; time spent hidden is not sender debt to be repaid.
+      nextCellAt = 0;
+    };
     const takeReadyPage = () => {
       const page = readyPages.get(nextPresentPageId);
       if (!page) return null;
@@ -1071,6 +1078,13 @@ async function startStream(revealStage = false) {
         }
         if (!nextCellAt) nextCellAt = now;
       }
+
+      // visibilitychange explicitly rebases this clock on tab restore. Also
+      // fence genuinely large scheduler stalls, but do not confuse an FPS above
+      // the display refresh rate with suspension: ordinary rAF lateness may
+      // still catch up exactly as before.
+      if (!nextCellAt || now - nextCellAt > 250)
+        nextCellAt = now + cellInterval;
 
       let painted = 0;
       while (currentPage && now + 0.25 >= nextCellAt && painted < gridCodes) {
@@ -1175,9 +1189,11 @@ async function startStream(revealStage = false) {
     interval = 1e3 / Math.max(1, fps);
     nextAt = Math.min(nextAt, performance.now() + interval);
   };
+  activeSendClockRebase = () => { nextAt = 0; };
   const tick = (now) => {
     if (gen !== generation || generatorFailed) return;
     requestAnimationFrame(tick);
+    if (!nextAt || now - nextAt > 250) nextAt = now + interval;
     if (now < nextAt) return;
     if (now - nextAt > interval) nextAt = now;
     if (!paintPage()) {
@@ -1207,6 +1223,7 @@ window.addEventListener("airgapper:pause-mode", () => {
 window.addEventListener("airgapper:resume-mode", () => {
   var _a;
   if (!((_a = document.getElementById("sendView")) == null ? void 0 : _a.classList.contains("active")) || !selectedFile) return;
+  activeSendClockRebase?.();
   void requestScreenWakeLock();
 });
 void main();
