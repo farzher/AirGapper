@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.279";
+const RECEIVER_RUNTIME_BUILD = "v0.5.280";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2165,7 +2165,6 @@ function noteDecodeCompleted(id, completion) {
         // re-homography the entire wall. Reset its throttle so the next fresh
         // camera frame gets a recovery opportunity immediately.
         geometryRecoveryAssistUntil = Math.max(geometryRecoveryAssistUntil, now + 550);
-        lastFullScan = 0;
         notePipelineEvent("geometry-recovery-assist", trackedOutputs);
       }
     } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
@@ -2331,6 +2330,7 @@ const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
 // therefore cannot consume CPU in the healthy LOCKED throughput path.
 const LOCKED_RECOVERY_SCAN_MS = 350;
+const GEOMETRY_MAINTENANCE_SCAN_MS = 1200;
 const GEOMETRY_FAST_HIT_MS = 220;
 const GEOMETRY_FAST_PROBE_SILENCE_MS = 180;
 const GEOMETRY_PROBE_SILENCE_MS = 500;
@@ -5749,8 +5749,11 @@ async function captureFrame(source) {
   // roughly a second. A short silence now starts a cheap predicted-slot probe;
   // full-frame recovery remains a later escalation.
   const coverageRecoveryAssist = lockedGeometryTrusted && geometryRecoveryAssistUntil > now;
-  const geometryProbeDue = lockedGeometryTrusted && (coverageRecoveryAssist ||
-    freshLockedHits === 0 && lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS);
+  const wallFreshRatio = freshLockedHits / Math.max(1, visibleGridSlots.length);
+  const aggressiveGeometryProbe = freshLockedHits === 0 && lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS;
+  const maintenanceGeometryProbe = coverageRecoveryAssist && wallFreshRatio < 0.55 &&
+    now - lastFullScan >= GEOMETRY_MAINTENANCE_SCAN_MS;
+  const geometryProbeDue = lockedGeometryTrusted && (aggressiveGeometryProbe || maintenanceGeometryProbe);
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
   // Three tracked misses are evidence for a rescue probe, not evidence that the
@@ -5785,7 +5788,7 @@ async function captureFrame(source) {
   // back to local robust decode or by abandoning the grid and reacquiring it.
   gridLattice.noteMissing(strictLockedAudit ? false : gridNeedsDiscovery, now);
   const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
-    ? geometryProbeDue || allLockedCandidatesCold || trackingUnhealthy
+    ? geometryProbeDue || allLockedCandidatesCold
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const provisionalUnknownVisible = acquisitionDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
