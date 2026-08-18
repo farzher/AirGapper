@@ -1,0 +1,31 @@
+receiver candidate rejected at 2026-08-18T23:25:39Z
+From https://github.com/zxing-cpp/zxing-cpp
+ * branch              3e09874a9ca7c191d67101f302a1f53c71a118cc -> FETCH_HEAD
+HEAD is now at 3e09874a Log: LogMatrix.h -> Log.h + printf -> log_[t|l|r]
+emcmake: cmake -S . -B build-simd -G Ninja -DCMAKE_BUILD_TYPE=Release -DDECIMEN_SIMD=ON -DDECIMEN_CODEC_VERSION=0.1.58 -DDECIMEN_CODEC_BUILD=b7d1d1e-dirty -DCMAKE_TOOLCHAIN_FILE=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/node/24.19.0_64bit/bin/node in directory /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source
+[1/2] Building CXX object CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o
+FAILED: [code=1] CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o 
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/emsdk/upstream/emscripten/em++ -DDECIMEN_CODEC_BUILD=\"b7d1d1e-dirty\" -DDECIMEN_CODEC_VERSION=\"0.1.58\" -DZXING_INTERNAL -I/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/third_party/zxing-cpp/core/src -I/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/build-simd/ZXing -msimd128 -O3 -DNDEBUG -std=gnu++20   -s DISABLE_EXCEPTION_CATCHING=0 -MD -MT CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o -MF CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o.d -o CMakeFiles/decimen_codec.dir/wrapper/decimen_codec.cpp.o -c /home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2468:25: error: use of undeclared identifier 'trackBit'
+ 2468 |                     if (trackBit)
+      |                         ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2469:55: error: use of undeclared identifier 'trackBit'
+ 2469 |                         metrics->sparseSuccessMask |= trackBit;
+      |                                                       ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2477:46: error: use of undeclared identifier 'trackBit'
+ 2477 |                 const bool fallbackAllowed = trackBit && (fallbackAllowedMask & trackBit) != 0;
+      |                                              ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2477:81: error: use of undeclared identifier 'trackBit'
+ 2477 |                 const bool fallbackAllowed = trackBit && (fallbackAllowedMask & trackBit) != 0;
+      |                                                                                 ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2482:53: error: use of undeclared identifier 'trackBit'
+ 2482 |                     metrics->fallbackAttemptMask |= trackBit;
+      |                                                     ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2497:33: error: use of undeclared identifier 'trackBit'
+ 2497 |                             if (trackBit)
+      |                                 ^~~~~~~~
+/home/runner/work/AirGapper/AirGapper/vendor/decimen-codec/source/wrapper/decimen_codec.cpp:2498:65: error: use of undeclared identifier 'trackBit'
+ 2498 |                                 metrics->fallbackSuccessMask |= trackBit;
+      |                                                                 ^~~~~~~~
+7 errors generated.
+ninja: build stopped: subcommand failed.
