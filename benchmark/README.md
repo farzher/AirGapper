@@ -7,3 +7,5 @@ AirGapper is optimized for a real handheld phone receiving a moving/shaking came
 Performance decisions should be validated on handheld hardware. Preserve cheap stable fast paths when available, but prioritize the motion-tolerant tracked/Guided path used during normal hand shake.
 
 The receiver UI `fps` metric means **decoder-processed camera frames per second (CPU throughput)**, not camera delivery rate. Camera capture/delivery FPS belongs in developer diagnostics.
+
+Live status DOM updates are intentionally **1 Hz** for readability and to avoid unnecessary main-thread UI churn. The rolling measurements still use their normal timestamped 1-second window.

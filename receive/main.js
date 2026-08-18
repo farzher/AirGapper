@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.252";
+const RECEIVER_RUNTIME_BUILD = "v0.5.253";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -875,8 +875,10 @@ function noteGridTransition(from, to, reason, at) {
   trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
 }
 const STATS_WINDOW_MS = 1e3;
-const STATS_TICK_MS = 100;
-const DIAGNOSTICS_TICK_MS = 250;
+// Keep visible rolling status intentionally calm/readable: one DOM refresh per second.
+// The underlying event timestamps remain precise; only presentation is 1 Hz.
+const STATS_TICK_MS = 1000;
+const DIAGNOSTICS_TICK_MS = 1000;
 let lastDiagnosticsPaintAt = -Infinity;
 let stream = null;
 let decoder = null;
