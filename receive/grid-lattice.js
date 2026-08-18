@@ -347,20 +347,27 @@ class GridLattice {
     // evidence. Fall back to the longer-lived anchors only when the visible
     // fragment cannot constrain a 2D wall by itself.
     const current = observations.filter((observation) => newest.at - observation.at <= CURRENT_FIT_MS);
-    if (distributedFitReady(layout, current)) observations = current;
+    const currentDistributed = distributedFitReady(layout, current);
+    if (currentDistributed) observations = current;
     const pairsFor = (items) => items.flatMap((observation) => {
       const slot = observation.slotIndex;
       return slotWorld(layout, observation.modules, slot).map((world, index) => ({ world, image: corners(observation.quad)[index] }));
     });
-    const seed = fitHomography(pairsFor([newest]));
+    // When this camera-time window already spans both wall axes, seed the
+    // outlier test from the distributed observations themselves. A homography
+    // inferred from one QR is exact locally but is not a safe extrapolation
+    // oracle across a large lens-distorted wall. If a filtering pass would
+    // destroy the fresh cross-axis constraint, keep the CRC-backed fresh set.
+    const seed = fitHomography(pairsFor(currentDistributed ? observations : [newest]));
     if (!seed) return null;
-    observations = observations.filter((observation) => {
+    const filtered = observations.filter((observation) => {
       const projected = slotWorld(layout, observation.modules, observation.slotIndex).map((point) => project(seed, point));
       const image = corners(observation.quad);
       const edge2 = Math.max(1, Math.sqrt(observation.box.w * observation.box.h));
       const residual = Math.sqrt(projected.reduce((sum, point, index) => sum + (point.x - image[index].x) ** 2 + (point.y - image[index].y) ** 2, 0) / 4) / edge2;
       return residual < 0.3;
     });
+    if (!currentDistributed || distributedFitReady(layout, filtered)) observations = filtered;
     const pairs = pairsFor(observations);
     const transform = fitHomography(pairs);
     if (!transform) return null;

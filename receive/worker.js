@@ -974,9 +974,9 @@ ctx.onmessage = async (e) => {
         const readFull = (tryHarder, maxSymbols, returnErrors) => decodePixelFormat === "y8"
           ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, tryHarder, maxSymbols, returnErrors)
           : zx.readFull(ptr, pw, ph, tryHarder, maxSymbols, returnErrors);
-        const readDenseSeed = () => decodePixelFormat === "y8"
-          ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, 1)
-          : zx.readFull(ptr, pw, ph, true, 1, false);
+        const readDenseSeed = (maxSymbols = 1) => decodePixelFormat === "y8"
+          ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, maxSymbols)
+          : zx.readFull(ptr, pw, ph, true, maxSymbols, false);
         if (fullMode === "thorough") {
           readFullAttempts++;
           appendResults(readFull(true, 16, false), false);
@@ -987,9 +987,11 @@ ctx.onmessage = async (e) => {
         } else if (fullMode === "deep") {
           readFullAttempts++;
           appendResults(readFull(true, 1, false), false);
+        } else if (fullMode === "recovery") {
+          readFullAttempts++;
+          appendResults(readDenseSeed(3), false);
         } else {
-          // Both global fast acquisition and bounded seed/recovery crops are
-          // optimized for the first useful AirGapper packet, not symbol count.
+          // Cold acquisition still returns the first useful packet immediately.
           readFullAttempts++;
           appendResults(readDenseSeed(), false);
         }

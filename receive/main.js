@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.277";
+const RECEIVER_RUNTIME_BUILD = "v0.5.278";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2327,7 +2327,7 @@ const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
 // therefore cannot consume CPU in the healthy LOCKED throughput path.
-const LOCKED_RECOVERY_SCAN_MS = 160;
+const LOCKED_RECOVERY_SCAN_MS = 350;
 const GEOMETRY_FAST_HIT_MS = 220;
 const GEOMETRY_FAST_PROBE_SILENCE_MS = 180;
 const GEOMETRY_PROBE_SILENCE_MS = 500;
@@ -5880,7 +5880,7 @@ async function captureFrame(source) {
     let acquisitionMode = captureNextScan ? "thorough" : fullFrameSeed
       ? fullScans % ACQUISITION_DEEP_EVERY === 0 ? "deep" : "fast"
       : "seed";
-    if (localRecoverySeedScan) acquisitionMode = "seed";
+    if (localRecoverySeedScan) acquisitionMode = "recovery";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
     if (!captureNextScan && acquisitionDiscovery && (!lastGridSnapshot || geometryBootstrap && provisionalUnknownVisible.length === 0) && !fullFrameSeed) {
       const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
@@ -5906,12 +5906,20 @@ async function captureFrame(source) {
       const target = provisionalUnknownVisible[acquisitionTileCursor++ % provisionalUnknownVisible.length];
       boundedScanCandidates = target ? [target] : [];
     } else if (localRecoverySeedScan) {
-      // A small bump moves the rigid wall coherently. Probe one central predicted
-      // QR at a time instead of rescanning the whole wall; the first CRC-valid
-      // packet re-homographies every slot. Rotate a few central choices so an
-      // occluded/transitioning code cannot stall reacquisition.
+      // Repair the missing side, not the side that is already trackable. The
+      // previous recovery pool was lockedGeometryCandidates, which excludes an
+      // OFFSCREEN/invalid prediction by definition and could therefore probe
+      // the surviving half forever. Rank every predicted grid slot, preferring
+      // lost/partial/offscreen and stale slots before healthy active slots.
       const cx = vw / 2, cy = vh / 2;
-      const ranked = [...lockedGeometryCandidates].sort((a, b) => {
+      const statePriority = (region) => region.slotState === "LOST" ? 5
+        : region.slotState === "PARTIAL" ? 4
+          : region.slotState === "OFFSCREEN" ? 3
+            : region.slotState === "LOW_QUALITY" ? 2 : 0;
+      const recoveryPool = regions.filter((region) => region.gridSlot !== void 0 && region.quad && region.dim);
+      const ranked = recoveryPool.sort((a, b) => {
+        const stateDelta = statePriority(b) - statePriority(a);
+        if (stateDelta) return stateDelta;
         const missDelta = (b.consecutiveMisses || 0) - (a.consecutiveMisses || 0);
         if (missDelta) return missDelta;
         const ageDelta = (a.decodedSeen ?? -Infinity) - (b.decodedSeen ?? -Infinity);
@@ -5920,10 +5928,11 @@ async function captureFrame(source) {
         const bd = Math.hypot(b.x + b.w / 2 - cx, b.y + b.h / 2 - cy);
         return bd - ad;
       });
-      const poolSize = Math.min(6, ranked.length);
-      const target = ranked[acquisitionTileCursor++ % poolSize];
+      const poolSize = Math.min(8, ranked.length);
+      const target = poolSize ? ranked[acquisitionTileCursor++ % poolSize] : void 0;
       boundedScanCandidates = target ? [target] : [];
       geometryRecoveryProbes++;
+      if (target) lastRecoveryReason = `measuring weak grid slot s${target.gridSlot} ${target.slotState.toLowerCase()}`;
       notePipelineEvent("local-recovery-probe", geometryRecoveryProbes);
     }
     if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || localRecoverySeedScan || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
@@ -5934,14 +5943,35 @@ async function captureFrame(source) {
         region.quad.bottomLeft
       ]);
       const typicalEdge = Math.max(...boundedScanCandidates.map((region) => Math.max(region.w, region.h)));
-      const pad = Math.max(24, Math.round(typicalEdge * (provisionalCrop ? 0.9 : localRecoverySeedScan ? 1.0 : 0.7)));
+      const target = boundedScanCandidates[0];
+      const broadRecovery = localRecoverySeedScan && (target.slotState === "OFFSCREEN" || target.slotState === "PARTIAL" || !validTrackedQuad(target, vw, vh));
       const quantum = 16;
-      scanX = Math.max(0, Math.floor((Math.min(...points.map((point) => point.x)) - pad) / quantum) * quantum);
-      scanY = Math.max(0, Math.floor((Math.min(...points.map((point) => point.y)) - pad) / quantum) * quantum);
-      const scanRight = Math.min(vw, Math.ceil((Math.max(...points.map((point) => point.x)) + pad) / quantum) * quantum);
-      const scanBottom = Math.min(vh, Math.ceil((Math.max(...points.map((point) => point.y)) + pad) / quantum) * quantum);
-      scanW = Math.max(32, scanRight - scanX);
-      scanH = Math.max(32, scanBottom - scanY);
+      if (broadRecovery) {
+        // If the predicted QR itself is outside/near the edge, a tiny crop can
+        // never rediscover it. Search a broad edge/quadrant tile centered as
+        // close as possible to its predicted location. This is still far less
+        // work than a whole 1440x2560 frame.
+        const predictedX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+        const predictedY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+        const wantedW = Math.min(vw, Math.max(typicalEdge * 6, vw * 0.45));
+        const wantedH = Math.min(vh, Math.max(typicalEdge * 6, vh * 0.35));
+        const centerX = Math.max(wantedW / 2, Math.min(vw - wantedW / 2, predictedX));
+        const centerY = Math.max(wantedH / 2, Math.min(vh - wantedH / 2, predictedY));
+        scanX = Math.max(0, Math.floor((centerX - wantedW / 2) / quantum) * quantum);
+        scanY = Math.max(0, Math.floor((centerY - wantedH / 2) / quantum) * quantum);
+        const scanRight = Math.min(vw, Math.ceil((centerX + wantedW / 2) / quantum) * quantum);
+        const scanBottom = Math.min(vh, Math.ceil((centerY + wantedH / 2) / quantum) * quantum);
+        scanW = Math.max(32, scanRight - scanX);
+        scanH = Math.max(32, scanBottom - scanY);
+      } else {
+        const pad = Math.max(24, Math.round(typicalEdge * (provisionalCrop ? 0.9 : localRecoverySeedScan ? 1.5 : 0.7)));
+        scanX = Math.max(0, Math.floor((Math.min(...points.map((point) => point.x)) - pad) / quantum) * quantum);
+        scanY = Math.max(0, Math.floor((Math.min(...points.map((point) => point.y)) - pad) / quantum) * quantum);
+        const scanRight = Math.min(vw, Math.ceil((Math.max(...points.map((point) => point.x)) + pad) / quantum) * quantum);
+        const scanBottom = Math.min(vh, Math.ceil((Math.max(...points.map((point) => point.y)) + pad) / quantum) * quantum);
+        scanW = Math.max(32, scanRight - scanX);
+        scanH = Math.max(32, scanBottom - scanY);
+      }
     }
     const directFull = source.videoFrame && !source.image && !captureNextScan
       ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, [])
