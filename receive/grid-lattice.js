@@ -204,6 +204,30 @@ class GridLattice {
       this.transition("TRACK", "valid predicted packet kept lattice alive", at);
     return true;
   }
+  nudgeTranslation(dx, dy, at = this.lastHitAt) {
+    if (!this.locked || !this.candidate || !Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 0.08 || distance > 4.5 || at < this.lastHitAt) return null;
+    const shiftQuad = (quad) => {
+      const points = corners(quad).map((point) => ({ x: point.x + dx, y: point.y + dy }));
+      return { topLeft: points[0], topRight: points[1], bottomRight: points[2], bottomLeft: points[3] };
+    };
+    const shiftObservation = (observation) => {
+      const quad = shiftQuad(observation.quad);
+      return { ...observation, quad, box: bounds(quad) };
+    };
+    this.observations = this.observations.map(shiftObservation);
+    const h = [...this.candidate.transform];
+    // Output translation of a projective transform: x'=(N/d)+dx, y'=(M/d)+dy.
+    h[0] += dx * h[6]; h[1] += dx * h[7]; h[2] += dx;
+    h[3] += dy * h[6]; h[4] += dy * h[7]; h[5] += dy;
+    this.candidate = {
+      ...this.candidate,
+      transform: h,
+      observations: this.candidate.observations.map(shiftObservation)
+    };
+    return this.snapshot();
+  }
   learnSlotCorrection(detection) {
     const candidate = this.candidate;
     if (!this.locked || !candidate || candidate.error > LOCAL_GEOMETRY_LEARN_MAX_ERROR) return;

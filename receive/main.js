@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.278";
+const RECEIVER_RUNTIME_BUILD = "v0.5.279";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1977,6 +1977,9 @@ let lastStreamDecodeAt = 0;
 let geometryRecoveryProbes = 0;
 let geometryRecoveryResets = 0;
 let geometrySightingNudges = 0;
+let geometryMotionNudges = 0;
+let geometryMotionPixels = 0;
+let geometryMotionLastSourceSequence = -1;
 let geometryCoverageHealthy = false;
 let geometryCoverageCollapseStreak = 0;
 let geometryCoverageCollapseLastAt = 0;
@@ -4009,7 +4012,7 @@ function renderFocusDiagnostics() {
     `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · restoring recent winner" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -4359,6 +4362,9 @@ function stopReceiver() {
   lastStreamDecodeAt = 0;
   geometryRecoveryProbes = 0;
   geometryRecoveryResets = 0;
+  geometryMotionNudges = 0;
+  geometryMotionPixels = 0;
+  geometryMotionLastSourceSequence = -1;
   geometryCoverageHealthy = false;
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
@@ -6503,6 +6509,18 @@ function onDecoded(bytes, box, info) {
     const packetAt = info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt;
     const geometryInfo = { ...info, crc32: true };
     if (info?.geometryMeasured === false) {
+      const sourceSequence = Number(info?.sourceSequence);
+      const motion = info?.wallMotion;
+      if (Number.isFinite(sourceSequence) && sourceSequence > geometryMotionLastSourceSequence &&
+          motion && Number(motion.samples) >= 2 && Number.isFinite(motion.dx) && Number.isFinite(motion.dy)) {
+        geometryMotionLastSourceSequence = sourceSequence;
+        const snapshot = gridLattice.nudgeTranslation(Number(motion.dx), Number(motion.dy), packetAt);
+        if (snapshot) {
+          geometryMotionNudges++;
+          geometryMotionPixels += Math.hypot(Number(motion.dx), Number(motion.dy));
+          syncGrid(snapshot, decodedAt);
+        }
+      }
       gridLattice.noteValidPacket(packetAt);
       decodedRegion = markGridRegionDecoded(
         regions.find((region) => region.gridSlot === header.slotIndex),
@@ -6510,6 +6528,8 @@ function onDecoded(bytes, box, info) {
         geometryInfo
       );
     } else if (box && validQuadObject(info?.quad) && info?.modules) {
+      if (Number.isFinite(Number(info?.sourceSequence)))
+        geometryMotionLastSourceSequence = Math.max(geometryMotionLastSourceSequence, Number(info.sourceSequence));
       const snapshot = gridLattice.accept({
         identity,
         layoutId: header.layoutId,

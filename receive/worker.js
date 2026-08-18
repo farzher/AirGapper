@@ -156,6 +156,9 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       expectedSlotsMask = (expectedSlotsMask | ((1 << slot) >>> 0)) >>> 0;
   }
   let decodedSlotsMask = 0;
+  const trackBySlot = new Map(tracks.map((track) => [Number(track.slot ?? track.id), track]));
+  const predictedMotion = [];
+  let measuredGeometryCount = 0;
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
     const status = view.getInt32(base + 4, true);
@@ -183,16 +186,48 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       bottomLeft: { x: view.getFloat32(base + 44, true), y: view.getFloat32(base + 48, true) }
     };
     if (!validQuad(quad)) continue;
+    const outputQuad = shifted(quad, ox, oy);
+    const geometryMeasured = status === NATIVE_TRACK_OK;
+    if (geometryMeasured) {
+      measuredGeometryCount++;
+    } else {
+      const input = trackBySlot.get(slot);
+      if (input?.quad && validQuad(input.quad)) {
+        const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+        const dx = names.reduce((sum, name) => sum + outputQuad[name].x - input.quad[name].x, 0) / names.length;
+        const dy = names.reduce((sum, name) => sum + outputQuad[name].y - input.quad[name].y, 0) / names.length;
+        if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 4.75)
+          predictedMotion.push({ dx, dy });
+      }
+    }
     symbols.push({
       bytes,
       box: boundsOf(quad, ox, oy),
-      quad: shifted(quad, ox, oy),
+      quad: outputQuad,
       modules,
       tracked: true,
-      geometryMeasured: status === NATIVE_TRACK_OK,
+      geometryMeasured,
       decodePath,
       header: packet.header
     });
+  }
+  // Full measured geometry wins. Otherwise, two or more CRC-valid predicted
+  // QRs agreeing on the same small current-frame offset are strong wall-motion
+  // evidence. Median + tight consensus rejects per-slot/local residual outliers.
+  if (!measuredGeometryCount && predictedMotion.length >= 2) {
+    const median = (values) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const mid = sorted.length >> 1;
+      return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const dx = median(predictedMotion.map((item) => item.dx));
+    const dy = median(predictedMotion.map((item) => item.dy));
+    const coherent = predictedMotion.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
+    const need = Math.max(2, Math.ceil(predictedMotion.length * 0.6));
+    if (coherent.length >= need && Math.hypot(dx, dy) <= 4.5) {
+      const wallMotion = { dx, dy, samples: coherent.length };
+      for (const symbol of symbols) if (symbol.geometryMeasured === false) symbol.wallMotion = wallMotion;
+    }
   }
   return { symbols, metrics };
 }

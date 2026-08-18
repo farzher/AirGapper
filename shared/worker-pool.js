@@ -102,6 +102,7 @@ class DecodeWorkerPool {
             modules: symbol.modules,
             tracked: symbol.tracked,
             geometryMeasured: symbol.geometryMeasured !== false,
+            wallMotion: symbol.wallMotion,
             decodePath: symbol.decodePath,
             crc32: symbol.crc32,
             verifiedPayload: Boolean(symbol.verifiedPayload),
