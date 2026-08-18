@@ -3,15 +3,27 @@ import { gridLayoutById } from "./grid-layout.js";
 const DIRECT_MAGIC = 211;
 const MDS_MAGIC = 212;
 const RAPTORQ_MAGIC = 213;
+// Extended-grid packets deliberately use new magic bytes. Legacy 5-bit-slot
+// captures remain byte-for-byte parseable, while Auto can carry a dynamic
+// rectangular wall with up to 128 physical slots.
+const EXT_MDS_MAGIC = 214;
+const EXT_RAPTORQ_MAGIC = 215;
 const DIRECT_HEADER_LEN = 7;
 const MDS_HEADER_LEN = 11;
 const RAPTORQ_HEADER_LEN = 14;
+const EXT_MDS_HEADER_LEN = 12;
+const EXT_RAPTORQ_HEADER_LEN = 15;
 const FRAME_CRC_LEN = 4;
-function frameHeaderLength(mode) {
-  return mode === "direct" ? DIRECT_HEADER_LEN : mode === "mds" ? MDS_HEADER_LEN : RAPTORQ_HEADER_LEN;
+const EXT_GRID_DIM_BITS = 5;
+const EXT_GRID_SLOT_BITS = 7;
+const EXT_GRID_MAX_SLOTS = 128;
+function frameHeaderLength(mode, extendedGrid = false) {
+  if (mode === "direct") return DIRECT_HEADER_LEN;
+  if (extendedGrid) return mode === "mds" ? EXT_MDS_HEADER_LEN : EXT_RAPTORQ_HEADER_LEN;
+  return mode === "mds" ? MDS_HEADER_LEN : RAPTORQ_HEADER_LEN;
 }
-function frameOverhead(mode) {
-  return frameHeaderLength(mode) + FRAME_CRC_LEN;
+function frameOverhead(mode, extendedGrid = false) {
+  return frameHeaderLength(mode, extendedGrid) + FRAME_CRC_LEN;
 }
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_FILE_LABEL = `${MAX_FILE_BYTES / 1024 / 1024} MB`;
@@ -169,11 +181,19 @@ const BLOCK_LEN_BITS = 12;
 const DIRECT_TOTAL_BITS = 12;
 const MDS_TOTAL_BITS = 17;
 const RAPTORQ_TOTAL_BITS = 27;
-function magicForMode(mode) {
-  return mode === "direct" ? DIRECT_MAGIC : mode === "mds" ? MDS_MAGIC : RAPTORQ_MAGIC;
+function magicForMode(mode, extendedGrid = false) {
+  if (mode === "direct") return DIRECT_MAGIC;
+  if (extendedGrid) return mode === "mds" ? EXT_MDS_MAGIC : EXT_RAPTORQ_MAGIC;
+  return mode === "mds" ? MDS_MAGIC : RAPTORQ_MAGIC;
 }
 function modeForMagic(magic) {
-  return magic === DIRECT_MAGIC ? "direct" : magic === MDS_MAGIC ? "mds" : magic === RAPTORQ_MAGIC ? "raptorq" : null;
+  if (magic === DIRECT_MAGIC) return "direct";
+  if (magic === MDS_MAGIC || magic === EXT_MDS_MAGIC) return "mds";
+  if (magic === RAPTORQ_MAGIC || magic === EXT_RAPTORQ_MAGIC) return "raptorq";
+  return null;
+}
+function extendedGridForMagic(magic) {
+  return magic === EXT_MDS_MAGIC || magic === EXT_RAPTORQ_MAGIC;
 }
 function writeBits(out, bitOffset, value, width) {
   for (let bit = 0; bit < width; bit++) {
@@ -192,17 +212,48 @@ function fitsBits(value, width) {
   return Number.isInteger(value) && value >= 0 && value < 2 ** width;
 }
 function packFrame(h, block) {
-  const headerLen = frameHeaderLength(h.mode);
-  if (codingMode(h.k) !== h.mode || h.mode === "raptorq" && h.k > RAPTOR_MAX_K || block.length !== h.blockLen || h.blockLen <= (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0) || Math.ceil(h.totalLen / (h.blockLen - (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0))) !== h.k || !fitsBits(h.payloadId, 32) || !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) || !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) || h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen) || h.mode === "mds" && !fitsBits(h.seq, 8) || h.mode === "raptorq" && !fitsBits(h.seq, 24) || h.mode !== "direct" && (!fitsBits(h.layoutId, 4) || !fitsBits(h.slotIndex, 5))) throw new Error("Frame metadata exceeds its packed field.");
+  const extendedGrid = h.mode !== "direct" && Boolean(h.extendedGrid);
+  const headerLen = frameHeaderLength(h.mode, extendedGrid);
+  const gridCols = Number(h.gridCols);
+  const gridRows = Number(h.gridRows);
+  const gridCount = gridCols * gridRows;
+  const validExtendedGrid = !extendedGrid || (
+    Number.isInteger(gridCols) && gridCols >= 1 && fitsBits(gridCols - 1, EXT_GRID_DIM_BITS) &&
+    Number.isInteger(gridRows) && gridRows >= 1 && fitsBits(gridRows - 1, EXT_GRID_DIM_BITS) &&
+    Number.isInteger(gridCount) && gridCount >= 2 && gridCount <= EXT_GRID_MAX_SLOTS &&
+    fitsBits(h.slotIndex, EXT_GRID_SLOT_BITS) && h.slotIndex < gridCount
+  );
+  const validLegacyGrid = extendedGrid || h.mode === "direct" ||
+    (fitsBits(h.layoutId, 4) && fitsBits(h.slotIndex, 5));
+  if (codingMode(h.k) !== h.mode ||
+      h.mode === "raptorq" && h.k > RAPTOR_MAX_K ||
+      block.length !== h.blockLen ||
+      h.blockLen <= (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0) ||
+      Math.ceil(h.totalLen / (h.blockLen - (h.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0))) !== h.k ||
+      !fitsBits(h.payloadId, 32) ||
+      !fitsBits(h.blockLen - 1, BLOCK_LEN_BITS) ||
+      !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) ||
+      h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen) ||
+      h.mode === "mds" && !fitsBits(h.seq, 8) ||
+      h.mode === "raptorq" && !fitsBits(h.seq, 24) ||
+      !validExtendedGrid || !validLegacyGrid)
+    throw new Error("Frame metadata exceeds its packed field.");
+
   const out = new Uint8Array(headerLen + block.length + FRAME_CRC_LEN);
-  out[0] = magicForMode(h.mode);
+  out[0] = magicForMode(h.mode, extendedGrid);
   let bit = 8;
   if (h.mode === "direct") {
     bit = writeBits(out, bit, h.totalLen - 1, DIRECT_TOTAL_BITS);
   } else {
     bit = writeBits(out, bit, h.seq, h.mode === "mds" ? 8 : 24);
-    bit = writeBits(out, bit, h.layoutId, 4);
-    bit = writeBits(out, bit, h.slotIndex, 5);
+    if (extendedGrid) {
+      bit = writeBits(out, bit, gridCols - 1, EXT_GRID_DIM_BITS);
+      bit = writeBits(out, bit, gridRows - 1, EXT_GRID_DIM_BITS);
+      bit = writeBits(out, bit, h.slotIndex, EXT_GRID_SLOT_BITS);
+    } else {
+      bit = writeBits(out, bit, h.layoutId, 4);
+      bit = writeBits(out, bit, h.slotIndex, 5);
+    }
     bit = writeBits(out, bit, h.blockLen - 1, BLOCK_LEN_BITS);
     bit = writeBits(out, bit, h.totalLen - 1, h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS);
   }
@@ -216,14 +267,17 @@ function packFrame(h, block) {
   return out;
 }
 function parseFrameBody(bytes, hasCrc) {
-  var _a;
-  const mode = modeForMagic((_a = bytes[0]) != null ? _a : -1);
+  const magic = bytes[0] ?? -1;
+  const mode = modeForMagic(magic);
   if (!mode) return null;
-  const headerLen = frameHeaderLength(mode);
+  const extendedGrid = extendedGridForMagic(magic);
+  const headerLen = frameHeaderLength(mode, extendedGrid);
   if (bytes.length < headerLen + 1 + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
   let bit = 8;
   let seq = 0;
   let layoutId = 0;
+  let gridCols = 1;
+  let gridRows = 1;
   let slotIndex = 0;
   let blockLen;
   let totalLen;
@@ -235,11 +289,23 @@ function parseFrameBody(bytes, hasCrc) {
   } else {
     const sequence = readBits(bytes, bit, mode === "mds" ? 8 : 24);
     seq = sequence.value;
-    const layout = readBits(bytes, sequence.next, 4);
-    layoutId = layout.value;
-    const slot = readBits(bytes, layout.next, 5);
-    slotIndex = slot.value;
-    const block = readBits(bytes, slot.next, BLOCK_LEN_BITS);
+    bit = sequence.next;
+    if (extendedGrid) {
+      const cols = readBits(bytes, bit, EXT_GRID_DIM_BITS);
+      gridCols = cols.value + 1;
+      const rows = readBits(bytes, cols.next, EXT_GRID_DIM_BITS);
+      gridRows = rows.value + 1;
+      const slot = readBits(bytes, rows.next, EXT_GRID_SLOT_BITS);
+      slotIndex = slot.value;
+      bit = slot.next;
+    } else {
+      const layout = readBits(bytes, bit, 4);
+      layoutId = layout.value;
+      const slot = readBits(bytes, layout.next, 5);
+      slotIndex = slot.value;
+      bit = slot.next;
+    }
+    const block = readBits(bytes, bit, BLOCK_LEN_BITS);
     blockLen = block.value + 1;
     const total = readBits(bytes, block.next, mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS);
     totalLen = total.value + 1;
@@ -257,8 +323,17 @@ function parseFrameBody(bytes, hasCrc) {
   const k = Math.ceil(totalLen / sourceBlockLen);
   if (k === 0 || k > RAPTOR_MAX_K || codingMode(k) !== mode) return null;
   if (mode !== "direct") {
-    const layout = gridLayoutById(layoutId);
-    if (!layout || slotIndex >= layout.cols * layout.rows) return null;
+    if (extendedGrid) {
+      const count = gridCols * gridRows;
+      if (gridCols < 1 || gridCols > 32 || gridRows < 1 || gridRows > 32 ||
+          count < 2 || count > EXT_GRID_MAX_SLOTS || slotIndex >= count)
+        return null;
+    } else {
+      const layout = gridLayoutById(layoutId);
+      if (!layout || slotIndex >= layout.cols * layout.rows) return null;
+      gridCols = layout.cols;
+      gridRows = layout.rows;
+    }
   }
   const packetLength = headerLen + blockLen;
   if (bytes.length !== packetLength + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
@@ -270,6 +345,9 @@ function parseFrameBody(bytes, hasCrc) {
     mode,
     seq,
     layoutId,
+    extendedGrid,
+    gridCols,
+    gridRows,
     slotIndex,
     k,
     blockLen,

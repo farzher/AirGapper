@@ -451,9 +451,9 @@ struct GuidedTurboAdaptive
     bool rsMode = false;
 };
 
-static std::array<GuidedTurboTrack, 64>& guidedTurboTracks()
+static std::array<GuidedTurboTrack, 128>& guidedTurboTracks()
 {
-    static std::array<GuidedTurboTrack, 64> tracks;
+    static std::array<GuidedTurboTrack, 128> tracks;
     return tracks;
 }
 
@@ -2002,7 +2002,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         int wallReferenceTries = 0;
         for (int i = 0; i < trackCount && wallReferenceTries < 4; ++i) {
             const int referenceId = tracks[i].id;
-            const uint32_t referenceBit = referenceId >= 0 && referenceId < 32 ? (uint32_t(1) << referenceId) : 0;
+            const uint32_t referenceBit = i < 32 ? (uint32_t(1) << i) : 0;
             if (referenceBit && (repairAllowedMask & referenceBit) == 0)
                 continue;
             auto* cache = guidedTurboTrack(referenceId);
@@ -2034,8 +2034,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
         for (int i = 0; i < trackCount; ++i) {
             const auto& track = tracks[i];
-            const uint32_t trackBit = track.id >= 0 && track.id < 32 ? (uint32_t(1) << track.id) : 0;
-            const bool repairMaskAllowed = !trackBit || (repairAllowedMask & trackBit) != 0;
+            const uint32_t trackBit = i < 32 ? (uint32_t(1) << i) : 0;
+            const bool repairMaskAllowed = trackBit && (repairAllowedMask & trackBit) != 0;
             const bool allowExpensiveRepair = repairMaskAllowed && repairTracksSpent < GUIDED_MAX_REPAIR_TRACKS_PER_BATCH;
             bool repairSpentThisTrack = false;
             auto* cache = guidedTurboTrack(track.id);
@@ -2357,6 +2357,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
                 break;
             const auto& track = tracks[trackIndex];
+            const uint32_t trackBit = trackIndex < 32 ? (uint32_t(1) << trackIndex) : 0;
 
             QRCode::FinderPatternSet finderSet;
             const double finderStart = guidedNowMs();
@@ -2465,8 +2466,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
                 if (decodedTrack) {
                     ++metrics->fastDecodeSuccesses;
-                    if (track.id >= 0 && track.id < 32)
-                        metrics->sparseSuccessMask |= uint32_t(1) << track.id;
+                    if (trackBit)
+                        metrics->sparseSuccessMask |= trackBit;
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             } else {
@@ -2474,14 +2475,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             }
 
             if (!decodedTrack) {
-                const bool fallbackAllowed = track.id < 0 || track.id >= 32 ||
-                    (fallbackAllowedMask & (uint32_t(1) << track.id)) != 0;
+                const bool fallbackAllowed = trackBit && (fallbackAllowedMask & trackBit) != 0;
                 if (!fallbackAllowed) {
                     ++metrics->genericFallbackSkipped;
                 } else {
                     ++metrics->genericFallbackTracks;
-                    if (track.id >= 0 && track.id < 32)
-                        metrics->fallbackAttemptMask |= uint32_t(1) << track.id;
+                    metrics->fallbackAttemptMask |= trackBit;
                     for (auto&& detected : QRCode::SampleQR(*bits, finderSet)) {
                         metrics->sampleAttempts++;
                         if (!detected.isValid() || detected.bits().width() != track.dimension)
@@ -2496,8 +2495,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         if (commitDecoded(detected, decoded)) {
                             decodedTrack = true;
                             ++metrics->genericFallbackSuccesses;
-                            if (track.id >= 0 && track.id < 32)
-                                metrics->fallbackSuccessMask |= uint32_t(1) << track.id;
+                            if (trackBit)
+                                metrics->fallbackSuccessMask |= trackBit;
                             if (turboSeedEligible(track)) {
                                 auto map = buildHomographySampleMap(track.dimension, detected.position());
                                 seedGuidedTurbo(track.id, track.dimension, detected.position(), std::move(map), false);

@@ -40,6 +40,7 @@ function inputBuffer(zx, bytes) {
   return inputPtr;
 }
 const NATIVE_BATCH_MAX_TRACKS = 32;
+const GUIDED_BATCH_MAX_TRACKS = 128;
 const ROBUST_BATCH_MAX_RESULTS = 8;
 const NATIVE_TRACK_RESULT_BYTES = 32;
 const NATIVE_BATCH_METRICS_BYTES = 128;
@@ -49,7 +50,7 @@ const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
 const GUIDED_METRICS_BYTES = 208;
-const GUIDED_OUTPUT_BYTES = 128 * 1024;
+const GUIDED_OUTPUT_BYTES = 512 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
 let guidedMetricsPtr = 0;
@@ -62,14 +63,14 @@ let nativeConfigured = [];
 let nativeCropOrigin = "";
 const nativeRefresh = /* @__PURE__ */ new Set();
 function ensureGuidedBatch(zx) {
-  if (!guidedTracksPtr) guidedTracksPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
-  if (!guidedResultsPtr) guidedResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
+  if (!guidedTracksPtr) guidedTracksPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
+  if (!guidedResultsPtr) guidedResultsPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
   if (!guidedMetricsPtr) guidedMetricsPtr = zx._malloc(GUIDED_METRICS_BYTES);
   if (!guidedOutputPtr) guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
   return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
 }
 function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff, repairAllowedMask = 0xffffffff) {
-  if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > NATIVE_BATCH_MAX_TRACKS) return null;
+  if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > GUIDED_BATCH_MAX_TRACKS) return null;
   let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i];
@@ -90,7 +91,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   const count = zx._decodeGuidedBatchY(
     yPtr, width, height, stride,
     guidedTracksPtr, tracks.length,
-    guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
+    guidedResultsPtr, GUIDED_BATCH_MAX_TRACKS,
     guidedOutputPtr, GUIDED_OUTPUT_BYTES,
     tracks.length, fallbackAllowedMask >>> 0, repairAllowedMask >>> 0, guidedMetricsPtr
   );
@@ -152,14 +153,13 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
   const symbols = [];
-  let expectedSlotsMask = 0;
-  for (const track of tracks) {
-    const slot = Number(track.slot);
-    if (Number.isInteger(slot) && slot >= 0 && slot < 32)
-      expectedSlotsMask = (expectedSlotsMask | ((1 << slot) >>> 0)) >>> 0;
-  }
-  let decodedSlotsMask = 0;
+  const expectedSlots = new Set(
+    tracks.map((track) => Number(track.slot ?? track.id))
+      .filter((slot) => Number.isInteger(slot) && slot >= 0)
+  );
+  const decodedSlots = new Set();
   const trackBySlot = new Map(tracks.map((track) => [Number(track.slot ?? track.id), track]));
+  const trackIndexBySlot = new Map(tracks.map((track, index) => [Number(track.slot ?? track.id), index]));
   const wallMotionSamples = [];
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
@@ -172,13 +172,16 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const bytes = zx.HEAPU8.slice(guidedOutputPtr + outputOffset, guidedOutputPtr + outputOffset + outputLength);
     const packet = parseFrame(bytes);
     const slot = packet?.header.slotIndex;
-    if (!packet || !Number.isInteger(slot) || slot < 0 || slot >= 32) continue;
-    const slotBit = (1 << slot) >>> 0;
-    if (expectedSlotsMask && !(expectedSlotsMask & slotBit) || decodedSlotsMask & slotBit) continue;
-    decodedSlotsMask = (decodedSlotsMask | slotBit) >>> 0;
-    const decodePath = metrics.fallbackSuccessMask & slotBit
+    if (!packet || !Number.isInteger(slot) || slot < 0) continue;
+    if (expectedSlots.size && !expectedSlots.has(slot) || decodedSlots.has(slot)) continue;
+    decodedSlots.add(slot);
+    const trackIndex = trackIndexBySlot.get(slot);
+    const slotBit = Number.isInteger(trackIndex) && trackIndex >= 0 && trackIndex < 32
+      ? (1 << trackIndex) >>> 0
+      : 0;
+    const decodePath = slotBit && (metrics.fallbackSuccessMask & slotBit)
       ? "fallback"
-      : metrics.sparseSuccessMask & slotBit
+      : slotBit && (metrics.sparseSuccessMask & slotBit)
         ? "sparse"
         : "hot";
     const quad = {
@@ -784,12 +787,24 @@ ctx.onmessage = async (e) => {
       appendValid(zx.readFull(ptr, pw, ph, true, 128, true));
       const seeds = [...valid].flatMap((seed) => {
         const parsed = parseFrame(seed.bytes);
-        return parsed ? [{ quad: seed.quad, modules: seed.modules, layoutId: parsed.header.layoutId, slot: parsed.header.slotIndex }] : [];
+        return parsed ? [{
+          quad: seed.quad,
+          modules: seed.modules,
+          layoutId: parsed.header.layoutId,
+          extendedGrid: parsed.header.extendedGrid,
+          gridCols: parsed.header.gridCols,
+          gridRows: parsed.header.gridRows,
+          slot: parsed.header.slotIndex
+        }] : [];
       });
       seeds.push(...oracleSeeds);
       for (const seed of seeds) {
-        const layout = gridLayoutById(seed.layoutId);
-        if (!layout) continue;
+        const layout = seed.extendedGrid
+          ? { cols: Number(seed.gridCols), rows: Number(seed.gridRows) }
+          : gridLayoutById(seed.layoutId);
+        if (!layout || !Number.isInteger(layout.cols) || !Number.isInteger(layout.rows) ||
+            layout.cols < 1 || layout.rows < 1 || layout.cols * layout.rows > 128)
+          continue;
         const sx = seed.slot % layout.cols;
         const sy = Math.floor(seed.slot / layout.cols);
         const ratio = (seed.modules + 1) / seed.modules;

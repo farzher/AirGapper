@@ -114,4 +114,42 @@ assert.equal(lattice.state, "TRACK");
 assert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");
 assert.equal(snapshot.fitSlots, 1, "stale old-pose anchors must be discarded on the new pose");
 
+// Extended-grid regression: Auto can declare a wall above the old 32-slot
+// ceiling and the lattice must expose every physical slot.
+const extended = new GridLattice();
+const extCols = 8;
+const extRows = 12;
+const extModules = 77;
+const extStride = extModules + 1;
+const extSlot = 95;
+const extCol = extSlot % extCols;
+const extRow = Math.floor(extSlot / extCols);
+const extScale = 1.3;
+const extX = 80 + extCol * extStride * extScale;
+const extY = 120 + extRow * extStride * extScale;
+const extEdge = extModules * extScale;
+const extSnapshot = extended.accept({
+  identity: "extended-grid-regression",
+  layoutId: 0,
+  extendedGrid: true,
+  gridCols: extCols,
+  gridRows: extRows,
+  slotIndex: extSlot,
+  modules: extModules,
+  at: 1,
+  scanId: 1,
+  quad: {
+    topLeft: { x: extX, y: extY },
+    topRight: { x: extX + extEdge, y: extY },
+    bottomRight: { x: extX + extEdge, y: extY + extEdge },
+    bottomLeft: { x: extX, y: extY + extEdge }
+  },
+  box: { x: extX, y: extY, w: extEdge, h: extEdge }
+}, 1600, 2600);
+assert(extSnapshot, "extended grid should lock from one verified QR");
+assert.equal(extSnapshot.layout.cols, extCols);
+assert.equal(extSnapshot.layout.rows, extRows);
+assert.equal(extSnapshot.slots.length, 96, "extended grid must expose slots above 31");
+assert.equal(extSnapshot.slots[95].index, 95);
+
 console.log("grid-lattice regression: ok");

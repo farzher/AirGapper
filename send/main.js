@@ -21,7 +21,7 @@ import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
 import { makeZip } from "../shared/zip.js";
 import { FRAME_BYTES_OPTIONS } from "../shared/send-settings.js";
-import { GRID_LAYOUTS, GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
+import { GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
 const HEADER_MARGIN = 0;
 const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
@@ -31,10 +31,24 @@ const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 // Sender FPS is always the user's requested presentation rate. Auto Grid may
 // choose QR count/size, but never silently changes the requested FPS.
 const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
-const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
+const AUTO_GRID_MAX_CODES = 128;
+// This is intentionally relaxed for the >32-slot experiment. At 360 Hz and
+// 30 sender fps it permits roughly 96 independently changing QR slots.
+const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 8;
+const AUTO_GRID_LAYOUTS = (() => {
+  const layouts = [];
+  for (let cols = 1; cols <= 32; cols++) {
+    for (let rows = cols; rows <= 32; rows++) {
+      const codes = cols * rows;
+      if (codes <= 1 || codes > AUTO_GRID_MAX_CODES) continue;
+      layouts.push({ id: cols * 64 + rows, cols, rows });
+    }
+  }
+  return layouts;
+})();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.311";
+const SEND_RUNTIME_BUILD = "v0.5.312";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -287,12 +301,12 @@ function chooseAutoGrid(
   const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
   const candidates = [];
   for (const maximumFrameBytes of allowedFrameBytes) {
-    if (!fitsInOneStream(payloadBytes, maximumFrameBytes)) continue;
-    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes);
+    if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
+    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
     if (plan.mode === "direct") continue;
-    for (const layout of GRID_LAYOUTS) {
+    for (const layout of AUTO_GRID_LAYOUTS) {
       const codes = layout.cols * layout.rows;
-      if (codes <= 1 || codes > 32) continue;
+      if (codes <= 1 || codes > AUTO_GRID_MAX_CODES) continue;
       const margin = GRID_MARGIN;
       const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, margin);
       const totalW = extent.width;
@@ -342,7 +356,7 @@ function chooseAutoGrid(
     // A rolling-shutter stripe destroys a smaller fraction of a wall made from
     // more independent QRs. Allow up to an 18% theoretical throughput trade
     // across the 8→32 QR range when fragmentation improves substantially.
-    const fragmentation = Math.max(0, Math.min(1, (candidate.codes - 8) / 24));
+    const fragmentation = Math.max(0, Math.min(1, (candidate.codes - 8) / (AUTO_GRID_MAX_CODES - 8)));
     const fragmentationBonus = 1 + fragmentation * AUTO_GRID_FRAGMENTATION_BONUS;
     // Integer scaling has cliffs: score the wall that is ACTUALLY painted.
     const fillBonus = fitScaling
@@ -760,10 +774,10 @@ async function startStream(revealStage = false) {
   // Size is meaningful in both manual and Auto layouts. Auto may step down
   // from this value to preserve its module-density target, but never above it.
   const maximumFrameBytes = manualFrameBytes;
-  if (!fitsInOneStream(payload.length, manualFrameBytes)) {
-    const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS);
+  if (!fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
+    const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
     showSettingsError(
-      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
     );
     return;
   }
@@ -782,7 +796,7 @@ async function startStream(revealStage = false) {
     showStreamPanels(true);
   }
   if (autoMode && plainSnippet === null) {
-    const directProbe = selectTransportPlan(payload.length, maximumFrameBytes);
+    const directProbe = selectTransportPlan(payload.length, maximumFrameBytes, true);
     if (directProbe.mode === "direct") {
       frameBytes = maximumFrameBytes;
       transport = directProbe;
@@ -851,9 +865,13 @@ async function startStream(revealStage = false) {
   const transportKey = `${payloadId}:${encoder.mode}:${encoder.k}:${blockLen}:${payload.length}`;
   let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;
   activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };
+  const extendedGrid = Boolean(autoGrid);
   const header = {
     mode: encoder.mode,
-    layoutId: gridLayoutId(gridCols, gridRows),
+    layoutId: extendedGrid ? 0 : gridLayoutId(gridCols, gridRows),
+    extendedGrid,
+    gridCols,
+    gridRows,
     k: encoder.k,
     blockLen,
     totalLen: payload.length,

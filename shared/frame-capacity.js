@@ -43,17 +43,17 @@ const QR_BYTE_CAPACITY_L = [
   2809,
   2953
 ];
-function blockLength(frameBytes, mode) {
-  return frameBytes - frameOverhead(mode);
+function blockLength(frameBytes, mode, extendedGrid = false) {
+  return frameBytes - frameOverhead(mode, extendedGrid);
 }
 function qrVersionForBytes(frameBytes) {
   const index = QR_BYTE_CAPACITY_L.findIndex((capacity) => capacity >= frameBytes);
   if (index < 0) throw new Error("Frame exceeds standard QR capacity.");
   return index + 1;
 }
-function balancedPlan(payload, maximumFrameBytes, mode, minimumK) {
+function balancedPlan(payload, maximumFrameBytes, mode, minimumK, extendedGrid = false) {
   const packetIdBytes = mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
-  const availableSourceBlock = blockLength(maximumFrameBytes, mode) - packetIdBytes;
+  const availableSourceBlock = blockLength(maximumFrameBytes, mode, extendedGrid) - packetIdBytes;
   const maximumSourceBlock = mode === "raptorq" ? Math.floor(availableSourceBlock / 8) * 8 : availableSourceBlock;
   if (maximumSourceBlock < 1) throw new Error("Size is too small for transport metadata.");
   const k = Math.max(minimumK, Math.ceil(payload / maximumSourceBlock));
@@ -67,20 +67,20 @@ function balancedPlan(payload, maximumFrameBytes, mode, minimumK) {
     k: Math.ceil(payload / sourceBlockLen)
   };
 }
-function sourcePlan(payloadBytes, maximumFrameBytes) {
+function sourcePlan(payloadBytes, maximumFrameBytes, extendedGrid = false) {
   const payload = Math.max(1, Math.floor(payloadBytes));
-  const directCapacity = blockLength(maximumFrameBytes, "direct");
+  const directCapacity = blockLength(maximumFrameBytes, "direct", false);
   if (payload <= directCapacity) return { mode: "direct", blockLen: payload, k: 1 };
-  const mds = balancedPlan(payload, maximumFrameBytes, "mds", 2);
+  const mds = balancedPlan(payload, maximumFrameBytes, "mds", 2, extendedGrid);
   if (mds.k <= MDS_MAX_K) return { mode: "mds", ...mds };
-  return { mode: "raptorq", ...balancedPlan(payload, maximumFrameBytes, "raptorq", MDS_MAX_K + 1) };
+  return { mode: "raptorq", ...balancedPlan(payload, maximumFrameBytes, "raptorq", MDS_MAX_K + 1, extendedGrid) };
 }
-function selectTransportPlan(payloadBytes, maximumFrameBytes) {
+function selectTransportPlan(payloadBytes, maximumFrameBytes, extendedGrid = false) {
   const payload = Math.max(1, Math.floor(payloadBytes));
-  const { mode, blockLen, k } = sourcePlan(payload, maximumFrameBytes);
+  const { mode, blockLen, k } = sourcePlan(payload, maximumFrameBytes, extendedGrid);
   if (k > MAX_SOURCE_BLOCKS) throw new Error("Transfer requires too many source blocks at this Size.");
   if (codingMode(k) !== mode) throw new Error("Could not select a consistent coding mode.");
-  const frameBytes = blockLen + frameOverhead(mode);
+  const frameBytes = blockLen + frameOverhead(mode, mode === "direct" ? false : extendedGrid);
   const qrVersion = qrVersionForBytes(frameBytes);
   const sourceBlockLen = blockLen - (mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0);
   const paddingBytes = k * sourceBlockLen - payload;
@@ -93,21 +93,21 @@ function selectTransportPlan(payloadBytes, maximumFrameBytes) {
     qrModules: 17 + 4 * qrVersion,
     paddingBytes,
     paddingFraction: paddingBytes / (k * sourceBlockLen),
-    overheadFraction: (frameOverhead(mode) + (mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0)) / frameBytes
+    overheadFraction: (frameOverhead(mode, mode === "direct" ? false : extendedGrid) + (mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0)) / frameBytes
   };
 }
-function sourceBlockCount(payloadBytes, frameBytes) {
-  return sourcePlan(payloadBytes, frameBytes).k;
+function sourceBlockCount(payloadBytes, frameBytes, extendedGrid = false) {
+  return sourcePlan(payloadBytes, frameBytes, extendedGrid).k;
 }
-function fitsInOneStream(payloadBytes, frameBytes) {
-  return sourceBlockCount(payloadBytes, frameBytes) <= MAX_SOURCE_BLOCKS;
+function fitsInOneStream(payloadBytes, frameBytes, extendedGrid = false) {
+  return sourceBlockCount(payloadBytes, frameBytes, extendedGrid) <= MAX_SOURCE_BLOCKS;
 }
-function minimumFrameBytes(payloadBytes) {
+function minimumFrameBytes(payloadBytes, extendedGrid = false) {
   const sourceBytes = Math.ceil(Math.ceil(payloadBytes / MAX_SOURCE_BLOCKS) / 8) * 8;
-  return sourceBytes + RAPTOR_PACKET_ID_BYTES + frameOverhead("raptorq");
+  return sourceBytes + RAPTOR_PACKET_ID_BYTES + frameOverhead("raptorq", extendedGrid);
 }
-function smallestSufficientFrameSize(payloadBytes, options) {
-  const minimum = minimumFrameBytes(payloadBytes);
+function smallestSufficientFrameSize(payloadBytes, options, extendedGrid = false) {
+  const minimum = minimumFrameBytes(payloadBytes, extendedGrid);
   return options.filter((value) => value >= minimum).sort((a, b) => a - b)[0];
 }
 export {

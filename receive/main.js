@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.309";
+const RECEIVER_RUNTIME_BUILD = "v0.5.312";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -157,7 +157,7 @@ function selectedTracksPerFrameLimit() {
   const value = decodeTracksPerFrame?.value;
   if (!value || value === "auto") return Infinity;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(1, Math.min(32, Math.trunc(parsed))) : Infinity;
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(128, Math.trunc(parsed))) : Infinity;
 }
 if (decodeTracksPerFrame) {
   try {
@@ -1194,7 +1194,7 @@ function noteGuidedCompletion(stage, outputSymbols, tracks, latencyMs, observati
   }
   guidedRollout.state = "active";
 }
-const SLOT_METRIC_COUNT = 64;
+const SLOT_METRIC_COUNT = 128;
 const SLOT_WEAK_MIN_SAMPLES = 32;
 const SLOT_WEAK_ENTER_SCORE = 0.08;
 const SLOT_WEAK_RECOVERY_SCORE = 0.25;
@@ -1270,7 +1270,7 @@ const slotAdaptiveWeak = new Uint8Array(SLOT_METRIC_COUNT);
 // histories learn far too slowly. Own the policy here, keyed by physical grid
 // slot, and send each guided job one allow-mask. The thresholds intentionally
 // match v175's conservative policy; only the evidence is now shared globally.
-const GUIDED_FALLBACK_SLOT_COUNT = 32;
+const GUIDED_FALLBACK_SLOT_COUNT = SLOT_METRIC_COUNT;
 const guidedFallbackMisses = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
 const guidedFallbackCooldown = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
 const guidedFallbackBackoff = new Uint8Array(GUIDED_FALLBACK_SLOT_COUNT);
@@ -1286,24 +1286,28 @@ function resetGuidedFallbackPolicy() {
 }
 function guidedFallbackMaskForTracks(tracks) {
   let mask = 0;
-  for (const track of tracks ?? []) {
+  const list = tracks ?? [];
+  for (let lane = 0; lane < Math.min(32, list.length); lane++) {
+    const track = list[lane];
     const slot = Number(track.slot ?? track.id);
     if (!Number.isInteger(slot) || slot < 0 || slot >= GUIDED_FALLBACK_SLOT_COUNT) continue;
     if (guidedFallbackCooldown[slot]) {
       guidedFallbackCooldown[slot]--;
       continue;
     }
-    mask = (mask | ((1 << slot) >>> 0)) >>> 0;
+    mask = (mask | ((1 << lane) >>> 0)) >>> 0;
   }
   return mask >>> 0;
 }
-function noteGuidedFallbackMetrics(guided) {
+function noteGuidedFallbackMetrics(guided, trackSlots = []) {
   if (!guided) return;
   const sparseSuccess = Number(guided.sparseSuccessMask) >>> 0;
   const fallbackAttempt = Number(guided.fallbackAttemptMask) >>> 0;
   const fallbackSuccess = Number(guided.fallbackSuccessMask) >>> 0;
-  for (let slot = 0; slot < GUIDED_FALLBACK_SLOT_COUNT; slot++) {
-    const bit = (1 << slot) >>> 0;
+  for (let lane = 0; lane < Math.min(32, trackSlots.length); lane++) {
+    const slot = Number(trackSlots[lane]);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= GUIDED_FALLBACK_SLOT_COUNT) continue;
+    const bit = (1 << lane) >>> 0;
     if (sparseSuccess & bit) {
       resetGuidedFallbackSlot(slot);
       continue;
@@ -1439,14 +1443,18 @@ function countMaskBits(mask) {
   while (value) { value &= value - 1; count++; }
   return count;
 }
-function noteGuidedRepairMetrics(guided) {
+function noteGuidedRepairMetrics(guided, trackSlots = []) {
   const attempts = Number(guided?.erasureRepairAttemptMask) >>> 0;
   const successes = Number(guided?.erasureRepairSuccessMask) >>> 0;
   const attemptedCount = countMaskBits(attempts);
-  const codewordsPerAttempt = attemptedCount ? Math.max(1, Number(guided?.erasureRepairCodewords) || 0) / attemptedCount : 0;
-  for (let slot = 0; slot < SLOT_METRIC_COUNT; slot++) {
-    const bit = (1 << slot) >>> 0;
+  const codewordsPerAttempt = attemptedCount
+    ? Math.max(1, Number(guided?.erasureRepairCodewords) || 0) / attemptedCount
+    : 0;
+  for (let lane = 0; lane < Math.min(32, trackSlots.length); lane++) {
+    const bit = (1 << lane) >>> 0;
     if (!(attempts & bit)) continue;
+    const slot = Number(trackSlots[lane]);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) continue;
     const hit = Boolean(successes & bit);
     const alpha = slotRepairSamples[slot] < 5 ? 0.34 : 0.18;
     slotRepairYield[slot] = slotRepairYield[slot] * (1 - alpha) + Number(hit) * alpha;
@@ -1465,10 +1473,15 @@ function guidedRepairValue(track, now) {
 function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) {
   const items = [];
   let mask = 0;
-  for (const track of tracks ?? []) {
+  const list = tracks ?? [];
+  // Native salvage has 32 bits. They address batch lanes, not physical slots.
+  // Lanes >=32 still run the cheap tracked/sparse path but cannot enter
+  // ambiguity repair or generic SampleQR fallback.
+  for (let lane = 0; lane < Math.min(32, list.length); lane++) {
+    const track = list[lane];
     const slot = Number(track?.slot ?? track?.id);
     if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) continue;
-    const bit = (1 << slot) >>> 0;
+    const bit = (1 << lane) >>> 0;
     const risk = temporalBandRiskForSlot(slot, sourceSequence, now);
     if (risk >= TEMPORAL_MODEL_RISK_THRESHOLD) {
       guidedRepairTemporalFences++;
@@ -1476,12 +1489,13 @@ function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) 
     }
     items.push({ track, slot, bit, value: guidedRepairValue(track, now) });
   }
-  lastGuidedRepairCandidates = (tracks ?? []).length;
+  lastGuidedRepairCandidates = list.length;
   if (!recentTrackPressure(now)) {
     for (const item of items) mask = (mask | item.bit) >>> 0;
   } else {
     items.sort((a, b) => b.value - a.value || a.slot - b.slot);
-    for (const item of items.slice(0, GUIDED_REPAIR_PRESSURE_LIMIT)) mask = (mask | item.bit) >>> 0;
+    for (const item of items.slice(0, GUIDED_REPAIR_PRESSURE_LIMIT))
+      mask = (mask | item.bit) >>> 0;
     guidedRepairPressureFences += Math.max(0, items.length - GUIDED_REPAIR_PRESSURE_LIMIT);
   }
   lastGuidedRepairAllowed = countMaskBits(mask);
@@ -2576,7 +2590,7 @@ function noteDecodeCompleted(id, completion) {
     const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     const guided = completion.guidedMetrics;
-    if (guided && !auditMode?.autoOpticsProbe) noteGuidedFallbackMetrics(guided);
+    if (guided && !auditMode?.autoOpticsProbe) noteGuidedFallbackMetrics(guided, auditMode?.trackSlots ?? []);
     const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
@@ -2638,7 +2652,7 @@ function noteDecodeCompleted(id, completion) {
       livePipeline.guidedErasureRepairAttempts += countMaskBits(Number(guided.erasureRepairAttemptMask) >>> 0);
       livePipeline.guidedErasureRepairSuccesses += countMaskBits(Number(guided.erasureRepairSuccessMask) >>> 0);
       livePipeline.guidedErasureRepairSuppressed += countMaskBits(Number(guided.erasureRepairSuppressedMask) >>> 0);
-      noteGuidedRepairMetrics(guided);
+      noteGuidedRepairMetrics(guided, auditMode?.trackSlots ?? []);
       livePipeline.guidedFinderAttempts += Math.max(0, Number(guided.finderAttempts) || 0);
       livePipeline.guidedFinderSuccesses += Math.max(0, Number(guided.finderSuccesses) || 0);
     }
@@ -4913,8 +4927,8 @@ function renderFocusDiagnostics() {
   const qrOpportunityRate = sourceCaptureRate * scheduledSlotEquivalent;
   const attemptCoverage = qrOpportunityRate > 0 ? attemptedQrRate / qrOpportunityRate : 0;
   const packetInternalBytes = decoder?.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
-  const transportMetadataBytes = decoder ? frameOverhead(decoder.mode) + packetInternalBytes : 0;
-  const transportFrameBytes = decoder ? decoder.blockLen + frameOverhead(decoder.mode) : 0;
+  const transportMetadataBytes = decoder ? frameOverhead(decoder.mode, decoder.extendedGrid) + packetInternalBytes : 0;
+  const transportFrameBytes = decoder ? decoder.blockLen + frameOverhead(decoder.mode, decoder.extendedGrid) : 0;
   const transportSourceBytes = decoder ? decoder.blockLen - packetInternalBytes : 0;
   const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
@@ -7520,7 +7534,7 @@ function onDecoded(bytes, box, info) {
   if (done) return;
   if (!replayRunning && livePipeline.startedAt && !livePipeline.firstQrAt) livePipeline.firstQrAt = decodedAt;
   qrReadTimes.push(decodedAt);
-  const parsed = info?.verifiedPayload && info.header ? { header: info.header, block: bytes.subarray(frameHeaderLength(info.header.mode)) } : parseFrame(bytes);
+  const parsed = info?.verifiedPayload && info.header ? { header: info.header, block: bytes.subarray(frameHeaderLength(info.header.mode, info.header.extendedGrid)) } : parseFrame(bytes);
   if (!parsed) {
     noteScanOutcome(info == null ? void 0 : info.scanId, "rejected");
     if (decoder) return;
@@ -7654,6 +7668,9 @@ function onDecoded(bytes, box, info) {
       const snapshot = gridLattice.accept({
         identity,
         layoutId: header.layoutId,
+        extendedGrid: header.extendedGrid,
+        gridCols: header.gridCols,
+        gridRows: header.gridRows,
         slotIndex: header.slotIndex,
         at: packetAt,
         scanId: info?.scanId ?? -1,
@@ -7674,6 +7691,7 @@ function onDecoded(bytes, box, info) {
   if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);
   if (!decoder) {
     decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
+    decoder.extendedGrid = Boolean(header.extendedGrid);
     usefulFrameTimes.length = 0;
     uniqueQrTimes.length = 0;
     duplicateQrTimes.length = 0;

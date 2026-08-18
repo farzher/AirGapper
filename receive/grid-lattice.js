@@ -92,6 +92,19 @@ function bounds(quad) {
   const bottom = Math.max(...points.map((p) => p.y));
   return { x: left, y: top, w: right - left, h: bottom - top };
 }
+function declaredGridLayout(detection) {
+  if (detection?.extendedGrid) {
+    const cols = Number(detection.gridCols);
+    const rows = Number(detection.gridRows);
+    const count = cols * rows;
+    if (!Number.isInteger(cols) || cols < 1 || cols > 32 ||
+        !Number.isInteger(rows) || rows < 1 || rows > 32 ||
+        !Number.isInteger(count) || count < 2 || count > 128)
+      return null;
+    return { id: `extended:${cols}x${rows}`, cols, rows, extendedGrid: true };
+  }
+  return gridLayoutById(detection?.layoutId) ?? null;
+}
 function activationReady(layout, observations) {
   // One CRC-verified AirGapper QR is enough to predict every declared slot and
   // begin tracked decoding immediately.
@@ -153,7 +166,7 @@ class GridLattice {
   accept(detection, frameWidth, frameHeight) {
     var _a;
     if (!validGeometry(detection)) return null;
-    const declaredLayout = gridLayoutById(detection.layoutId);
+    const declaredLayout = declaredGridLayout(detection);
     if (!declaredLayout || detection.slotIndex >= declaredLayout.cols * declaredLayout.rows) return null;
     if (this.identity && detection.identity !== this.identity) return null;
     if (!this.identity) this.identity = detection.identity;
@@ -399,7 +412,7 @@ class GridLattice {
     const count = layout.cols * layout.rows;
     const latest = /* @__PURE__ */ new Map();
     for (const observation of this.observations) {
-      const declared = gridLayoutById(observation.layoutId);
+      const declared = declaredGridLayout(observation);
       if (!declared || declared.cols !== layout.cols || declared.rows !== layout.rows) continue;
       latest.set(observation.slotIndex, observation);
     }
