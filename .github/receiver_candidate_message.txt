@@ -1,0 +1,1 @@
+v0.5.300 record per-frame camera and optics metadata in raw corpora
