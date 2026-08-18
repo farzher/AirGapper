@@ -259,7 +259,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     };
     const edgeValues = predictedMotion.map((item) => item.edge).filter((value) => Number.isFinite(value) && value > 0);
     const medianEdge = edgeValues.length ? median(edgeValues) : 64;
-    const minSpan = Math.max(48, medianEdge * 0.65);
+    const minSpan = Math.max(80, medianEdge * 1.25);
     const need = Math.max(2, Math.ceil(predictedMotion.length * 0.6));
     let best = null;
     // Pair-seeded RANSAC is tiny here (<=32 tracks) and prevents one local

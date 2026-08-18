@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.281";
+const RECEIVER_RUNTIME_BUILD = "v0.5.282";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5774,7 +5774,7 @@ async function captureFrame(source) {
   // global decoder-silence timer at zero. Sustain the condition briefly so a
   // normal animated frame cannot wake recovery, then actively repair breadth.
   const wallCoverageStarved = lockedGeometryTrusted && visibleGridSlots.length >= SLOT_WEAK_MIN_WALL &&
-    freshLockedHits > 0 && wallFreshRatio < 0.55 && (!freshDistributed || wallFreshRatio < 0.38);
+    freshLockedHits > 0 && (wallFreshRatio < 0.55 || !freshDistributed);
   if (wallCoverageStarved) {
     if (!geometryCoverageStarvedSince) geometryCoverageStarvedSince = now;
   } else {
@@ -5785,7 +5785,7 @@ async function captureFrame(source) {
   const aggressiveGeometryProbe = freshLockedHits === 0 && lockedDecodeSilenceMs >= GEOMETRY_FAST_PROBE_SILENCE_MS;
   const maintenanceInterval = sustainedCoverageStarvation ? 550 : GEOMETRY_MAINTENANCE_SCAN_MS;
   const maintenanceGeometryProbe = (coverageRecoveryAssist || sustainedCoverageStarvation) &&
-    wallFreshRatio < 0.55 && now - lastFullScan >= maintenanceInterval;
+    (wallFreshRatio < 0.55 || !freshDistributed) && now - lastFullScan >= maintenanceInterval;
   const geometryProbeDue = lockedGeometryTrusted && (aggressiveGeometryProbe || maintenanceGeometryProbe);
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
