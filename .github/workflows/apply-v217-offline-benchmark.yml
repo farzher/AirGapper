@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/repeated_trials_patch.py
+      - .github/v233_local_phase_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,16 +25,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply median-trial benchmark update
+      - name: Apply v234 local phase candidate
         id: candidate
         run: |
           set -euo pipefail
-          if [ -f .github/repeated_trials_patch.py ] && ! grep -q 'selectMedianTrial' benchmark/offline-runner.mjs; then
-            python3 .github/repeated_trials_patch.py 2>&1 | tee /tmp/trials-patch.log
+          if [ -f .github/v233_local_phase_patch.py ] && ! grep -q 'turboRefineLocalPhase' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
+            python3 .github/v233_local_phase_patch.py 2>&1 | tee /tmp/v234-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Cache codec toolchain
+        if: steps.candidate.outputs.changed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/decimen-codec/source/emsdk
+            vendor/decimen-codec/source/third_party
+            vendor/decimen-codec/source/build-simd
+            vendor/decimen-codec/source/build-scalar
+          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+
+      - name: Build SIMD and scalar codecs
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/v234-build-simd.log
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/v234-build-scalar.log
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
@@ -49,7 +67,47 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/regression.log
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v234-regression.log
+
+      - name: Require useful optical phase recovery
+        id: performance
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          node <<'NODE' 2>&1 | tee /tmp/v234-performance.log
+          const fs = require('fs');
+          const before = JSON.parse(fs.readFileSync('benchmark/latest-result.json', 'utf8')).scenarios;
+          const after = JSON.parse(fs.readFileSync('benchmark/offline-summary.json', 'utf8')).scenarios;
+          const med = (x, key) => Number(x?.trialMedians?.[key] ?? x?.normalized?.[key] ?? 0);
+          const bO=before['optical-dense-y8'], aO=after['optical-dense-y8'];
+          const bC=before['camera-dense-y8'], aC=after['camera-dense-y8'];
+          const bS=before['stable-y8'], aS=after['stable-y8'];
+          const bM=before['motion-y8'], aM=after['motion-y8'];
+          const bD=before['dense-y8'], aD=after['dense-y8'];
+          const problems=[];
+          const bHard=(med(bO,'guidedMsPerOutput')+med(bC,'guidedMsPerOutput'))/2;
+          const aHard=(med(aO,'guidedMsPerOutput')+med(aC,'guidedMsPerOutput'))/2;
+          const phaseSearches=(aO.guided?.localPhaseSearches||0)+(aC.guided?.localPhaseSearches||0);
+          const phaseRecoveries=(aO.guided?.localPhaseDecodeRecoveries||0)+(aC.guided?.localPhaseDecodeRecoveries||0);
+          if(phaseSearches < 10) problems.push(`phase search barely exercised (${phaseSearches})`);
+          if(phaseRecoveries < 3) problems.push(`only ${phaseRecoveries} phase decode recoveries`);
+          if(aHard > bHard * 0.95) problems.push(`hard optical median ${aHard.toFixed(3)}ms/QR did not beat ${bHard.toFixed(3)} by 5%`);
+          if(med(aO,'guidedOutputYield') < med(bO,'guidedOutputYield') - 0.02) problems.push('optical output yield regressed');
+          if(med(aC,'guidedOutputYield') < med(bC,'guidedOutputYield') - 0.02) problems.push('camera output yield regressed');
+          if(med(aS,'guidedMsPerOutput') > med(bS,'guidedMsPerOutput') * 1.12) problems.push('clean stable CPU regressed >12%');
+          if(med(aS,'guidedOutputYield') < 0.98 || med(aS,'dataOnlyYield') < 0.98) problems.push('clean stable correctness regressed');
+          if(aM.finalState !== 'TRACK' || aM.tailFullJobs !== 0 || med(aM,'guidedOutputYield') < med(bM,'guidedOutputYield') - 0.04) problems.push('motion recovery regressed');
+          if(med(aM,'guidedMsPerOutput') > med(bM,'guidedMsPerOutput') * 1.15) problems.push('motion CPU regressed >15%');
+          if(med(aD,'guidedOutputYield') < 0.98 || med(aD,'guidedMsPerOutput') > med(bD,'guidedMsPerOutput') * 1.12) problems.push('clean dense regressed');
+          console.log(JSON.stringify({
+            hardOpticalMsPerQr:{before:bHard,after:aHard},
+            phase:{searches:phaseSearches,recoveries:phaseRecoveries,optical:aO.guided,camera:aC.guided},
+            stable:{before:bS.trialMedians,after:aS.trialMedians},
+            motion:{before:bM.trialMedians,after:aM.trialMedians},
+            dense:{before:bD.trialMedians,after:aD.trialMedians}
+          },null,2));
+          if(problems.length) throw new Error(problems.join('; '));
+          NODE
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -59,7 +117,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit median-trial benchmark
+      - name: Commit passing v234 candidate
         if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -67,9 +125,12 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/repeated_trials_patch.py
-          git add benchmark/offline-runner.mjs benchmark/latest-result.json
-          git commit -m "use median trials for receiver performance regression"
+          git rm .github/v233_local_phase_patch.py
+          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/wrapper/decimen_codec.h vendor/decimen-codec/source/VERSION \
+                  vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
+                  vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
+                  receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
+          git commit -m "v0.5.234 recover per-slot optical phase"
           git pull --rebase origin master
           git push origin HEAD:master
 
@@ -88,20 +149,23 @@ jobs:
             git push origin HEAD:master
           fi
 
-      - name: Record benchmark failure
+      - name: Record v234 rejection
         if: failure()
         run: |
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "median benchmark failed at $(date -u +%FT%TZ)"
-            cat /tmp/trials-patch.log 2>/dev/null || true
-            tail -n 420 /tmp/regression.log 2>/dev/null || true
-          } > benchmark/median-trials-ci.log
+            echo "v234 candidate rejected at $(date -u +%FT%TZ)"
+            cat /tmp/v234-patch.log 2>/dev/null || true
+            cat /tmp/v234-performance.log 2>/dev/null || true
+            tail -n 160 /tmp/v234-build-simd.log 2>/dev/null || true
+            tail -n 160 /tmp/v234-build-scalar.log 2>/dev/null || true
+            tail -n 480 /tmp/v234-regression.log 2>/dev/null || true
+          } > benchmark/v234-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/median-trials-ci.log
-          git commit -m "record median benchmark rejection"
+          git add benchmark/v234-ci.log
+          git commit -m "record v234 local phase rejection"
           git pull --rebase origin master
           git push origin HEAD:master
           exit 1
