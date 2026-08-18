@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.250";
+const RECEIVER_RUNTIME_BUILD = "v0.5.251";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -6420,7 +6420,6 @@ function onDecoded(bytes, box, info) {
       if (fnv1a(payload) === header.payloadId) benchmarkVerifiedBytes = header.totalLen;
     }
   } else if (decoder.isComplete && !transferFinalizing) {
-    freezeCompletionDiagnostics();
     void finalizeCompletedTransfer(header.payloadId);
   }
 }
@@ -6445,6 +6444,7 @@ async function finalizeCompletedTransfer(payloadId) {
     transferFinalizing = false;
     return;
   }
+  freezeCompletionDiagnostics();
   const payload = completingDecoder.assemble();
   const seconds = (receiverNow() - startTs) / 1e3;
   const ok = fnv1a(payload) === payloadId;

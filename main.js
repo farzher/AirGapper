@@ -2,7 +2,7 @@ var _a;
 import { closeOnBackdropClick } from "./shared/dialog.js";
 import { isAndroid, isIOS } from "./shared/platform.js";
 
-const APP_BUILD = "v0.5.250";
+const APP_BUILD = "v0.5.251";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -106,6 +106,7 @@ function historyView() {
 }
 const headerQr = document.getElementById("receiver-link-qr");
 const headerQrButton = document.getElementById("receiver-link-open");
+const sendReceiverLinkButton = document.getElementById("send-receiver-link-open");
 const receiverLinkDialog = document.getElementById("receiver-link-dialog");
 const receiverLinkUrl = document.getElementById("receiver-link-url");
 const receiverUrl = (_a = headerQr.dataset.receiverUrl) != null ? _a : "";
@@ -118,7 +119,9 @@ try {
 }
 receiverLinkUrl.target = "_blank";
 receiverLinkUrl.rel = "noopener";
-headerQrButton.addEventListener("click", () => receiverLinkDialog.showModal());
+const openReceiverLinkDialog = () => receiverLinkDialog.showModal();
+headerQrButton.addEventListener("click", openReceiverLinkDialog);
+sendReceiverLinkButton?.addEventListener("click", openReceiverLinkDialog);
 closeOnBackdropClick(receiverLinkDialog);
 function showView(name, historyMode = "push") {
   if (name === active) {
@@ -131,7 +134,7 @@ function showView(name, historyMode = "push") {
   else if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
   document.body.classList.toggle("receive-mode", name === "receive");
-  headerQrButton.hidden = name === "receive";
+  headerQrButton.hidden = name !== "home";
   if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
   if (name === "send" && !hasMobileInput) {
