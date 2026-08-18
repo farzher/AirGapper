@@ -13,6 +13,61 @@ function u32(value) {
   new DataView(bytes.buffer).setUint32(0, value, true);
   return bytes;
 }
+const RAW_Y_FORMATS = new Set(["I420", "I420A", "NV12"]);
+function normalizedRect(rect, width, height) {
+  return { x: Math.max(0, Math.round(rect?.x ?? 0)), y: Math.max(0, Math.round(rect?.y ?? 0)),
+    width: Math.max(1, Math.round(rect?.width ?? width)), height: Math.max(1, Math.round(rect?.height ?? height)) };
+}
+async function copyVideoFrameY(videoFrame) {
+  if (!videoFrame || typeof VideoFrame !== "function") throw new Error("Raw camera capture requires VideoFrame");
+  const frame = typeof videoFrame.clone === "function" ? videoFrame.clone() : new VideoFrame(videoFrame);
+  try {
+    const sourcePixelFormat = String(frame.format ?? "");
+    if (!RAW_Y_FORMATS.has(sourcePixelFormat)) throw new Error(`Raw Y capture does not support ${sourcePixelFormat || "unknown"}`);
+    const visibleRect = normalizedRect(frame.visibleRect, frame.codedWidth, frame.codedHeight);
+    const options = { rect: visibleRect };
+    const storage = new Uint8Array(frame.allocationSize(options));
+    const layout = await frame.copyTo(storage, options);
+    const plane = layout?.[0];
+    if (!plane || plane.stride < visibleRect.width) throw new Error("Camera frame has no usable Y plane");
+    const y = new Uint8Array(visibleRect.width * visibleRect.height);
+    for (let row = 0; row < visibleRect.height; row++) {
+      const start = plane.offset + row * plane.stride;
+      y.set(storage.subarray(start, start + visibleRect.width), row * visibleRect.width);
+    }
+    return { y, meta: { sourcePixelFormat, codedWidth: frame.codedWidth, codedHeight: frame.codedHeight,
+      visibleRect, displayWidth: frame.displayWidth || visibleRect.width, displayHeight: frame.displayHeight || visibleRect.height,
+      frameTimestamp: Number(frame.timestamp) || 0, frameDuration: frame.duration == null ? void 0 : Number(frame.duration),
+      rotation: Number(frame.rotation ?? 0) || 0, flip: Boolean(frame.flip) } };
+  } finally { frame.close(); }
+}
+function yToImageData(y, width, height) {
+  if (y.length !== width * height) throw new Error("Y frame size mismatch");
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0, p = 0; i < y.length; i++, p += 4) rgba[p] = rgba[p + 1] = rgba[p + 2] = y[i], rgba[p + 3] = 255;
+  return new ImageData(rgba, width, height);
+}
+function yRecordToVideoFrame(meta, y) {
+  const sourceRect = normalizedRect(meta.visibleRect, meta.width, meta.height);
+  const codedWidth = Math.max(sourceRect.x + sourceRect.width, Math.round(meta.codedWidth || meta.width || sourceRect.width));
+  const codedHeight = Math.max(sourceRect.y + sourceRect.height, Math.round(meta.codedHeight || meta.height || sourceRect.height));
+  if ((codedWidth & 1) || (codedHeight & 1)) throw new Error(`Raw Y replay requires even coded dimensions, got ${codedWidth}×${codedHeight}`);
+  if (y.length !== sourceRect.width * sourceRect.height) throw new Error(`Frame ${meta.sequence} raw Y length mismatch`);
+  const yBytes = codedWidth * codedHeight, chromaBytes = (codedWidth >> 1) * (codedHeight >> 1);
+  const i420 = new Uint8Array(yBytes + chromaBytes * 2);
+  i420.fill(255, 0, yBytes); i420.fill(128, yBytes);
+  for (let row = 0; row < sourceRect.height; row++) {
+    const src = row * sourceRect.width, dst = (sourceRect.y + row) * codedWidth + sourceRect.x;
+    i420.set(y.subarray(src, src + sourceRect.width), dst);
+  }
+  const init = { format: "I420", codedWidth, codedHeight, visibleRect: sourceRect,
+    displayWidth: Math.max(1, Math.round(meta.displayWidth || meta.width || sourceRect.width)),
+    displayHeight: Math.max(1, Math.round(meta.displayHeight || meta.height || sourceRect.height)),
+    timestamp: Number.isFinite(meta.frameTimestamp) ? Math.round(meta.frameTimestamp) : Math.max(0, Math.round((Number(meta.mediaTimeMs) || Number(meta.callbackTimeMs) || 0) * 1000)),
+    rotation: Number(meta.rotation) || 0, flip: Boolean(meta.flip) };
+  if (Number.isFinite(meta.frameDuration) && meta.frameDuration > 0) init.duration = Math.round(meta.frameDuration);
+  return new VideoFrame(i420, init);
+}
 class AgcapRecorder {
   constructor(durationMs, base) {
     this.durationMs = durationMs;
@@ -28,6 +83,9 @@ class AgcapRecorder {
     __publicField(this, "records", []);
     __publicField(this, "bodyParts", []);
     __publicField(this, "canvas", document.createElement("canvas"));
+    __publicField(this, "pixelFormat");
+    __publicField(this, "compression");
+    __publicField(this, "storageBytes", 0);
   }
   get elapsedMs() {
     return performance.now() - this.startedAt;
@@ -40,14 +98,16 @@ class AgcapRecorder {
     this.callbacks++;
     (_a = this.firstMediaTime) != null ? _a : this.firstMediaTime = meta.mediaTimeMs;
     this.lastMediaTime = meta.mediaTimeMs;
-    if (this.pending >= 64) {
+    if (this.stopped || this.pending >= 8) {
       this.drops++;
       return false;
     }
     this.pending++;
     return true;
   }
-  enqueue(meta, pixels) {
+  enqueue(meta, pixels, pixelFormat = "RGBA8888", compression = "png") {
+    if (this.pixelFormat && this.pixelFormat !== pixelFormat) { this.pending--; this.drops++; return; }
+    this.pixelFormat = pixelFormat; this.compression = compression;
     const metadata = encoder.encode(JSON.stringify(meta));
     this.records.push({ meta, pixels });
     this.bodyParts.push(
@@ -56,8 +116,21 @@ class AgcapRecorder {
       u32(pixels.byteLength),
       pixels
     );
+    this.storageBytes += metadata.length + pixels.byteLength + 8;
     this.stored++;
     this.pending--;
+  }
+  addFrame(meta, videoFrame, videoFallback) {
+    if (videoFrame && typeof VideoFrame === "function") {
+      if (!this.begin(meta)) return;
+      void copyVideoFrameY(videoFrame).then(({ y, meta: frameMeta }) => {
+        const width = frameMeta.visibleRect.width, height = frameMeta.visibleRect.height;
+        this.enqueue({ ...meta, ...frameMeta, width: meta.width || frameMeta.displayWidth, height: meta.height || frameMeta.displayHeight,
+          stride: width, yWidth: width, yHeight: height }, y, "Y8", "none");
+      }).catch(() => { this.pending--; this.drops++; });
+      return;
+    }
+    this.addVideo(meta, videoFallback);
   }
   addVideo(meta, video) {
     if (!this.begin(meta)) return;
@@ -87,15 +160,17 @@ class AgcapRecorder {
     const header = {
       ...this.base,
       format: "AirGapper lossless camera corpus",
-      formatVersion: 4,
-      pixelFormat: "RGBA8888",
-      compression: "png",
+      formatVersion: this.pixelFormat === "Y8" ? 5 : 4,
+      pixelFormat: this.pixelFormat || "RGBA8888",
+      compression: this.compression || "png",
+      capturePath: this.pixelFormat === "Y8" ? "TrackProcessor VideoFrame exact Y plane" : "video canvas RGBA fallback",
       startedAt: (/* @__PURE__ */ new Date()).toISOString(),
       requestedDurationMs: this.durationMs,
       callbacks: this.callbacks,
       framesStored: this.stored,
       recorderDrops: this.drops,
-      estimatedCameraDrops: Math.max(0, expectedCallbacks - this.callbacks)
+      estimatedCameraDrops: Math.max(0, expectedCallbacks - this.callbacks),
+      storageBytes: this.storageBytes
     };
     const headerBytes = encoder.encode(JSON.stringify(header));
     return {
@@ -128,9 +203,9 @@ class AgcapCorpus {
     const bodyStart = headerStart + headerLength;
     if (bodyStart > bytes.length) throw new Error("Truncated AirGapper capture");
     const header = JSON.parse(decoder.decode(bytes.subarray(headerStart, bodyStart)));
-    if (![1, 2, 3, 4].includes(header.formatVersion) || header.pixelFormat !== "RGBA8888") {
-      throw new Error("Unsupported AirGapper capture");
-    }
+    const supported = header.pixelFormat === "RGBA8888" ? [1, 2, 3, 4].includes(header.formatVersion)
+      : header.pixelFormat === "Y8" && header.formatVersion === 5;
+    if (!supported) throw new Error("Unsupported AirGapper capture");
     const body = header.compression === "gzip-stream" || header.compression === "png+gzip-stream" ? await gunzip(bytes.subarray(bodyStart)) : bytes.subarray(bodyStart);
     const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
     let offset = 0;
@@ -157,8 +232,22 @@ class AgcapCorpus {
   meta(index) {
     return this.records[index].meta;
   }
+  raw(index) {
+    const record = this.records[index];
+    if (this.header.pixelFormat !== "Y8") return null;
+    const width = record.meta.yWidth || record.meta.visibleRect?.width || record.meta.width;
+    const height = record.meta.yHeight || record.meta.visibleRect?.height || record.meta.height;
+    if (record.pixels.length !== width * height) throw new Error(`Frame ${record.meta.sequence} raw Y length mismatch`);
+    return { meta: record.meta, y: record.pixels };
+  }
+  videoFrame(index) { const raw = this.raw(index); return raw ? yRecordToVideoFrame(raw.meta, raw.y) : null; }
   async frame(index) {
     const record = this.records[index];
+    if (this.header.pixelFormat === "Y8") {
+      const raw = this.raw(index), width = raw.meta.yWidth || raw.meta.visibleRect?.width || raw.meta.width;
+      const height = raw.meta.yHeight || raw.meta.visibleRect?.height || raw.meta.height;
+      return { meta: raw.meta, y: raw.y, rgba: yToImageData(raw.y, width, height).data };
+    }
     if (this.header.compression === "png+gzip-stream" || this.header.compression === "png") {
       const bitmap = await createImageBitmap(new Blob([record.pixels], { type: "image/png" }));
       try {
@@ -181,5 +270,7 @@ class AgcapCorpus {
 }
 export {
   AgcapCorpus,
-  AgcapRecorder
+  AgcapRecorder,
+  copyVideoFrameY,
+  yToImageData
 };

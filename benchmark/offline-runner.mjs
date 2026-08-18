@@ -375,6 +375,37 @@ function assertScenario(name, result) {
 
 try {
   const { easy, motion, dense, opticalDense, cameraDense } = await generateSenderProfiles();
+  const rawYRoundTrip = await page.evaluate(async () => {
+    const { AgcapRecorder, AgcapCorpus, copyVideoFrameY } = await import(new URL("./receive/agcap.js", location.href).href);
+    const codedWidth = 640, codedHeight = 480, sourceRect = { x: 40, y: 0, width: 560, height: 480 };
+    const yBytes = codedWidth * codedHeight, chromaBytes = (codedWidth >> 1) * (codedHeight >> 1);
+    const i420 = new Uint8Array(yBytes + chromaBytes * 2);
+    for (let y = 0; y < codedHeight; y++) for (let x = 0; x < codedWidth; x++) i420[y * codedWidth + x] = (x * 17 + y * 29 + (x ^ y)) & 255;
+    i420.fill(128, yBytes);
+    const source = new VideoFrame(i420, { format: "I420", codedWidth, codedHeight, visibleRect: sourceRect, displayWidth: 560, displayHeight: 480, timestamp: 123456, rotation: 0 });
+    const expected = new Uint8Array(sourceRect.width * sourceRect.height);
+    for (let y = 0; y < sourceRect.height; y++) expected.set(i420.subarray(y * codedWidth + sourceRect.x, y * codedWidth + sourceRect.x + sourceRect.width), y * sourceRect.width);
+    const recorder = new AgcapRecorder(1000, { width: 560, height: 480, stride: 560, cameraSettings: { width: 560, height: 480, frameRate: 30 }, airgapperVersion: "roundtrip", userAgent: navigator.userAgent });
+    recorder.addFrame({ sequence: 0, mediaTimeMs: 0, presentationTimeMs: 0, expectedDisplayTimeMs: 0, callbackTimeMs: 0, width: 560, height: 480, stride: 560 }, source);
+    source.close();
+    const { blob, header } = await recorder.finish();
+    const corpus = await AgcapCorpus.load(blob), recorded = corpus.meta(0), replay = corpus.videoFrame(0);
+    const replayBefore = { codedWidth: replay.codedWidth, codedHeight: replay.codedHeight, visibleRect: { x: replay.visibleRect.x, y: replay.visibleRect.y, width: replay.visibleRect.width, height: replay.visibleRect.height }, displayWidth: replay.displayWidth, displayHeight: replay.displayHeight };
+    const copied = await copyVideoFrameY(replay); replay.close();
+    let different = 0; for (let i = 0; i < expected.length; i++) if (copied.y[i] !== expected[i]) different++;
+    // A UA may crop/reposition a raw-buffer VideoFrame internally. Compare the
+    // metadata actually exposed by the captured frame/corpus, not the constructor
+    // request, while requiring byte-identical visible luminance end to end.
+    const metadataPreserved = recorded.visibleRect?.width === copied.meta.visibleRect.width &&
+      recorded.visibleRect?.height === copied.meta.visibleRect.height &&
+      recorded.displayWidth === copied.meta.displayWidth && recorded.displayHeight === copied.meta.displayHeight &&
+      Number.isFinite(recorded.codedWidth) && Number.isFinite(recorded.codedHeight);
+    const replayShape = copied.y.length === expected.length && copied.meta.visibleRect.width === 560 && copied.meta.visibleRect.height === 480 && copied.meta.displayWidth === 560 && copied.meta.displayHeight === 480;
+    return { ok: different === 0 && header.formatVersion === 5 && header.pixelFormat === "Y8" && metadataPreserved && replayShape,
+      different, formatVersion: header.formatVersion, pixelFormat: header.pixelFormat, recordedVisibleRect: recorded.visibleRect, replayBefore, copiedVisibleRect: copied.meta.visibleRect };
+  });
+  if (!rawYRoundTrip.ok) throw new Error(`AGCAP raw-Y round trip failed: ${JSON.stringify(rawYRoundTrip)}`);
+  console.log(`AIRGAPPER_AGCAP_RAW_Y_PASS ${JSON.stringify(rawYRoundTrip)}`);
   await page.evaluate(() => document.getElementById("home-button").click());
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");

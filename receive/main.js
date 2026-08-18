@@ -39,8 +39,8 @@ import {
   showScanCaptureMenuOnAndroid
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
-import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.297";
+import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
+const RECEIVER_RUNTIME_BUILD = "v0.5.298";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -5140,7 +5140,7 @@ function processSourceFrame(frame, gen) {
   const recorder = benchmarkRecorder;
   if (recorder && frame.width && frame.height) {
     const orientation = screen.orientation?.type ?? `${window.orientation ?? 0}`;
-    recorder.addVideo({
+    recorder.addFrame({
       sequence: frame.sequence,
       mediaTimeMs: frame.mediaTimeMs,
       presentationTimeMs: frame.presentationTimeMs,
@@ -5150,7 +5150,7 @@ function processSourceFrame(frame, gen) {
       height: frame.height,
       stride: frame.width * 4,
       orientation
-    }, video);
+    }, frame.videoFrame, video);
     recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
     frame.videoFrame?.close();
     queueOverlayDraw();
@@ -5467,6 +5467,20 @@ function captureSubmittedScan(image, ox, oy, full, tracks = [], scaleX = 1, scal
   scanDialogStatus.textContent = `${full ? "Full-frame scan" : `${tracks.length || 1} tracked region${tracks.length === 1 ? "" : "s"}`} · ${image.width}×${image.height} · decoding…`;
   scanSightingLegend.hidden = true;
   if (!scanDialog.open) scanDialog.showModal();
+}
+async function captureDirectSourceScan(source) {
+  if (!captureNextScan || pendingScanCapture || !source.videoFrame || source.image) return;
+  try {
+    const captured = await copyVideoFrameY(source.videoFrame);
+    const width = captured.meta.visibleRect.width, height = captured.meta.visibleRect.height;
+    pendingScanCapture = { image: yToImageData(captured.y, width, height), ox: 0, oy: 0, full: !gridLattice.locked,
+      tracks: gridLattice.locked ? regions.filter((region) => validQuadObject(region.quad)).map((region) => region.quad) : [],
+      scaleX: source.width / width, scaleY: source.height / height, rawY: true };
+    scanDialogStatus.textContent = `Captured exact camera Y frame ${width}×${height} · waiting for decoder…`;
+  } catch (error) {
+    scanDialogStatus.textContent = `Capture failed: ${error instanceof Error ? error.message : String(error)}`;
+    cancelScanCapture();
+  }
 }
 function cancelScanCapture() {
   clearTimeout(scanCaptureTimer);
@@ -5855,7 +5869,7 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   };
 }
 function cloneDirectDecodeFrame(source) {
-  if (optimizerPipelineActive || source.image || captureNextScan || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
+  if (optimizerPipelineActive || source.image || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
   return cloneVideoFrame(source, false);
 }
 function acquisitionSeedWindow(index, width, height) {
@@ -5877,7 +5891,7 @@ function acquisitionSeedWindow(index, width, height) {
   return { x, y, w: Math.max(32, right - x), h: Math.max(32, bottom - y) };
 }
 function cloneDirectFullScanFrame(source) {
-  if (optimizerPipelineActive || source.image || captureNextScan || typeof VideoFrame !== "function") return null;
+  if (optimizerPipelineActive || source.image || typeof VideoFrame !== "function") return null;
   // Full acquisition/reacquisition must stay on the same TrackProcessor Y plane
   // as locked decoding. A coded frame may have a non-zero visibleRect origin
   // (e.g. 1920x2560 I420 with a 240px left crop for a 1440x2560 display), so
@@ -6068,6 +6082,7 @@ async function captureFrame(source) {
   if (!vw || !vh) return;
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
+  if (captureNextScan && !pendingScanCapture && source.videoFrame && !source.image) await captureDirectSourceScan(source);
   const now = receiverNow();
   void maintainManualOptics(now);
   maintainAcquisitionAutofocus(now);
@@ -6495,7 +6510,7 @@ async function captureFrame(source) {
       id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
       quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32)
     })) : [];
-    const directFull = source.videoFrame && !source.image && !captureNextScan
+    const directFull = source.videoFrame && !source.image
       ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, recoveryTracks)
       : null;
     if (directFull) {
@@ -6551,7 +6566,7 @@ async function captureFrame(source) {
       trace,
       source.sequence
     )) {
-      if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
+      if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
     } else if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) {
       cancelScanCapture();
     }
@@ -6799,7 +6814,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
           poolBusyTimes.push(now);
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         } else {
-          if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2;
+          if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id2; captureNextScan = false;
         }
         cropRotate++;
         if (trace) trace.stateAfter = gridLattice.state;
@@ -6816,7 +6831,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         batchRegions
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
-        if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
+        if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
       } else {
         if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
         poolBusyTimes.push(now);
@@ -6900,7 +6915,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       poolBusyTimes.push(receiverNow());
       break;
     }
-    if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id;
+    if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
     submitted = true;
   }
   if (!submitted && scheduledRegions.length > 0) {
@@ -7666,7 +7681,7 @@ recordCorpusBtn.addEventListener("click", () => {
   }
   const version = (_c = (_b = (_a = document.querySelector(".app-version")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.replace(/^v/, "")) != null ? _c : "unknown";
   benchmarkRecordingSequence = 0;
-  benchmarkRecorder = new AgcapRecorder(7e3, {
+  benchmarkRecorder = new AgcapRecorder(3e3, {
     width: video.videoWidth,
     height: video.videoHeight,
     stride: video.videoWidth * 4,
@@ -7677,8 +7692,8 @@ recordCorpusBtn.addEventListener("click", () => {
   });
   benchmarkCorpus = void 0;
   benchmarkPendingBlob = void 0;
-  recordCorpusBtn.textContent = "Stop · 7s";
-  setStatus("Recording lossless frames… decoding paused");
+  recordCorpusBtn.textContent = "Stop · 3s";
+  setStatus("Recording exact raw camera Y frames… decoder paused");
 });
 loadCorpusBtn.addEventListener("click", () => corpusFile.click());
 corpusFile.addEventListener("change", async () => {
@@ -7690,7 +7705,7 @@ corpusFile.addEventListener("change", async () => {
     if (!benchmarkDialog.open) benchmarkDialog.showModal();
     benchmarkCorpus = await AgcapCorpus.load(file);
     benchmarkPendingBlob = void 0;
-    benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} RGBA · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
+    benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} ${benchmarkCorpus.header.pixelFormat} · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
     runBenchmarkBtn.disabled = false;
   } catch (error) {
     benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
@@ -7901,7 +7916,8 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
   const maximum = replayMode.value === "maximum";
   try {
     for (let index = 0; index < corpus.length; index++) {
-      const frame = await corpus.frame(index);
+      const rawYReplay = corpus.header.pixelFormat === "Y8";
+      const frame = rawYReplay ? corpus.raw(index) : await corpus.frame(index);
       if (!maximum) {
         const target = wallStart + frame.meta.callbackTimeMs - firstTime;
         const delay = target - performance.now();
@@ -7911,8 +7927,8 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
       benchmarkStatus.textContent = `Production ${index + 1}/${corpus.length}`;
       if (index % 4 === 0) await new Promise(requestAnimationFrame);
       const cameraPixels = fastRegressionCameraFrames?.[index];
-      let cameraFrame;
-      if (cameraPixels) {
+      let cameraFrame = rawYReplay ? corpus.videoFrame(index) : void 0;
+      if (!cameraFrame && cameraPixels) {
         if (frame.meta.width & 1 || frame.meta.height & 1)
           throw new Error("I420 fast regression requires even frame dimensions");
         cameraFrame = new VideoFrame(cameraPixels, {
