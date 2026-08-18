@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.282";
+const RECEIVER_RUNTIME_BUILD = "v0.5.283";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2312,7 +2312,11 @@ function noteDecodeCompleted(id, completion) {
     region.decodeAttempts++;
     region.lastAttemptAt = receiverNow();
     region.averageDecodeCostMs = region.averageDecodeCostMs ? region.averageDecodeCostMs * 0.8 + completion.latencyMs * 0.2 : completion.latencyMs;
-    const hit = completion.symbols.some((symbol) => symbol.box && regionAt(symbol.box) === region);
+    const hit = completion.symbols.some((symbol) => {
+      const decodedSlot = Number(symbol.header?.slotIndex);
+      if (region.gridSlot !== void 0 && Number.isInteger(decodedSlot)) return decodedSlot === region.gridSlot;
+      return Boolean(symbol.box && regionAt(symbol.box) === region);
+    });
     if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
     region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
     if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
@@ -6051,8 +6055,12 @@ async function captureFrame(source) {
         scanH = Math.max(32, scanBottom - scanY);
       }
     }
+    const recoveryTracks = localRecoverySeedScan ? boundedScanCandidates.map((region) => ({
+      id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
+      quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32)
+    })) : [];
     const directFull = source.videoFrame && !source.image && !captureNextScan
-      ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, [])
+      ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, recoveryTracks)
       : null;
     if (directFull) {
       const id = frameId++;
@@ -6069,6 +6077,7 @@ async function captureFrame(source) {
           full: true,
           pixelFormat: "y8",
           outputMap: directFull.outputMap,
+          tracks: directFull.tracks,
           acquisitionMode
         },
         [directFull.frame],
@@ -6100,7 +6109,7 @@ async function captureFrame(source) {
     captureSubmittedScan(img, scanX, scanY, true);
     const id = frameId++;
     if (submitReceiverJob(
-      { id, buf: img.data.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true, acquisitionMode },
+      { id, buf: img.data.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true, tracks: recoveryTracks, acquisitionMode },
       [img.data.buffer],
       "FULL FRAME",
       trace,
@@ -6584,28 +6593,28 @@ function onDecoded(bytes, box, info) {
     if (productionTrace) activeBenchmarkFrame = productionTrace;
     const packetAt = info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt;
     const geometryInfo = { ...info, crc32: true };
-    if (info?.geometryMeasured === false) {
-      const sourceSequence = Number(info?.sourceSequence);
-      const motion = info?.wallMotion;
-      if (Number.isFinite(sourceSequence) && sourceSequence > geometryMotionLastSourceSequence &&
-          motion && Number(motion.samples) >= 2 && Number.isFinite(motion.dx) && Number.isFinite(motion.dy)) {
-        geometryMotionLastSourceSequence = sourceSequence;
-        const hasSimilarity = [motion.a, motion.b, motion.tx, motion.ty].every((value) => Number.isFinite(Number(value)));
-        const snapshot = hasSimilarity
-          ? gridLattice.nudgeMotion(motion, packetAt)
-          : gridLattice.nudgeTranslation(Number(motion.dx), Number(motion.dy), packetAt);
-        if (snapshot) {
-          geometryMotionNudges++;
-          const scale = hasSimilarity ? Math.hypot(Number(motion.a), Number(motion.b)) : 1;
-          const rotation = hasSimilarity ? Math.abs(Math.atan2(Number(motion.b), Number(motion.a))) : 0;
-          if (hasSimilarity && (Math.abs(scale - 1) >= 0.0005 || rotation >= 0.0005))
-            geometrySimilarityNudges++;
-          geometryMotionPixels += Number.isFinite(Number(motion.maxShift))
-            ? Number(motion.maxShift)
-            : Math.hypot(Number(motion.dx), Number(motion.dy));
-          syncGrid(snapshot, decodedAt);
-        }
+    const sourceSequence = Number(info?.sourceSequence);
+    const motion = info?.wallMotion;
+    if (Number.isFinite(sourceSequence) && sourceSequence > geometryMotionLastSourceSequence &&
+        motion && Number(motion.samples) >= 2 && Number.isFinite(motion.dx) && Number.isFinite(motion.dy)) {
+      geometryMotionLastSourceSequence = sourceSequence;
+      const hasSimilarity = [motion.a, motion.b, motion.tx, motion.ty].every((value) => Number.isFinite(Number(value)));
+      const motionSnapshot = hasSimilarity
+        ? gridLattice.nudgeMotion(motion, packetAt)
+        : gridLattice.nudgeTranslation(Number(motion.dx), Number(motion.dy), packetAt);
+      if (motionSnapshot) {
+        geometryMotionNudges++;
+        const scale = hasSimilarity ? Math.hypot(Number(motion.a), Number(motion.b)) : 1;
+        const rotation = hasSimilarity ? Math.abs(Math.atan2(Number(motion.b), Number(motion.a))) : 0;
+        if (hasSimilarity && (Math.abs(scale - 1) >= 0.0005 || rotation >= 0.0005))
+          geometrySimilarityNudges++;
+        geometryMotionPixels += Number.isFinite(Number(motion.maxShift))
+          ? Number(motion.maxShift)
+          : Math.hypot(Number(motion.dx), Number(motion.dy));
+        syncGrid(motionSnapshot, decodedAt);
       }
+    }
+    if (info?.geometryMeasured === false) {
       gridLattice.noteValidPacket(packetAt);
       decodedRegion = markGridRegionDecoded(
         regions.find((region) => region.gridSlot === header.slotIndex),

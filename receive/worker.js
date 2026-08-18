@@ -157,8 +157,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   }
   let decodedSlotsMask = 0;
   const trackBySlot = new Map(tracks.map((track) => [Number(track.slot ?? track.id), track]));
-  const predictedMotion = [];
-  let measuredGeometryCount = 0;
+  const wallMotionSamples = [];
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
     const status = view.getInt32(base + 4, true);
@@ -188,24 +187,20 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     if (!validQuad(quad)) continue;
     const outputQuad = shifted(quad, ox, oy);
     const geometryMeasured = status === NATIVE_TRACK_OK;
-    if (geometryMeasured) {
-      measuredGeometryCount++;
-    } else {
-      const input = trackBySlot.get(slot);
-      if (input?.quad && validQuad(input.quad)) {
-        const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
-        const dx = names.reduce((sum, name) => sum + outputQuad[name].x - input.quad[name].x, 0) / names.length;
-        const dy = names.reduce((sum, name) => sum + outputQuad[name].y - input.quad[name].y, 0) / names.length;
-        if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 4.75) {
-          const points = [input.quad.topLeft, input.quad.topRight, input.quad.bottomRight, input.quad.bottomLeft];
-          const x = points.reduce((sum, point) => sum + point.x, 0) / points.length;
-          const y = points.reduce((sum, point) => sum + point.y, 0) / points.length;
-          const edge = points.reduce((sum, point, index) => {
-            const next = points[(index + 1) % points.length];
-            return sum + Math.hypot(next.x - point.x, next.y - point.y);
-          }, 0) / points.length;
-          predictedMotion.push({ dx, dy, x, y, edge, slot });
-        }
+    const input = trackBySlot.get(slot);
+    if (input?.quad && validQuad(input.quad)) {
+      const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+      const dx = names.reduce((sum, name) => sum + outputQuad[name].x - input.quad[name].x, 0) / names.length;
+      const dy = names.reduce((sum, name) => sum + outputQuad[name].y - input.quad[name].y, 0) / names.length;
+      if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 5.1) {
+        const points = [input.quad.topLeft, input.quad.topRight, input.quad.bottomRight, input.quad.bottomLeft];
+        const x = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+        const y = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+        const edge = points.reduce((sum, point, index) => {
+          const next = points[(index + 1) % points.length];
+          return sum + Math.hypot(next.x - point.x, next.y - point.y);
+        }, 0) / points.length;
+        wallMotionSamples.push({ dx, dy, x, y, edge, slot, measured: geometryMeasured });
       }
     }
     symbols.push({
@@ -225,7 +220,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   // many pixels away HERE". Pure camera translation makes those residuals equal;
   // rotation/scale makes them vary smoothly with position. Fit that residual
   // field as a tiny similarity transform instead of rejecting it as incoherent.
-  if (!measuredGeometryCount && predictedMotion.length >= 2) {
+  if (wallMotionSamples.length >= 2) {
     const median = (values) => {
       const sorted = [...values].sort((a, b) => a - b);
       const mid = sorted.length >> 1;
@@ -257,16 +252,16 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
         ty: meanQy - b * meanX - a * meanY
       };
     };
-    const edgeValues = predictedMotion.map((item) => item.edge).filter((value) => Number.isFinite(value) && value > 0);
+    const edgeValues = wallMotionSamples.map((item) => item.edge).filter((value) => Number.isFinite(value) && value > 0);
     const medianEdge = edgeValues.length ? median(edgeValues) : 64;
     const minSpan = Math.max(80, medianEdge * 1.25);
-    const need = Math.max(2, Math.ceil(predictedMotion.length * 0.6));
+    const need = Math.max(2, Math.ceil(wallMotionSamples.length * 0.6));
     let best = null;
     // Pair-seeded RANSAC is tiny here (<=32 tracks) and prevents one local
     // fallback residual from rotating the whole lattice.
-    for (let i = 0; i < predictedMotion.length; i++) {
-      for (let j = i + 1; j < predictedMotion.length; j++) {
-        const p = predictedMotion[i], q = predictedMotion[j];
+    for (let i = 0; i < wallMotionSamples.length; i++) {
+      for (let j = i + 1; j < wallMotionSamples.length; j++) {
+        const p = wallMotionSamples[i], q = wallMotionSamples[j];
         const ux = q.x - p.x, uy = q.y - p.y;
         const denom = ux * ux + uy * uy;
         if (denom < minSpan * minSpan) continue;
@@ -282,7 +277,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
           tx: p.x + p.dx - a * p.x + b * p.y,
           ty: p.y + p.dy - b * p.x - a * p.y
         };
-        const inliers = predictedMotion.filter((item) => residualFor(motion, item) <= 1.05);
+        const inliers = wallMotionSamples.filter((item) => residualFor(motion, item) <= 1.05);
         if (inliers.length < need) continue;
         const rms = Math.sqrt(inliers.reduce((sum, item) => {
           const r = residualFor(motion, item);
@@ -325,9 +320,9 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     // Keep v279's extremely conservative translation consensus as the fallback
     // for clustered successes that do not provide a safe rotation/scale baseline.
     if (!wallMotion) {
-      const dx = median(predictedMotion.map((item) => item.dx));
-      const dy = median(predictedMotion.map((item) => item.dy));
-      const coherent = predictedMotion.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
+      const dx = median(wallMotionSamples.map((item) => item.dx));
+      const dy = median(wallMotionSamples.map((item) => item.dy));
+      const coherent = wallMotionSamples.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
       if (coherent.length >= need && Math.hypot(dx, dy) <= 4.5) {
         wallMotion = {
           kind: "translation",
@@ -340,7 +335,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
       }
     }
     if (wallMotion)
-      for (const symbol of symbols) if (symbol.geometryMeasured === false) symbol.wallMotion = wallMotion;
+      for (const symbol of symbols) symbol.wallMotion = wallMotion;
   }
   return { symbols, metrics };
 }
@@ -623,6 +618,9 @@ ctx.onmessage = async (e) => {
   const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, guidedFallbackMask = 0xffffffff, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
+  let targetedAttempts = 0;
+  let targetedPixels = 0;
+  let targetedSuccesses = 0;
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
@@ -1089,21 +1087,24 @@ ctx.onmessage = async (e) => {
     }
     if ((full || !strictHotPath) && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
       fallbackAttempted = !full;
-      const appendResults = (vec, includeErrors) => {
+      const appendResults = (vec, includeErrors, resultOx = ox, resultOy = oy, expectedSlot) => {
         try {
           for (let i = 0; i < vec.size(); i++) {
             const r = vec.get(i);
             if (r.valid && r.bytes.length > 0 && validQuad(r.position)) {
+              const packet = expectedSlot === void 0 ? null : parseFrame(r.bytes);
+              if (expectedSlot !== void 0 && packet?.header.slotIndex !== expectedSlot) continue;
               symbols.push({
                 bytes: r.bytes,
-                box: boundsOf(r.position, ox, oy),
-                quad: shifted(r.position, ox, oy),
+                box: boundsOf(r.position, resultOx, resultOy),
+                quad: shifted(r.position, resultOx, resultOy),
                 modules: r.modules,
                 tracked: false,
-                decodePath: full ? "acquire" : "fallback"
+                decodePath: full ? "acquire" : "fallback",
+                header: packet?.header
               });
             } else if (includeErrors) {
-              const box = boundsOf(r.position, ox, oy);
+              const box = boundsOf(r.position, resultOx, resultOy);
               if (box && box.w > 0 && box.h > 0) sightings.push(box);
             }
           }
@@ -1136,8 +1137,35 @@ ctx.onmessage = async (e) => {
           readFullAttempts++;
           appendResults(readFull(true, 1, false), false);
         } else if (fullMode === "recovery") {
-          readFullAttempts++;
-          appendResults(readDenseSeed(3), false);
+          if (decodePixelFormat === "y8" && Array.isArray(tracks) && tracks.length) {
+            for (const target of tracks.slice(0, 3)) {
+              const local = localQuad(target.quad, ox, oy);
+              const box = local && boundsOf(local, 0, 0);
+              const expectedSlot = Number(target.slot);
+              if (!box || !Number.isInteger(expectedSlot)) continue;
+              const edge = Math.max(box.w, box.h);
+              const pad = Math.max(20, edge * 0.45);
+              const rx = Math.max(0, Math.floor(box.x - pad));
+              const ry = Math.max(0, Math.floor(box.y - pad));
+              const rr = Math.min(pw, Math.ceil(box.x + box.w + pad));
+              const rb = Math.min(ph, Math.ceil(box.y + box.h + pad));
+              const rw = rr - rx, rh = rb - ry;
+              if (rw < 32 || rh < 32) continue;
+              targetedAttempts++;
+              targetedPixels += rw * rh;
+              readFullAttempts++;
+              const before = symbols.length;
+              appendResults(
+                zx.readDenseY(ptr + inputOffset + ry * inputStride + rx, rw, rh, inputStride, 4),
+                false, ox + rx, oy + ry, expectedSlot
+              );
+              if (symbols.length > before) targetedSuccesses++;
+            }
+          }
+          if (!targetedAttempts || targetedSuccesses === 0) {
+            readFullAttempts++;
+            appendResults(readDenseSeed(1), false);
+          }
         } else {
           // Cold acquisition still returns the first useful packet immediately.
           readFullAttempts++;
@@ -1162,6 +1190,9 @@ ctx.onmessage = async (e) => {
       fallbackSucceeded: fallbackAttempted && symbols.some((symbol) => !symbol.tracked),
       readFullAttempts,
       workerWaitMs,
+      targetedAttempts,
+      targetedPixels,
+      targetedSuccesses,
       latencyMs: performance.now() - startedAt
     });
   } catch (error) {

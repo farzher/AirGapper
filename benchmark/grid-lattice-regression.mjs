@@ -91,4 +91,9 @@ assert.equal(snapshot.distributedFit, true, "motion feedback must preserve trust
 assert.equal(lattice.nudgeMotion({ a: 1.2, b: 0, tx: 0, ty: 0, dx: 1, dy: 1, maxShift: 2, samples: 4 }, 1440), null,
   "unsafe scale jumps must be rejected");
 
+snapshot = lattice.accept(detection(0, 1460, { dx: 154, dy: 98 }), frameWidth, frameHeight);
+assert(snapshot, "measured geometry after a coherent frame nudge must remain usable");
+assert.equal(lattice.locked, true);
+assert.equal(snapshot.distributedFit, true);
+
 console.log("grid-lattice regression: ok");
