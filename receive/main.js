@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.298";
+const RECEIVER_RUNTIME_BUILD = "v0.5.299";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -7713,6 +7713,15 @@ corpusFile.addEventListener("change", async () => {
     corpusFile.value = "";
   }
 });
+window.__airgapperRunLoadedCorpus = async ({ mode = "performance", productionOnly = true } = {}) => {
+  if (!benchmarkCorpus) throw new Error("No .agcap corpus is loaded");
+  if (!["performance", "maximum", "correctness"].includes(mode)) throw new Error(`Unknown replay mode ${mode}`);
+  replayMode.value = mode;
+  await runReceiverBenchmark({ productionOnly });
+  if (!benchmarkResult) throw new Error(benchmarkStatus.textContent || "Corpus benchmark produced no result");
+  return structuredClone(benchmarkResult);
+};
+window.__airgapperLoadedCorpusHeader = () => benchmarkCorpus ? structuredClone(benchmarkCorpus.header) : null;
 closeBenchmarkBtn.addEventListener("click", () => benchmarkDialog.close());
 runBenchmarkBtn.addEventListener("click", () => void runReceiverBenchmark());
 saveBenchmarkBtn.addEventListener("click", () => {

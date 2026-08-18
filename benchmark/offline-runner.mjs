@@ -406,6 +406,10 @@ try {
   });
   if (!rawYRoundTrip.ok) throw new Error(`AGCAP raw-Y round trip failed: ${JSON.stringify(rawYRoundTrip)}`);
   console.log(`AIRGAPPER_AGCAP_RAW_Y_PASS ${JSON.stringify(rawYRoundTrip)}`);
+  const corpusRunnerReady = await page.evaluate(() => typeof window.__airgapperRunLoadedCorpus === "function" && typeof window.__airgapperLoadedCorpusHeader === "function");
+  if (!corpusRunnerReady) throw new Error("Headless .agcap replay API unavailable");
+  await import("./run-agcap.mjs");
+  await import("./corpus-suite.mjs");
   await page.evaluate(() => document.getElementById("home-button").click());
   await page.waitForTimeout(50);
   await page.waitForFunction(() => typeof window.__airgapperRunFastRegression === "function");
