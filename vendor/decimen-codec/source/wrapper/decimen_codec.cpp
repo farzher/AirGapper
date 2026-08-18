@@ -70,8 +70,8 @@ static_assert(sizeof(DecimenGuidedTrack) == 40,
               "DecimenGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(DecimenGuidedResult) == 52,
               "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 192,
-              "DecimenGuidedMetrics JS ABI must allocate 176 bytes");
+static_assert(sizeof(DecimenGuidedMetrics) == 208,
+              "DecimenGuidedMetrics JS ABI must allocate 208 bytes");
 static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
               "DecimenGuidedMetrics turboAttempts JS offset changed");
 static_assert(offsetof(DecimenGuidedMetrics, turboSuccesses) == 140,
@@ -1498,9 +1498,13 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
                                          DecimenGuidedMetrics& metrics, bool centerOnly = false,
-                                         bool progressive = false, bool* rsUsedOut = nullptr)
+                                         bool progressive = false, bool allowRepair = true,
+                                         bool* rsUsedOut = nullptr, bool* repairAttemptedOut = nullptr,
+                                         bool* repairSuccessOut = nullptr)
 {
     if (rsUsedOut) *rsUsedOut = false;
+    if (repairAttemptedOut) *repairAttemptedOut = false;
+    if (repairSuccessOut) *repairSuccessOut = false;
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
@@ -1683,6 +1687,10 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             return erasureDecoded;
         }
 
+        if (repairAttemptedOut) *repairAttemptedOut = true;
+        if (!allowRepair)
+            return {};
+
         std::vector<int> repairOrder;
         repairOrder.reserve(ambiguousCount);
         for (int margin = 0; margin <= GUIDED_TURBO_AMBIGUOUS; ++margin)
@@ -1712,8 +1720,10 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             auto partialDecoded = runRs(raw, nullptr);
             metrics.decodeMs += guidedNowMs() - partialDecodeStarted;
             if (partialDecoded.isValid() && !partialDecoded.content().bytes.empty() &&
-                hasValidCRC32(partialDecoded.content().bytes))
+                hasValidCRC32(partialDecoded.content().bytes)) {
+                if (repairSuccessOut) *repairSuccessOut = true;
                 return partialDecoded;
+            }
 
             const double remainderSampleStarted = guidedNowMs();
             for (int i = partialRepairCount; i < int(repairOrder.size()); ++i) {
@@ -1733,6 +1743,9 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     const double decodeStarted = guidedNowMs();
     auto decoded = runRs(raw, nullptr);
     metrics.decodeMs += guidedNowMs() - decodeStarted;
+    if (repairSuccessOut && repairAttemptedOut && *repairAttemptedOut &&
+        decoded.isValid() && !decoded.content().bytes.empty() && hasValidCRC32(decoded.content().bytes))
+        *repairSuccessOut = true;
     return decoded;
 }
 
@@ -1909,7 +1922,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                    const DecimenGuidedTrack* tracks, int trackCount,
                                    DecimenGuidedResult* results, int resultCapacity,
                                    uint8_t* output, int outputCapacity, int maxSymbols,
-                                   uint32_t fallbackAllowedMask, DecimenGuidedMetrics* metrics)
+                                   uint32_t fallbackAllowedMask, uint32_t repairAllowedMask,
+                                   DecimenGuidedMetrics* metrics)
 {
     if (!metrics)
         return -1;
@@ -1926,6 +1940,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         int resultCount = 0;
         int outputUsed = 0;
         std::vector<uint8_t> completed(trackCount, 0);
+        int repairTracksSpent = 0;
+        constexpr int GUIDED_MAX_REPAIR_TRACKS_PER_BATCH = 2;
 
         auto commitTurbo = [&](int trackIndex, const DecoderResult& decoded, float correctionX, float correctionY) {
             if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
@@ -1985,7 +2001,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         float wallCorrectionX = 0, wallCorrectionY = 0;
         int wallReferenceTries = 0;
         for (int i = 0; i < trackCount && wallReferenceTries < 4; ++i) {
-            auto* cache = guidedTurboTrack(tracks[i].id);
+            const int referenceId = tracks[i].id;
+            const uint32_t referenceBit = referenceId >= 0 && referenceId < 32 ? (uint32_t(1) << referenceId) : 0;
+            if (referenceBit && (repairAllowedMask & referenceBit) == 0)
+                continue;
+            auto* cache = guidedTurboTrack(referenceId);
             if (!cache || !turboStableWarpEligible(*cache, tracks[i]))
                 continue;
             const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
@@ -2014,6 +2034,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
 
         for (int i = 0; i < trackCount; ++i) {
             const auto& track = tracks[i];
+            const uint32_t trackBit = track.id >= 0 && track.id < 32 ? (uint32_t(1) << track.id) : 0;
+            const bool repairMaskAllowed = !trackBit || (repairAllowedMask & trackBit) != 0;
+            const bool allowExpensiveRepair = repairMaskAllowed && repairTracksSpent < GUIDED_MAX_REPAIR_TRACKS_PER_BATCH;
+            bool repairSpentThisTrack = false;
             auto* cache = guidedTurboTrack(track.id);
             if (!cache || !cache->seeded)
                 continue;
@@ -2089,7 +2113,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         // rotation/scale makes the residual vary across the wall,
                         // which one global translation cannot represent.
                         auto retryLocalResidual = [&]() {
-                            if (stableModuleSize > GUIDED_TURBO_CANARY_MIN_MODULE)
+                            if (!allowExpensiveRepair || stableModuleSize > GUIDED_TURBO_CANARY_MIN_MODULE)
                                 return false;
                             const auto refined = turboRefineWallOffset(*cache, track, frameTransform,
                                                                         yPlane, width, height, stride,
@@ -2105,12 +2129,20 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->sampleAttempts;
                             ++metrics->stableRsAttempts;
                             bool localRsUsed = false;
+                            bool localRepairAttempted = false;
+                            bool localRepairSuccess = false;
                             auto localDecoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                     yPlane, width, height, stride,
                                                                     refined->x, refined->y, localLevels, *metrics,
-                                                                    centerOnlyRs, progressiveRs, &localRsUsed);
+                                                                    centerOnlyRs, progressiveRs, allowExpensiveRepair,
+                                                                    &localRsUsed, &localRepairAttempted, &localRepairSuccess);
                             if (localRsUsed)
                                 ++metrics->sparseRsFallbacks;
+                            if (localRepairAttempted && trackBit) {
+                                metrics->erasureRepairAttemptMask |= trackBit;
+                                if (!repairSpentThisTrack) { repairSpentThisTrack = true; ++repairTracksSpent; }
+                            }
+                            if (localRepairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
                             return commitTurbo(i, localDecoded, refined->x, refined->y);
                         };
 
@@ -2120,10 +2152,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 guidedNoteDenseStableRs(stableRsGate, stableModuleSize, true);
                                 ++metrics->stableRsSuccesses;
                                 cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
-                            } else {
+                            } else if (allowExpensiveRepair) {
                                 // Finder evidence still cannot land this map on the
                                 // live QR; let sparse Guided rebuild it in this job.
                                 stableNeedsRefresh = true;
+                            } else if (trackBit) {
+                                metrics->erasureRepairSuppressedMask |= trackBit;
                             }
                         } else {
                             const bool stableDirectEligible = !cache->cooldown &&
@@ -2140,7 +2174,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 success = directSuccess;
                                 if (directSuccess)
                                     ++metrics->sparseNoRsSuccesses;
-                                else
+                                else if (allowExpensiveRepair)
                                     cache->cooldown = std::max<uint8_t>(cache->cooldown, 2);
                             }
                             if (!success) {
@@ -2148,30 +2182,51 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 ++metrics->sampleAttempts;
                                 ++metrics->stableRsAttempts;
                                 bool rsUsed = false;
+                                bool repairAttempted = false;
+                                bool repairSuccess = false;
                                 auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                    yPlane, width, height, stride,
                                                                    dx, dy, levels, *metrics,
-                                                                   centerOnlyRs, progressiveRs, &rsUsed);
+                                                                   centerOnlyRs, progressiveRs, allowExpensiveRepair,
+                                                                   &rsUsed, &repairAttempted, &repairSuccess);
                                 if (rsUsed)
                                     ++metrics->sparseRsFallbacks;
+                                if (repairAttempted && trackBit) {
+                                    if (allowExpensiveRepair) {
+                                        metrics->erasureRepairAttemptMask |= trackBit;
+                                        if (!repairSpentThisTrack) { repairSpentThisTrack = true; ++repairTracksSpent; }
+                                    } else {
+                                        metrics->erasureRepairSuppressedMask |= trackBit;
+                                    }
+                                }
+                                if (repairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
                                 success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
-                                const bool robustRetryWorthwhile = centerOnlyRs &&
+                                const bool robustRetryWorthwhile = allowExpensiveRepair && !repairSpentThisTrack && centerOnlyRs &&
                                     stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE;
                                 if (!success && robustRetryWorthwhile) {
                                     ++metrics->sampleAttempts;
                                     ++metrics->stableRsAttempts;
                                     bool robustRsUsed = false;
+                                    bool robustRepairAttempted = false;
+                                    bool robustRepairSuccess = false;
                                     decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                   yPlane, width, height, stride,
                                                                   dx, dy, levels, *metrics,
-                                                                  false, true, &robustRsUsed);
+                                                                  false, true, true, &robustRsUsed,
+                                                                  &robustRepairAttempted, &robustRepairSuccess);
                                     if (robustRsUsed)
                                         ++metrics->sparseRsFallbacks;
+                                    if (robustRepairAttempted && trackBit) {
+                                        metrics->erasureRepairAttemptMask |= trackBit;
+                                        if (!repairSpentThisTrack) { repairSpentThisTrack = true; ++repairTracksSpent; }
+                                    }
+                                    if (robustRepairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
                                     success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
                                 }
-                                if (!success)
+                                if (!success && allowExpensiveRepair && !repairSpentThisTrack)
                                     success = retryLocalResidual();
-                                guidedNoteDenseStableRs(stableRsGate, stableModuleSize, success);
+                                if (success || allowExpensiveRepair)
+                                    guidedNoteDenseStableRs(stableRsGate, stableModuleSize, success);
                                 if (success) {
                                     ++metrics->stableRsSuccesses;
                                     cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
@@ -2198,10 +2253,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 cache->cooldown = 0;
                 cache->stableSuccesses = 0;
                 cache->distortionAware = false;
-            } else if (stableRsAttempted) {
+            } else if (stableRsAttempted && allowExpensiveRepair) {
                 // A single RS miss can be sender/camera phase noise. Repeated
                 // misses mean the calibrated map is no longer earning its keep;
                 // relearn it from the Guided fallback instead of parking it.
+                // Intentionally suppressed temporal frames never poison this cache.
                 cache->stableSuccesses = 0;
                 if (++cache->misses >= 2) {
                     cache->misses = 0;

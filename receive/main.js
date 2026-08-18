@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.306";
+const RECEIVER_RUNTIME_BUILD = "v0.5.307";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1217,6 +1217,30 @@ let temporalBandLastKey = "";
 let temporalBandLastSource = -1;
 let temporalBandRepeat = 0;
 const TEMPORAL_BAND_AVOID_MS = 500;
+const TEMPORAL_MODEL_FRESH_MS = 900;
+const TEMPORAL_MODEL_RISK_THRESHOLD = 0.34;
+const TEMPORAL_MODEL_OVERLAY_THRESHOLD = 0.18;
+const GUIDED_REPAIR_PRESSURE_LIMIT = 1;
+const temporalBandModel = {
+  axis: "",
+  position: 0,
+  velocity: 0,
+  width: 1,
+  span: 0,
+  sourceSequence: -1,
+  updatedAt: -Infinity,
+  confidence: 0,
+  detections: 0
+};
+const slotRepairYield = new Float32Array(SLOT_METRIC_COUNT);
+slotRepairYield.fill(0.28);
+const slotRepairSamples = new Uint16Array(SLOT_METRIC_COUNT);
+const slotRepairCost = new Float32Array(SLOT_METRIC_COUNT);
+slotRepairCost.fill(480);
+let lastGuidedRepairAllowed = 0;
+let lastGuidedRepairCandidates = 0;
+let guidedRepairPressureFences = 0;
+let guidedRepairTemporalFences = 0;
 const TRACK_BUDGET_MIN = 8;
 const TRACK_BUDGET_UPDATE_MS = 400;
 const TRACK_BUDGET_WINDOW_MS = 1400;
@@ -1296,6 +1320,14 @@ function noteGuidedFallbackMetrics(guided) {
   }
 }
 function resetSlotMetrics() {
+  resetTemporalBandModel();
+  slotRepairYield.fill(0.28);
+  slotRepairSamples.fill(0);
+  slotRepairCost.fill(480);
+  lastGuidedRepairAllowed = 0;
+  lastGuidedRepairCandidates = 0;
+  guidedRepairPressureFences = 0;
+  guidedRepairTemporalFences = 0;
   slotAttemptCounts.fill(0);
   slotHitCounts.fill(0);
   slotQualitySamples.fill(0);
@@ -1326,6 +1358,135 @@ function noteSlotMetric(slot, hit) {
     slotAdaptiveWeak[index] = 1;
   }
 }
+function resetTemporalBandModel() {
+  temporalBandModel.axis = "";
+  temporalBandModel.position = 0;
+  temporalBandModel.velocity = 0;
+  temporalBandModel.width = 1;
+  temporalBandModel.span = 0;
+  temporalBandModel.sourceSequence = -1;
+  temporalBandModel.updatedAt = -Infinity;
+  temporalBandModel.confidence = 0;
+  temporalBandModel.detections = 0;
+  temporalBandAvoidUntil.fill(0);
+}
+function circularBandDelta(next, previous, span) {
+  if (!(span > 1)) return next - previous;
+  let delta = next - previous;
+  const half = span / 2;
+  while (delta > half) delta -= span;
+  while (delta < -half) delta += span;
+  return delta;
+}
+function updateTemporalBandModel(axis, indices, span, sourceSequence, now) {
+  if (!indices.length || !(span > 0) || !Number.isFinite(sourceSequence)) return;
+  const position = indices.reduce((sum, value) => sum + value, 0) / indices.length;
+  const width = Math.max(1, indices[indices.length - 1] - indices[0] + 1);
+  const sameAxis = temporalBandModel.axis === axis && temporalBandModel.span === span &&
+    temporalBandModel.sourceSequence >= 0 && sourceSequence > temporalBandModel.sourceSequence;
+  let velocity = 0;
+  if (sameAxis) {
+    const frames = Math.max(1, sourceSequence - temporalBandModel.sourceSequence);
+    const observed = circularBandDelta(position, temporalBandModel.position, span) / frames;
+    velocity = temporalBandModel.velocity * 0.58 + observed * 0.42;
+  }
+  temporalBandModel.axis = axis;
+  temporalBandModel.position = position;
+  temporalBandModel.velocity = Math.max(-2.5, Math.min(2.5, velocity));
+  temporalBandModel.width = temporalBandModel.width * (sameAxis ? 0.65 : 0) + width * (sameAxis ? 0.35 : 1);
+  temporalBandModel.span = span;
+  temporalBandModel.sourceSequence = Math.trunc(sourceSequence);
+  temporalBandModel.updatedAt = now;
+  temporalBandModel.confidence = Math.min(0.96, sameAxis ? temporalBandModel.confidence * 0.72 + 0.28 : 0.58);
+  temporalBandModel.detections++;
+}
+function predictedTemporalBand(sourceSequence, now = receiverNow()) {
+  if (!temporalBandModel.axis || !(temporalBandModel.span > 0)) return null;
+  const age = Math.max(0, now - temporalBandModel.updatedAt);
+  if (age > TEMPORAL_MODEL_FRESH_MS) return null;
+  const frames = Number.isFinite(sourceSequence) && temporalBandModel.sourceSequence >= 0
+    ? Math.max(0, Math.min(8, sourceSequence - temporalBandModel.sourceSequence))
+    : 0;
+  const span = temporalBandModel.span;
+  let position = temporalBandModel.position + temporalBandModel.velocity * frames;
+  if (span > 1) position = ((position % span) + span) % span;
+  const confidence = temporalBandModel.confidence * Math.exp(-age / 700) * Math.exp(-Math.max(0, frames - 2) * 0.16);
+  return {
+    axis: temporalBandModel.axis,
+    position,
+    velocity: temporalBandModel.velocity,
+    width: temporalBandModel.width + Math.min(1.5, Math.abs(temporalBandModel.velocity) * Math.max(0, frames) * 0.45),
+    span, confidence
+  };
+}
+function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return 0;
+  let risk = temporalBandAvoidUntil[index] > now ? 0.98 : 0;
+  const model = predictedTemporalBand(sourceSequence, now);
+  const layout = lastGridSnapshot?.layout;
+  if (!model || !layout || model.confidence < 0.08) return risk;
+  const coordinate = model.axis === "c" ? index % layout.cols : Math.floor(index / layout.cols);
+  let distance = Math.abs(coordinate - model.position);
+  if (model.span > 1) distance = Math.min(distance, model.span - distance);
+  const radius = Math.max(0.6, model.width * 0.58 + 0.35);
+  const modeled = model.confidence * Math.exp(-0.5 * (distance / radius) ** 2);
+  return Math.max(risk, Math.min(1, modeled));
+}
+function countMaskBits(mask) {
+  let value = mask >>> 0;
+  let count = 0;
+  while (value) { value &= value - 1; count++; }
+  return count;
+}
+function noteGuidedRepairMetrics(guided) {
+  const attempts = Number(guided?.erasureRepairAttemptMask) >>> 0;
+  const successes = Number(guided?.erasureRepairSuccessMask) >>> 0;
+  const attemptedCount = countMaskBits(attempts);
+  const codewordsPerAttempt = attemptedCount ? Math.max(1, Number(guided?.erasureRepairCodewords) || 0) / attemptedCount : 0;
+  for (let slot = 0; slot < SLOT_METRIC_COUNT; slot++) {
+    const bit = (1 << slot) >>> 0;
+    if (!(attempts & bit)) continue;
+    const hit = Boolean(successes & bit);
+    const alpha = slotRepairSamples[slot] < 5 ? 0.34 : 0.18;
+    slotRepairYield[slot] = slotRepairYield[slot] * (1 - alpha) + Number(hit) * alpha;
+    slotRepairCost[slot] = slotRepairCost[slot] * (1 - alpha) + codewordsPerAttempt * alpha;
+    slotRepairSamples[slot] = Math.min(65535, slotRepairSamples[slot] + 1);
+  }
+}
+function guidedRepairValue(track, now) {
+  const slot = Number(track?.slot ?? track?.id);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) return 0;
+  const fast = slotFastSamples[slot] ? slotFastYield[slot] : 0.82;
+  const repair = slotRepairSamples[slot] ? slotRepairYield[slot] : 0.28;
+  const cost = Math.max(64, slotRepairCost[slot]);
+  return (0.15 + repair * 0.70 + fast * 0.15) / Math.sqrt(cost);
+}
+function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) {
+  const items = [];
+  let mask = 0;
+  for (const track of tracks ?? []) {
+    const slot = Number(track?.slot ?? track?.id);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) continue;
+    const bit = (1 << slot) >>> 0;
+    const risk = temporalBandRiskForSlot(slot, sourceSequence, now);
+    if (risk >= TEMPORAL_MODEL_RISK_THRESHOLD) {
+      guidedRepairTemporalFences++;
+      continue;
+    }
+    items.push({ track, slot, bit, value: guidedRepairValue(track, now) });
+  }
+  lastGuidedRepairCandidates = (tracks ?? []).length;
+  if (!recentTrackPressure(now)) {
+    for (const item of items) mask = (mask | item.bit) >>> 0;
+  } else {
+    items.sort((a, b) => b.value - a.value || a.slot - b.slot);
+    for (const item of items.slice(0, GUIDED_REPAIR_PRESSURE_LIMIT)) mask = (mask | item.bit) >>> 0;
+    guidedRepairPressureFences += Math.max(0, items.length - GUIDED_REPAIR_PRESSURE_LIMIT);
+  }
+  lastGuidedRepairAllowed = countMaskBits(mask);
+  return mask >>> 0;
+}
 function resetTrackBudgetController() {
   autoTrackBudgetTarget = 32;
   autoTrackBudgetUpdatedAt = -Infinity;
@@ -1340,7 +1501,7 @@ function noteSlotFastMetric(slot, hit) {
   slotFastSamples[index] = Math.min(65535, slotFastSamples[index] + 1);
   slotFastUpdatedAt[index] = receiverNow();
 }
-function slotSchedulingYield(region, now) {
+function slotSchedulingYield(region, now, sourceSequence = temporalBandLastSource + 1) {
   const slot = Number(region.gridSlot);
   if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) return 0.5;
   // Fast evidence decays back toward a neutral prior so a temporarily crossed
@@ -1353,7 +1514,8 @@ function slotSchedulingYield(region, now) {
   let estimate = fast * 0.72 + longYield * 0.28;
   const visible = Math.max(0.15, Math.min(1, Number(region.visibleFraction) || 1));
   estimate *= 0.82 + visible * 0.18;
-  if (temporalBandAvoidUntil[slot] > now) estimate *= 0.16;
+  const temporalRisk = temporalBandRiskForSlot(slot, sourceSequence, now);
+  if (temporalRisk > 0) estimate *= Math.max(0.06, 1 - temporalRisk * 0.94);
   if ((region.consecutiveMisses || 0) > 0) estimate *= Math.max(0.35, 1 - Math.min(5, region.consecutiveMisses) * 0.10);
   return Math.max(0.01, Math.min(1, estimate));
 }
@@ -1380,7 +1542,9 @@ function temporalBandMissSlots(auditMode, completion) {
   const rowBand = adjacent(missRows) && hits.some((slot) => !rowSet.has(Math.floor(slot / layout.cols)));
   if (!columnBand && !rowBand) return new Set();
   const useColumn = columnBand && (!rowBand || missCols.length <= missRows.length);
-  const key = `${useColumn ? "c" : "r"}:${(useColumn ? missCols : missRows).join(",")}`;
+  const bandIndices = useColumn ? missCols : missRows;
+  const bandSpan = useColumn ? layout.cols : layout.rows;
+  const key = `${useColumn ? "c" : "r"}:${bandIndices.join(",")}`;
 
   if (sourceSequence >= temporalBandLastSource) {
     if (key === temporalBandLastKey && sourceSequence - temporalBandLastSource <= 2) temporalBandRepeat++;
@@ -1394,7 +1558,9 @@ function temporalBandMissSlots(auditMode, completion) {
   // short-term evidence that CPU should prefer the other rows/columns.
   const transientBand = temporalBandRepeat <= TEMPORAL_BAND_MAX_REPEAT;
   temporalBandDetections++;
-  const avoidUntil = receiverNow() + TEMPORAL_BAND_AVOID_MS;
+  const bandNow = receiverNow();
+  updateTemporalBandModel(useColumn ? "c" : "r", bandIndices, bandSpan, sourceSequence, bandNow);
+  const avoidUntil = bandNow + TEMPORAL_BAND_AVOID_MS;
   for (const slot of misses) {
     temporalBandAvoidUntil[slot] = Math.max(temporalBandAvoidUntil[slot], avoidUntil);
     if (transientBand) {
@@ -1503,7 +1669,7 @@ function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
   lastTrackBudgetSelected = budget;
   if (budget >= candidates.length) return candidates;
 
-  const ranked = candidates.map((region) => ({ region, score: slotSchedulingYield(region, now) }))
+  const ranked = candidates.map((region) => ({ region, score: slotSchedulingYield(region, now, sourceSequence) }))
     .sort((a, b) => b.score - a.score || Number(a.region.gridSlot) - Number(b.region.gridSlot));
   const selected = [];
   const selectedIds = new Set();
@@ -1689,6 +1855,9 @@ const livePipeline = {
   guidedErasureRsAttempts: 0,
   guidedErasureRsSuccesses: 0,
   guidedErasureRepairCodewords: 0,
+  guidedErasureRepairAttempts: 0,
+  guidedErasureRepairSuccesses: 0,
+  guidedErasureRepairSuppressed: 0,
   guidedJobs: 0,
   guidedOutputs: 0,
   guidedFinderAttempts: 0,
@@ -1718,6 +1887,7 @@ function resetLivePipeline(now = receiverNow()) {
     guidedStableRsAttempts: 0, guidedStableRsSuccesses: 0, guidedStableEligibleTracks: 0,
     guidedTranslationWarpTracks: 0, guidedAffineWarpTracks: 0, guidedPerspectiveWarpTracks: 0, guidedPerspectiveMeshWarpTracks: 0,
     guidedErasureRsAttempts: 0, guidedErasureRsSuccesses: 0, guidedErasureRepairCodewords: 0,
+    guidedErasureRepairAttempts: 0, guidedErasureRepairSuccesses: 0, guidedErasureRepairSuppressed: 0,
     guidedJobs: 0, guidedOutputs: 0, guidedFinderAttempts: 0, guidedFinderSuccesses: 0,
     workerWaitMs: 0, otherMs: 0, readFullAttempts: 0, timeouts: 0, errors: 0, lastCompletedAt: 0,
     trackedLatencies: [], fullLatencies: [], droppedBase: capturesDropped
@@ -2465,6 +2635,10 @@ function noteDecodeCompleted(id, completion) {
       livePipeline.guidedErasureRsAttempts += Math.max(0, Number(guided.erasureRsAttempts) || 0);
       livePipeline.guidedErasureRsSuccesses += Math.max(0, Number(guided.erasureRsSuccesses) || 0);
       livePipeline.guidedErasureRepairCodewords += Math.max(0, Number(guided.erasureRepairCodewords) || 0);
+      livePipeline.guidedErasureRepairAttempts += countMaskBits(Number(guided.erasureRepairAttemptMask) >>> 0);
+      livePipeline.guidedErasureRepairSuccesses += countMaskBits(Number(guided.erasureRepairSuccessMask) >>> 0);
+      livePipeline.guidedErasureRepairSuppressed += countMaskBits(Number(guided.erasureRepairSuppressedMask) >>> 0);
+      noteGuidedRepairMetrics(guided);
       livePipeline.guidedFinderAttempts += Math.max(0, Number(guided.finderAttempts) || 0);
       livePipeline.guidedFinderSuccesses += Math.max(0, Number(guided.finderSuccesses) || 0);
     }
@@ -4505,6 +4679,36 @@ function drawOverlay(now) {
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
   const ordered = [...regions].sort(layoutOrder);
+  if (developerOverlay && lastGridSnapshot?.layout) {
+    const nextSource = Math.max(0, temporalBandLastSource + 1);
+    const band = predictedTemporalBand(nextSource, receiverNow());
+    if (band && band.confidence >= 0.10) {
+      overlayCtx.save();
+      overlayCtx.fillStyle = "rgba(255, 176, 64, 0.16)";
+      overlayCtx.strokeStyle = "rgba(255, 196, 92, 0.78)";
+      overlayCtx.lineWidth = Math.max(1, dpr);
+      for (const r of ordered) {
+        const slot = Number(r.gridSlot);
+        if (!Number.isInteger(slot) || temporalBandRiskForSlot(slot, nextSource, receiverNow()) < TEMPORAL_MODEL_OVERLAY_THRESHOLD) continue;
+        const q = r.quad;
+        if (!q?.topLeft || !q?.topRight || !q?.bottomRight || !q?.bottomLeft) continue;
+        const points = [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+        overlayCtx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+          const x = offX + points[i].x * scale;
+          const y = offY + points[i].y * scale;
+          if (i) overlayCtx.lineTo(x, y); else overlayCtx.moveTo(x, y);
+        }
+        overlayCtx.closePath();
+        overlayCtx.fill();
+        overlayCtx.stroke();
+      }
+      overlayCtx.font = `${Math.max(10, Math.round(11 * dpr))}px monospace`;
+      overlayCtx.fillStyle = "rgba(255, 210, 128, 0.95)";
+      overlayCtx.fillText(`rolling ${band.axis === "r" ? "row" : "col"} ${band.position.toFixed(1)} v${band.velocity >= 0 ? "+" : ""}${band.velocity.toFixed(2)}/f`, Math.max(6 * dpr, offX + 6 * dpr), Math.max(14 * dpr, offY + 14 * dpr));
+      overlayCtx.restore();
+    }
+  }
   for (const r of ordered) {
     const gridRegion = r.gridSlot !== void 0;
     if (gridRegion && r.slotState === "OFFSCREEN") continue;
@@ -4732,7 +4936,11 @@ function renderFocusDiagnostics() {
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · salvage ${lastGuidedRepairAllowed}/${lastGuidedRepairCandidates} · fences ${guidedRepairTemporalFences} seam/${guidedRepairPressureFences} CPU · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    (() => {
+      const band = predictedTemporalBand(Math.max(temporalBandLastSource, 0) + 1, perfNow);
+      return band ? `Rolling  ${band.axis === "r" ? "row" : "col"} ${band.position.toFixed(2)}/${band.span} · width ${band.width.toFixed(2)} · velocity ${band.velocity >= 0 ? "+" : ""}${band.velocity.toFixed(2)} slots/frame · confidence ${(band.confidence * 100).toFixed(0)}%` : "Rolling  —";
+    })(),
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `AF       modes ${(diagnostic.hardwareFocusModes ?? []).join(",") || "—"} · POI ${diagnostic.poiSupported ? "yes" : "no"} · single-shot ${diagnostic.singleShotAfRejected ? "rejected" : diagnostic.seekingAfVerified ? "confirmed" : "unproven"} · ROI nudges ${diagnostic.continuousAfNudges}`,
@@ -4765,7 +4973,7 @@ ${optimizerTrace.slice(-20).map(
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
     lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · maps ${lastNativeMetrics.calibratedTracks ?? 0}/${lastNativeMetrics.activeTracks ?? 0} · pose ${lastNativeMetrics.translationSuccesses ?? 0}/${lastNativeMetrics.translationAttempts ?? 0} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
-    lastGuidedMetrics ? `Guided   state ${guidedRollout.state} · ${lastGuidedMetrics.totalMs.toFixed(1)}ms · bin ${lastGuidedMetrics.binarizeMs.toFixed(1)} · finder ${lastGuidedMetrics.finderMs.toFixed(1)} · sample ${lastGuidedMetrics.sampleMs.toFixed(1)} · decode ${lastGuidedMetrics.decodeMs.toFixed(1)} [sparse ${lastGuidedMetrics.fastDecodeMs.toFixed(1)} ${lastGuidedMetrics.fastDecodeSuccesses}/${lastGuidedMetrics.fastDecodeAttempts} · noRS ${lastGuidedMetrics.sparseNoRsSuccesses}/${lastGuidedMetrics.sparseNoRsAttempts} · stableRS ${lastGuidedMetrics.stableRsSuccesses ?? 0}/${lastGuidedMetrics.stableRsAttempts ?? 0} stable ${lastGuidedMetrics.stableEligibleTracks ?? 0} · warp T/A/M/P ${lastGuidedMetrics.translationWarpTracks ?? 0}/${lastGuidedMetrics.affineWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveMeshWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveWarpTracks ?? 0} · erasure ${lastGuidedMetrics.erasureRsSuccesses ?? 0}/${lastGuidedMetrics.erasureRsAttempts ?? 0} repair ${lastGuidedMetrics.erasureRepairCodewords ?? 0} · profile ${lastGuidedMetrics.sparseProfileSuccesses ?? 0}/${lastGuidedMetrics.sparseProfileAttempts ?? 0} · module ${(lastGuidedMetrics.moduleSizeAvg ?? 0).toFixed(2)}px [${(lastGuidedMetrics.moduleSizeMin ?? 0).toFixed(2)}–${(lastGuidedMetrics.moduleSizeMax ?? 0).toFixed(2)}] · RS ${lastGuidedMetrics.sparseRsFallbacks} · sparse-skip ${lastGuidedMetrics.sparseSkipped} · fallback ${lastGuidedMetrics.genericDecodeMs.toFixed(1)} ${lastGuidedMetrics.genericDecodeAttempts} · hit ${lastGuidedMetrics.genericFallbackSuccesses}/${lastGuidedMetrics.genericFallbackTracks} skip ${lastGuidedMetrics.genericFallbackSkipped}] · finders ${lastGuidedMetrics.finderSuccesses}/${lastGuidedMetrics.finderAttempts} · triplets ${lastGuidedMetrics.finderTriplets} · ${lastGuidedMetrics.successful}/${lastGuidedMetrics.tracks} QR` : `Guided   state ${guidedRollout.state} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms`,
+    lastGuidedMetrics ? `Guided   state ${guidedRollout.state} · ${lastGuidedMetrics.totalMs.toFixed(1)}ms · bin ${lastGuidedMetrics.binarizeMs.toFixed(1)} · finder ${lastGuidedMetrics.finderMs.toFixed(1)} · sample ${lastGuidedMetrics.sampleMs.toFixed(1)} · decode ${lastGuidedMetrics.decodeMs.toFixed(1)} [sparse ${lastGuidedMetrics.fastDecodeMs.toFixed(1)} ${lastGuidedMetrics.fastDecodeSuccesses}/${lastGuidedMetrics.fastDecodeAttempts} · noRS ${lastGuidedMetrics.sparseNoRsSuccesses}/${lastGuidedMetrics.sparseNoRsAttempts} · stableRS ${lastGuidedMetrics.stableRsSuccesses ?? 0}/${lastGuidedMetrics.stableRsAttempts ?? 0} stable ${lastGuidedMetrics.stableEligibleTracks ?? 0} · warp T/A/M/P ${lastGuidedMetrics.translationWarpTracks ?? 0}/${lastGuidedMetrics.affineWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveMeshWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveWarpTracks ?? 0} · erasure ${lastGuidedMetrics.erasureRsSuccesses ?? 0}/${lastGuidedMetrics.erasureRsAttempts ?? 0} repair ${lastGuidedMetrics.erasureRepairCodewords ?? 0} salvage ${countMaskBits(Number(lastGuidedMetrics.erasureRepairSuccessMask) >>> 0)}/${countMaskBits(Number(lastGuidedMetrics.erasureRepairAttemptMask) >>> 0)} suppress ${countMaskBits(Number(lastGuidedMetrics.erasureRepairSuppressedMask) >>> 0)} · profile ${lastGuidedMetrics.sparseProfileSuccesses ?? 0}/${lastGuidedMetrics.sparseProfileAttempts ?? 0} · module ${(lastGuidedMetrics.moduleSizeAvg ?? 0).toFixed(2)}px [${(lastGuidedMetrics.moduleSizeMin ?? 0).toFixed(2)}–${(lastGuidedMetrics.moduleSizeMax ?? 0).toFixed(2)}] · RS ${lastGuidedMetrics.sparseRsFallbacks} · sparse-skip ${lastGuidedMetrics.sparseSkipped} · fallback ${lastGuidedMetrics.genericDecodeMs.toFixed(1)} ${lastGuidedMetrics.genericDecodeAttempts} · hit ${lastGuidedMetrics.genericFallbackSuccesses}/${lastGuidedMetrics.genericFallbackTracks} skip ${lastGuidedMetrics.genericFallbackSkipped}] · finders ${lastGuidedMetrics.finderSuccesses}/${lastGuidedMetrics.finderAttempts} · triplets ${lastGuidedMetrics.finderTriplets} · ${lastGuidedMetrics.successful}/${lastGuidedMetrics.tracks} QR` : `Guided   state ${guidedRollout.state} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms`,
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
     `Mutation ${(_v = mutation == null ? void 0 : mutation.kind) != null ? _v : "—"}`,
@@ -5877,7 +6085,18 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     return false;
   }
   const guidedStage = chooseGuidedStage(message);
-  if (guidedStage) message.guidedFallbackMask = guidedFallbackMaskForTracks(message.tracks);
+  if (guidedStage) {
+    const fallbackMask = guidedFallbackMaskForTracks(message.tracks);
+    if (gridLattice.locked && !message.full && !message.strictHotPath && !autoOpticsMeasurementSlots?.size) {
+      message.guidedRepairMask = guidedRepairMaskForTracks(message.tracks, message.sourceSequence, receiverNow());
+      // Full SampleQR is also salvage. A seam/pressure-fenced track gets its cheap
+      // Guided attempt but cannot immediately spend the CPU we just denied.
+      message.guidedFallbackMask = (fallbackMask & message.guidedRepairMask) >>> 0;
+    } else {
+      message.guidedRepairMask = 0xffffffff;
+      message.guidedFallbackMask = fallbackMask;
+    }
+  }
   const auditMode = {
     generation: hotPathAuditGeneration,
     strict: Boolean(message.strictHotPath),
@@ -8797,7 +9016,7 @@ Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.t
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
 Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}

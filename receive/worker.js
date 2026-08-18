@@ -48,7 +48,7 @@ const NATIVE_TRACK_OK = 1;
 const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 192;
+const GUIDED_METRICS_BYTES = 208;
 const GUIDED_OUTPUT_BYTES = 128 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -68,7 +68,7 @@ function ensureGuidedBatch(zx) {
   if (!guidedOutputPtr) guidedOutputPtr = zx._malloc(GUIDED_OUTPUT_BYTES);
   return Boolean(guidedTracksPtr && guidedResultsPtr && guidedMetricsPtr && guidedOutputPtr);
 }
-function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff) {
+function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff, repairAllowedMask = 0xffffffff) {
   if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > NATIVE_BATCH_MAX_TRACKS) return null;
   let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
   for (let i = 0; i < tracks.length; i++) {
@@ -92,7 +92,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     guidedTracksPtr, tracks.length,
     guidedResultsPtr, NATIVE_BATCH_MAX_TRACKS,
     guidedOutputPtr, GUIDED_OUTPUT_BYTES,
-    tracks.length, fallbackAllowedMask >>> 0, guidedMetricsPtr
+    tracks.length, fallbackAllowedMask >>> 0, repairAllowedMask >>> 0, guidedMetricsPtr
   );
   const metricsView = new DataView(zx.HEAPU8.buffer, guidedMetricsPtr, GUIDED_METRICS_BYTES);
   const metrics = {
@@ -136,7 +136,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     perspectiveMeshWarpTracks: metricsView.getUint32(176, true),
     erasureRsAttempts: metricsView.getUint32(180, true),
     erasureRsSuccesses: metricsView.getUint32(184, true),
-    erasureRepairCodewords: metricsView.getUint32(188, true)
+    erasureRepairCodewords: metricsView.getUint32(188, true),
+    erasureRepairAttemptMask: metricsView.getUint32(192, true),
+    erasureRepairSuccessMask: metricsView.getUint32(196, true),
+    erasureRepairSuppressedMask: metricsView.getUint32(200, true)
   };
   const moduleSizes = tracks.map((track) => quadModuleSize(track.quad, track.dim)).filter((value) => value > 0 && Number.isFinite(value));
   if (moduleSizes.length) {
@@ -630,7 +633,7 @@ function repeatSignatureDistance(current, previous) {
 
 ctx.onmessage = async (e) => {
   const startedAt = performance.now();
-  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, guidedFallbackMask = 0xffffffff, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
+  const { id, buf, videoFrame, cropX = 0, cropY = 0, w = 0, h = 0, ox = 0, oy = 0, full = true, quad, dim, tracks, isolated = false, oracle = false, oracleSeeds = [], sentAt, pixelFormat = "rgba", yOffset: messageYOffset = 0, yStride: messageYStride = 0, payloadBytes = 0, strictHotPath = false, outputMap, thorough = false, acquisitionMode, guidedDecode = false, guidedFallbackMask = 0xffffffff, guidedRepairMask = 0xffffffff, sourceSequence, repeatFilter = false, previousFrameSignature } = e.data;
   const workerWaitMs = sentAt === void 0 ? 0 : Math.max(0, startedAt - sentAt);
   let readFullAttempts = 0;
   let targetedAttempts = 0;
@@ -882,7 +885,7 @@ ctx.onmessage = async (e) => {
         // camera frames. The next cache path must reuse Guided's successful
         // geometry instead of duplicating localization work.
         const guided = decodeGuidedBatch(
-          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks, guidedFallbackMask
+          zx, ptr + inputOffset, pw, ph, inputStride, ox, oy, tracks, guidedFallbackMask, guidedRepairMask
         );
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();

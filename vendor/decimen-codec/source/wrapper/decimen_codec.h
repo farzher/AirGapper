@@ -84,6 +84,9 @@ struct DecimenGuidedMetrics {
 	uint32_t erasureRsAttempts;
 	uint32_t erasureRsSuccesses;
 	uint32_t erasureRepairCodewords;
+	uint32_t erasureRepairAttemptMask;
+	uint32_t erasureRepairSuccessMask;
+	uint32_t erasureRepairSuppressedMask;
 };
 
 struct DecimenBatchMetrics {
@@ -127,7 +130,8 @@ int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
 						 const DecimenGuidedTrack* tracks, int trackCount,
 						 DecimenGuidedResult* results, int resultCapacity,
 						 uint8_t* output, int outputCapacity, int maxSymbols,
-						 uint32_t fallbackAllowedMask, DecimenGuidedMetrics* metrics);
+						 uint32_t fallbackAllowedMask, uint32_t repairAllowedMask,
+						 DecimenGuidedMetrics* metrics);
 
 int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
 						DecimenTrackedResult* results, int resultCapacity,
