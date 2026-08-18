@@ -1162,9 +1162,9 @@ static GuidedNoRsGate& guidedStableNoRsGate()
 
 // CRC-only decode is a large win on clean frames, but real handheld optics can
 // enter regimes where it almost never succeeds. Learn that independently per
-// worker/path. When recent success falls below 12.5%, QR RS gets first chance;
-// raw-data decode is retained behind RS failure, and a periodic probe lets the
-// shortcut recover quickly when the image becomes clean again.
+// worker/path. When recent success falls below 12.5%, stop paying for the raw
+// decode entirely and use QR RS. A periodic probe lets the shortcut recover
+// quickly when the image becomes clean again.
 static bool guidedTryNoRsFirst(GuidedNoRsGate& gate)
 {
     if (!gate.suppressed)
@@ -1279,19 +1279,22 @@ static DecoderResult decodeAirGapperSparseProgressive(
         return true;
     };
 
+    auto& noRsGate = guidedSparseNoRsGate();
+    const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
     ByteArray raw(totalCodewords);
-    ByteArray data(dataPlan.dataCodewords);
+    ByteArray data;
+    if (tryNoRsFirst)
+        data.resize(dataPlan.dataCodewords);
     for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
         uint8_t value = 0;
         if (!sampleByte(dataPlan.samples, size_t(codeword) * 8, value))
             return {};
         raw[codeword] = value;
-        data[dataPlan.destination[codeword]] = value;
+        if (tryNoRsFirst)
+            data[dataPlan.destination[codeword]] = value;
     }
 
-    auto& noRsGate = guidedSparseNoRsGate();
-    const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
-    auto tryDirect = [&]() -> DecoderResult {
+    if (tryNoRsFirst) {
         result.dataOnlyAttempted = true;
         const double decodeStarted = guidedNowMs();
         auto direct = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
@@ -1300,26 +1303,15 @@ static DecoderResult decodeAirGapperSparseProgressive(
                               hasValidCRC32(direct.content().bytes);
         result.dataOnlySuccess = accepted;
         guidedNoteNoRs(noRsGate, accepted);
-        return accepted ? std::move(direct) : DecoderResult{};
-    };
-
-    if (tryNoRsFirst) {
-        auto direct = tryDirect();
-        if (direct.isValid())
+        if (accepted)
             return direct;
     }
 
     result.rsAttempted = true;
     for (int codeword = dataPlan.dataCodewords; codeword < totalCodewords; ++codeword) {
         uint8_t value = 0;
-        if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
-            if (!tryNoRsFirst) {
-                auto direct = tryDirect();
-                if (direct.isValid())
-                    return direct;
-            }
+        if (!sampleByte(fullPlan, size_t(codeword) * 8, value))
             return {};
-        }
         raw[codeword] = value;
     }
 
@@ -1347,14 +1339,6 @@ static DecoderResult decodeAirGapperSparseProgressive(
             decoded = QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
     }
     result.decodeMs += guidedNowMs() - decodeStarted;
-    if (decoded.isValid() && !decoded.content().bytes.empty() && hasValidCRC32(decoded.content().bytes))
-        return decoded;
-
-    if (!tryNoRsFirst) {
-        auto direct = tryDirect();
-        if (direct.isValid())
-            return direct;
-    }
     return decoded;
 }
 
@@ -1409,17 +1393,18 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     };
 
     ByteArray raw(totalCodewords);
-    ByteArray progressiveData;
     int firstParityCodeword = 0;
-    bool tryNoRsFirst = false;
-    GuidedNoRsGate* noRsGate = nullptr;
     if (progressive) {
         const auto& dataPlan = turboDataPlan(dim);
         if (dataPlan.dataCodewords <= 0 ||
             dataPlan.samples.size() != size_t(dataPlan.dataCodewords) * 8 ||
             dataPlan.destination.size() != size_t(dataPlan.dataCodewords))
             return {};
-        progressiveData.resize(dataPlan.dataCodewords);
+        auto& noRsGate = guidedStableNoRsGate();
+        const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
+        ByteArray progressiveData;
+        if (tryNoRsFirst)
+            progressiveData.resize(dataPlan.dataCodewords);
         const double sampleStarted = guidedNowMs();
         for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
             uint8_t value = 0;
@@ -1428,12 +1413,11 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                 return {};
             }
             raw[codeword] = value;
-            progressiveData[dataPlan.destination[codeword]] = value;
+            if (tryNoRsFirst)
+                progressiveData[dataPlan.destination[codeword]] = value;
         }
         metrics.sampleMs += guidedNowMs() - sampleStarted;
 
-        noRsGate = &guidedStableNoRsGate();
-        tryNoRsFirst = guidedTryNoRsFirst(*noRsGate);
         if (tryNoRsFirst) {
             ++metrics.sparseNoRsAttempts;
             const double decodeStarted = guidedNowMs();
@@ -1441,7 +1425,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             metrics.decodeMs += guidedNowMs() - decodeStarted;
             const bool accepted = direct.isValid() && !direct.content().bytes.empty() &&
                                   hasValidCRC32(direct.content().bytes);
-            guidedNoteNoRs(*noRsGate, accepted);
+            guidedNoteNoRs(noRsGate, accepted);
             if (accepted) {
                 ++metrics.sparseNoRsSuccesses;
                 return direct;
@@ -1450,31 +1434,12 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         firstParityCodeword = dataPlan.dataCodewords;
     }
 
-    auto tryDeferredNoRs = [&]() -> DecoderResult {
-        if (!progressive || tryNoRsFirst || !noRsGate)
-            return {};
-        ++metrics.sparseNoRsAttempts;
-        const double decodeStarted = guidedNowMs();
-        auto direct = QRCode::DecodeBitStream(std::move(progressiveData), *version, QRCode::ErrorCorrectionLevel::Low);
-        metrics.decodeMs += guidedNowMs() - decodeStarted;
-        const bool accepted = direct.isValid() && !direct.content().bytes.empty() &&
-                              hasValidCRC32(direct.content().bytes);
-        guidedNoteNoRs(*noRsGate, accepted);
-        if (accepted) {
-            ++metrics.sparseNoRsSuccesses;
-            return direct;
-        }
-        return {};
-    };
-
     if (rsUsedOut) *rsUsedOut = true;
     const double sampleStarted = guidedNowMs();
     for (int codeword = firstParityCodeword; codeword < totalCodewords; ++codeword) {
         uint8_t value = 0;
         if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
             metrics.sampleMs += guidedNowMs() - sampleStarted;
-            auto direct = tryDeferredNoRs();
-            if (direct.isValid()) return std::move(direct);
             return {};
         }
         raw[codeword] = value;
@@ -1505,11 +1470,6 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             decoded = QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
     }
     metrics.decodeMs += guidedNowMs() - decodeStarted;
-    if (decoded.isValid() && !decoded.content().bytes.empty() && hasValidCRC32(decoded.content().bytes))
-        return decoded;
-
-    auto direct = tryDeferredNoRs();
-    if (direct.isValid()) return std::move(direct);
     return decoded;
 }
 
