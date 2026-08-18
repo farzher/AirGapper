@@ -1143,6 +1143,12 @@ static DecoderResult decodeAirGapperSparseProgressive(
                 control(rx, ry), control(rx + 1, ry),
                 control(rx + 1, ry + 1), control(rx, ry + 1)
             };
+    const int split = centers[1];
+    const int tileStart[2] = {centers[0], centers[1]};
+    const float invSpan[2] = {
+        1.0f / float(centers[1] - centers[0]),
+        1.0f / float(centers[2] - centers[1])
+    };
 
     auto sampleByte = [&](const std::vector<uint32_t>& plan, size_t firstBit,
                           uint8_t& value) -> bool {
@@ -1152,10 +1158,10 @@ static DecoderResult decodeAirGapperSparseProgressive(
             const int x = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const int rx = x < centers[1] ? 0 : 1;
-            const int ry = y < centers[1] ? 0 : 1;
-            const float u = float(x - centers[rx]) / float(centers[rx + 1] - centers[rx]);
-            const float v = float(y - centers[ry]) / float(centers[ry + 1] - centers[ry]);
+            const int rx = x < split ? 0 : 1;
+            const int ry = y < split ? 0 : 1;
+            const float u = float(x - tileStart[rx]) * invSpan[rx];
+            const float v = float(y - tileStart[ry]) * invSpan[ry];
             const auto& q = tiles[ry * 2 + rx];
             const PointF top{q[0].x + (q[1].x - q[0].x) * u,
                              q[0].y + (q[1].y - q[0].y) * u};
