@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/module_size_diagnostics_patch.py
+      - .github/repeated_trials_patch.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,12 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v233 diagnostics candidate
+      - name: Apply median-trial benchmark update
         id: candidate
         run: |
           set -euo pipefail
-          if [ -f .github/module_size_diagnostics_patch.py ] && ! grep -q 'moduleSizeAvg' receive/worker.js; then
-            python3 .github/module_size_diagnostics_patch.py 2>&1 | tee /tmp/diag-patch.log
+          if [ -f .github/repeated_trials_patch.py ] && ! grep -q 'selectMedianTrial' benchmark/offline-runner.mjs; then
+            python3 .github/repeated_trials_patch.py 2>&1 | tee /tmp/trials-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -49,7 +49,7 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          node benchmark/offline-runner.mjs 2>&1 | tee /tmp/regression.log
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/regression.log
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -59,7 +59,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit passing diagnostics
+      - name: Commit median-trial benchmark
         if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -67,9 +67,9 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/module_size_diagnostics_patch.py
-          git add receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.233 report tracked QR module size"
+          git rm .github/repeated_trials_patch.py
+          git add benchmark/offline-runner.mjs benchmark/latest-result.json
+          git commit -m "use median trials for receiver performance regression"
           git pull --rebase origin master
           git push origin HEAD:master
 
@@ -88,20 +88,20 @@ jobs:
             git push origin HEAD:master
           fi
 
-      - name: Record diagnostics failure
+      - name: Record benchmark failure
         if: failure()
         run: |
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "diagnostics regression failed at $(date -u +%FT%TZ)"
-            cat /tmp/diag-patch.log 2>/dev/null || true
-            tail -n 340 /tmp/regression.log 2>/dev/null || true
-          } > benchmark/v233-diagnostics-ci.log
+            echo "median benchmark failed at $(date -u +%FT%TZ)"
+            cat /tmp/trials-patch.log 2>/dev/null || true
+            tail -n 420 /tmp/regression.log 2>/dev/null || true
+          } > benchmark/median-trials-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/v233-diagnostics-ci.log
-          git commit -m "record v233 diagnostics rejection"
+          git add benchmark/median-trials-ci.log
+          git commit -m "record median benchmark rejection"
           git pull --rebase origin master
           git push origin HEAD:master
           exit 1
