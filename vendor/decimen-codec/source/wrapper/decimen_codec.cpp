@@ -1223,31 +1223,34 @@ static DecoderResult decodeAirGapperSparseProgressive(
     return decoded;
 }
 
+// Stable-RS is progressive below the clean high-resolution lane: sample data
+// codewords first and try the AirGapper CRC before touching QR parity. If that
+// exact fast result misses, retain the already sampled raw data bytes, read only
+// the remaining ECC codewords, then perform normal QR Reed-Solomon. The caller
+// keeps the existing standalone data-only path for >=2.75 px/module, where that
+// minimal sampler is already the cheaper clean-wall implementation.
 static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                          const DecimenGuidedTrack& track,
                                          const TurboFrameTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
-                                         DecimenGuidedMetrics& metrics, bool centerOnly = false)
+                                         DecimenGuidedMetrics& metrics, bool centerOnly = false,
+                                         bool progressive = false, bool* rsUsedOut = nullptr)
 {
+    if (rsUsedOut) *rsUsedOut = false;
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
         return {};
     const int totalCodewords = version->totalCodewords();
-    if (totalCodewords <= 0)
+    const auto& fullPlan = turboCodewordPlan(dim);
+    if (totalCodewords <= 0 || fullPlan.size() != size_t(totalCodewords) * 8)
         return {};
 
-    const auto& plan = turboCodewordPlan(dim);
-    if (plan.size() != size_t(totalCodewords) * 8)
-        return {};
-    const double sampleStarted = guidedNowMs();
-    ByteArray raw(totalCodewords);
     const float moduleSize = guidedModuleSize(track);
-    bool failed = false;
-    for (int codeword = 0; codeword < totalCodewords && !failed; ++codeword) {
-        uint8_t value = 0;
-        const size_t firstBit = size_t(codeword) * 8;
+    auto sampleByte = [&](const std::vector<uint32_t>& plan, size_t firstBit,
+                          uint8_t& value) -> bool {
+        value = 0;
         for (int bit = 0; bit < 8; ++bit) {
             const uint32_t entry = plan[firstBit + bit];
             const int xx = int(entry & 0xff);
@@ -1256,12 +1259,6 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int threshold = turboThreshold(levels, xx, y, dim);
             int lum;
             if (centerOnly) {
-                // This path is limited by the caller to calibrated dense QRs
-                // whose live pose is pure translation. Let QR RS absorb an
-                // occasional phase-adjacent module and use one luminance byte
-                // per data cell. AirGapper CRC remains the exact acceptance
-                // gate; the caller may retry the voted sampler when the module
-                // scale justifies it, otherwise sparse Guided recovery follows.
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
@@ -1269,14 +1266,56 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                                      yPlane, width, height, stride,
                                      xx, y, dx, dy, threshold, moduleSize);
             }
-            if (lum < 0) { failed = true; break; }
+            if (lum < 0)
+                return false;
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
+        }
+        return true;
+    };
+
+    ByteArray raw(totalCodewords);
+    int firstParityCodeword = 0;
+    if (progressive) {
+        const auto& dataPlan = turboDataPlan(dim);
+        if (dataPlan.dataCodewords <= 0 ||
+            dataPlan.samples.size() != size_t(dataPlan.dataCodewords) * 8 ||
+            dataPlan.destination.size() != size_t(dataPlan.dataCodewords))
+            return {};
+        ByteArray data(dataPlan.dataCodewords);
+        const double sampleStarted = guidedNowMs();
+        for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
+            uint8_t value = 0;
+            if (!sampleByte(dataPlan.samples, size_t(codeword) * 8, value)) {
+                metrics.sampleMs += guidedNowMs() - sampleStarted;
+                return {};
+            }
+            raw[codeword] = value;
+            data[dataPlan.destination[codeword]] = value;
+        }
+        metrics.sampleMs += guidedNowMs() - sampleStarted;
+
+        ++metrics.sparseNoRsAttempts;
+        const double decodeStarted = guidedNowMs();
+        auto direct = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
+        metrics.decodeMs += guidedNowMs() - decodeStarted;
+        if (direct.isValid() && !direct.content().bytes.empty() && hasValidCRC32(direct.content().bytes)) {
+            ++metrics.sparseNoRsSuccesses;
+            return direct;
+        }
+        firstParityCodeword = dataPlan.dataCodewords;
+    }
+
+    if (rsUsedOut) *rsUsedOut = true;
+    const double sampleStarted = guidedNowMs();
+    for (int codeword = firstParityCodeword; codeword < totalCodewords; ++codeword) {
+        uint8_t value = 0;
+        if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
+            metrics.sampleMs += guidedNowMs() - sampleStarted;
+            return {};
         }
         raw[codeword] = value;
     }
     metrics.sampleMs += guidedNowMs() - sampleStarted;
-    if (failed)
-        return {};
 
     const double decodeStarted = guidedNowMs();
     auto blocks = QRCode::DataBlock::GetDataBlocks(raw, *version, QRCode::ErrorCorrectionLevel::Low);
@@ -1287,8 +1326,8 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     int dataBytes = 0;
     for (const auto& block : blocks)
         dataBytes += block.numDataCodewords();
-    ByteArray data(dataBytes);
-    auto dst = data.begin();
+    ByteArray corrected(dataBytes);
+    auto dst = corrected.begin();
     for (auto& block : blocks) {
         auto& codewords = block.codewords();
         const int dataCount = block.numDataCodewords();
@@ -1299,7 +1338,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         }
         dst = std::copy_n(codewords.begin(), dataCount, dst);
     }
-    auto decoded = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
+    auto decoded = QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
     metrics.decodeMs += guidedNowMs() - decodeStarted;
     return decoded;
 }
@@ -1639,26 +1678,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         // job's Guided fallback rebuild it instead of cooling it.
                         stableNeedsRefresh = true;
                     } else {
-                        // Once this exact distortion-aware map has repeatedly
-                        // survived QR RS + AirGapper CRC, try the existing
-                        // data-only decoder first on sufficiently resolved QRs.
-                        // Its CRC is still an exact acceptance gate. A miss pays
-                        // no correctness cost: Stable-RS runs immediately below
-                        // and the data-only probe backs off briefly.
                         const float stableModuleSize = guidedModuleSize(track);
-                        const bool denseDirectCanary =
-                            frameTransform.translationOnly &&
-                            stableModuleSize >= GUIDED_STABLE_RS_MIN_MODULE &&
-                            stableModuleSize < GUIDED_TURBO_CANARY_MIN_MODULE &&
-                            // Dense no-RS sampling is more expensive than the
-                            // nearest-center Stable-RS lane. Require four exact
-                            // RS+CRC proofs before spending that probe; v229
-                            // measured this as the better crossover point.
-                            cache->stableSuccesses >= 4;
-                        const bool stableDirectEligible = !cache->cooldown && (
-                            (stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE && cache->stableSuccesses >= 2) ||
-                            denseDirectCanary
-                        );
+                        const bool stableDirectEligible = !cache->cooldown &&
+                            stableModuleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE &&
+                            cache->stableSuccesses >= 2;
                         if (stableDirectEligible) {
                             directAttempted = true;
                             ++metrics->sampleAttempts;
@@ -1676,13 +1699,17 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         if (!success) {
                             stableRsAttempted = true;
                             ++metrics->sampleAttempts;
-                            ++metrics->sparseRsFallbacks;
                             ++metrics->stableRsAttempts;
                             const bool centerOnlyRs = frameTransform.translationOnly &&
                                 stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+                            const bool progressiveRs = stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+                            bool rsUsed = false;
                             auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                yPlane, width, height, stride,
-                                                               dx, dy, levels, *metrics, centerOnlyRs);
+                                                               dx, dy, levels, *metrics,
+                                                               centerOnlyRs, progressiveRs, &rsUsed);
+                            if (rsUsed)
+                                ++metrics->sparseRsFallbacks;
                             success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
                             // Below the 2.25 px/module data-only crossover, a failed
                             // center sample is strong evidence that this cached phase
@@ -1693,11 +1720,14 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE;
                             if (!success && robustRetryWorthwhile) {
                                 ++metrics->sampleAttempts;
-                                ++metrics->sparseRsFallbacks;
                                 ++metrics->stableRsAttempts;
+                                bool robustRsUsed = false;
                                 decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                               yPlane, width, height, stride,
-                                                              dx, dy, levels, *metrics, false);
+                                                              dx, dy, levels, *metrics,
+                                                              false, true, &robustRsUsed);
+                                if (robustRsUsed)
+                                    ++metrics->sparseRsFallbacks;
                                 success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
                             }
                             if (success) {
