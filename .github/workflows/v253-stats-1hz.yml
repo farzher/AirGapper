@@ -1,0 +1,63 @@
+name: v253 1hz stats correctness
+
+on:
+  push:
+    paths:
+      - .github/v253_stats_1hz_patch.py
+      - .github/workflows/v253-stats-1hz.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply v253 candidate
+        run: |
+          set -euo pipefail
+          python3 .github/v253_stats_1hz_patch.py
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+
+      - name: Run existing receiver benchmark unchanged
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=1 node benchmark/offline-runner.mjs
+
+      - name: Promote passing v253
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -rf node_modules benchmark/offline-summary.json
+          git rm .github/v253_stats_1hz_patch.py .github/workflows/v253-stats-1hz.yml
+          git add benchmark/README.md index.html main.js receive/main.js sw.js
+          git commit -m "v0.5.253 restore 1Hz status updates"
+          git pull --rebase origin master
+          git push origin HEAD:master
+
+      - name: Record rejected v253
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          rm -f .github/v253_stats_1hz_patch.py .github/workflows/v253-stats-1hz.yml
+          git add -A
+          git commit -m "record v253 1Hz stats rejection" || true
+          git pull --rebase origin master
+          git push origin HEAD:master
+          exit 1
