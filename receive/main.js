@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.289";
+const RECEIVER_RUNTIME_BUILD = "v0.5.290";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2920,6 +2920,8 @@ function cameraSettingNear(value, target, range) {
 }
 function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
   const aeProduct = baseline.exposure * baseline.iso;
+  // readAutomaticAeBaseline() is neutral. Apply AirGapper's deliberate darkness
+  // preference exactly once here; remembered/manual winners bypass this meter.
   const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * AUTO_QR_LIGHT_SCALE);
   let exposure = quantizeCameraRange(
     Math.min(exposureRange.max, AUTO_OPTICS_MAX_SHORT_EXPOSURE, 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION),
@@ -2939,7 +2941,16 @@ function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
 }
 async function readAutomaticAeBaseline(track) {
   const beforeSequence = latestSourceFrameSequence;
-  await applyExposureSetting(track);
+  const caps = track.getCapabilities?.() ?? {};
+  const patch = { exposureMode: "continuous" };
+  if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
+    patch.exposureCompensation = quantizeCameraRange(0, caps.exposureCompensation);
+  }
+  delete desiredCamera.exposureTime;
+  delete desiredCamera.iso;
+  delete desiredCamera.exposureCompensation;
+  desiredCamera.exposureMode = "continuous";
+  await applyCameraConstraint(track, patch);
   if (!automaticOpticsSessionAlive(track)) return void 0;
   await waitForFreshAutoOpticsFrames(track, beforeSequence, 2, 500);
   if (!automaticOpticsSessionAlive(track)) return void 0;
@@ -2947,7 +2958,7 @@ async function readAutomaticAeBaseline(track) {
   const exposure = Number(settings.exposureTime);
   const iso = Number(settings.iso);
   if (!(exposure > 0) || !(iso > 0)) return void 0;
-  return { exposure, iso, at: receiverNow() };
+  return { exposure, iso, at: receiverNow(), neutral: true };
 }
 async function applyAutomaticShortSeed(track, baseline, reason) {
   const caps = track.getCapabilities?.() ?? {};
