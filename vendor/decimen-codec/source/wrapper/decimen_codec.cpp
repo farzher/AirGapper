@@ -1959,11 +1959,53 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         const float dy = wallCorrectionY;
                         const auto levels = turboReadLevels(*cache, track, frameTransform,
                                                             yPlane, width, height, stride, dx, dy);
+                        const bool centerOnlyRs = frameTransform.translationOnly &&
+                            stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+                        const bool progressiveRs = stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+
+                        // Keep the existing shared-wall correction as the primary
+                        // path. Only on a dense cached miss, refine this QR's finder
+                        // offset locally and retry Stable-RS before paying for
+                        // current-frame sparse alignment sampling. A handheld
+                        // rotation/scale makes the residual vary across the wall,
+                        // which one global translation cannot represent.
+                        auto retryLocalResidual = [&]() {
+                            if (stableModuleSize > GUIDED_TURBO_CANARY_MIN_MODULE)
+                                return false;
+                            const auto refined = turboRefineWallOffset(*cache, track, frameTransform,
+                                                                        yPlane, width, height, stride,
+                                                                        dx, dy);
+                            if (!refined || std::hypot(refined->x - dx, refined->y - dy) < 0.20f)
+                                return false;
+                            const auto localLevels = turboReadLevels(*cache, track, frameTransform,
+                                                                     yPlane, width, height, stride,
+                                                                     refined->x, refined->y);
+                            if (!localLevels.ok)
+                                return false;
+                            stableRsAttempted = true;
+                            ++metrics->sampleAttempts;
+                            ++metrics->stableRsAttempts;
+                            bool localRsUsed = false;
+                            auto localDecoded = decodeTurboStableRS(*cache, track, frameTransform,
+                                                                    yPlane, width, height, stride,
+                                                                    refined->x, refined->y, localLevels, *metrics,
+                                                                    centerOnlyRs, progressiveRs, &localRsUsed);
+                            if (localRsUsed)
+                                ++metrics->sparseRsFallbacks;
+                            return commitTurbo(i, localDecoded, refined->x, refined->y);
+                        };
+
                         if (!levels.ok) {
-                            // A 147-cell finder miss is cheap evidence that this map
-                            // no longer lands on the live modules. Let this same
-                            // job's Guided fallback rebuild it instead of cooling it.
-                            stableNeedsRefresh = true;
+                            success = retryLocalResidual();
+                            if (success) {
+                                guidedNoteDenseStableRs(stableRsGate, stableModuleSize, true);
+                                ++metrics->stableRsSuccesses;
+                                cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
+                            } else {
+                                // Finder evidence still cannot land this map on the
+                                // live QR; let sparse Guided rebuild it in this job.
+                                stableNeedsRefresh = true;
+                            }
                         } else {
                             const bool stableDirectEligible = !cache->cooldown &&
                                 stableModuleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE &&
@@ -1986,9 +2028,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 stableRsAttempted = true;
                                 ++metrics->sampleAttempts;
                                 ++metrics->stableRsAttempts;
-                                const bool centerOnlyRs = frameTransform.translationOnly &&
-                                    stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
-                                const bool progressiveRs = stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
                                 bool rsUsed = false;
                                 auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                    yPlane, width, height, stride,
@@ -2011,6 +2050,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                         ++metrics->sparseRsFallbacks;
                                     success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
                                 }
+                                if (!success)
+                                    success = retryLocalResidual();
                                 guidedNoteDenseStableRs(stableRsGate, stableModuleSize, success);
                                 if (success) {
                                     ++metrics->stableRsSuccesses;
