@@ -1,0 +1,1 @@
+v0.5.308 add Auto 1-4 QR density levels
