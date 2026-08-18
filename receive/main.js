@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.286";
+const RECEIVER_RUNTIME_BUILD = "v0.5.287";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2112,11 +2112,16 @@ function noteDecodeCompleted(id, completion) {
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
     if (!auditMode.full && Number.isFinite(auditMode.sourceSequence)) {
+      const submittedSlots = new Set(auditMode.trackSlots ?? []);
+      const attributedOutputs = submittedSlots.size
+        ? completion.symbols.reduce((count, symbol) =>
+            count + Number(submittedSlots.has(Number(symbol.header?.slotIndex))), 0)
+        : Math.min(Math.max(0, Number(auditMode.tracks) || 0), outputSymbols);
       autoOpticsCompletionSamples.push({
         at: receiverNow(),
         sourceSequence: auditMode.sourceSequence,
         tracks: Math.max(0, Number(auditMode.tracks) || 0),
-        outputs: Math.min(Math.max(0, Number(auditMode.tracks) || 0), outputSymbols)
+        outputs: Math.min(Math.max(0, Number(auditMode.tracks) || 0), attributedOutputs)
       });
       if (autoOpticsCompletionSamples.length > 512)
         autoOpticsCompletionSamples.splice(0, autoOpticsCompletionSamples.length - 512);
@@ -3124,7 +3129,8 @@ async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso
   const probe = async (candidate, label, options = {}) => {
     const requested = quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, candidate)), isoRange);
     const key = String(requested);
-    if (measured.has(key)) return probes.find((item) => String(item.requestedIso) === key) || null;
+    if (measured.has(key) && !options.confirm)
+      return probes.find((item) => String(item.requestedIso) === key) || null;
     if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES && !options.confirm) return null;
     if (!options.confirm) measured.add(key);
     autoOpticsTuneSummary = `${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
@@ -3240,6 +3246,13 @@ async function settleAutomaticQrOptics(track, now) {
   autoOpticsRuntimeState = "tuning";
   notePipelineEvent("auto-optics-short-shutter-search");
   try {
+    if (!await waitForStableAutoOpticsPose(track, AUTO_OPTICS_POSE_WAIT_MS)) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = 0;
+      autoOpticsRetryAt = receiverNow() + 350;
+      autoOpticsTuneSummary = "waiting for stable framing · hardware AE";
+      return;
+    }
     let exposure = targetExposure;
     let cap = isoCapFor(exposure);
     let rememberedIso = loadAutomaticOpticsMemory(track, exposure, isoRange, cap, aeExposureProduct);
@@ -5125,7 +5138,10 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     guided: Boolean(guidedStage),
     guidedStage,
     kind,
-    sourceSequence: Number(sourceSequence)
+    sourceSequence: Number(sourceSequence),
+    trackSlots: Array.isArray(message.tracks)
+      ? message.tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger)
+      : []
   };
   message.jobKind = kind;
   message.trackCount = auditMode.tracks;
