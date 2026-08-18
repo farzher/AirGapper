@@ -1479,16 +1479,22 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->sparseRsFallbacks;
                             ++metrics->stableRsAttempts;
                             const bool centerOnlyRs = frameTransform.translationOnly &&
-                                guidedModuleSize(track) < GUIDED_TURBO_NEAREST_MIN_MODULE;
+                                stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
                             auto decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                                yPlane, width, height, stride,
                                                                dx, dy, levels, *metrics, centerOnlyRs);
                             success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
-                            if (!success && centerOnlyRs) {
-                                // No correctness regression: if single-center RS
-                                // cannot reconstruct an exact CRC-valid packet,
-                                // retry the old ambiguity-voted sampler before
-                                // handing the slot to sparse Guided recovery.
+                            // Below the 2.25 px/module data-only crossover, a failed
+                            // center sample is strong evidence that this cached phase
+                            // is not worth sampling a second time. Sparse Guided is
+                            // already the stronger recovery there, so avoid paying a
+                            // second full v40 grid read before handing the slot over.
+                            const bool robustRetryWorthwhile = centerOnlyRs &&
+                                stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE;
+                            if (!success && robustRetryWorthwhile) {
+                                ++metrics->sampleAttempts;
+                                ++metrics->sparseRsFallbacks;
+                                ++metrics->stableRsAttempts;
                                 decoded = decodeTurboStableRS(*cache, track, frameTransform,
                                                               yPlane, width, height, stride,
                                                               dx, dy, levels, *metrics, false);
