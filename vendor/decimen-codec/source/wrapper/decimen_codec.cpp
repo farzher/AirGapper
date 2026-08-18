@@ -1538,9 +1538,9 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     };
 
     auto sampleByteCenter = [&](const std::vector<uint32_t>& plan, size_t firstBit,
-                                uint8_t& value, bool& ambiguous) -> bool {
+                                uint8_t& value, uint8_t& minMargin) -> bool {
         value = 0;
-        ambiguous = false;
+        minMargin = 255;
         for (int bit = 0; bit < 8; ++bit) {
             const uint32_t entry = plan[firstBit + bit];
             const int xx = int(entry & 0xff);
@@ -1551,19 +1551,20 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
             if (lum < 0)
                 return false;
-            ambiguous |= std::abs(lum - threshold) <= GUIDED_TURBO_AMBIGUOUS;
+            const int margin = std::min(255, std::abs(lum - threshold));
+            minMargin = std::min(minMargin, uint8_t(margin));
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
         }
         return true;
     };
 
-    auto runRs = [&](const ByteArray& source, const ByteArray* erasureFlags) -> DecoderResult {
+    auto runRs = [&](const ByteArray& source, const ByteArray* erasureScores) -> DecoderResult {
         auto blocks = QRCode::DataBlock::GetDataBlocks(source, *version, QRCode::ErrorCorrectionLevel::Low);
         if (blocks.empty()) return {};
-        std::vector<QRCode::DataBlock> erasureBlocks;
-        if (erasureFlags) {
-            erasureBlocks = QRCode::DataBlock::GetDataBlocks(*erasureFlags, *version, QRCode::ErrorCorrectionLevel::Low);
-            if (erasureBlocks.size() != blocks.size()) return {};
+        std::vector<QRCode::DataBlock> scoreBlocks;
+        if (erasureScores) {
+            scoreBlocks = QRCode::DataBlock::GetDataBlocks(*erasureScores, *version, QRCode::ErrorCorrectionLevel::Low);
+            if (scoreBlocks.size() != blocks.size()) return {};
         }
         int dataBytes = 0;
         for (const auto& block : blocks) dataBytes += block.numDataCodewords();
@@ -1576,12 +1577,18 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int eccCount = int(codewords.size()) - dataCount;
             if (eccCount <= 0) return {};
             std::vector<int> erasures;
-            if (erasureFlags) {
-                const auto& flags = erasureBlocks[blockIndex].codewords();
-                for (int i = 0; i < int(flags.size()); ++i) if (flags[i]) erasures.push_back(i);
-                if (int(erasures.size()) > eccCount - 2) return {};
+            if (erasureScores) {
+                const auto& scores = scoreBlocks[blockIndex].codewords();
+                // Confidence has only 12 meaningful levels (0..11), so a tiny
+                // bucket walk is cheaper and more deterministic than sorting.
+                const int erasureLimit = std::max(1, (eccCount * 4) / 5);
+                erasures.reserve(erasureLimit);
+                for (int margin = 0; margin <= GUIDED_TURBO_AMBIGUOUS && int(erasures.size()) < erasureLimit; ++margin) {
+                    for (int i = 0; i < int(scores.size()) && int(erasures.size()) < erasureLimit; ++i)
+                        if (scores[i] == margin) erasures.push_back(i);
+                }
             }
-            const bool rsOk = erasureFlags
+            const bool rsOk = erasureScores
                 ? bool(ReedSolomonDecode(RSField::QRCode, codewords, eccCount, erasures))
                 : bool(ReedSolomonDecode(RSField::QRCode, codewords, eccCount));
             if (!rsOk) return {};
@@ -1591,7 +1598,8 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     };
 
     ByteArray raw(totalCodewords);
-    ByteArray ambiguousCodeword(totalCodewords);
+    ByteArray ambiguityScore(totalCodewords);
+    std::fill(ambiguityScore.begin(), ambiguityScore.end(), uint8_t(255));
     bool erasureSampling = false;
     int ambiguousCount = 0;
     int firstParityCodeword = 0;
@@ -1610,17 +1618,17 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         const double sampleStarted = guidedNowMs();
         for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
             uint8_t value = 0;
-            bool ambiguous = false;
+            uint8_t minMargin = 255;
             const bool sampled = erasureSampling
-                ? sampleByteCenter(dataPlan.samples, size_t(codeword) * 8, value, ambiguous)
+                ? sampleByteCenter(dataPlan.samples, size_t(codeword) * 8, value, minMargin)
                 : sampleByte(dataPlan.samples, size_t(codeword) * 8, value);
             if (!sampled) {
                 metrics.sampleMs += guidedNowMs() - sampleStarted;
                 return {};
             }
             raw[codeword] = value;
-            if (ambiguous) {
-                ambiguousCodeword[codeword] = 1;
+            if (minMargin <= GUIDED_TURBO_AMBIGUOUS) {
+                ambiguityScore[codeword] = minMargin;
                 ++ambiguousCount;
             }
             if (tryNoRsFirst)
@@ -1648,17 +1656,17 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     const double sampleStarted = guidedNowMs();
     for (int codeword = firstParityCodeword; codeword < totalCodewords; ++codeword) {
         uint8_t value = 0;
-        bool ambiguous = false;
+        uint8_t minMargin = 255;
         const bool sampled = erasureSampling
-            ? sampleByteCenter(fullPlan, size_t(codeword) * 8, value, ambiguous)
+            ? sampleByteCenter(fullPlan, size_t(codeword) * 8, value, minMargin)
             : sampleByte(fullPlan, size_t(codeword) * 8, value);
         if (!sampled) {
             metrics.sampleMs += guidedNowMs() - sampleStarted;
             return {};
         }
         raw[codeword] = value;
-        if (ambiguous) {
-            ambiguousCodeword[codeword] = 1;
+        if (minMargin <= GUIDED_TURBO_AMBIGUOUS) {
+            ambiguityScore[codeword] = minMargin;
             ++ambiguousCount;
         }
     }
@@ -1667,7 +1675,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     if (erasureSampling && ambiguousCount > 0) {
         ++metrics.erasureRsAttempts;
         const double erasureDecodeStarted = guidedNowMs();
-        auto erasureDecoded = runRs(raw, &ambiguousCodeword);
+        auto erasureDecoded = runRs(raw, &ambiguityScore);
         metrics.decodeMs += guidedNowMs() - erasureDecodeStarted;
         if (erasureDecoded.isValid() && !erasureDecoded.content().bytes.empty() &&
             hasValidCRC32(erasureDecoded.content().bytes)) {
@@ -1675,10 +1683,20 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             return erasureDecoded;
         }
 
-        metrics.erasureRepairCodewords += uint32_t(ambiguousCount);
+        std::vector<int> repairOrder;
+        repairOrder.reserve(ambiguousCount);
+        for (int margin = 0; margin <= GUIDED_TURBO_AMBIGUOUS; ++margin)
+            for (int codeword = 0; codeword < totalCodewords; ++codeword)
+                if (ambiguityScore[codeword] == margin) repairOrder.push_back(codeword);
+
+        // Repair the least-confident ~1/8 of the QR first. On the v268 phone
+        // trace failed erasure attempts re-read ~1200 codewords each; a targeted
+        // first stage gives normal RS a chance after only ~460 v40 codewords.
+        const int partialRepairCount = std::min<int>(
+            repairOrder.size(), std::max(64, totalCodewords / 8));
         const double repairSampleStarted = guidedNowMs();
-        for (int codeword = 0; codeword < totalCodewords; ++codeword) {
-            if (!ambiguousCodeword[codeword]) continue;
+        for (int i = 0; i < partialRepairCount; ++i) {
+            const int codeword = repairOrder[i];
             uint8_t value = 0;
             if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
                 metrics.sampleMs += guidedNowMs() - repairSampleStarted;
@@ -1686,7 +1704,30 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             }
             raw[codeword] = value;
         }
+        metrics.erasureRepairCodewords += uint32_t(partialRepairCount);
         metrics.sampleMs += guidedNowMs() - repairSampleStarted;
+
+        if (partialRepairCount < int(repairOrder.size())) {
+            const double partialDecodeStarted = guidedNowMs();
+            auto partialDecoded = runRs(raw, nullptr);
+            metrics.decodeMs += guidedNowMs() - partialDecodeStarted;
+            if (partialDecoded.isValid() && !partialDecoded.content().bytes.empty() &&
+                hasValidCRC32(partialDecoded.content().bytes))
+                return partialDecoded;
+
+            const double remainderSampleStarted = guidedNowMs();
+            for (int i = partialRepairCount; i < int(repairOrder.size()); ++i) {
+                const int codeword = repairOrder[i];
+                uint8_t value = 0;
+                if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
+                    metrics.sampleMs += guidedNowMs() - remainderSampleStarted;
+                    return {};
+                }
+                raw[codeword] = value;
+            }
+            metrics.erasureRepairCodewords += uint32_t(repairOrder.size() - partialRepairCount);
+            metrics.sampleMs += guidedNowMs() - remainderSampleStarted;
+        }
     }
 
     const double decodeStarted = guidedNowMs();
