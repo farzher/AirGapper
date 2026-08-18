@@ -682,13 +682,43 @@ static bool turboStableWarpEligible(const GuidedTurboTrack& cache,
 // affine map for ordinary handheld rotation/scale/shear, with the full homography
 // reserved for genuine perspective change. Finder evidence + QR RS + AirGapper
 // CRC still gate every accepted result, so a cheap-warp miss falls through.
+constexpr int TURBO_PERSPECTIVE_MESH_CELLS = 4;
+constexpr int TURBO_PERSPECTIVE_MESH_POINTS = TURBO_PERSPECTIVE_MESH_CELLS + 1;
+
 struct TurboFrameTransform
 {
     PerspectiveTransform perspective;
     PointF translation{0, 0};
     float m00 = 1, m01 = 0, m10 = 0, m11 = 1, tx = 0, ty = 0;
+    std::array<PointF, TURBO_PERSPECTIVE_MESH_POINTS * TURBO_PERSPECTIVE_MESH_POINTS> perspectiveDelta{};
+    float perspectiveMeshScale = 0;
     bool translationOnly = false;
     bool affineOnly = false;
+    bool perspectiveMesh = false;
+
+    PointF meshWarp(PointF p, int x, int y) const
+    {
+        const float gx = std::clamp(float(x) * perspectiveMeshScale, 0.0f,
+                                    float(TURBO_PERSPECTIVE_MESH_CELLS));
+        const float gy = std::clamp(float(y) * perspectiveMeshScale, 0.0f,
+                                    float(TURBO_PERSPECTIVE_MESH_CELLS));
+        const int ix = std::min(TURBO_PERSPECTIVE_MESH_CELLS - 1, std::max(0, int(gx)));
+        const int iy = std::min(TURBO_PERSPECTIVE_MESH_CELLS - 1, std::max(0, int(gy)));
+        const float u = gx - ix;
+        const float v = gy - iy;
+        const int stride = TURBO_PERSPECTIVE_MESH_POINTS;
+        const PointF& d00 = perspectiveDelta[iy * stride + ix];
+        const PointF& d10 = perspectiveDelta[iy * stride + ix + 1];
+        const PointF& d01 = perspectiveDelta[(iy + 1) * stride + ix];
+        const PointF& d11 = perspectiveDelta[(iy + 1) * stride + ix + 1];
+        const PointF top{d00.x + (d10.x - d00.x) * u,
+                         d00.y + (d10.y - d00.y) * u};
+        const PointF bottom{d01.x + (d11.x - d01.x) * u,
+                            d01.y + (d11.y - d01.y) * u};
+        const PointF delta{top.x + (bottom.x - top.x) * v,
+                           top.y + (bottom.y - top.y) * v};
+        return p + delta;
+    }
 
     TurboFrameTransform(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track)
         : perspective(
@@ -715,11 +745,6 @@ struct TurboFrameTransform
         const float tolerance = std::clamp(module * 0.08f, 0.15f, 0.40f);
         translationOnly = residual <= tolerance;
 
-        // Handheld motion is usually translation + rotation/scale/shear between
-        // adjacent camera frames. Those transforms are affine and do not need a
-        // projective divide for every QR bit. Solve the affine map once from
-        // TL/TR/BL, then use the fourth corner only as an accuracy oracle.
-        // Significant perspective still uses the exact homography below.
         if (!translationOnly) {
             const PointF seedU = cache.seedQuad[1] - cache.seedQuad[0];
             const PointF seedV = cache.seedQuad[3] - cache.seedQuad[0];
@@ -747,9 +772,49 @@ struct TurboFrameTransform
                 affineOnly = affineError <= affineTolerance;
             }
         }
+
+        // A true handheld projective warp is smooth. Preserve the calibrated
+        // lens-distortion sample map and approximate only the frame-to-frame
+        // displacement field with a 4x4 bilinear mesh. This replaces one
+        // homography divide per sampled module with multiply/add. Validate the
+        // approximation at every cell center before enabling it; otherwise use
+        // the exact PerspectiveTransform. QR RS + AirGapper CRC remain the final
+        // acceptance oracle either way.
+        const int dim = track.dimension;
+        if (!translationOnly && !affineOnly && perspective.isValid() && dim > 1 &&
+            cache.samples.size() == size_t(dim) * dim) {
+            perspectiveMeshScale = float(TURBO_PERSPECTIVE_MESH_CELLS) / float(dim - 1);
+            auto controlCoord = [&](int index) {
+                return std::clamp(int(std::lround(double(index) * (dim - 1) /
+                                                  TURBO_PERSPECTIVE_MESH_CELLS)), 0, dim - 1);
+            };
+            for (int gy = 0; gy < TURBO_PERSPECTIVE_MESH_POINTS; ++gy)
+                for (int gx = 0; gx < TURBO_PERSPECTIVE_MESH_POINTS; ++gx) {
+                    const int x = controlCoord(gx);
+                    const int y = controlCoord(gy);
+                    const PointF p = cache.samples[size_t(y) * dim + x];
+                    perspectiveDelta[gy * TURBO_PERSPECTIVE_MESH_POINTS + gx] = perspective(p) - p;
+                }
+
+            float maxError = 0;
+            for (int gy = 0; gy < TURBO_PERSPECTIVE_MESH_CELLS; ++gy)
+                for (int gx = 0; gx < TURBO_PERSPECTIVE_MESH_CELLS; ++gx) {
+                    const int x = std::clamp(int(std::lround((gx + 0.5) * (dim - 1) /
+                                                             TURBO_PERSPECTIVE_MESH_CELLS)), 0, dim - 1);
+                    const int y = std::clamp(int(std::lround((gy + 0.5) * (dim - 1) /
+                                                             TURBO_PERSPECTIVE_MESH_CELLS)), 0, dim - 1);
+                    const PointF p = cache.samples[size_t(y) * dim + x];
+                    const PointF exact = perspective(p);
+                    const PointF approx = meshWarp(p, x, y);
+                    maxError = std::max(maxError, float(std::hypot(exact.x - approx.x,
+                                                                   exact.y - approx.y)));
+                }
+            const float meshTolerance = std::clamp(module * 0.10f, 0.14f, 0.30f);
+            perspectiveMesh = maxError <= meshTolerance;
+        }
     }
 
-    bool isValid() const { return translationOnly || affineOnly || perspective.isValid(); }
+    bool isValid() const { return translationOnly || affineOnly || perspectiveMesh || perspective.isValid(); }
     PointF operator()(PointF p) const
     {
         if (translationOnly)
@@ -770,7 +835,8 @@ static TurboFrameTransform turboFrameTransform(const GuidedTurboTrack& cache,
 static PointF turboWarpedPoint(const GuidedTurboTrack& cache,
                                const TurboFrameTransform& frameTransform, int x, int y)
 {
-    return frameTransform(cache.samples[size_t(y) * cache.dimension + x]);
+    const PointF p = cache.samples[size_t(y) * cache.dimension + x];
+    return frameTransform.perspectiveMesh ? frameTransform.meshWarp(p, x, y) : frameTransform(p);
 }
 
 static bool turboFinderIdeal(int x, int y)
