@@ -1,14 +1,14 @@
-receiver candidate rejected at 2026-08-18T18:47:03Z
+receiver candidate rejected at 2026-08-18T18:50:53Z
 AIRGAPPER_SENDER_PROFILE stable-1000B 2548x1276 frames=8
 AIRGAPPER_SENDER_PROFILE motion-1000B 2548x1276 frames=20
 AIRGAPPER_SENDER_PROFILE dense-2953B 2138x1070 frames=10
 AIRGAPPER_SENDER_PROFILE optical-dense-2953B 2138x1070 frames=20
 AIRGAPPER_SENDER_PROFILE camera-dense-2953B 1440x2560 frames=20
-file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:397
+file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:401
   if (!rawYRoundTrip.ok) throw new Error(`AGCAP raw-Y round trip failed: ${JSON.stringify(rawYRoundTrip)}`);
                                ^
 
-Error: AGCAP raw-Y round trip failed: {"ok":false,"different":0,"formatVersion":5,"pixelFormat":"Y8","visibleRect":{"x":0,"y":0,"width":560,"height":480}}
-    at file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:397:32
+Error: AGCAP raw-Y round trip failed: {"ok":false,"different":0,"formatVersion":5,"pixelFormat":"Y8","recordedVisibleRect":{"x":0,"y":0,"width":560,"height":480},"replayBefore":{"codedWidth":560,"codedHeight":480,"visibleRect":{"x":0,"y":0,"width":560,"height":480},"displayWidth":560,"displayHeight":480},"copiedVisibleRect":{"x":0,"y":0,"width":560,"height":480}}
+    at file:///home/runner/work/AirGapper/AirGapper/benchmark/offline-runner.mjs:401:32
 
 Node.js v22.23.2
