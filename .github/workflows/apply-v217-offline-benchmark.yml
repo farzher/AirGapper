@@ -70,6 +70,7 @@ jobs:
           git rm .github/module_size_diagnostics_patch.py
           git add receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
           git commit -m "v0.5.233 report tracked QR module size"
+          git pull --rebase origin master
           git push origin HEAD:master
 
       - name: Record normal regression
@@ -81,7 +82,11 @@ jobs:
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
           git add benchmark/latest-result.json
-          git diff --cached --quiet || (git commit -m "record latest fast receiver regression" && git push origin HEAD:master)
+          if ! git diff --cached --quiet; then
+            git commit -m "record latest fast receiver regression"
+            git pull --rebase origin master
+            git push origin HEAD:master
+          fi
 
       - name: Record diagnostics failure
         if: failure()
@@ -97,5 +102,6 @@ jobs:
           git config user.email "actions@github.com"
           git add benchmark/v233-diagnostics-ci.log
           git commit -m "record v233 diagnostics rejection"
+          git pull --rebase origin master
           git push origin HEAD:master
           exit 1
