@@ -78,8 +78,8 @@ replace_once(
 # make partial-lattice traps obvious.
 replace_once(
     "receive/main.js",
-    'Geometry ${freshGeometryCount}/${visibleGridSlots.length} fresh · calibrated ${calibratedGeometryCount}/${visibleGridSlots.length}',
-    'Geometry ${freshGeometryCount}/${visibleGridSlots.length} fresh · calibrated ${calibratedGeometryCount}/${visibleGridSlots.length} · fit ${lastGridSnapshot?.distributedFit ? "distributed" : "local"}'
+    '''Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} fresh · calibrated ${lastGridSnapshot.correctedSlots ?? 0}/${lastGridSnapshot.slots.length} · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}''',
+    '''Geometry ${lastGridSnapshot ? `${lastGridSnapshot.provisional ? "provisional · " : ""}${lastGridSnapshot.observedSlots ?? 0}/${lastGridSnapshot.slots.length} fresh · calibrated ${lastGridSnapshot.correctedSlots ?? 0}/${lastGridSnapshot.slots.length} · fit ${lastGridSnapshot.distributedFit ? "distributed" : "local"} · global fit ${((lastGridSnapshot.fitError ?? 0) * 100).toFixed(1)}%` : "no lattice"}'''
 )
 
 # Version/cache bust. Sender behavior is unchanged from v274.
