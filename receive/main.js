@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.283";
+const RECEIVER_RUNTIME_BUILD = "v0.5.284";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3983,7 +3983,11 @@ function renderFocusDiagnostics() {
   const averageRobustBands = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustBands, 0) / trackedCompletions.length : 0;
   const averageRobustSearchMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustSearchMs, 0) / trackedCompletions.length : 0;
   const visibleSlotCount = regions.reduce((count, region) => count + Number(region.gridSlot !== void 0 && region.slotState !== "OFFSCREEN"), 0);
-  const qrOpportunityRate = sourceCaptureRate * visibleSlotCount;
+  const decodableSlotCount = regions.reduce((count, region) => count + Number(
+    region.gridSlot !== void 0 && isGridDecodeCandidate(region) &&
+    validTrackedQuad(region, receiverFrameWidth, receiverFrameHeight)
+  ), 0);
+  const qrOpportunityRate = sourceCaptureRate * decodableSlotCount;
   const attemptCoverage = qrOpportunityRate > 0 ? attemptedQrRate / qrOpportunityRate : 0;
   const packetInternalBytes = decoder?.mode === "raptorq" ? RAPTOR_PACKET_ID_BYTES : 0;
   const transportMetadataBytes = decoder ? frameOverhead(decoder.mode) + packetInternalBytes : 0;
@@ -4005,7 +4009,7 @@ function renderFocusDiagnostics() {
     `Camera   focus writes ${cameraFocusWritesTotal} · exposure writes ${cameraExposureWritesTotal}`,
     `Source   ${sourceLine}`,
     `Hot path codec ${usesScalarCodec ? "scalar" : "SIMD"} · workers ${pool.size} · busy ${(workerUtilization * 100).toFixed(0)}% · scheduled frames ${decodeSourceRate.toFixed(1)}/s · jobs ${submittedJobsRate.toFixed(1)}→${completedJobsRate.toFixed(1)}/s`,
-    `Capacity ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
+    `Capacity ${decodableSlotCount || "—"} decodable / ${visibleSlotCount || "—"} visible slots × ${sourceCaptureRate.toFixed(1)} fps = ${qrOpportunityRate.toFixed(1)} QR/s · submitted ${attemptedQrRate.toFixed(1)} (${qrOpportunityRate ? `${(attemptCoverage * 100).toFixed(0)}%` : "—"}) · completed ${completedQrRate.toFixed(1)}`,
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
@@ -5760,8 +5764,16 @@ async function captureFrame(source) {
   // roughly a second. A short silence now starts a cheap predicted-slot probe;
   // full-frame recovery remains a later escalation.
   const coverageRecoveryAssist = lockedGeometryTrusted && geometryRecoveryAssistUntil > now;
-  const wallFreshRatio = freshLockedHits / Math.max(1, visibleGridSlots.length);
+  const wallFreshRatio = freshLockedHits / Math.max(1, lockedGeometryCandidates.length);
   const liveGridLayout = lastGridSnapshot?.layout;
+  const candidateCols = new Set();
+  const candidateRows = new Set();
+  for (const region of lockedGeometryCandidates) {
+    const slot = Number(region.gridSlot);
+    if (!Number.isInteger(slot) || !liveGridLayout) continue;
+    candidateCols.add(slot % liveGridLayout.cols);
+    candidateRows.add(Math.floor(slot / liveGridLayout.cols));
+  }
   const freshCols = new Set();
   const freshRows = new Set();
   for (const region of freshLockedRegions) {
@@ -5770,14 +5782,21 @@ async function captureFrame(source) {
     freshCols.add(slot % liveGridLayout.cols);
     freshRows.add(Math.floor(slot / liveGridLayout.cols));
   }
-  const freshDistributed = !liveGridLayout ? false
+  const candidateBreadthCanConstrainPose = !liveGridLayout ? false
+    : liveGridLayout.cols === 1 ? candidateRows.size >= 2
+      : liveGridLayout.rows === 1 ? candidateCols.size >= 2
+        : candidateCols.size >= 2 && candidateRows.size >= 2;
+  // Never demand cross-axis evidence the current camera framing cannot
+  // physically provide. A one-row/one-column view can still be a healthy
+  // tracked subsection of an already-declared wall.
+  const freshDistributed = !candidateBreadthCanConstrainPose || !liveGridLayout ? true
     : liveGridLayout.cols === 1 ? freshRows.size >= 2
       : liveGridLayout.rows === 1 ? freshCols.size >= 2
         : freshCols.size >= 2 && freshRows.size >= 2;
   // Partial lock is a pose failure even when an easy strip of QRs keeps the
   // global decoder-silence timer at zero. Sustain the condition briefly so a
   // normal animated frame cannot wake recovery, then actively repair breadth.
-  const wallCoverageStarved = lockedGeometryTrusted && visibleGridSlots.length >= SLOT_WEAK_MIN_WALL &&
+  const wallCoverageStarved = lockedGeometryTrusted && lockedGeometryCandidates.length >= SLOT_WEAK_MIN_WALL &&
     freshLockedHits > 0 && (wallFreshRatio < 0.55 || !freshDistributed);
   if (wallCoverageStarved) {
     if (!geometryCoverageStarvedSince) geometryCoverageStarvedSince = now;
@@ -5812,8 +5831,7 @@ async function captureFrame(source) {
   // full-frame acquisition loop; only an active lattice may hand scheduling
   // over to tracked QR work.
   const preLatticeDiscovery = !gridLattice.active;
-  const geometryBootstrap = gridLattice.active && Boolean(lastGridSnapshot) && !lastGridSnapshot.distributedFit;
-  const acquisitionDiscovery = preLatticeDiscovery || geometryBootstrap;
+  const acquisitionDiscovery = preLatticeDiscovery;
   const gridNeedsDiscovery = preLatticeDiscovery || (lockedGeometryTrusted
     ? allLockedCandidatesCold
     : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST"));
@@ -5839,7 +5857,7 @@ async function captureFrame(source) {
   // worker on visible unknown neighbors; if every unknown is offscreen, probe
   // globally only occasionally while tracked subsection throughput continues.
   const provisionalNeedsDiscovery = acquisitionDiscovery && (
-    geometryBootstrap || !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
+    !lastGridSnapshot || !captureHasTrackedWork || provisionalUnknownVisible.length > 0 ||
     now - lastFullScan > GEOMETRY_PROBE_SILENCE_MS
   );
   // Once geometry has been proven, never let a transient zero-output window
@@ -5928,7 +5946,7 @@ async function captureFrame(source) {
       : "seed";
     if (localRecoverySeedScan) acquisitionMode = "recovery";
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
-    if (!captureNextScan && acquisitionDiscovery && (!lastGridSnapshot || geometryBootstrap && provisionalUnknownVisible.length === 0) && !fullFrameSeed) {
+    if (!captureNextScan && acquisitionDiscovery && !lastGridSnapshot && !fullFrameSeed) {
       const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
       scanX = seed.x;
       scanY = seed.y;
@@ -5952,17 +5970,14 @@ async function captureFrame(source) {
       const target = provisionalUnknownVisible[acquisitionTileCursor++ % provisionalUnknownVisible.length];
       boundedScanCandidates = target ? [target] : [];
     } else if (localRecoverySeedScan) {
-      // Repair the missing side, not the side that is already trackable. The
-      // previous recovery pool was lockedGeometryCandidates, which excludes an
-      // OFFSCREEN/invalid prediction by definition and could therefore probe
-      // the surviving half forever. Rank every predicted grid slot, preferring
-      // lost/partial/offscreen and stale slots before healthy active slots.
+      // Repair missing breadth using slots that are actually present enough
+      // to decode. Offscreen/invalid predictions belong to global pose recovery,
+      // not an endless local finder loop around pixels that cannot contain a QR.
       const cx = vw / 2, cy = vh / 2;
       const statePriority = (region) => region.slotState === "LOST" ? 5
         : region.slotState === "PARTIAL" ? 4
-          : region.slotState === "OFFSCREEN" ? 3
-            : region.slotState === "LOW_QUALITY" ? 2 : 0;
-      const recoveryPool = regions.filter((region) => region.gridSlot !== void 0 && region.quad && region.dim);
+          : region.slotState === "LOW_QUALITY" ? 2 : 0;
+      const recoveryPool = [...lockedGeometryCandidates];
       const ranked = recoveryPool.sort((a, b) => {
         const stateDelta = statePriority(b) - statePriority(a);
         if (stateDelta) return stateDelta;

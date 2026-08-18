@@ -1162,7 +1162,7 @@ ctx.onmessage = async (e) => {
               if (symbols.length > before) targetedSuccesses++;
             }
           }
-          if (!targetedAttempts || targetedSuccesses === 0) {
+          if (!targetedAttempts) {
             readFullAttempts++;
             appendResults(readDenseSeed(1), false);
           }
