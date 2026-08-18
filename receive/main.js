@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.248";
+const RECEIVER_RUNTIME_BUILD = "v0.5.249";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -4384,9 +4384,16 @@ async function start() {
   var _a;
   const startAttempt = cameraStartGen;
   clearPendingGridLanes();
+
+  // Codec WASM startup is independent of the camera. Start every decoder
+  // worker before transport prep / permission / getUserMedia so cold WASM
+  // compilation is hidden behind work we already have to wait for instead of
+  // beginning only after the live preview is visible.
+  pool.resize(selectedWorkerCount());
   try {
     await prepareRaptorQ();
   } catch (error) {
+    if (startAttempt === cameraStartGen) pool.resize(0);
     offerRetry(`Transport: ${error instanceof Error ? error.message : String(error)}`);
     return;
   }
@@ -4398,6 +4405,7 @@ async function start() {
   progressEl.style.display = "block";
   showRequestedCameraSettings();
   if (!((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia)) {
+    if (startAttempt === cameraStartGen) pool.resize(0);
     offerRetry(
       location.protocol === "file:" ? localCameraMessage : "Camera access needs HTTPS. Open the hosted app or its installed offline PWA."
     );
@@ -4454,6 +4462,7 @@ async function start() {
     }
   } catch (err) {
     if (startAttempt !== cameraStartGen || receiverPaused) return;
+    pool.resize(0);
     const denied = err instanceof DOMException && err.name === "NotAllowedError";
     offerRetry(
       denied ? location.protocol === "file:" ? localCameraMessage : "Camera permission denied — allow it, then tap Enable camera again." : `Camera: ${err instanceof Error ? err.message : String(err)}`
@@ -4481,7 +4490,6 @@ async function start() {
   // while enumerateDevices/capability UI work delays the first camera frame.
   syncPreviewAspect();
   setStatus("");
-  pool.resize(selectedWorkerCount());
   cameraStartedTs = receiverNow();
   resetLivePipeline(cameraStartedTs);
   captureGen++;
