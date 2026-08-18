@@ -5,6 +5,7 @@ on:
     branches: ["agent/ambiguity-erasures"]
     paths:
       - .github/ambiguity_erasures_patch.py
+      - .github/ambiguity_dense_fence.py
       - .github/workflows/ambiguity-erasures.yml
   workflow_dispatch:
 
@@ -21,6 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/ambiguity_erasures_patch.py 2>&1 | tee /tmp/ambiguity-patch.log
+          python3 .github/ambiguity_dense_fence.py
 
       - name: Cache codec toolchain
         uses: actions/cache@v4
@@ -79,13 +81,13 @@ jobs:
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "ambiguity erasure candidate passed at $(date -u +%FT%TZ)"
+            echo "ambiguity erasure dense-fenced candidate passed at $(date -u +%FT%TZ)"
             cat /tmp/ambiguity-summary.log
-          } > benchmark/ambiguity-erasures-pass.log
+          } > benchmark/ambiguity-erasures-dense-pass.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/ambiguity-erasures-pass.log
-          git commit -m "record ambiguity erasure pass"
+          git add benchmark/ambiguity-erasures-dense-pass.log
+          git commit -m "record dense-fenced ambiguity erasure pass"
           git push origin HEAD:agent/ambiguity-erasures
 
       - name: Record rejection marker
@@ -94,15 +96,15 @@ jobs:
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "ambiguity erasure candidate rejected at $(date -u +%FT%TZ)"
+            echo "ambiguity erasure dense-fenced candidate rejected at $(date -u +%FT%TZ)"
             cat /tmp/ambiguity-patch.log 2>/dev/null || true
             tail -n 200 /tmp/ambiguity-build-simd.log 2>/dev/null || true
             tail -n 200 /tmp/ambiguity-build-scalar.log 2>/dev/null || true
             tail -n 520 /tmp/ambiguity-regression.log 2>/dev/null || true
-          } > benchmark/ambiguity-erasures-reject.log
+          } > benchmark/ambiguity-erasures-dense-reject.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/ambiguity-erasures-reject.log
-          git commit -m "record ambiguity erasure rejection"
+          git add benchmark/ambiguity-erasures-dense-reject.log
+          git commit -m "record dense-fenced ambiguity erasure rejection"
           git push origin HEAD:agent/ambiguity-erasures
           exit 1
