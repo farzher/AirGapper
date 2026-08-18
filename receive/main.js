@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.276";
+const RECEIVER_RUNTIME_BUILD = "v0.5.277";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2165,11 +2165,6 @@ function noteDecodeCompleted(id, completion) {
         lastFullScan = 0;
         notePipelineEvent("geometry-recovery-assist", trackedOutputs);
       }
-      if (geometryCoverageCollapseStreak >= GEOMETRY_COLLAPSE_STREAK &&
-          now - geometryCoverageCollapseStartedAt >= GEOMETRY_COLLAPSE_MIN_SPAN_MS) {
-        notePipelineEvent("geometry-coverage-collapse", trackedOutputs);
-        enterGeometryRecovery(`tracked coverage collapsed ${trackedOutputs}/${auditMode.tracks}; fresh acquisition`, now, true);
-      }
     } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
       geometryCoverageCollapseStreak = 0;
       geometryCoverageCollapseLastAt = 0;
@@ -2332,7 +2327,7 @@ const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
 // therefore cannot consume CPU in the healthy LOCKED throughput path.
-const LOCKED_RECOVERY_SCAN_MS = 90;
+const LOCKED_RECOVERY_SCAN_MS = 160;
 const GEOMETRY_FAST_HIT_MS = 220;
 const GEOMETRY_FAST_PROBE_SILENCE_MS = 180;
 const GEOMETRY_PROBE_SILENCE_MS = 500;
@@ -3834,8 +3829,7 @@ function drawOverlay(now) {
       const pop = (1.5 + 2.5 * pulse) * dpr;
       const color = overlayPathColor(r);
       overlayCtx.strokeStyle = color;
-      overlayCtx.shadowColor = color;
-      overlayCtx.shadowBlur = (3 + 7 * pulse) * dpr;
+      overlayCtx.shadowBlur = 0;
       overlayCtx.lineWidth = Math.max(2, (2 + 0.8 * pulse) * dpr);
       overlayCtx.setLineDash([]);
       overlayCtx.globalAlpha = 0.30 + 0.70 * pulse;
@@ -3862,8 +3856,7 @@ function drawOverlay(now) {
     const h = r.h * scale + 2 * pad;
     overlayCtx.globalAlpha = 1 - 0.65 * age / optimizerFadeMs;
     overlayCtx.strokeStyle = OVERLAY_PATH_COLORS.sparse;
-    overlayCtx.shadowColor = OVERLAY_PATH_COLORS.sparse;
-    overlayCtx.shadowBlur = 5 * dpr;
+    overlayCtx.shadowBlur = 0;
     overlayCtx.lineWidth = Math.max(2.5, 2.5 * dpr);
     overlayCtx.setLineDash([]);
     drawOverlayCorners(x, y, w, h, 0.24 * Math.min(w, h));
@@ -5919,11 +5912,15 @@ async function captureFrame(source) {
       // occluded/transitioning code cannot stall reacquisition.
       const cx = vw / 2, cy = vh / 2;
       const ranked = [...lockedGeometryCandidates].sort((a, b) => {
+        const missDelta = (b.consecutiveMisses || 0) - (a.consecutiveMisses || 0);
+        if (missDelta) return missDelta;
+        const ageDelta = (a.decodedSeen ?? -Infinity) - (b.decodedSeen ?? -Infinity);
+        if (ageDelta) return ageDelta;
         const ad = Math.hypot(a.x + a.w / 2 - cx, a.y + a.h / 2 - cy);
         const bd = Math.hypot(b.x + b.w / 2 - cx, b.y + b.h / 2 - cy);
-        return ad - bd;
+        return bd - ad;
       });
-      const poolSize = Math.min(5, ranked.length);
+      const poolSize = Math.min(6, ranked.length);
       const target = ranked[acquisitionTileCursor++ % poolSize];
       boundedScanCandidates = target ? [target] : [];
       geometryRecoveryProbes++;
