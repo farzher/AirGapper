@@ -298,15 +298,14 @@ class GridLattice {
   }
   tick(now) {
     if (this.candidate && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
-      this.transition("REACQUIRE", "whole lattice expired without a valid packet", now);
-      this.candidate = void 0;
-      this.observations = [];
-      this.slotCorrections.clear();
-      return null;
+      // Never erase a CRC-proven wall merely because the camera moved away from
+      // its predicted quads. Keeping identity + homography lets bounded global
+      // recovery accept any later same-stream QR and re-anchor the whole wall
+      // from that QR's four measured corners. Session/camera changes still call
+      // reset/reacquire explicitly when the identity really must be discarded.
+      this.transition("PARTIAL_LOSS", "whole lattice stale; retaining proven wall for QR re-anchor", now);
     }
-    // Provisional geometry remains publishable for overlays, visibility,
-    // cropping and exact observed-slot tracking. Only `active` means the whole
-    // predicted wall is trusted enough to replace acquisition.
+    // Stale geometry remains a recovery prior, not an acquisition blocker.
     return this.candidate ? this.snapshot() : null;
   }
   noteMissing(anyMissing, now = this.lastHitAt) {

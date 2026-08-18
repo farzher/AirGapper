@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.295";
+const RECEIVER_RUNTIME_BUILD = "v0.5.296";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2438,8 +2438,6 @@ const GEOMETRY_COLLAPSE_MIN_SPAN_MS = 180;
 // A short synchronized miss burst is common when a camera exposure crosses a
 // display transition. Keep proven geometry alive long enough for tracked
 // decoding and occasional generic rescue probes to recover it.
-const GEOMETRY_HARD_RESET_MS = 2800;
-const GEOMETRY_NARROW_FOV_HARD_RESET_MS = 8000;
 const CAMERA_MUTATION_SETTLE_MS = 350;
 const EXPECTED_REGIONS_DECAY_MS = 1e4;
 const MAX_REGIONS = 15;
@@ -6243,17 +6241,11 @@ async function captureFrame(source) {
   // roughly 0.9 s of optical misses and forced dense generic reacquisition.
   // Preserve the hot geometry while rescue scans run in parallel; only abandon
   // it after sustained decoder silence.
-  const declaredLockedSlots = liveGridLayout ? liveGridLayout.cols * liveGridLayout.rows : lockedGeometryCandidates.length;
-  const narrowFovLock = declaredLockedSlots > 3 && lockedGeometryCandidates.length <= 3;
-  const hardResetSilenceMs = narrowFovLock ? GEOMETRY_NARROW_FOV_HARD_RESET_MS : GEOMETRY_HARD_RESET_MS;
-  const hardGeometryResetDue = allLockedCandidatesCold &&
-    lockedDecodeSilenceMs >= hardResetSilenceMs;
-  if (hardGeometryResetDue) {
-    enterGeometryRecovery("tracked lattice silent too long; fresh acquisition", now, true);
-    if (trace) trace.stateAfter = gridLattice.state;
-    activeBenchmarkFrame = void 0;
-    return;
-  }
+  // A proven lattice is sticky for the life of this receive session.
+  // `allLockedCandidatesCold` escalates to bounded full-frame recovery below,
+  // but ordinary decoder silence must never destroy stream identity/geometry.
+  // A newly found CRC-valid QR will reject stale pose anchors and re-anchor the
+  // existing wall in place, even when only that one QR is visible.
   // A decoded QR is not the same thing as acquired grid geometry. In SEARCH
   // or REACQUIRE, one valid seed can set expectedRegions/live to 1 before the
   // lattice accepts its geometry. Never let that lone region suppress the

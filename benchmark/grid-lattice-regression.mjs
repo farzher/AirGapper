@@ -96,4 +96,22 @@ assert(snapshot, "measured geometry after a coherent frame nudge must remain usa
 assert.equal(lattice.locked, true);
 assert.equal(snapshot.distributedFit, true);
 
+// Close-up regression: decode silence must never erase a CRC-proven wall. The
+// old 3200 ms tick timeout forced REACQUIRE, which in turn woke expensive cold
+// acquisition and Auto Optics races. Retain the stale wall as PARTIAL_LOSS.
+snapshot = lattice.tick(12000);
+assert(snapshot, "a proven wall must survive long decoder silence");
+assert.equal(lattice.locked, true, "silence must keep the lattice locked for bounded recovery");
+assert.equal(lattice.active, true, "silence must not fall back to cold acquisition");
+assert.equal(lattice.state, "PARTIAL_LOSS");
+
+// One CRC-valid QR at a radically different camera pose has four measured
+// corners, enough to rebuild the full projective wall transform immediately.
+snapshot = lattice.accept(detection(10, 12020, { dx: -260, dy: 310, scale: 1.75 }), frameWidth, frameHeight);
+assert(snapshot, "one verified QR must re-anchor a stale wall");
+assert.equal(lattice.locked, true);
+assert.equal(lattice.state, "TRACK");
+assert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");
+assert.equal(snapshot.fitSlots, 1, "stale old-pose anchors must be discarded on the new pose");
+
 console.log("grid-lattice regression: ok");
