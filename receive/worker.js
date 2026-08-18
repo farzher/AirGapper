@@ -220,6 +220,21 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   // many pixels away HERE". Pure camera translation makes those residuals equal;
   // rotation/scale makes them vary smoothly with position. Fit that residual
   // field as a tiny similarity transform instead of rejecting it as incoherent.
+  if (wallMotionSamples.length === 1) {
+    const item = wallMotionSamples[0];
+    const shift = Math.hypot(item.dx, item.dy);
+    if (shift >= 0.08 && shift <= 4.5) {
+      const wallMotion = {
+        kind: "translation",
+        a: 1, b: 0, tx: item.dx, ty: item.dy,
+        dx: item.dx, dy: item.dy,
+        samples: 1,
+        residual: 0,
+        maxShift: shift
+      };
+      for (const symbol of symbols) symbol.wallMotion = wallMotion;
+    }
+  }
   if (wallMotionSamples.length >= 2) {
     const median = (values) => {
       const sorted = [...values].sort((a, b) => a - b);

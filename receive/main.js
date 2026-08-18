@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.294";
+const RECEIVER_RUNTIME_BUILD = "v0.5.295";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -245,8 +245,10 @@ const AUTO_OPTICS_UNHEALTHY_RETRY_MS = 3000;
 const AUTO_OPTICS_NEAR_BEST_SCORE = 0.97;
 const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.03;
 const AUTO_OPTICS_AE_PRODUCT_CEILING = 6.0;
-const AUTO_OPTICS_POSE_STABLE_MS = 140;
+const AUTO_OPTICS_POSE_STABLE_MS = 300;
 const AUTO_OPTICS_POSE_WAIT_MS = 700;
+const AUTO_OPTICS_NARROW_FOV_MAX_VISIBLE = 3;
+const AUTO_OPTICS_NARROW_FOV_RETRY_MS = 1800;
 const AUTO_OPTICS_POSE_MAX_CENTER_DRIFT = 0.035;
 const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // One stable tracked QR is enough to compare exposure candidates. Requiring
@@ -2412,7 +2414,7 @@ const ACQUISITION_SCAN_MS = 20;
 // The first acquisition frame is global. After that, prefer the much cheaper
 // overlapping seed windows; with one-QR lock there is no reason to repeatedly
 // scan the whole dense wall while waiting for cross-axis confirmation.
-const ACQUISITION_FULL_EVERY = 10;
+const ACQUISITION_FULL_EVERY = 4;
 const ACQUISITION_DEEP_EVERY = 13;
 const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
@@ -2437,6 +2439,7 @@ const GEOMETRY_COLLAPSE_MIN_SPAN_MS = 180;
 // display transition. Keep proven geometry alive long enough for tracked
 // decoding and occasional generic rescue probes to recover it.
 const GEOMETRY_HARD_RESET_MS = 2800;
+const GEOMETRY_NARROW_FOV_HARD_RESET_MS = 8000;
 const CAMERA_MUTATION_SETTLE_MS = 350;
 const EXPECTED_REGIONS_DECAY_MS = 1e4;
 const MAX_REGIONS = 15;
@@ -3589,6 +3592,8 @@ async function settleAutomaticQrOptics(track, now) {
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
   const settings = track.getSettings();
+  const preTuneExposure = Number(settings.exposureTime);
+  const preTuneIso = Number(settings.iso);
   if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") ||
       !exposureRange || !isoRange || !Number.isFinite(settings.exposureTime) ||
       !Number.isFinite(settings.iso) || settings.exposureTime <= 0 || settings.iso <= 0) {
@@ -3596,6 +3601,15 @@ async function settleAutomaticQrOptics(track, now) {
     return;
   }
   const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+  const declaredAutoLayout = lastGridSnapshot?.layout;
+  const declaredAutoSlots = declaredAutoLayout ? declaredAutoLayout.cols * declaredAutoLayout.rows : 0;
+  const visibleAutoSlots = autoOpticsVisibleSlots();
+  if (declaredAutoSlots > AUTO_OPTICS_NARROW_FOV_MAX_VISIBLE && visibleAutoSlots <= AUTO_OPTICS_NARROW_FOV_MAX_VISIBLE) {
+    autoOpticsLockSince = 0;
+    autoOpticsRetryAt = now + AUTO_OPTICS_NARROW_FOV_RETRY_MS;
+    autoOpticsTuneSummary = `narrow FOV ${visibleAutoSlots}/${declaredAutoSlots} · holding current optics`;
+    return;
+  }
   const savedAe = autoOpticsAeBaseline && receiverNow() - autoOpticsAeBaseline.at < 9000 ? autoOpticsAeBaseline : void 0;
   const aeExposure = savedAe?.exposure ?? settings.exposureTime;
   const aeIso = savedAe?.iso ?? settings.iso;
@@ -3655,9 +3669,17 @@ async function settleAutomaticQrOptics(track, now) {
     }
     if (!automaticOpticsSessionAlive(track)) return;
     if (tuned.deferred) {
+      if (Number.isFinite(preTuneExposure) && preTuneExposure > 0 && Number.isFinite(preTuneIso) && preTuneIso > 0) {
+        await applyCameraConstraint(track, {
+          exposureMode: "manual",
+          exposureTime: quantizeCameraRange(preTuneExposure, exposureRange),
+          iso: quantizeCameraRange(preTuneIso, isoRange)
+        });
+        if (!automaticOpticsSessionAlive(track)) return;
+      }
       autoOpticsRuntimeState = "ae";
       autoOpticsLockSince = 0;
-      autoOpticsRetryAt = receiverNow() + Math.max(350, Number(tuned.retryMs) || 0);
+      autoOpticsRetryAt = receiverNow() + Math.max(AUTO_OPTICS_NARROW_FOV_RETRY_MS, Number(tuned.retryMs) || 0);
       autoOpticsTuneSummary = tuned.deferredReason || "comparison invalidated by movement · holding short shutter";
       focusController.adoptAutomaticCameraState(tuned.deferredReason
         ? "automatic optics comparison deferred because decoder geometry changed during the control bracket"
@@ -5847,8 +5869,8 @@ function acquisitionSeedWindow(index, width, height) {
   const row = Math.floor(index / cols) % rows;
   const cellW = width / cols;
   const cellH = height / rows;
-  const padX = cellW * 0.28;
-  const padY = cellH * 0.28;
+  const padX = cellW * 0.42;
+  const padY = cellH * 0.42;
   const quantum = 16;
   const x = Math.max(0, Math.floor((col * cellW - padX) / quantum) * quantum);
   const y = Math.max(0, Math.floor((row * cellH - padY) / quantum) * quantum);
@@ -6221,8 +6243,11 @@ async function captureFrame(source) {
   // roughly 0.9 s of optical misses and forced dense generic reacquisition.
   // Preserve the hot geometry while rescue scans run in parallel; only abandon
   // it after sustained decoder silence.
+  const declaredLockedSlots = liveGridLayout ? liveGridLayout.cols * liveGridLayout.rows : lockedGeometryCandidates.length;
+  const narrowFovLock = declaredLockedSlots > 3 && lockedGeometryCandidates.length <= 3;
+  const hardResetSilenceMs = narrowFovLock ? GEOMETRY_NARROW_FOV_HARD_RESET_MS : GEOMETRY_HARD_RESET_MS;
   const hardGeometryResetDue = allLockedCandidatesCold &&
-    lockedDecodeSilenceMs >= GEOMETRY_HARD_RESET_MS;
+    lockedDecodeSilenceMs >= hardResetSilenceMs;
   if (hardGeometryResetDue) {
     enterGeometryRecovery("tracked lattice silent too long; fresh acquisition", now, true);
     if (trace) trace.stateAfter = gridLattice.state;
@@ -7061,8 +7086,10 @@ function onDecoded(bytes, box, info) {
     const geometryInfo = { ...info, crc32: true };
     const sourceSequence = Number(info?.sourceSequence);
     const motion = info?.wallMotion;
+    const motionSamples = Number(motion?.samples) || 0;
+    const motionEvidenceEnough = motion?.kind === "translation" ? motionSamples >= 1 : motionSamples >= 2;
     if (Number.isFinite(sourceSequence) && sourceSequence > geometryMotionLastSourceSequence &&
-        motion && Number(motion.samples) >= 2 && Number.isFinite(motion.dx) && Number.isFinite(motion.dy)) {
+        motion && motionEvidenceEnough && Number.isFinite(motion.dx) && Number.isFinite(motion.dy)) {
       geometryMotionLastSourceSequence = sourceSequence;
       const hasSimilarity = [motion.a, motion.b, motion.tx, motion.ty].every((value) => Number.isFinite(Number(value)));
       const motionSnapshot = hasSimilarity
