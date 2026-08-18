@@ -1,0 +1,45 @@
+name: ui candidate
+
+on:
+  push:
+    paths:
+      - .github/workflows/ui-candidate.yml
+
+permissions: { contents: write }
+
+concurrency:
+  group: fast-receiver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promote-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Apply and verify UI candidate
+        run: |
+          set -euo pipefail
+          python3 .github/receiver_candidate.py
+          node --check main.js
+          git diff --check
+          grep -q '<span>Receive</span><button class="secondary-button" id="send-receiver-link-open"' index.html
+          grep -q 'const APP_BUILD = "v0.5.269"' main.js
+          grep -q 'airgapper-static-js-v217' sw.js
+
+      - name: Promote
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          MESSAGE="$(cat .github/receiver_candidate_message.txt)"
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt .github/workflows/ui-candidate.yml
+          git add -A
+          git commit -m "$MESSAGE"
+          git pull --rebase origin master
+          git push origin HEAD:master
