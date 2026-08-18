@@ -930,14 +930,31 @@ static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenG
     return out;
 }
 
-static int turboThreshold(const TurboLevels& levels, int x, int y, int dim)
+struct TurboThresholdPlane
 {
-    const float fx = (x + 0.5f) / dim;
-    const float fy = (y + 0.5f) / dim;
-    const float t = levels.tl + (levels.tr - levels.tl) * fx + (levels.bl - levels.tl) * fy;
-    const int lo = std::min({levels.tl, levels.tr, levels.bl}) - 12;
-    const int hi = std::max({levels.tl, levels.tr, levels.bl}) + 12;
-    return std::clamp(int(std::lround(t)), lo, hi);
+    float base = 128;
+    float stepX = 0;
+    float stepY = 0;
+    int lo = 0;
+    int hi = 255;
+};
+
+static TurboThresholdPlane turboThresholdPlane(const TurboLevels& levels, int dim)
+{
+    const float invDim = 1.0f / float(dim);
+    TurboThresholdPlane plane;
+    plane.stepX = float(levels.tr - levels.tl) * invDim;
+    plane.stepY = float(levels.bl - levels.tl) * invDim;
+    plane.base = float(levels.tl) + 0.5f * (plane.stepX + plane.stepY);
+    plane.lo = std::min({levels.tl, levels.tr, levels.bl}) - 12;
+    plane.hi = std::max({levels.tl, levels.tr, levels.bl}) + 12;
+    return plane;
+}
+
+static int turboThreshold(const TurboThresholdPlane& plane, int x, int y)
+{
+    const float t = plane.base + plane.stepX * float(x) + plane.stepY * float(y);
+    return std::clamp(int(std::lround(t)), plane.lo, plane.hi);
 }
 
 static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -1066,6 +1083,7 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
     const double sampleStarted = guidedNowMs();
     ByteArray data(plan.dataCodewords);
     const float moduleSize = guidedModuleSize(track);
+    const auto thresholdPlane = turboThresholdPlane(levels, dim);
     bool failed = false;
     for (int codeword = 0; codeword < plan.dataCodewords && !failed; ++codeword) {
         uint8_t value = 0;
@@ -1075,7 +1093,7 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const int xx = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const int threshold = turboThreshold(levels, xx, y, dim);
+            const int threshold = turboThreshold(thresholdPlane, xx, y);
             int lum;
             if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
                 // High-resolution CRC-Turbo can use one calibrated center byte.
@@ -1493,6 +1511,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         return {};
 
     const float moduleSize = guidedModuleSize(track);
+    const auto thresholdPlane = turboThresholdPlane(levels, dim);
     auto sampleByte = [&](const std::vector<uint32_t>& plan, size_t firstBit,
                           uint8_t& value) -> bool {
         value = 0;
@@ -1501,7 +1520,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int xx = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const int threshold = turboThreshold(levels, xx, y, dim);
+            const int threshold = turboThreshold(thresholdPlane, xx, y);
             int lum;
             if (centerOnly) {
                 const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
