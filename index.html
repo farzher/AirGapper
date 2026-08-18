@@ -26,7 +26,7 @@
         <canvas id="receiver-link-qr" class="header-qr" data-receiver-url="https://farzher.github.io/AirGapper/?r" aria-hidden="true"></canvas>
       </button>
       <button class="brand-button" id="home-button" type="button">
-        <span class="brand">AirGapper <span class="app-version">v0.5.305</span></span>
+        <span class="brand">AirGapper <span class="app-version">v0.5.306</span></span>
         <span class="tag">Air-gapped file transfer</span>
       </button>
     </div>
@@ -111,7 +111,7 @@
             </div>
             <div class="receiver-dev-actions" hidden>
               <div id="optics-auto-actions" hidden><button class="secondary-button" id="optics-optimize" type="button" aria-pressed="false">Recalibrate</button><button class="secondary-button" id="optics-keep" type="button" hidden>Keep</button><span id="optics-optimize-status" role="status">Off</span></div>
-              <label><span>Device label</span><input id="device-label" type="text" placeholder="OnePlus 12R" autocomplete="off" /></label><label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
+              <label><span>Device label</span><input id="device-label" type="text" placeholder="OnePlus 12R" autocomplete="off" /></label><label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label><label id="decode-tracks-control"><span>Tracks/frame</span><select id="decode-tracks-per-frame"><option value="auto" selected>Auto</option><option value="32">32</option><option value="28">28</option><option value="24">24</option><option value="20">20</option><option value="16">16</option><option value="12">12</option><option value="8">8</option></select></label>
               <label class="setting-toggle" id="strict-hot-path-control"><input id="strict-hot-path" type="checkbox" /><span>Strict hot path</span></label>
               <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="copy-diagnostics" type="button">Copy diagnostics</button><button class="secondary-button" id="record-corpus" type="button">Record raw</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
               <pre id="transport-diagnostics" class="transport-diagnostics"></pre>
@@ -158,6 +158,6 @@
   <a id="receiver-link-url"></a>
 </dialog>
 
-<script type="module" src="./main.js?build=v0.5.305"></script>
+<script type="module" src="./main.js?build=v0.5.306"></script>
 </body>
 </html>

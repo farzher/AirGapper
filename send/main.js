@@ -34,7 +34,7 @@ const AUTO_GRID_MIN_MODULE_PX = 2;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.305";
+const SEND_RUNTIME_BUILD = "v0.5.306";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";

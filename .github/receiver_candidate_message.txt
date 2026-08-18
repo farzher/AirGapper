@@ -1,1 +1,0 @@
-v0.5.306 add rolling-shutter-aware tracked QR CPU budgeting
