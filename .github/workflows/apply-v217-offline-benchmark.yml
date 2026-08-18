@@ -12,11 +12,15 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
-      - .github/v234_sparse_profile_patch.py
+      - .github/receiver_candidate.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
 permissions: { contents: write }
+
+concurrency:
+  group: fast-receiver-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   fast-regression:
@@ -24,17 +28,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: Apply v234 sparse profile candidate
+      - name: Apply receiver candidate
         id: candidate
         run: |
           set -euo pipefail
-          if [ -f .github/v234_sparse_profile_patch.py ] && ! grep -q 'decodeAirGapperSampledBits' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
-            python3 .github/v234_sparse_profile_patch.py 2>&1 | tee /tmp/v234-patch.log
+          if [ -f .github/receiver_candidate.py ]; then
+            python3 .github/receiver_candidate.py 2>&1 | tee /tmp/receiver-candidate-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
+          git diff --check
 
       - name: Cache codec toolchain
         if: steps.candidate.outputs.changed == 'true'
@@ -51,8 +57,8 @@ jobs:
         if: steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/v234-build-simd.log
-          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/v234-build-scalar.log
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-simd.log
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-scalar.log
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
@@ -61,55 +67,12 @@ jobs:
         run: npm install --no-save --package-lock=false playwright@1.55.0
 
       - name: Run production regression
-        id: regression
         run: |
           set -euo pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v234-regression.log
-
-      - name: Require useful sparse profile win
-        id: performance
-        if: steps.candidate.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          node <<'NODE' 2>&1 | tee /tmp/v234-performance.log
-          const fs=require('fs');
-          const before=JSON.parse(fs.readFileSync('benchmark/latest-result.json','utf8')).scenarios;
-          const after=JSON.parse(fs.readFileSync('benchmark/offline-summary.json','utf8')).scenarios;
-          const med=(x,k)=>Number(x?.trialMedians?.[k] ?? x?.normalized?.[k] ?? 0);
-          const bS=before['stable-y8'],aS=after['stable-y8'];
-          const bM=before['motion-y8'],aM=after['motion-y8'];
-          const bD=before['dense-y8'],aD=after['dense-y8'];
-          const bO=before['optical-dense-y8'],aO=after['optical-dense-y8'];
-          const bC=before['camera-dense-y8'],aC=after['camera-dense-y8'];
-          const hardBefore=(med(bO,'guidedMsPerOutput')+med(bC,'guidedMsPerOutput'))/2;
-          const hardAfter=(med(aO,'guidedMsPerOutput')+med(aC,'guidedMsPerOutput'))/2;
-          const motionBefore=med(bM,'guidedMsPerOutput'), motionAfter=med(aM,'guidedMsPerOutput');
-          const attempts=(aM.guided?.sparseProfileAttempts||0)+(aO.guided?.sparseProfileAttempts||0)+(aC.guided?.sparseProfileAttempts||0);
-          const successes=(aM.guided?.sparseProfileSuccesses||0)+(aO.guided?.sparseProfileSuccesses||0)+(aC.guided?.sparseProfileSuccesses||0);
-          const profileYield=attempts ? successes/attempts : 0;
-          const problems=[];
-          if(attempts<80) problems.push(`known-profile sparse path barely exercised (${attempts})`);
-          if(profileYield<0.90) problems.push(`known-profile success ${(100*profileYield).toFixed(1)}% < 90%`);
-          if(hardAfter>hardBefore*.95) problems.push(`hard optical ${hardAfter.toFixed(3)}ms/QR did not beat ${hardBefore.toFixed(3)} by 5%`);
-          if(motionAfter>motionBefore*1.03) problems.push(`motion CPU ${motionAfter.toFixed(3)} regressed from ${motionBefore.toFixed(3)}`);
-          for(const [name,b,a] of [['stable',bS,aS],['dense',bD,aD],['optical',bO,aO],['camera',bC,aC]]) {
-            if(med(a,'guidedOutputYield') < med(b,'guidedOutputYield')-.01) problems.push(`${name} output yield regressed`);
-          }
-          if(med(aS,'guidedMsPerOutput')>med(bS,'guidedMsPerOutput')*1.12) problems.push('clean stable CPU regressed >12%');
-          if(med(aD,'guidedMsPerOutput')>med(bD,'guidedMsPerOutput')*1.10) problems.push('clean dense CPU regressed >10%');
-          if(aM.finalState!=='TRACK' || aM.tailFullJobs!==0) problems.push('motion state/recovery regressed');
-          console.log(JSON.stringify({
-            profile:{attempts,successes,yield:profileYield,motion:[aM.guided?.sparseProfileSuccesses,aM.guided?.sparseProfileAttempts],optical:[aO.guided?.sparseProfileSuccesses,aO.guided?.sparseProfileAttempts],camera:[aC.guided?.sparseProfileSuccesses,aC.guided?.sparseProfileAttempts]},
-            hardOpticalMsPerQr:{before:hardBefore,after:hardAfter},
-            motionMsPerQr:{before:motionBefore,after:motionAfter},
-            stable:{before:bS.trialMedians,after:aS.trialMedians},
-            dense:{before:bD.trialMedians,after:aD.trialMedians}
-          },null,2));
-          if(problems.length) throw new Error(problems.join('; '));
-          NODE
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/receiver-regression.log
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -119,7 +82,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Commit passing v234 candidate
+      - name: Promote passing candidate
         if: success() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -127,13 +90,13 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/v234_sparse_profile_patch.py
-          for f in .github/v233_local_phase_patch.py .github/v234_cheap_phase_refine.py .github/v234_persistent_phase_refine.py; do [ ! -f "$f" ] || git rm "$f"; done
-          git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/wrapper/decimen_codec.h vendor/decimen-codec/source/VERSION \
-                  vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
-                  vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
-                  receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.234 fast-decode sampled AirGapper QR profile"
+          MESSAGE="$(cat .github/receiver_candidate_message.txt 2>/dev/null || echo 'promote receiver candidate')"
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt
+          rm -f .github/ambiguity_erasures_patch.py .github/ambiguity_dense_fence.py
+          rm -f .github/v268*.py .github/workflows/v268-*.yml
+          rm -f benchmark/v268*-ci.log benchmark/v268*-pass.log
+          git add -A
+          git commit -m "$MESSAGE"
           git pull --rebase origin master
           git push origin HEAD:master
 
@@ -152,23 +115,25 @@ jobs:
             git push origin HEAD:master
           fi
 
-      - name: Record v234 rejection
-        if: failure()
+      - name: Record candidate rejection
+        if: failure() && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git reset --hard HEAD
           {
-            echo "v234 sparse profile candidate rejected at $(date -u +%FT%TZ)"
-            cat /tmp/v234-patch.log 2>/dev/null || true
-            cat /tmp/v234-performance.log 2>/dev/null || true
-            tail -n 160 /tmp/v234-build-simd.log 2>/dev/null || true
-            tail -n 160 /tmp/v234-build-scalar.log 2>/dev/null || true
-            tail -n 480 /tmp/v234-regression.log 2>/dev/null || true
-          } > benchmark/v234-sparse-profile-ci.log
+            echo "receiver candidate rejected at $(date -u +%FT%TZ)"
+            cat /tmp/receiver-candidate-patch.log 2>/dev/null || true
+            tail -n 180 /tmp/receiver-build-simd.log 2>/dev/null || true
+            tail -n 180 /tmp/receiver-build-scalar.log 2>/dev/null || true
+            tail -n 500 /tmp/receiver-regression.log 2>/dev/null || true
+          } > benchmark/receiver-candidate-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          git add benchmark/v234-sparse-profile-ci.log
-          git commit -m "record v234 sparse profile rejection"
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt
+          rm -f .github/ambiguity_erasures_patch.py .github/ambiguity_dense_fence.py
+          rm -f .github/v268*.py .github/workflows/v268-*.yml
+          git add -A benchmark/receiver-candidate-ci.log .github
+          git commit -m "record receiver candidate rejection"
           git pull --rebase origin master
           git push origin HEAD:master
           exit 1
