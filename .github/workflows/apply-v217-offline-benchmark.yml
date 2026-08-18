@@ -13,7 +13,7 @@ on:
       - sw.js
       - benchmark/offline-runner.mjs
       - .github/v233_local_phase_patch.py
-      - .github/v234_cheap_phase_refine.py
+      - .github/v234_persistent_phase_refine.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -26,13 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v234 cheap local phase candidate
+      - name: Apply v234 persistent local phase candidate
         id: candidate
         run: |
           set -euo pipefail
           if [ -f .github/v233_local_phase_patch.py ] && ! grep -q 'turboRefineLocalPhase' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
             python3 .github/v233_local_phase_patch.py 2>&1 | tee /tmp/v234-patch.log
-            python3 .github/v234_cheap_phase_refine.py 2>&1 | tee /tmp/v234-refine.log
+            python3 .github/v234_persistent_phase_refine.py 2>&1 | tee /tmp/v234-refine.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -71,7 +71,7 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/v234-regression.log
 
-      - name: Require useful optical phase recovery
+      - name: Require useful persistent optical recovery
         id: performance
         if: steps.candidate.outputs.changed == 'true'
         run: |
@@ -127,12 +127,13 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/v233_local_phase_patch.py .github/v234_cheap_phase_refine.py
+          git rm .github/v233_local_phase_patch.py .github/v234_persistent_phase_refine.py
+          [ ! -f .github/v234_cheap_phase_refine.py ] || git rm .github/v234_cheap_phase_refine.py
           git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/wrapper/decimen_codec.h vendor/decimen-codec/source/VERSION \
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
                   receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.234 recover optical phase cheaply"
+          git commit -m "v0.5.234 remember CRC-proven optical phase"
           git pull --rebase origin master
           git push origin HEAD:master
 
@@ -168,7 +169,7 @@ jobs:
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
           git add benchmark/v234-ci.log
-          git commit -m "record v234 cheap phase rejection"
+          git commit -m "record v234 persistent phase rejection"
           git pull --rebase origin master
           git push origin HEAD:master
           exit 1
