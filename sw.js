@@ -1,5 +1,5 @@
 (() => {
-  const CACHE = "airgapper-static-js-v205";
+  const CACHE = "airgapper-static-js-v206";
   const PRECACHE = [
     "./main.js",
     "./icon-192.png",
@@ -96,7 +96,12 @@
         if (response.ok) cache.put(request, response.clone());
         return response;
       } catch {
-        const cached = await cache.match(request, { ignoreSearch: request.mode === "navigate" });
+        // Static build/scalar query parameters select runtime behavior, not
+        // different file bytes. Precache stores the canonical paths, so offline
+        // fallback must ignore the query (e.g. main.js?build=v... and
+        // worker.js?scalar=1) or a freshly installed PWA can miss files it
+        // already precached.
+        const cached = await cache.match(request, { ignoreSearch: true });
         if (cached) return cached;
         if (request.mode === "navigate") return cache.match("./index.html");
         throw new Error("Offline and not cached");
