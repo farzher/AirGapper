@@ -1,0 +1,1 @@
+v0.5.311 let Auto respect selected QR Size
