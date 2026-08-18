@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.245";
+const RECEIVER_RUNTIME_BUILD = "v0.5.246";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -737,7 +737,10 @@ const opticsAnalyzer = new StaticQrOpticsAnalyzer();
 function attachCameraController(track) {
   focusController.attach(track);
   if (automaticOptics) void primeAutomaticQrOpticsStartup(track);
-  else void applyExposureSetting(track);
+  // Manual sensor settings are applied explicitly before camera playback and
+  // verified after fresh frames arrive. Do not write them again merely because
+  // the focus/controller UI attached; duplicate constraint writes can restart
+  // Android camera delivery and hold decoding during acquisition.
 }
 async function reapplyManualOpticsAfterFreshFrames(track, reason) {
   const generation = ++manualOpticsReapplyGeneration;
