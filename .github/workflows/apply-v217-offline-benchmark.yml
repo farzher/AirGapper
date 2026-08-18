@@ -13,6 +13,7 @@ on:
       - sw.js
       - benchmark/offline-runner.mjs
       - .github/v233_local_phase_patch.py
+      - .github/v234_cheap_phase_refine.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -25,12 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply v234 local phase candidate
+      - name: Apply v234 cheap local phase candidate
         id: candidate
         run: |
           set -euo pipefail
           if [ -f .github/v233_local_phase_patch.py ] && ! grep -q 'turboRefineLocalPhase' vendor/decimen-codec/source/wrapper/decimen_codec.cpp; then
             python3 .github/v233_local_phase_patch.py 2>&1 | tee /tmp/v234-patch.log
+            python3 .github/v234_cheap_phase_refine.py 2>&1 | tee /tmp/v234-refine.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'changed=false' >> "$GITHUB_OUTPUT"
@@ -125,12 +127,12 @@ jobs:
           git config user.email "actions@github.com"
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json
-          git rm .github/v233_local_phase_patch.py
+          git rm .github/v233_local_phase_patch.py .github/v234_cheap_phase_refine.py
           git add vendor/decimen-codec/source/wrapper/decimen_codec.cpp vendor/decimen-codec/source/wrapper/decimen_codec.h vendor/decimen-codec/source/VERSION \
                   vendor/decimen-codec/decimen_codec.js vendor/decimen-codec/decimen_codec.wasm \
                   vendor/decimen-codec-android/decimen_codec.js vendor/decimen-codec-android/decimen_codec.wasm \
                   receive/worker.js receive/main.js main.js index.html sw.js benchmark/latest-result.json
-          git commit -m "v0.5.234 recover per-slot optical phase"
+          git commit -m "v0.5.234 recover optical phase cheaply"
           git pull --rebase origin master
           git push origin HEAD:master
 
@@ -157,6 +159,7 @@ jobs:
           {
             echo "v234 candidate rejected at $(date -u +%FT%TZ)"
             cat /tmp/v234-patch.log 2>/dev/null || true
+            cat /tmp/v234-refine.log 2>/dev/null || true
             cat /tmp/v234-performance.log 2>/dev/null || true
             tail -n 160 /tmp/v234-build-simd.log 2>/dev/null || true
             tail -n 160 /tmp/v234-build-scalar.log 2>/dev/null || true
@@ -165,7 +168,7 @@ jobs:
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
           git add benchmark/v234-ci.log
-          git commit -m "record v234 local phase rejection"
+          git commit -m "record v234 cheap phase rejection"
           git pull --rebase origin master
           git push origin HEAD:master
           exit 1
