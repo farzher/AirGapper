@@ -565,8 +565,58 @@ static bool buildSparseSampleMap(int dim, const PerspectiveTransform& fallback,
     return true;
 }
 
-static void seedGuidedTurbo(int id, int dim, const Position& pos,
-                            std::vector<PointF>&& samples, bool distortionAware)
+static bool buildSparseSampleMapBilinear(int dim, const PerspectiveTransform& fallback,
+                                         Matrix<std::optional<PointF>>& controls,
+                                         const std::vector<int>& centers,
+                                         std::vector<PointF>& out)
+{
+    const int W = Size(centers) - 1;
+    const int H = W;
+    if (dim <= 0 || W <= 0)
+        return false;
+    for (int y = 0; y <= H; ++y)
+        for (int x = 0; x <= W; ++x)
+            if (!controls(x, y))
+                controls.set(x, y, fallback(centered(PointI(centers[x], centers[y]))));
+
+    out.assign(size_t(dim) * dim, PointF{});
+    for (int ry = 0; ry < H; ++ry) {
+        for (int rx = 0; rx < W; ++rx) {
+            const int x0 = centers[rx], x1 = centers[rx + 1];
+            const int y0 = centers[ry], y1 = centers[ry + 1];
+            const int beginX = rx == 0 ? 0 : x0;
+            const int endX = rx == W - 1 ? dim : x1;
+            const int beginY = ry == 0 ? 0 : y0;
+            const int endY = ry == H - 1 ? dim : y1;
+            const PointF q00 = *controls(rx, ry);
+            const PointF q10 = *controls(rx + 1, ry);
+            const PointF q11 = *controls(rx + 1, ry + 1);
+            const PointF q01 = *controls(rx, ry + 1);
+            const float invWidth = 1.0f / float(x1 - x0);
+            const float invHeight = 1.0f / float(y1 - y0);
+            for (int y = beginY; y < endY; ++y) {
+                const float v = float(y - y0) * invHeight;
+                const PointF left{q00.x + (q01.x - q00.x) * v,
+                                  q00.y + (q01.y - q00.y) * v};
+                const PointF right{q10.x + (q11.x - q10.x) * v,
+                                   q10.y + (q11.y - q10.y) * v};
+                const PointF step{(right.x - left.x) * invWidth,
+                                  (right.y - left.y) * invWidth};
+                PointF p{left.x + step.x * float(beginX - x0),
+                         left.y + step.y * float(beginX - x0)};
+                for (int x = beginX; x < endX; ++x) {
+                    out[size_t(y) * dim + x] = p;
+                    p.x += step.x;
+                    p.y += step.y;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static void seedGuidedTurboQuad(int id, int dim, const std::array<PointF, 4>& quad,
+                                std::vector<PointF>&& samples, bool distortionAware)
 {
     auto* cache = guidedTurboTrack(id);
     if (!cache || dim <= 0 || samples.size() != size_t(dim) * dim)
@@ -574,11 +624,17 @@ static void seedGuidedTurbo(int id, int dim, const Position& pos,
     cache->dimension = dim;
     cache->seeded = true;
     cache->distortionAware = distortionAware;
-    cache->seedQuad = turboPositionQuad(pos);
+    cache->seedQuad = quad;
     cache->samples = std::move(samples);
     cache->misses = 0;
     cache->cooldown = 0;
     cache->stableSuccesses = 0;
+}
+
+static void seedGuidedTurbo(int id, int dim, const Position& pos,
+                            std::vector<PointF>&& samples, bool distortionAware)
+{
+    seedGuidedTurboQuad(id, dim, turboPositionQuad(pos), std::move(samples), distortionAware);
 }
 
 static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
@@ -1039,27 +1095,41 @@ static DecoderResult decodeAirGapperSampledBits(const BitMatrix& bits)
 
 
 // Sparse Guided already has a current-frame 3x3 distortion control lattice.
-// Sample AirGapper's fixed codeword placement directly through that lattice
-// before asking generic GridSampler to materialize an entire 177x177 matrix.
-// Each of the four sparse tiles uses a cheap bilinear warp. This is only a
-// speculative fast path: QR RS + AirGapper CRC must both pass, otherwise the
-// caller immediately runs the existing perspective SampleGrid path unchanged.
-static DecoderResult decodeAirGapperSparseBilinear(
+// AirGapper also fixes QR Model-2 EC-L/mask-4. Read only data codewords first;
+// if DecodeBitStream + AirGapper CRC succeeds, parity modules and QR RS are
+// unnecessary. On a miss, keep those already sampled bytes, read only the
+// remaining ECC codewords, and run the normal QR RS decoder. No pixel is read
+// twice and the exact CRC acceptance contract is unchanged.
+struct GuidedSparseFastResult
+{
+    DecoderResult decoded;
+    std::array<PointF, 4> quad{};
+    double decodeMs = 0;
+    bool attempted = false;
+    bool dataOnlyAttempted = false;
+    bool dataOnlySuccess = false;
+    bool rsAttempted = false;
+};
+
+static DecoderResult decodeAirGapperSparseProgressive(
     const BitMatrix& image, int dim,
     const PerspectiveTransform& fallback,
     const Matrix<std::optional<PointF>>& controls,
     const std::vector<int>& centers,
-    double* decodeMsOut)
+    GuidedSparseFastResult& result)
 {
-    if (decodeMsOut) *decodeMsOut = 0;
+    result.dataOnlyAttempted = true;
     if (centers.size() != 3 || dim < 21 || dim > 177 || ((dim - 17) & 3))
         return {};
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
         return {};
     const int totalCodewords = version->totalCodewords();
-    const auto& plan = turboCodewordPlan(dim);
-    if (totalCodewords <= 0 || plan.size() != size_t(totalCodewords) * 8)
+    const auto& fullPlan = turboCodewordPlan(dim);
+    const auto& dataPlan = turboDataPlan(dim);
+    if (totalCodewords <= 0 || fullPlan.size() != size_t(totalCodewords) * 8 ||
+        dataPlan.dataCodewords <= 0 || dataPlan.samples.size() != size_t(dataPlan.dataCodewords) * 8 ||
+        dataPlan.destination.size() != size_t(dataPlan.dataCodewords))
         return {};
 
     auto control = [&](int x, int y) -> PointF {
@@ -1074,11 +1144,9 @@ static DecoderResult decodeAirGapperSparseBilinear(
                 control(rx + 1, ry + 1), control(rx, ry + 1)
             };
 
-    ByteArray raw(totalCodewords);
-    bool failed = false;
-    for (int codeword = 0; codeword < totalCodewords && !failed; ++codeword) {
-        uint8_t value = 0;
-        const size_t firstBit = size_t(codeword) * 8;
+    auto sampleByte = [&](const std::vector<uint32_t>& plan, size_t firstBit,
+                          uint8_t& value) -> bool {
+        value = 0;
         for (int bit = 0; bit < 8; ++bit) {
             const uint32_t entry = plan[firstBit + bit];
             const int x = int(entry & 0xff);
@@ -1095,41 +1163,63 @@ static DecoderResult decodeAirGapperSparseBilinear(
                                 q[3].y + (q[2].y - q[3].y) * u};
             const PointF p{top.x + (bottom.x - top.x) * v,
                            top.y + (bottom.y - top.y) * v};
-            if (!image.isIn(p)) {
-                failed = true;
-                break;
-            }
+            if (!image.isIn(p))
+                return false;
             const bool dark = image.get(p);
             value = uint8_t((value << 1) | uint8_t(mask != dark));
         }
+        return true;
+    };
+
+    ByteArray raw(totalCodewords);
+    ByteArray data(dataPlan.dataCodewords);
+    for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
+        uint8_t value = 0;
+        if (!sampleByte(dataPlan.samples, size_t(codeword) * 8, value))
+            return {};
+        raw[codeword] = value;
+        data[dataPlan.destination[codeword]] = value;
+    }
+
+    double decodeStarted = guidedNowMs();
+    auto direct = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
+    result.decodeMs += guidedNowMs() - decodeStarted;
+    if (direct.isValid() && !direct.content().bytes.empty() && hasValidCRC32(direct.content().bytes)) {
+        result.dataOnlySuccess = true;
+        return direct;
+    }
+
+    result.rsAttempted = true;
+    for (int codeword = dataPlan.dataCodewords; codeword < totalCodewords; ++codeword) {
+        uint8_t value = 0;
+        if (!sampleByte(fullPlan, size_t(codeword) * 8, value))
+            return {};
         raw[codeword] = value;
     }
-    if (failed)
-        return {};
 
-    const double decodeStarted = guidedNowMs();
+    decodeStarted = guidedNowMs();
     auto blocks = QRCode::DataBlock::GetDataBlocks(raw, *version, QRCode::ErrorCorrectionLevel::Low);
     if (blocks.empty()) {
-        if (decodeMsOut) *decodeMsOut = guidedNowMs() - decodeStarted;
+        result.decodeMs += guidedNowMs() - decodeStarted;
         return {};
     }
     int dataBytes = 0;
     for (const auto& block : blocks)
         dataBytes += block.numDataCodewords();
-    ByteArray data(dataBytes);
-    auto dst = data.begin();
+    ByteArray corrected(dataBytes);
+    auto dst = corrected.begin();
     for (auto& block : blocks) {
         auto& codewords = block.codewords();
         const int dataCount = block.numDataCodewords();
         const int eccCount = int(codewords.size()) - dataCount;
         if (eccCount <= 0 || !ReedSolomonDecode(RSField::QRCode, codewords, eccCount)) {
-            if (decodeMsOut) *decodeMsOut = guidedNowMs() - decodeStarted;
+            result.decodeMs += guidedNowMs() - decodeStarted;
             return {};
         }
         dst = std::copy_n(codewords.begin(), dataCount, dst);
     }
-    auto decoded = QRCode::DecodeBitStream(std::move(data), *version, QRCode::ErrorCorrectionLevel::Low);
-    if (decodeMsOut) *decodeMsOut = guidedNowMs() - decodeStarted;
+    auto decoded = QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
+    result.decodeMs += guidedNowMs() - decodeStarted;
     return decoded;
 }
 
@@ -1266,13 +1356,9 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const QRCode::FinderPatternSet& fp,
                                          int* alignmentFoundOut,
                                          std::vector<PointF>* sampleMapOut,
-                                         DecoderResult* fastDecodedOut,
-                                         double* fastDecodeMsOut,
-                                         bool* fastAttemptedOut)
+                                         GuidedSparseFastResult* fastOut)
 {
-    if (fastDecodedOut) *fastDecodedOut = {};
-    if (fastDecodeMsOut) *fastDecodeMsOut = 0;
-    if (fastAttemptedOut) *fastAttemptedOut = false;
+    if (fastOut) *fastOut = GuidedSparseFastResult{};
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
     if (!version)
@@ -1318,9 +1404,6 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
         return currentPrediction(prior(centered(PointI{centers[x], centers[y]})));
     };
 
-    // Base transform is only the fallback for missing sparse controls. Its
-    // fourth point is the previous bottom-right alignment prediction after the
-    // exact current finder affine correction, not a stale raw corner.
     const PointF predictedBR = projectControl(N, N);
     if (!image.isIn(predictedBR))
         return {};
@@ -1363,26 +1446,28 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
     }
 
     if (alignmentFoundOut) *alignmentFoundOut = alignmentFound;
-    // If fewer than half of the real sparse alignment controls were found,
-    // avoid a likely-wasted RS decode and use full SampleQR immediately.
     if (alignmentFound < 3)
         return {};
 
-    if (sampleMapOut && !buildSparseSampleMap(dim, base, controls, centers, *sampleMapOut))
-        sampleMapOut->clear();
-
-    // When this slot already has a calibrated persistent map, try the direct
-    // fixed-profile sampler first. During calibration/reseed we still run the
-    // old SampleGrid path so its exact perspective map and position remain the
-    // source of truth for future Stable-RS frames.
-    if (!sampleMapOut && fastDecodedOut) {
-        if (fastAttemptedOut) *fastAttemptedOut = true;
-        auto decoded = decodeAirGapperSparseBilinear(image, dim, base, controls, centers, fastDecodeMsOut);
+    if (fastOut) {
+        fastOut->attempted = true;
+        fastOut->quad = {
+            currentPrediction(PointF{track.x0, track.y0}),
+            currentPrediction(PointF{track.x1, track.y1}),
+            currentPrediction(PointF{track.x2, track.y2}),
+            currentPrediction(PointF{track.x3, track.y3})
+        };
+        auto decoded = decodeAirGapperSparseProgressive(image, dim, base, controls, centers, *fastOut);
         if (decoded.isValid() && !decoded.content().bytes.empty() && hasValidCRC32(decoded.content().bytes)) {
-            *fastDecodedOut = std::move(decoded);
+            fastOut->decoded = std::move(decoded);
+            if (sampleMapOut && !buildSparseSampleMapBilinear(dim, base, controls, centers, *sampleMapOut))
+                sampleMapOut->clear();
             return {};
         }
     }
+
+    if (sampleMapOut && !buildSparseSampleMap(dim, base, controls, centers, *sampleMapOut))
+        sampleMapOut->clear();
     return SampleGrid(image, dim, dim, base, std::move(controls), centers, centers);
 }
 
@@ -1784,27 +1869,44 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 ++metrics->fastDecodeAttempts;
                 std::vector<PointF> sparseMap;
                 auto* mapOut = turboSeedEligible(track) ? &sparseMap : nullptr;
-                DecoderResult directDecoded;
-                double directDecodeMs = 0;
-                bool directAttempted = false;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut,
-                                                 &directDecoded, &directDecodeMs, &directAttempted);
+                GuidedSparseFastResult fast;
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut, &fast);
 
-                if (directAttempted) {
+                if (fast.attempted) {
                     ++metrics->sampleAttempts;
-                    ++metrics->sparseRsFallbacks;
                     ++metrics->sparseProfileAttempts;
-                    metrics->decodeMs += directDecodeMs;
-                    decodeSpent += directDecodeMs;
-                    if (directDecoded.isValid() && !directDecoded.content().bytes.empty() &&
-                        hasValidCRC32(directDecoded.content().bytes)) {
-                        // Geometry is still current because guidedFinderTriplet
-                        // succeeded in this frame. The exact bytes are protected
-                        // by QR RS + AirGapper CRC; keep the tracked quad until a
-                        // real SampleGrid reseed is needed.
-                        decodedTrack = commitTurbo(trackIndex, directDecoded, 0, 0);
-                        if (decodedTrack)
+                    if (fast.dataOnlyAttempted)
+                        ++metrics->sparseNoRsAttempts;
+                    if (fast.dataOnlySuccess)
+                        ++metrics->sparseNoRsSuccesses;
+                    if (fast.rsAttempted)
+                        ++metrics->sparseRsFallbacks;
+                    metrics->decodeMs += fast.decodeMs;
+                    decodeSpent += fast.decodeMs;
+                    if (fast.decoded.isValid() && !fast.decoded.content().bytes.empty() &&
+                        hasValidCRC32(fast.decoded.content().bytes)) {
+                        const ByteArray& bytes = fast.decoded.content().bytes;
+                        if (outputUsed + int(bytes.size()) <= outputCapacity) {
+                            std::memcpy(output + outputUsed, bytes.data(), bytes.size());
+                            auto& result = results[resultCount++];
+                            result = {};
+                            result.id = track.id;
+                            result.status = DECIMEN_TRACK_OK;
+                            result.bytesOffset = outputUsed;
+                            result.bytesLength = int(bytes.size());
+                            result.dimension = track.dimension;
+                            result.x0 = fast.quad[0].x; result.y0 = fast.quad[0].y;
+                            result.x1 = fast.quad[1].x; result.y1 = fast.quad[1].y;
+                            result.x2 = fast.quad[2].x; result.y2 = fast.quad[2].y;
+                            result.x3 = fast.quad[3].x; result.y3 = fast.quad[3].y;
+                            outputUsed += int(bytes.size());
+                            ++metrics->successful;
                             ++metrics->sparseProfileSuccesses;
+                            decodedTrack = true;
+                            if (mapOut && !sparseMap.empty())
+                                seedGuidedTurboQuad(track.id, track.dimension, fast.quad,
+                                                    std::move(sparseMap), true);
+                        }
                     }
                 }
 
@@ -1818,10 +1920,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     if (decodedTrack) {
                         ++metrics->sparseProfileSuccesses;
                     } else {
-                        // Keep the stock QR decoder as the exact compatibility
-                        // fallback for any unexpected profile/plain QR or fast
-                        // parser miss. This attempt is already on a sampled grid,
-                        // so failure cannot disturb geometry or cache state.
                         decoded = QRCode::Decode(sparse.bits());
                         decodedTrack = commitDecoded(sparse, decoded);
                     }
@@ -1829,17 +1927,17 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     metrics->fastDecodeMs += fastElapsed;
                     metrics->decodeMs += fastElapsed;
                     decodeSpent += fastElapsed;
+                    if (decodedTrack && mapOut) {
+                        if (sparseMap.empty())
+                            sparseMap = buildHomographySampleMap(track.dimension, sparse.position());
+                        seedGuidedTurbo(track.id, track.dimension, sparse.position(), std::move(sparseMap), true);
+                    }
                 }
 
                 if (decodedTrack) {
                     ++metrics->fastDecodeSuccesses;
                     if (track.id >= 0 && track.id < 32)
                         metrics->sparseSuccessMask |= uint32_t(1) << track.id;
-                    if (mapOut && sparse.isValid()) {
-                        if (sparseMap.empty())
-                            sparseMap = buildHomographySampleMap(track.dimension, sparse.position());
-                        seedGuidedTurbo(track.id, track.dimension, sparse.position(), std::move(sparseMap), true);
-                    }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             } else {
