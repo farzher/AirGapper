@@ -34,7 +34,7 @@ const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.309";
+const SEND_RUNTIME_BUILD = "v0.5.310";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -237,9 +237,11 @@ function gridRasterExtent(modules, cols, rows, margin = GRID_MARGIN) {
 }
 function senderDisplayBudgetCss() {
   if (document.body.classList.contains("qr-full")) {
+    // Fullscreen has no sender controls. Use the literal viewport; do not let a
+    // hidden element's stale box participate in Auto geometry.
     return {
       width: Math.max(1, window.innerWidth),
-      height: Math.max(1, window.innerHeight - stageBottom.offsetHeight)
+      height: Math.max(1, window.innerHeight)
     };
   }
   if (!stage.hidden) {
@@ -250,9 +252,13 @@ function senderDisplayBudgetCss() {
       height: Math.max(1, rect.height - stageBottom.offsetHeight - Number.parseFloat(style.paddingTop) - Number.parseFloat(style.paddingBottom))
     };
   }
-  // Before the first wall is visible there is no measurable stage box yet.
-  // The fullscreen/resize pass will immediately re-evaluate Auto with the real box.
-  return { width: Math.max(1, window.innerWidth), height: Math.max(1, window.innerHeight) };
+  // Match the CSS stage before it is measurable. startStream normally makes
+  // Auto's stage/controls measurable before selection, but this conservative
+  // fallback must never pretend the non-fullscreen wall owns the whole viewport.
+  return {
+    width: Math.max(1, Math.min(1400, window.innerWidth - 24)),
+    height: Math.max(1, window.innerHeight - 180)
+  };
 }
 function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGridTargetModulePx()) {
   const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
@@ -477,6 +483,12 @@ function setStageFullscreen(on) {
   document.body.classList.toggle("qr-full", on);
   if (!on && document.fullscreenElement) void document.exitFullscreen().catch(() => void 0);
   resizeDisplay == null ? void 0 : resizeDisplay();
+  // Auto is a viewport solver, not just a canvas scaler. Entering/exiting
+  // fullscreen changes the candidate set, so recompute QR version + layout.
+  if (selectedFile && isAutoLayout()) {
+    clearTimeout(autoGridRefreshTimer);
+    autoGridRefreshTimer = setTimeout(() => void startStream(), 140);
+  }
   window.scrollTo(0, on ? 0 : scrollBeforeFullscreen);
 }
 canvas.addEventListener("click", () => {
@@ -654,12 +666,11 @@ async function main() {
     saveSendSettings();
     if (selectedFile && !applyLiveSenderFps()) void startStream();
   });
-  let autoGridResizeTimer;
   const resizeForViewport = () => {
     resizeDisplay == null ? void 0 : resizeDisplay();
     if (selectedFile && isAutoLayout()) {
-      clearTimeout(autoGridResizeTimer);
-      autoGridResizeTimer = setTimeout(() => void startStream(), 140);
+      clearTimeout(autoGridRefreshTimer);
+      autoGridRefreshTimer = setTimeout(() => void startStream(), 140);
     }
   };
   window.addEventListener("resize", resizeForViewport);
@@ -728,6 +739,15 @@ async function startStream(revealStage = false) {
   let frameBytes = manualFrameBytes;
   let autoGrid = null;
   let transport;
+  if (autoMode) {
+    // Auto must solve against the box that will actually contain the QR wall.
+    // Previously the first solve happened while #stage was display:none, so it
+    // used the full viewport, then the visible controls made the chosen wall no
+    // longer fit and Pixel Perfect silently fell below 1x.
+    stage.hidden = false;
+    if (sendStart) sendStart.hidden = true;
+    showStreamPanels(true);
+  }
   if (autoMode && plainSnippet === null) {
     const directProbe = selectTransportPlan(payload.length, maximumFrameBytes);
     if (directProbe.mode === "direct") {
@@ -858,7 +878,15 @@ async function startStream(revealStage = false) {
     const budgetW = budget.width;
     const budgetH = budget.height;
     const availableScale = Math.min(budgetW * dpr / displayW, budgetH * dpr / displayH);
-    scale = fitScaling || availableScale < 1 ? Math.max(Number.EPSILON, availableScale) : Math.floor(availableScale);
+    if (fitScaling) {
+      scale = Math.max(Number.EPSILON, availableScale);
+    } else if (autoMode) {
+      // Pixel Perfect Auto may change layout/QR version, but it may NEVER
+      // resample modules or the one-source-pixel shared gap fractionally.
+      scale = Math.max(1, Math.floor(availableScale));
+    } else {
+      scale = availableScale < 1 ? Math.max(Number.EPSILON, availableScale) : Math.floor(availableScale);
+    }
     if (staging.width !== totalW || staging.height !== totalH) {
       staging.width = totalW;
       staging.height = totalH;

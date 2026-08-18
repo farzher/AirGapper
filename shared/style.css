@@ -195,7 +195,7 @@ body.receive-mode .preview { width: 100%; height: 100%; max-height: none; aspect
 }
 .stage[hidden] { display: none; }
 .stage canvas { display: block; max-width: 100%; cursor: pointer; }
-#qr { cursor: pointer; }
+#qr { cursor: pointer; max-width: none; max-height: none; flex: none; }
 #qr.cursor-idle { cursor: none; }
 .stage-error {
   width: min(560px, calc(100% - 24px));
