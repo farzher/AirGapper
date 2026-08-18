@@ -11,6 +11,12 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icon-192.png" />
   <link rel="stylesheet" href="./shared/style.css" />
+  <style>
+    /* Completion assembly can block the main thread for large payloads. The
+       runtime already paints 100% before assembling; make that final width a
+       snap instead of a 220ms transition so it cannot visibly freeze at 97–99%. */
+    #bar[style*="width: 100%"] { transition: none !important; animation: none !important; opacity: 1 !important; }
+  </style>
 </head>
 <body>
 <div class="app">
