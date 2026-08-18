@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.246";
+const RECEIVER_RUNTIME_BUILD = "v0.5.247";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -4169,6 +4169,8 @@ let frameTrackReader = null;
 let framePumpMode = "—";
 let framePumpProcessorTotal = 0;
 let framePumpProcessorDiscarded = 0;
+let framePumpStartedAt = 0;
+let framePumpFirstFrameAt = 0;
 let rvfcLastPresentedFrames = 0;
 let rvfcSkippedFrames = 0;
 let frameModeSync;
@@ -4191,6 +4193,8 @@ function stopFramePump() {
   framePumpMode = "—";
   framePumpProcessorTotal = 0;
   framePumpProcessorDiscarded = 0;
+  framePumpStartedAt = 0;
+  framePumpFirstFrameAt = 0;
   rvfcLastPresentedFrames = 0;
   rvfcSkippedFrames = 0;
   if (reader) {
@@ -4630,6 +4634,7 @@ async function pumpTrackFrames(gen, reader, processor) {
       }
       framePumpProcessorTotal = Number(processor.totalFrames ?? framePumpProcessorTotal + 1);
       framePumpProcessorDiscarded = Number(processor.discardedFrames ?? framePumpProcessorDiscarded);
+      if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
       processSourceFrame(sourceFrameMeta(value), gen);
     }
   } catch (error) {
@@ -4660,6 +4665,7 @@ function restartFramePumpForCameraMode(track, reason = "camera mode changed") {
 
 function startFramePump(gen, track) {
   stopFramePump();
+  framePumpStartedAt = receiverNow();
   if (track && typeof MediaStreamTrackProcessor === "function") {
     try {
       const processor = new MediaStreamTrackProcessor({ track, maxBufferSize: 1 });
@@ -4698,6 +4704,7 @@ function scheduleFrame(gen) {
   const v = video;
   const next = (callbackTime = performance.now(), metadata = {}) => {
     if (done || gen !== captureGen || framePumpMode === "MediaStreamTrackProcessor") return;
+    if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
     scheduleFrame(gen);
     const presented = Number(metadata.presentedFrames);
     if (Number.isFinite(presented) && presented > 0) {
@@ -7583,6 +7590,15 @@ if ((forceDiagnostics || !receiverDevActions.hidden) && transportDiagnostics) {
   const totals = decoder ? `${decoder.framesNew} unique · ${decoder.framesDup} duplicate · ${decoder.framesRedundant} redundant` : "no active transport";
   const runSeconds = decoder && startTs ? Math.max(1e-3, (now - startTs) / 1e3) : 0;
   const cameraSeconds = cameraStartedTs ? Math.max(0, (now - cameraStartedTs) / 1e3) : 0;
+  const startupBase = framePumpStartedAt || cameraStartedTs;
+  const firstCaptureAt = captureTimes[0] ?? 0;
+  const firstJobAt = hotJobSubmitSamples[0]?.at ?? 0;
+  const firstQrAt = qrReadTimes[0] ?? 0;
+  const startupMs = (at) => startupBase && at ? Math.max(0, at - startupBase) : null;
+  const startupValue = (at) => {
+    const value = startupMs(at);
+    return value === null ? "waiting" : `${value.toFixed(0)}ms`;
+  };
   const runUniqueRate = decoder && runSeconds ? decoder.framesNew / runSeconds : 0;
   const runDuplicateRate = decoder && runSeconds ? decoder.framesDup / runSeconds : 0;
   const runUsefulRate = decoder && runSeconds ? decoder.usefulSymbols / runSeconds : 0;
@@ -7628,6 +7644,7 @@ if ((forceDiagnostics || !receiverDevActions.hidden) && transportDiagnostics) {
   transportDiagnostics.textContent = `Build ${document.querySelector(".app-version")?.textContent ?? "—"} · Device ${diagnosticDevice}
 Transport
 Run ${runSeconds ? formatDuration(runSeconds) : "waiting for first packet"}${cameraSeconds ? ` · camera ${formatDuration(cameraSeconds)}` : ""} · recent window ${(STATS_WINDOW_MS / 1e3).toFixed(1)}s
+Startup  source ${startupValue(framePumpFirstFrameAt)} · capture ${startupValue(firstCaptureAt)} · job ${startupValue(firstJobAt)} · QR ${startupValue(firstQrAt)} · pump ${framePumpMode}
 Average unique ${runUniqueRate.toFixed(1)} QR/s · duplicate ${runDuplicateRate.toFixed(1)} QR/s (${runDuplicatePercent.toFixed(0)}%) · useful ${runUsefulRate.toFixed(1)} QR/s · ${runGoodputKbs.toFixed(1)} KB/s
 Recent  unique ${uniqueRate.toFixed(1)} QR/s · duplicate ${duplicateRate.toFixed(1)} QR/s (${duplicatePercent.toFixed(0)}%)
 Recent  useful ${usefulRate.toFixed(1)} QR/s · ${liveGoodputKbs(now).toFixed(1)} KB/s
