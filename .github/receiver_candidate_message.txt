@@ -1,1 +1,0 @@
-v0.5.302 restore fully user-controlled sender FPS for rolling-shutter testing
