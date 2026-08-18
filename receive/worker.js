@@ -129,6 +129,14 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     stableRsSuccesses: metricsView.getUint32(148, true),
     stableEligibleTracks: metricsView.getUint32(152, true)
   };
+  const moduleSizes = tracks.map((track) => quadModuleSize(track.quad, track.dim)).filter((value) => value > 0 && Number.isFinite(value));
+  if (moduleSizes.length) {
+    metrics.moduleSizeMin = Math.min(...moduleSizes);
+    metrics.moduleSizeMax = Math.max(...moduleSizes);
+    metrics.moduleSizeAvg = moduleSizes.reduce((sum, value) => sum + value, 0) / moduleSizes.length;
+  } else {
+    metrics.moduleSizeMin = metrics.moduleSizeMax = metrics.moduleSizeAvg = 0;
+  }
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
   const symbols = [];
