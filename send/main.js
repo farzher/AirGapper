@@ -34,7 +34,7 @@ const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.308";
+const SEND_RUNTIME_BUILD = "v0.5.309";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -226,12 +226,41 @@ function spatiallyDispersedOrder(cols, rows) {
   }
   return order;
 }
+function gridRasterExtent(modules, cols, rows, margin = GRID_MARGIN) {
+  // Each QR raster owns a margin on both sides, while adjacent cells overlap
+  // one margin to create exactly one shared gap. This is the same extent used
+  // by both Auto selection and the renderer so the gap can never be double-counted.
+  return {
+    width: modules * cols + margin * (cols + 1),
+    height: modules * rows + margin * (rows + 1)
+  };
+}
+function senderDisplayBudgetCss() {
+  if (document.body.classList.contains("qr-full")) {
+    return {
+      width: Math.max(1, window.innerWidth),
+      height: Math.max(1, window.innerHeight - stageBottom.offsetHeight)
+    };
+  }
+  if (!stage.hidden) {
+    const rect = stage.getBoundingClientRect();
+    const style = getComputedStyle(stage);
+    return {
+      width: Math.max(1, rect.width - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight)),
+      height: Math.max(1, rect.height - stageBottom.offsetHeight - Number.parseFloat(style.paddingTop) - Number.parseFloat(style.paddingBottom))
+    };
+  }
+  // Before the first wall is visible there is no measurable stage box yet.
+  // The fullscreen/resize pass will immediately re-evaluate Auto with the real box.
+  return { width: Math.max(1, window.innerWidth), height: Math.max(1, window.innerHeight) };
+}
 function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGridTargetModulePx()) {
   const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
   const dpr = window.devicePixelRatio || 1;
   const landscape = landscapeGrid();
-  const budgetW = Math.max(1, window.innerWidth * dpr);
-  const budgetH = Math.max(1, window.innerHeight * dpr);
+  const budgetCss = senderDisplayBudgetCss();
+  const budgetW = Math.max(1, budgetCss.width * dpr);
+  const budgetH = Math.max(1, budgetCss.height * dpr);
   const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
   const candidates = [];
   for (const maximumFrameBytes of FRAME_BYTES_OPTIONS) {
@@ -242,13 +271,17 @@ function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGr
       const codes = layout.cols * layout.rows;
       if (codes <= 1 || codes > 32) continue;
       const margin = GRID_MARGIN;
-      const totalW = plan.qrModules * layout.cols + margin * (layout.cols + 1);
-      const totalH = plan.qrModules * layout.rows + margin * (layout.rows + 1);
+      const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, margin);
+      const totalW = extent.width;
+      const totalH = extent.height;
       const displayW = landscape ? totalH : totalW;
       const displayH = landscape ? totalW : totalH;
       const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
       const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
       if (!(moduleScale > 0)) continue;
+      const renderedW = displayW * moduleScale;
+      const renderedH = displayH * moduleScale;
+      const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
       const changesPerRefresh = codes * txFps / refreshHz;
       const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
       const payloadPerSecond = sourceBytesPerQr * codes * txFps;
@@ -258,6 +291,7 @@ function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGr
         layout,
         codes,
         moduleScale,
+        screenFill,
         changesPerRefresh,
         payloadPerSecond,
         refreshHz
@@ -276,13 +310,20 @@ function chooseAutoGrid(payloadBytes, txFps, fitScaling, targetModulePx = autoGr
     // across the 8→32 QR range when fragmentation improves substantially.
     const fragmentation = Math.max(0, Math.min(1, (candidate.codes - 8) / 24));
     const fragmentationBonus = 1 + fragmentation * AUTO_GRID_FRAGMENTATION_BONUS;
-    if (strict.length) return candidate.payloadPerSecond * fragmentationBonus;
+    // Integer scaling has cliffs: an 8×4 v40 wall at 1× can use less than a
+    // third of a 16:9 screen while 7×4 at 2× nearly fills it. Score the wall
+    // that is ACTUALLY painted, not the fractional scale that almost fit.
+    const fillBonus = fitScaling
+      ? 0.80 + 0.20 * Math.sqrt(candidate.screenFill)
+      : 0.30 + 0.70 * Math.sqrt(candidate.screenFill);
+    if (strict.length) return candidate.payloadPerSecond * fragmentationBonus * fillBonus;
     const scalePenalty = Math.min(1, candidate.moduleScale / densityTarget);
     const transitionPenalty = Math.min(1, AUTO_GRID_MAX_CHANGES_PER_REFRESH / Math.max(0.001, candidate.changesPerRefresh));
-    return candidate.payloadPerSecond * fragmentationBonus * scalePenalty * transitionPenalty;
+    return candidate.payloadPerSecond * fragmentationBonus * fillBonus * scalePenalty * transitionPenalty;
   };
   pool.sort((a, b) =>
     adjustedScore(b) - adjustedScore(a) ||
+    b.screenFill - a.screenFill ||
     b.codes - a.codes ||
     b.moduleScale - a.moduleScale ||
     b.plan.frameBytes - a.plan.frameBytes ||
@@ -731,7 +772,7 @@ async function startStream(revealStage = false) {
     if (staticStream) return "";
     if (!autoGrid) return `Update ${updatePatternLabel}`;
     const fallback = autoGrid.constrained ? "" : " · fallback constraints";
-    return `Auto ${autoGrid.targetModulePx} · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${fallback}`;
+    return `Auto ${autoGrid.targetModulePx} · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -807,22 +848,15 @@ async function startStream(revealStage = false) {
   const sizeCanvas = () => {
     const dpr = window.devicePixelRatio || 1;
     const stride = modules + gridMargin;
-    const totalW = modules * gridCols + gridMargin * (gridCols + 1);
-    const totalH = modules * gridRows + gridMargin * (gridRows + 1);
+    const extent = gridRasterExtent(modules, gridCols, gridRows, gridMargin);
+    const totalW = extent.width;
+    const totalH = extent.height;
     const landscape = landscapeGrid();
     const displayW = landscape ? totalH : totalW;
     const displayH = landscape ? totalW : totalH;
-    let budgetW;
-    let budgetH;
-    if (document.body.classList.contains("qr-full")) {
-      budgetW = window.innerWidth;
-      budgetH = window.innerHeight - stageBottom.offsetHeight;
-    } else {
-      const rect = stage.getBoundingClientRect();
-      const stageStyle = getComputedStyle(stage);
-      budgetW = rect.width - Number.parseFloat(stageStyle.paddingLeft) - Number.parseFloat(stageStyle.paddingRight);
-      budgetH = rect.height - stageBottom.offsetHeight - Number.parseFloat(stageStyle.paddingTop) - Number.parseFloat(stageStyle.paddingBottom);
-    }
+    const budget = senderDisplayBudgetCss();
+    const budgetW = budget.width;
+    const budgetH = budget.height;
     const availableScale = Math.min(budgetW * dpr / displayW, budgetH * dpr / displayH);
     scale = fitScaling || availableScale < 1 ? Math.max(Number.EPSILON, availableScale) : Math.floor(availableScale);
     if (staging.width !== totalW || staging.height !== totalH) {
