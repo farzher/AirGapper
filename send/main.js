@@ -34,7 +34,7 @@ const AUTO_GRID_MIN_MODULE_PX = 2;
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 3;
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.304";
+const SEND_RUNTIME_BUILD = "v0.5.305";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -151,7 +151,7 @@ function selectedFps() {
 }
 function selectedUpdatePattern() {
   const value = cfgUpdatePattern?.value;
-  return value === "synchronous" || value === "fixed" || value === "dispersed" ? value : "dispersed";
+  return value === "synchronous" || value === "fixed" || value === "fixed-columns" || value === "dispersed" ? value : "dispersed";
 }
 function selectFps(fps) {
   var _a;
@@ -527,7 +527,7 @@ function restoreSendSettings() {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
-    if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
+    if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "fixed-columns" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
     if (saved.layout === "auto" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
       cfgLayout.value = saved.layout;
     } else if (saved.layout === "five-three") {
@@ -695,12 +695,20 @@ async function startStream(revealStage = false) {
   const phaseStep = temporalPhaseStep(gridCodes);
   const temporalSourceOffset = (pageId, phase) => {
     if (gridCodes <= 1 || updatePattern === "fixed" || updatePattern === "synchronous") return phase;
+    if (updatePattern === "fixed-columns") {
+      // Transpose the existing row-major fixed schedule without changing packet
+      // assignment, page cadence, or aggregate rate: top-to-bottom through one
+      // logical column, then advance to the next column.
+      const row = phase % gridRows;
+      const col = Math.floor(phase / gridRows);
+      return row * gridCols + col;
+    }
     const rotation = pageId * phaseStep % gridCodes;
     let index = (phase + rotation) % gridCodes;
     if (pageId & 1) index = gridCodes - 1 - index;
     return temporalOrder[index];
   };
-  const updatePatternLabel = updatePattern === "synchronous" ? "synchronous wall" : updatePattern === "fixed" ? "fixed phased" : "dispersed rotating phases";
+  const updatePatternLabel = updatePattern === "synchronous" ? "synchronous wall" : updatePattern === "fixed" ? "fixed rows" : updatePattern === "fixed-columns" ? "fixed columns" : "dispersed rotating phases";
   const describeGrid = () => {
     if (staticStream) return "";
     if (!autoGrid) return `Update ${updatePatternLabel}`;
