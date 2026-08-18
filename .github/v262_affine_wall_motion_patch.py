@@ -76,18 +76,18 @@ helper = r'''struct TurboWallMotion
                 const PointF w = p - centers[0];
                 const float u = float(w.x * d2.y - w.y * d2.x) / det;
                 const float v = float(d1.x * w.y - d1.y * w.x) / det;
-                out = offsets[0] + o1 * u + o2 * v;
+                out = offsets[0] + u * o1 + v * o2;
             } else {
                 const float denom = float(d1.x * d1.x + d1.y * d1.y);
                 const float t = denom > 1.0f ? float((p.x - centers[0].x) * d1.x +
                                                      (p.y - centers[0].y) * d1.y) / denom : 0.0f;
-                out = offsets[0] + o1 * t;
+                out = offsets[0] + t * o1;
             }
         } else {
             const float denom = float(d1.x * d1.x + d1.y * d1.y);
             const float t = denom > 1.0f ? float((p.x - centers[0].x) * d1.x +
                                                  (p.y - centers[0].y) * d1.y) / denom : 0.0f;
-            out = offsets[0] + o1 * t;
+            out = offsets[0] + t * o1;
         }
         // Every measured anchor is itself constrained to a tiny finder search.
         // Bound extrapolation so one noisy reference cannot drag all 28 cached
@@ -233,7 +233,6 @@ new_wall = '''        // The tracked quads can be hundreds of milliseconds old w
 if old_wall not in s:
     raise SystemExit("old shared wall correction block missing")
 s = s.replace(old_wall, new_wall, 1)
-# Replace both per-track dx/dy pairs in direct/stable lane with local wall correction.
 s = s.replace(
     '''                    const float dx = wallCorrectionX;
                     const float dy = wallCorrectionY;
@@ -254,7 +253,6 @@ s = s.replace(
 ''',
     1,
 )
-# commitTurbo returned geometry must use the same per-track residual, not an obsolete global translation.
 s = s.replace('commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY)', 'commitTurbo(i, decoded, wallCorrection.x, wallCorrection.y)')
 if 'wallCorrectionX' in s or 'wallCorrectionY' in s:
     raise SystemExit("obsolete global wall correction remains")
