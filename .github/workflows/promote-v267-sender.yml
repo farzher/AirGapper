@@ -1,0 +1,35 @@
+name: promote validated v267 sender
+
+on:
+  push:
+    paths:
+      - .github/workflows/promote-v267-sender.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Apply validated sender patch
+        run: |
+          set -euo pipefail
+          python3 .github/v267_staggered_sender_patch.py
+          grep -q 'const APP_BUILD = "v0.5.267"' main.js
+          grep -q 'const SEND_RUNTIME_BUILD = "v0.5.267"' send/main.js
+          grep -q 'cellInterval = pageInterval / gridCodes' send/main.js
+          grep -q 'activeSendFpsSetter' send/main.js
+      - name: Commit production v267
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git rm .github/v267_staggered_sender_patch.py .github/workflows/v267-staggered-sender.yml .github/workflows/promote-v267-sender.yml
+          git add send/main.js main.js index.html sw.js
+          git commit -m "v0.5.267 stagger sender QR phases"
+          git pull --rebase origin master
+          git push origin HEAD:master
