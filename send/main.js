@@ -28,7 +28,14 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-const SEND_RUNTIME_BUILD = "v0.5.299";
+// A rolling-shutter camera may expose each sensor row briefly while taking most
+// of a camera frame to move that exposure window across the sensor. A single QR
+// that changes near the camera frame rate can therefore be captured as an
+// undecodable splice of two consecutive pages. Keep animated 1x1 symbols stable
+// for at least ~66 ms on the common 30 fps camera path. Multi-QR walls keep their
+// existing faster cell-phased cadence because temporal damage is spatially local.
+const SINGLE_QR_SAFE_UNIQUE_FPS = 15;
+const SEND_RUNTIME_BUILD = "v0.5.301";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -524,6 +531,12 @@ async function startStream(revealStage = false) {
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode = staticStream ? "single" : configuredLayout;
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = layoutGrid(layoutMode);
+  const effectivePageFps = (fps) => {
+    const requested = Math.max(1, Number(fps) || 1);
+    return !staticStream && gridCodes === 1 ? Math.min(requested, SINGLE_QR_SAFE_UNIQUE_FPS) : requested;
+  };
+  const effectiveTxFps = effectivePageFps(txFps);
+  const temporalHold = !staticStream && gridCodes === 1 && effectiveTxFps < txFps ? txFps / effectiveTxFps : 1;
   const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -718,6 +731,8 @@ async function startStream(revealStage = false) {
             },
             settings: {
               txFps,
+              effectiveTxFps,
+              temporalHold,
               frameBytes,
               ecc,
               gridCodes,
@@ -1019,11 +1034,11 @@ async function startStream(revealStage = false) {
     }
     scheduleDispatch();
 
-    let pageInterval = 1e3 / txFps;
+    let pageInterval = 1e3 / effectiveTxFps;
     let cellInterval = pageInterval / gridCodes;
     let nextCellAt = 0;
     activeSendFpsSetter = (fps) => {
-      pageInterval = 1e3 / Math.max(1, fps);
+      pageInterval = 1e3 / effectivePageFps(fps);
       cellInterval = pageInterval / gridCodes;
       // Speed changes are live: keep the current sweep and warm workers. If the
       // new rate is faster, pull the next phase forward; never blank/restart.
@@ -1183,10 +1198,10 @@ async function startStream(revealStage = false) {
     activeSendFpsSetter = () => {};
     return;
   }
-  let interval = 1e3 / txFps;
+  let interval = 1e3 / effectiveTxFps;
   let nextAt = performance.now() + interval;
   activeSendFpsSetter = (fps) => {
-    interval = 1e3 / Math.max(1, fps);
+    interval = 1e3 / effectivePageFps(fps);
     nextAt = Math.min(nextAt, performance.now() + interval);
   };
   activeSendClockRebase = () => { nextAt = 0; };
