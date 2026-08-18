@@ -1,5 +1,0 @@
-v268 dense erasure retry2 rejected at 2026-08-18T04:22:10Z
-  File "/home/runner/work/AirGapper/AirGapper/.github/v268_diagnostics_patch2.py", line 9
-    old = '''old='''      livePipeline.captures++;'''\n          new='''      if (!livePipeline.firstCaptureAt) livePipeline.firstCaptureAt = now;\n      livePipeline.captures++;'''\n          if old not in s: raise SystemExit('capture timestamp anchor missing')\n          s=s.replace(old,new,1)'''
-                          ^^^^^^^^^^^^
-SyntaxError: invalid syntax

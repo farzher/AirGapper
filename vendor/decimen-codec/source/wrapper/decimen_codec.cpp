@@ -70,7 +70,7 @@ static_assert(sizeof(DecimenGuidedTrack) == 40,
               "DecimenGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(DecimenGuidedResult) == 52,
               "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 176,
+static_assert(sizeof(DecimenGuidedMetrics) == 192,
               "DecimenGuidedMetrics JS ABI must allocate 176 bytes");
 static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
               "DecimenGuidedMetrics turboAttempts JS offset changed");
@@ -1537,7 +1537,63 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         return true;
     };
 
+    auto sampleByteCenter = [&](const std::vector<uint32_t>& plan, size_t firstBit,
+                                uint8_t& value, bool& ambiguous) -> bool {
+        value = 0;
+        ambiguous = false;
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint32_t entry = plan[firstBit + bit];
+            const int xx = int(entry & 0xff);
+            const int y = int((entry >> 8) & 0xff);
+            const bool mask = ((entry >> 16) & 1) != 0;
+            const int threshold = turboThreshold(thresholdPlane, xx, y);
+            const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
+            const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
+            if (lum < 0)
+                return false;
+            ambiguous |= std::abs(lum - threshold) <= GUIDED_TURBO_AMBIGUOUS;
+            value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
+        }
+        return true;
+    };
+
+    auto runRs = [&](const ByteArray& source, const ByteArray* erasureFlags) -> DecoderResult {
+        auto blocks = QRCode::DataBlock::GetDataBlocks(source, *version, QRCode::ErrorCorrectionLevel::Low);
+        if (blocks.empty()) return {};
+        std::vector<QRCode::DataBlock> erasureBlocks;
+        if (erasureFlags) {
+            erasureBlocks = QRCode::DataBlock::GetDataBlocks(*erasureFlags, *version, QRCode::ErrorCorrectionLevel::Low);
+            if (erasureBlocks.size() != blocks.size()) return {};
+        }
+        int dataBytes = 0;
+        for (const auto& block : blocks) dataBytes += block.numDataCodewords();
+        ByteArray corrected(dataBytes);
+        auto dst = corrected.begin();
+        for (size_t blockIndex = 0; blockIndex < blocks.size(); ++blockIndex) {
+            auto& block = blocks[blockIndex];
+            auto& codewords = block.codewords();
+            const int dataCount = block.numDataCodewords();
+            const int eccCount = int(codewords.size()) - dataCount;
+            if (eccCount <= 0) return {};
+            std::vector<int> erasures;
+            if (erasureFlags) {
+                const auto& flags = erasureBlocks[blockIndex].codewords();
+                for (int i = 0; i < int(flags.size()); ++i) if (flags[i]) erasures.push_back(i);
+                if (int(erasures.size()) > eccCount - 2) return {};
+            }
+            const bool rsOk = erasureFlags
+                ? bool(ReedSolomonDecode(RSField::QRCode, codewords, eccCount, erasures))
+                : bool(ReedSolomonDecode(RSField::QRCode, codewords, eccCount));
+            if (!rsOk) return {};
+            dst = std::copy_n(codewords.begin(), dataCount, dst);
+        }
+        return QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
+    };
+
     ByteArray raw(totalCodewords);
+    ByteArray ambiguousCodeword(totalCodewords);
+    bool erasureSampling = false;
+    int ambiguousCount = 0;
     int firstParityCodeword = 0;
     if (progressive) {
         const auto& dataPlan = turboDataPlan(dim);
@@ -1547,17 +1603,26 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             return {};
         auto& noRsGate = guidedStableNoRsGate();
         const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
+        erasureSampling = !tryNoRsFirst && !centerOnly && moduleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
         ByteArray progressiveData;
         if (tryNoRsFirst)
             progressiveData.resize(dataPlan.dataCodewords);
         const double sampleStarted = guidedNowMs();
         for (int codeword = 0; codeword < dataPlan.dataCodewords; ++codeword) {
             uint8_t value = 0;
-            if (!sampleByte(dataPlan.samples, size_t(codeword) * 8, value)) {
+            bool ambiguous = false;
+            const bool sampled = erasureSampling
+                ? sampleByteCenter(dataPlan.samples, size_t(codeword) * 8, value, ambiguous)
+                : sampleByte(dataPlan.samples, size_t(codeword) * 8, value);
+            if (!sampled) {
                 metrics.sampleMs += guidedNowMs() - sampleStarted;
                 return {};
             }
             raw[codeword] = value;
+            if (ambiguous) {
+                ambiguousCodeword[codeword] = 1;
+                ++ambiguousCount;
+            }
             if (tryNoRsFirst)
                 progressiveData[dataPlan.destination[codeword]] = value;
         }
@@ -1583,37 +1648,49 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     const double sampleStarted = guidedNowMs();
     for (int codeword = firstParityCodeword; codeword < totalCodewords; ++codeword) {
         uint8_t value = 0;
-        if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
+        bool ambiguous = false;
+        const bool sampled = erasureSampling
+            ? sampleByteCenter(fullPlan, size_t(codeword) * 8, value, ambiguous)
+            : sampleByte(fullPlan, size_t(codeword) * 8, value);
+        if (!sampled) {
             metrics.sampleMs += guidedNowMs() - sampleStarted;
             return {};
         }
         raw[codeword] = value;
+        if (ambiguous) {
+            ambiguousCodeword[codeword] = 1;
+            ++ambiguousCount;
+        }
     }
     metrics.sampleMs += guidedNowMs() - sampleStarted;
 
-    const double decodeStarted = guidedNowMs();
-    DecoderResult decoded;
-    auto blocks = QRCode::DataBlock::GetDataBlocks(raw, *version, QRCode::ErrorCorrectionLevel::Low);
-    bool rsOk = !blocks.empty();
-    if (rsOk) {
-        int dataBytes = 0;
-        for (const auto& block : blocks)
-            dataBytes += block.numDataCodewords();
-        ByteArray corrected(dataBytes);
-        auto dst = corrected.begin();
-        for (auto& block : blocks) {
-            auto& codewords = block.codewords();
-            const int dataCount = block.numDataCodewords();
-            const int eccCount = int(codewords.size()) - dataCount;
-            if (eccCount <= 0 || !ReedSolomonDecode(RSField::QRCode, codewords, eccCount)) {
-                rsOk = false;
-                break;
-            }
-            dst = std::copy_n(codewords.begin(), dataCount, dst);
+    if (erasureSampling && ambiguousCount > 0) {
+        ++metrics.erasureRsAttempts;
+        const double erasureDecodeStarted = guidedNowMs();
+        auto erasureDecoded = runRs(raw, &ambiguousCodeword);
+        metrics.decodeMs += guidedNowMs() - erasureDecodeStarted;
+        if (erasureDecoded.isValid() && !erasureDecoded.content().bytes.empty() &&
+            hasValidCRC32(erasureDecoded.content().bytes)) {
+            ++metrics.erasureRsSuccesses;
+            return erasureDecoded;
         }
-        if (rsOk)
-            decoded = QRCode::DecodeBitStream(std::move(corrected), *version, QRCode::ErrorCorrectionLevel::Low);
+
+        metrics.erasureRepairCodewords += uint32_t(ambiguousCount);
+        const double repairSampleStarted = guidedNowMs();
+        for (int codeword = 0; codeword < totalCodewords; ++codeword) {
+            if (!ambiguousCodeword[codeword]) continue;
+            uint8_t value = 0;
+            if (!sampleByte(fullPlan, size_t(codeword) * 8, value)) {
+                metrics.sampleMs += guidedNowMs() - repairSampleStarted;
+                return {};
+            }
+            raw[codeword] = value;
+        }
+        metrics.sampleMs += guidedNowMs() - repairSampleStarted;
     }
+
+    const double decodeStarted = guidedNowMs();
+    auto decoded = runRs(raw, nullptr);
     metrics.decodeMs += guidedNowMs() - decodeStarted;
     return decoded;
 }
@@ -1890,6 +1967,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         auto noteWarpMode = [&](const TurboFrameTransform& frameTransform) {
             if (frameTransform.translationOnly) ++metrics->translationWarpTracks;
             else if (frameTransform.affineOnly) ++metrics->affineWarpTracks;
+            else if (frameTransform.perspectiveMesh) ++metrics->perspectiveMeshWarpTracks;
             else ++metrics->perspectiveWarpTracks;
         };
 

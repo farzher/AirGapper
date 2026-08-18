@@ -80,6 +80,10 @@ struct DecimenGuidedMetrics {
 	uint32_t translationWarpTracks;
 	uint32_t affineWarpTracks;
 	uint32_t perspectiveWarpTracks;
+	uint32_t perspectiveMeshWarpTracks;
+	uint32_t erasureRsAttempts;
+	uint32_t erasureRsSuccesses;
+	uint32_t erasureRepairCodewords;
 };
 
 struct DecimenBatchMetrics {
