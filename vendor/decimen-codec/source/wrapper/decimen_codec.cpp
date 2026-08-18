@@ -70,8 +70,8 @@ static_assert(sizeof(DecimenGuidedTrack) == 40,
               "DecimenGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(DecimenGuidedResult) == 52,
               "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 168,
-              "DecimenGuidedMetrics JS ABI must allocate 168 bytes");
+static_assert(sizeof(DecimenGuidedMetrics) == 176,
+              "DecimenGuidedMetrics JS ABI must allocate 176 bytes");
 static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
               "DecimenGuidedMetrics turboAttempts JS offset changed");
 static_assert(offsetof(DecimenGuidedMetrics, turboSuccesses) == 140,
@@ -1778,10 +1778,15 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             break;
         }
 
-        // Stable-RS uses the same coherent projective seed->live warp as
-        // direct Turbo, plus the one shared sub-pixel residual refined above.
-        // RS + AirGapper CRC remain the acceptance oracle, so a stale warp only
-        // causes a cheap miss and Guided fallback.
+        // Stable-RS uses the same coherent seed->live warp as direct Turbo, plus
+        // the one shared sub-pixel residual refined above. Record which transform
+        // mode actually carried each attempted cached track so handheld traces can
+        // distinguish stable translation, cheap affine motion, and full perspective.
+        auto noteWarpMode = [&](const TurboFrameTransform& frameTransform) {
+            if (frameTransform.translationOnly) ++metrics->translationWarpTracks;
+            else if (frameTransform.affineOnly) ++metrics->affineWarpTracks;
+            else ++metrics->perspectiveWarpTracks;
+        };
 
         for (int i = 0; i < trackCount; ++i) {
             const auto& track = tracks[i];
@@ -1810,6 +1815,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (directMode) {
                 const auto frameTransform = turboFrameTransform(*cache, track);
                 if (frameTransform.isValid()) {
+                    noteWarpMode(frameTransform);
                     const float dx = wallCorrectionX;
                     const float dy = wallCorrectionY;
                     const auto levels = turboReadLevels(*cache, track, frameTransform,
@@ -1838,6 +1844,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 if (!frameTransform.isValid()) {
                     stableNeedsRefresh = true;
                 } else {
+                    noteWarpMode(frameTransform);
                     const float dx = wallCorrectionX;
                     const float dy = wallCorrectionY;
                     const auto levels = turboReadLevels(*cache, track, frameTransform,

@@ -77,6 +77,9 @@ struct DecimenGuidedMetrics {
 	uint32_t stableEligibleTracks;
 	uint32_t sparseProfileAttempts;
 	uint32_t sparseProfileSuccesses;
+	uint32_t translationWarpTracks;
+	uint32_t affineWarpTracks;
+	uint32_t perspectiveWarpTracks;
 };
 
 struct DecimenBatchMetrics {
