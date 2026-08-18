@@ -14,7 +14,7 @@ replace("send/main.js", 'const SEND_RUNTIME_BUILD = "v0.5.304";', 'const SEND_RU
 replace("receive/main.js", 'const RECEIVER_RUNTIME_BUILD = "v0.5.304";', 'const RECEIVER_RUNTIME_BUILD = "v0.5.305";')
 replace("main.js", 'const APP_BUILD = "v0.5.304";', 'const APP_BUILD = "v0.5.305";')
 replace("index.html", 'v0.5.304', 'v0.5.305', 2)
-replace("sw.js", 'airgapper-static-js-v251', 'airgapper-static-js-v252')
+replace("sw.js", 'airgapper-static-js-v252', 'airgapper-static-js-v253')
 
 # Keep legacy `fixed` as row-major so existing saved settings preserve the exact
 # winning behavior. Add a distinct column-major mode for a clean hardware A/B.
