@@ -1,1 +1,1 @@
-v0.5.300 record per-frame camera and optics metadata in raw corpora
+v0.5.301 add rolling-shutter-safe temporal hold for animated 1x1 QR
