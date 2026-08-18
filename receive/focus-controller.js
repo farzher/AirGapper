@@ -14,7 +14,7 @@ const CAMERA_TUNING = {
   exposureExcellent: 0.7,
   seekingOpticalIntervalMs: 110,
   lockedOpticalIntervalMs: 700,
-  targetLostGraceMs: 1600,
+  targetLostGraceMs: 650,
   stabilizingRetryMs: 2500,
   poorFocusRetryMs: 480,
   maxStabilizingAfRetries: 2,
@@ -146,7 +146,8 @@ class FocusController {
     if (this.calibrationMode === "off") return Infinity;
     if (this.strategy !== "auto" || this.state === "OVERRIDE") return CAMERA_TUNING.lockedOpticalIntervalMs;
     if (this.expectsProbeFrame) return 0;
-    return this.state === "LOCKED" || this.state === "TARGET_LOST_GRACE" ? CAMERA_TUNING.lockedOpticalIntervalMs : CAMERA_TUNING.seekingOpticalIntervalMs;
+    if (this.state === "TARGET_LOST_GRACE") return CAMERA_TUNING.seekingOpticalIntervalMs;
+    return this.state === "LOCKED" ? CAMERA_TUNING.lockedOpticalIntervalMs : CAMERA_TUNING.seekingOpticalIntervalMs;
   }
   attach(track) {
     var _a, _b;

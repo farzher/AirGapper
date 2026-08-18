@@ -953,15 +953,19 @@ ctx.onmessage = async (e) => {
         }
       };
       if (full) {
-        // Acquisition needs a small set of distinct slots before a multi-QR
-        // lattice becomes trusted. Keep this far cheaper than the historical
-        // 16->24 symbol scan, but do not stop after the easiest single QR.
-        // Normal scans collect up to four current-frame seeds; occasional deep
-        // scans use the same bound with tryHarder's downscale sweep.
+        // One CRC-valid AirGapper QR now seeds the complete declared wall. At
+        // dense v40 scale, use the codec's dedicated full-resolution finder:
+        // it keeps tryHarder's 3-row scan stride but deliberately skips the
+        // useless 1/3 and 1/9 image pyramids. Return after the first QR so the
+        // main thread can lock/predict all slots immediately. An occasional
+        // deep scan retains generic downscale coverage for a distant wall.
         const fullMode = acquisitionMode ?? (thorough ? "thorough" : "fast");
         const readFull = (tryHarder, maxSymbols, returnErrors) => decodePixelFormat === "y8"
           ? zx.readFullY(ptr + inputOffset, pw, ph, inputStride, tryHarder, maxSymbols, returnErrors)
           : zx.readFull(ptr, pw, ph, tryHarder, maxSymbols, returnErrors);
+        const readDenseSeed = () => decodePixelFormat === "y8"
+          ? zx.readDenseY(ptr + inputOffset, pw, ph, inputStride, 1)
+          : zx.readFull(ptr, pw, ph, true, 1, false);
         if (fullMode === "thorough") {
           readFullAttempts++;
           appendResults(readFull(true, 16, false), false);
@@ -969,12 +973,14 @@ ctx.onmessage = async (e) => {
             readFullAttempts++;
             appendResults(readFull(true, 24, true), true);
           }
-        } else if (fullMode === "seed") {
+        } else if (fullMode === "deep") {
           readFullAttempts++;
-          appendResults(readFull(true, 2, false), false);
+          appendResults(readFull(true, 1, false), false);
         } else {
+          // Both global fast acquisition and bounded seed/recovery crops are
+          // optimized for the first useful AirGapper packet, not symbol count.
           readFullAttempts++;
-          appendResults(readFull(fullMode === "deep", 4, false), false);
+          appendResults(readDenseSeed(), false);
         }
       } else {
         readFullAttempts++;
