@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.287";
+const RECEIVER_RUNTIME_BUILD = "v0.5.288";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -2031,6 +2031,7 @@ let geometryMotionLastSourceSequence = -1;
 let geometryCoverageHealthy = false;
 let geometryCoverageStarvedSince = 0;
 let geometryBreadthRecoveryProbes = 0;
+let geometryCoverageRepairTracks = 0;
 let geometryCoverageCollapseStreak = 0;
 let geometryCoverageCollapseLastAt = 0;
 let geometryCoverageCollapseStartedAt = 0;
@@ -4007,7 +4008,7 @@ function renderFocusDiagnostics() {
     `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · restoring recent winner" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
-    `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -4364,6 +4365,7 @@ function stopReceiver() {
   geometryCoverageHealthy = false;
   geometryCoverageStarvedSince = 0;
   geometryBreadthRecoveryProbes = 0;
+  geometryCoverageRepairTracks = 0;
   geometryCoverageCollapseStreak = 0;
   geometryCoverageCollapseLastAt = 0;
   geometryCoverageCollapseStartedAt = 0;
@@ -6136,9 +6138,46 @@ async function captureFrame(source) {
   // motion wobble. That only lengthens Guided jobs and causes newer frames to be
   // replaced while workers chew on known failures.
   const adaptiveWeakSlots = gridLattice.active && adaptiveWeakSlotScheduling(batchCandidates);
-  const batchRegions = adaptiveWeakSlots
+  let batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
+
+  // Weak-slot throttling is good when a few QRs are genuinely poor, but it can
+  // self-lock a partially stale wall: stale geometry misses, becomes weak, then
+  // gets too few attempts to produce the CRC-valid hit that would refresh it.
+  // Keep the normal CPU-saving throttle and reserve only ONE extra track while
+  // breadth starvation is sustained. Prefer missing rows/columns, then the
+  // stalest successful geometry, with a sequence-rotated tie break for fairness.
+  if (adaptiveWeakSlots && sustainedCoverageStarvation && batchRegions.length < batchCandidates.length) {
+    const scheduledIds = new Set(batchRegions.map((region) => region.id));
+    const cols = Math.max(1, Number(liveGridLayout?.cols) || 1);
+    const phase = Math.trunc(Number(source.sequence) || 0);
+    const repairCandidates = batchCandidates
+      .filter((region) => !scheduledIds.has(region.id))
+      .sort((a, b) => {
+        const aSlot = Number(a.gridSlot);
+        const bSlot = Number(b.gridSlot);
+        const aCol = Number.isInteger(aSlot) ? aSlot % cols : 0;
+        const bCol = Number.isInteger(bSlot) ? bSlot % cols : 0;
+        const aRow = Number.isInteger(aSlot) ? Math.floor(aSlot / cols) : 0;
+        const bRow = Number.isInteger(bSlot) ? Math.floor(bSlot / cols) : 0;
+        const aBreadth = Number(!freshCols.has(aCol)) + Number(!freshRows.has(aRow));
+        const bBreadth = Number(!freshCols.has(bCol)) + Number(!freshRows.has(bRow));
+        if (aBreadth !== bBreadth) return bBreadth - aBreadth;
+        const aSeen = Number.isFinite(a.decodedSeen) ? a.decodedSeen : -1e15;
+        const bSeen = Number.isFinite(b.decodedSeen) ? b.decodedSeen : -1e15;
+        if (aSeen !== bSeen) return aSeen - bSeen;
+        const aRotate = Number.isInteger(aSlot) ? (aSlot - phase + SLOT_METRIC_COUNT * 4) % SLOT_METRIC_COUNT : SLOT_METRIC_COUNT;
+        const bRotate = Number.isInteger(bSlot) ? (bSlot - phase + SLOT_METRIC_COUNT * 4) % SLOT_METRIC_COUNT : SLOT_METRIC_COUNT;
+        return aRotate - bRotate;
+      });
+    const repair = repairCandidates[0];
+    if (repair) {
+      batchRegions = [...batchRegions, repair];
+      geometryCoverageRepairTracks++;
+      notePipelineEvent("coverage-repair-track", Number(repair.gridSlot) || 0);
+    }
+  }
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
