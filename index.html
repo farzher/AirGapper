@@ -109,7 +109,7 @@
               <div id="camera-iso-control" class="axis-control" hidden><span class="axis-heading"><span id="iso-axis-name">ISO</span><button id="iso-axis-reset" type="button" hidden>ISO</button><output id="camera-iso-value" hidden></output></span><label id="iso-axis-toggle" class="setting-toggle" aria-label="Automatic ISO"><input id="iso-axis-auto" type="checkbox" checked /></label><input id="camera-iso" type="range" min="0" max="0" step="1" value="0" aria-label="ISO" hidden /></div>
             </div>
             <div class="receiver-dev-actions" hidden>
-              <div id="optics-auto-actions" hidden><button class="secondary-button" id="optics-optimize" type="button" aria-pressed="false">Optimize</button><button class="secondary-button" id="optics-keep" type="button" hidden>Keep</button><span id="optics-optimize-status" role="status">Off</span></div>
+              <div id="optics-auto-actions" hidden><button class="secondary-button" id="optics-optimize" type="button" aria-pressed="false">Recalibrate</button><button class="secondary-button" id="optics-keep" type="button" hidden>Keep</button><span id="optics-optimize-status" role="status">Off</span></div>
               <label><span>Device label</span><input id="device-label" type="text" placeholder="OnePlus 12R" autocomplete="off" /></label><label id="decode-workers-control"><span>Workers</span><select id="decode-workers"><option value="auto" selected>Auto</option></select></label>
               <label class="setting-toggle" id="strict-hot-path-control"><input id="strict-hot-path" type="checkbox" /><span>Strict hot path</span></label>
               <button class="secondary-button scan-capture-button" id="capture-scan" type="button">Capture</button><button class="secondary-button" id="copy-diagnostics" type="button">Copy diagnostics</button><button class="secondary-button" id="record-corpus" type="button">Record</button><button class="secondary-button" id="load-corpus" type="button">Replay</button><input id="corpus-file" type="file" accept=".agcap,application/vnd.airgapper.capture" hidden />
@@ -157,6 +157,6 @@
   <a id="receiver-link-url"></a>
 </dialog>
 
-<script type="module" src="./main.js?build=v0.5.285"></script>
+<script type="module" src="./main.js?build=v0.5.286"></script>
 </body>
 </html>

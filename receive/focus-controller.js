@@ -31,7 +31,7 @@ const CAMERA_TUNING = {
   optimizeWinRatio: 1.14,
   optimizeLossRatio: 0.88
 };
-const AUTO_QR_EV_BIAS = -0.7;
+const AUTO_QR_EV_BIAS = -0.8;
 const AUTO_QR_EV_COOLDOWN_MS = 3e3;
 const AUTO_QR_WHITE_LOW = 145;
 const AUTO_QR_WHITE_HIGH = 238;
