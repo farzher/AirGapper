@@ -1,0 +1,1 @@
+v0.5.276 path-aware satisfying QR overlay
