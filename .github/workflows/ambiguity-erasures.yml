@@ -1,0 +1,108 @@
+name: ambiguity erasure sampling candidate
+
+on:
+  push:
+    branches: ["agent/ambiguity-erasures"]
+    paths:
+      - .github/ambiguity_erasures_patch.py
+      - .github/workflows/ambiguity-erasures.yml
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply candidate
+        run: |
+          set -euo pipefail
+          python3 .github/ambiguity_erasures_patch.py 2>&1 | tee /tmp/ambiguity-patch.log
+
+      - name: Cache codec toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/decimen-codec/source/emsdk
+            vendor/decimen-codec/source/third_party
+            vendor/decimen-codec/source/build-simd
+            vendor/decimen-codec/source/build-scalar
+          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+
+      - name: Build SIMD and scalar codecs
+        run: |
+          set -euo pipefail
+          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/ambiguity-build-simd.log
+          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/ambiguity-build-scalar.log
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Prepare Chrome
+        run: npm install --no-save --package-lock=false playwright@1.55.0
+
+      - name: Run unchanged production regression
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=2 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/ambiguity-regression.log
+
+      - name: Summarize candidate
+        if: success()
+        run: |
+          node <<'NODE' | tee /tmp/ambiguity-summary.log
+          const fs=require('fs');
+          const before=JSON.parse(fs.readFileSync('benchmark/latest-result.json','utf8')).scenarios;
+          const after=JSON.parse(fs.readFileSync('benchmark/offline-summary.json','utf8')).scenarios;
+          const rows={};
+          for(const name of ['motion-y8','dense-y8','optical-dense-y8','camera-dense-y8']) {
+            const b=before[name], a=after[name];
+            rows[name]={
+              yield:[b?.normalized?.guidedOutputYield,a?.normalized?.guidedOutputYield],
+              guidedMsPerOutput:[b?.trialMedians?.guidedMsPerOutput,a?.trialMedians?.guidedMsPerOutput],
+              sampleMsPerTrack:[b?.trialMedians?.sampleMsPerTrack,a?.trialMedians?.sampleMsPerTrack],
+              decodeMsPerOutput:[b?.normalized?.decodeMsPerOutput,a?.normalized?.decodeMsPerOutput],
+              stableRsYield:[b?.normalized?.stableRsYield,a?.normalized?.stableRsYield]
+            };
+          }
+          console.log(JSON.stringify(rows,null,2));
+          NODE
+
+      - name: Record pass marker
+        if: success()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          {
+            echo "ambiguity erasure candidate passed at $(date -u +%FT%TZ)"
+            cat /tmp/ambiguity-summary.log
+          } > benchmark/ambiguity-erasures-pass.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add benchmark/ambiguity-erasures-pass.log
+          git commit -m "record ambiguity erasure pass"
+          git push origin HEAD:agent/ambiguity-erasures
+
+      - name: Record rejection marker
+        if: failure()
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          {
+            echo "ambiguity erasure candidate rejected at $(date -u +%FT%TZ)"
+            cat /tmp/ambiguity-patch.log 2>/dev/null || true
+            tail -n 200 /tmp/ambiguity-build-simd.log 2>/dev/null || true
+            tail -n 200 /tmp/ambiguity-build-scalar.log 2>/dev/null || true
+            tail -n 520 /tmp/ambiguity-regression.log 2>/dev/null || true
+          } > benchmark/ambiguity-erasures-reject.log
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add benchmark/ambiguity-erasures-reject.log
+          git commit -m "record ambiguity erasure rejection"
+          git push origin HEAD:agent/ambiguity-erasures
+          exit 1
