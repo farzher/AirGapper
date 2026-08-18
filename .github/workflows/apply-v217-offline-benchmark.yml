@@ -12,6 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/offline-runner.mjs
+      - benchmark/grid-lattice-regression.mjs
       - .github/receiver_candidate.py
       - .github/receiver_candidate_message.txt
       - .github/workflows/apply-v217-offline-benchmark.yml
@@ -69,6 +70,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+
+      - name: Run grid lattice regression
+        run: node benchmark/grid-lattice-regression.mjs
 
       - name: Prepare Chrome
         run: npm install --no-save --package-lock=false playwright@1.55.0
