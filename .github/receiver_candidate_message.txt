@@ -1,0 +1,1 @@
+v0.5.295 make close-up one-QR tracking and reacquisition first-class
