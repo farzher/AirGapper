@@ -1,1 +1,0 @@
-v0.5.289 remember proven optics, rescue bad starts, and converge at short-shutter robust brightness

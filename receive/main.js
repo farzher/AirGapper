@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.288";
+const RECEIVER_RUNTIME_BUILD = "v0.5.289";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -241,8 +241,8 @@ const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // One stable tracked QR is enough to compare exposure candidates. Requiring
 // multiple visible slots makes Auto Optics impossible on a true 1x1 sender.
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
-const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 2500;
-const AUTO_OPTICS_RESCUE_RETRY_MS = 12000;
+const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 650;
+const AUTO_OPTICS_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
 const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v2";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
@@ -252,7 +252,7 @@ const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v2";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 12 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
 const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
-const AUTO_OPTICS_MEMORY_BOOT_MAX_MS = 1600;
+const AUTO_OPTICS_MEMORY_BOOT_MAX_MS = 650;
 // A relative winner is meaningless when the whole local ISO neighborhood is
 // unusable. Below this per-QR yield, abandon manual tuning and let hardware AE
 // re-establish a sane exposure product before trying the motion-safe handoff.
@@ -2918,24 +2918,126 @@ function cameraSettingNear(value, target, range) {
   const step = Number(range?.step) || 0;
   return Math.abs(value - target) <= Math.max(step * 0.75, Math.abs(target) * 0.02, 1e-6);
 }
+function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
+  const aeProduct = baseline.exposure * baseline.iso;
+  const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * AUTO_QR_LIGHT_SCALE);
+  let exposure = quantizeCameraRange(
+    Math.min(exposureRange.max, AUTO_OPTICS_MAX_SHORT_EXPOSURE, 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION),
+    exposureRange
+  );
+  if (targetProduct / Math.max(exposureRange.min, exposure) < isoRange.min) {
+    exposure = quantizeCameraRange(
+      Math.max(exposureRange.min, Math.min(exposure, targetProduct / isoRange.min)),
+      exposureRange
+    );
+  }
+  const iso = quantizeCameraRange(
+    Math.max(isoRange.min, Math.min(isoRange.max, targetProduct / Math.max(exposureRange.min, exposure))),
+    isoRange
+  );
+  return { exposure, iso, aeProduct, targetProduct };
+}
+async function readAutomaticAeBaseline(track) {
+  const beforeSequence = latestSourceFrameSequence;
+  await applyExposureSetting(track);
+  if (!automaticOpticsSessionAlive(track)) return void 0;
+  await waitForFreshAutoOpticsFrames(track, beforeSequence, 2, 500);
+  if (!automaticOpticsSessionAlive(track)) return void 0;
+  const settings = track.getSettings();
+  const exposure = Number(settings.exposureTime);
+  const iso = Number(settings.iso);
+  if (!(exposure > 0) || !(iso > 0)) return void 0;
+  return { exposure, iso, at: receiverNow() };
+}
+async function applyAutomaticShortSeed(track, baseline, reason) {
+  const caps = track.getCapabilities?.() ?? {};
+  const exposureRange = caps.exposureTime;
+  const isoRange = caps.iso;
+  if (!baseline || !exposureRange || !isoRange) return false;
+  const settings = track.getSettings();
+  const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+  const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps);
+  const accepted = await applyCameraConstraint(track, {
+    exposureMode: "manual",
+    exposureTime: seed.exposure,
+    iso: seed.iso
+  });
+  if (!accepted || !automaticOpticsSessionAlive(track)) return false;
+  const actual = track.getSettings();
+  autoOpticsAeBaseline = { ...baseline, at: receiverNow() };
+  autoOpticsRuntimeState = "seed";
+  autoOpticsMemoryBootAt = 0;
+  autoOpticsMemoryBoot = void 0;
+  autoOpticsLockSince = 0;
+  autoOpticsAcquisitionSince = receiverNow();
+  autoOpticsRetryAt = 0;
+  autoOpticsRescueRetryAt = autoOpticsAcquisitionSince + AUTO_OPTICS_ACQUISITION_RESCUE_MS;
+  autoOpticsTuneSummary = `${reason} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
+  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");
+  notePipelineEvent("auto-optics-short-seed");
+  return true;
+}
 async function primeAutomaticQrOpticsStartup(track) {
   if (!automaticOpticsSessionAlive(track) || autoOpticsMutationRunning) return;
+  const caps = track.getCapabilities?.() ?? {};
+  const exposureRange = caps.exposureTime;
+  const isoRange = caps.iso;
+  const saved = usableAutomaticOpticsMemory(track) ?? bestAutomaticOpticsHistory(track);
+  const canManual = Array.isArray(caps.exposureMode) && caps.exposureMode.includes("manual") && exposureRange && isoRange;
+
+  if (canManual && automaticOpticsMemoryHealthy(saved)) {
+    const exposure = quantizeCameraRange(saved.exposure, exposureRange);
+    const iso = quantizeCameraRange(saved.iso, isoRange);
+    autoOpticsMutationRunning = true;
+    try {
+      const accepted = await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: exposure, iso });
+      if (!automaticOpticsSessionAlive(track)) return;
+      const actual = track.getSettings();
+      const restored = accepted && actual.exposureMode === "manual" &&
+        cameraSettingNear(actual.exposureTime, exposure, exposureRange) &&
+        cameraSettingNear(actual.iso, iso, isoRange);
+      if (restored) {
+        const now = receiverNow();
+        autoOpticsRuntimeState = "memory";
+        autoOpticsMemoryBootAt = now;
+        autoOpticsMemoryBoot = {
+          exposure: Number(actual.exposureTime) || exposure,
+          iso: Number(actual.iso) || iso,
+          yieldRate: Number(saved.yieldRate) || 0
+        };
+        autoOpticsAcquisitionSince = now;
+        autoOpticsRetryAt = Infinity;
+        autoOpticsRescueRetryAt = 0;
+        autoOpticsHeldYield = autoOpticsMemoryBoot.yieldRate;
+        autoOpticsTuneSummary = `recent winner · ${formatExposureMs(autoOpticsMemoryBoot.exposure)} · ISO ${Math.round(autoOpticsMemoryBoot.iso)} · validating`;
+        focusController.adoptAutomaticCameraState("restored recent QR-proven automatic optics before acquisition");
+        notePipelineEvent("auto-optics-memory-start");
+        return;
+      }
+    } finally {
+      autoOpticsMutationRunning = false;
+    }
+  }
+
   autoOpticsRuntimeState = "ae";
   autoOpticsMemoryBootAt = 0;
   autoOpticsMemoryBoot = void 0;
   autoOpticsRetryAt = 0;
   autoOpticsRescueRetryAt = 0;
-  await applyExposureSetting(track);
+  const baseline = await readAutomaticAeBaseline(track);
   if (!automaticOpticsSessionAlive(track)) return;
+  if (canManual && baseline && await applyAutomaticShortSeed(track, baseline, "AE-metered seed")) return;
+  autoOpticsRuntimeState = "ae";
   autoOpticsAcquisitionSince = receiverNow();
-  autoOpticsTuneSummary = "hardware AE acquisition";
+  autoOpticsTuneSummary = "hardware AE · manual exposure unavailable";
 }
 async function abandonAutomaticOpticsStartupMemory(track, reason = "startup winner produced no QR") {
   if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "memory") return;
   autoOpticsMutationRunning = true;
   try {
-    await applyExposureSetting(track);
+    const baseline = await readAutomaticAeBaseline(track);
     if (!automaticOpticsSessionAlive(track)) return;
+    if (baseline && await applyAutomaticShortSeed(track, baseline, `${reason} · AE re-metered`)) return;
     const now = receiverNow();
     autoOpticsRuntimeState = "ae";
     autoOpticsMemoryBootAt = 0;
@@ -2943,7 +3045,7 @@ async function abandonAutomaticOpticsStartupMemory(track, reason = "startup winn
     autoOpticsLockSince = 0;
     autoOpticsAcquisitionSince = now;
     autoOpticsRetryAt = 0;
-    autoOpticsRescueRetryAt = now + 900;
+    autoOpticsRescueRetryAt = now + AUTO_OPTICS_ACQUISITION_RESCUE_MS;
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = 0;
@@ -3274,17 +3376,24 @@ async function settleAutomaticQrOptics(track, now) {
       }
     }
     if (!automaticOpticsSessionAlive(track)) return;
-    if (tuned.deferred || tuned.collapsed || !tuned.best?.valid) {
-      const why = tuned.deferred ? "comparison invalidated; hold framing" : "short shutter too dark";
+    if (tuned.deferred) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = 0;
+      autoOpticsRetryAt = receiverNow() + 350;
+      autoOpticsTuneSummary = "comparison invalidated by movement · holding short shutter";
+      focusController.adoptAutomaticCameraState("automatic optics comparison deferred; current short-shutter setting held until framing stabilizes");
+      return;
+    }
+    if (tuned.collapsed || !tuned.best?.valid) {
       await applyExposureSetting(track);
       if (!automaticOpticsSessionAlive(track)) return;
       autoOpticsRuntimeState = "ae";
       autoOpticsLockSince = 0;
       autoOpticsAcquisitionSince = receiverNow();
-      autoOpticsRetryAt = receiverNow() + (tuned.deferred ? 500 : AUTO_OPTICS_COLLAPSE_RETRY_MS);
-      autoOpticsTuneSummary = `${why} · hardware AE until clean retry`;
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_COLLAPSE_RETRY_MS;
+      autoOpticsTuneSummary = "short shutter too dark · hardware AE until clean retry";
       if (tuned.collapsed) forgetAutomaticOptics(track);
-      focusController.adoptAutomaticCameraState("automatic optics comparison invalid; hardware AE retained until clean retry");
+      focusController.adoptAutomaticCameraState("bounded short-shutter search failed; hardware AE retained until clean retry");
       return;
     }
 
@@ -3324,64 +3433,40 @@ async function releaseAutomaticQrOptics(track, now) {
     autoOpticsMutationRunning = false;
   }
 }
-function shuffleAutomaticOpticsCandidates(items) {
-  const result = [...items];
-  const random = () => {
-    try {
-      const value = new Uint32Array(1);
-      crypto.getRandomValues(value);
-      return value[0] / 4294967296;
-    } catch {
-      return Math.random();
-    }
-  };
-  for (let index = result.length - 1; index > 0; index--) {
-    const other = Math.floor(random() * (index + 1));
-    [result[index], result[other]] = [result[other], result[index]];
-  }
-  return result;
-}
 function buildAutomaticOpticsAcquisitionCandidates(track, aeBaseline, exposureRange, isoRange, fps) {
-  const motionSafeExposure = 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION;
-  const safeExposure = quantizeCameraRange(
-    Math.min(exposureRange.max, AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE, motionSafeExposure),
-    exposureRange
-  );
-  const minIso = quantizeCameraRange(isoRange.min, isoRange);
+  const seed = automaticShortShutterSeed(aeBaseline, exposureRange, isoRange, fps);
+  const current = track.getSettings();
+  const currentKey = Number.isFinite(current.exposureTime) && Number.isFinite(current.iso)
+    ? autoOpticsHistoryConfigKey(current.exposureTime, current.iso)
+    : "";
   const candidates = [];
   const seen = new Set();
-  const add = (exposureRaw, isoRaw, label, priority = false) => {
+  const add = (exposureRaw, isoRaw, label, allowCurrent = false) => {
     const exposure = quantizeCameraRange(exposureRaw, exposureRange);
     const iso = quantizeCameraRange(isoRaw, isoRange);
     const key = autoOpticsHistoryConfigKey(exposure, iso);
-    if (seen.has(key)) return;
+    if (seen.has(key) || !allowCurrent && key === currentKey) return;
     seen.add(key);
-    candidates.push({ exposure, iso, label, priority });
+    candidates.push({ exposure, iso, label });
   };
 
-  for (const item of readAutomaticOpticsHistory(track).slice(0, 3))
-    add(item.exposure, item.iso, "learned", true);
+  for (const item of readAutomaticOpticsHistory(track).slice(0, 2))
+    add(item.exposure, item.iso, "learned");
   const memory = usableAutomaticOpticsMemory(track);
-  if (memory) add(memory.exposure, memory.iso, "recent winner", true);
-  // This is the most important general bootstrap on a 30 fps phone: 10 ms at
-  // minimum gain. It is frame-safe, low-noise, and unlike the old algorithm it
-  // remains reachable even when hardware AE starts at a 1-2 ms shutter.
-  add(safeExposure, minIso, "frame-safe", true);
-
-  const explore = [];
-  const pushExplore = (exposure, iso, label) => {
-    const before = candidates.length;
-    add(exposure, iso, label, false);
-    if (candidates.length > before) explore.push(candidates.pop());
-  };
-  pushExplore(safeExposure * 0.72, minIso, "shorter");
-  pushExplore(safeExposure * 0.48, minIso, "short");
-  pushExplore(safeExposure * 0.32, minIso, "very short");
-  pushExplore(safeExposure, minIso * Math.SQRT2, "more gain");
-  pushExplore(safeExposure * 0.72, minIso * Math.SQRT2, "balanced");
-  pushExplore(safeExposure * 0.48, minIso * 2, "fast gain");
-  pushExplore(aeBaseline.exposure, aeBaseline.iso, "hardware AE");
-  return [...candidates, ...shuffleAutomaticOpticsCandidates(explore)];
+  if (memory) add(memory.exposure, memory.iso, "recent winner");
+  add(seed.exposure, seed.iso / Math.SQRT2, "darker");
+  add(seed.exposure, seed.iso * Math.SQRT2, "brighter");
+  add(seed.exposure, seed.iso * 2, "bright rescue");
+  const fasterExposure = quantizeCameraRange(Math.max(exposureRange.min, seed.exposure / Math.SQRT2), exposureRange);
+  add(fasterExposure, seed.targetProduct / Math.max(exposureRange.min, fasterExposure), "faster");
+  const lowLightExposure = quantizeCameraRange(
+    Math.min(exposureRange.max, AUTO_OPTICS_FALLBACK_EXPOSURE, 1e4 / fps * 0.18),
+    exposureRange
+  );
+  if (lowLightExposure > seed.exposure * 1.08)
+    add(lowLightExposure, seed.targetProduct / Math.max(exposureRange.min, lowLightExposure), "low-light");
+  add(aeBaseline.exposure, aeBaseline.iso, "hardware AE", true);
+  return candidates;
 }
 async function measureAutomaticAcquisitionCandidate(track, candidate, index, total) {
   const id = `AUTO-RACE-${index + 1}`;
@@ -3422,7 +3507,10 @@ async function rescueAutomaticQrAcquisition(track, now) {
   }
 
   const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
-  const aeBaseline = { exposure: settings.exposureTime, iso: settings.iso, at: receiverNow() };
+  const savedAe = autoOpticsAeBaseline && receiverNow() - autoOpticsAeBaseline.at < 10000
+    ? autoOpticsAeBaseline
+    : void 0;
+  const aeBaseline = savedAe ?? { exposure: settings.exposureTime, iso: settings.iso, at: receiverNow() };
   const candidates = buildAutomaticOpticsAcquisitionCandidates(track, aeBaseline, exposureRange, isoRange, fps);
   if (!candidates.length) {
     autoOpticsRescueRetryAt = now + AUTO_OPTICS_RESCUE_RETRY_MS;
@@ -3470,14 +3558,15 @@ async function rescueAutomaticQrAcquisition(track, now) {
     // If no exposure decoded, do not keep oscillating brightness. Hold the best
     // prior / frame-safe candidate and hand recovery back to autofocus. A focus
     // failure cannot be repaired by repeatedly making the image darker.
-    const hold = candidates[0];
+    const seed = automaticShortShutterSeed(aeBaseline, exposureRange, isoRange, fps);
+    const hold = { exposure: seed.exposure, iso: seed.iso, label: "short-shutter seed" };
     await applyCameraConstraint(track, {
       exposureMode: "manual",
       exposureTime: hold.exposure,
       iso: hold.iso
     });
     const actual = track.getSettings();
-    autoOpticsRuntimeState = "ae";
+    autoOpticsRuntimeState = "seed";
     autoOpticsLockSince = 0;
     autoOpticsAcquisitionSince = receiverNow();
     autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_RESCUE_RETRY_MS;
@@ -3538,15 +3627,60 @@ function maintainAutomaticQrOptics(now) {
     }
     return;
   }
+  if (autoOpticsRuntimeState === "memory") {
+    const bootAt = autoOpticsMemoryBootAt || autoOpticsAcquisitionSince || now;
+    const decodedOnMemory = lastStreamDecodeAt >= bootAt;
+    if (gridLattice.locked) {
+      autoOpticsRuntimeState = "manual";
+      autoOpticsHoldSample = autoOpticsPipelineSnapshot();
+      autoOpticsHoldCollapseSince = 0;
+      autoOpticsHeldYield = Math.max(AUTO_OPTICS_MEMORY_MIN_YIELD, Number(autoOpticsMemoryBoot?.yieldRate) || autoOpticsHeldYield || 0);
+      autoOpticsRetryAt = Infinity;
+      autoOpticsTuneSummary = `recent winner confirmed · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%`;
+      autoOpticsMemoryBootAt = 0;
+      autoOpticsMemoryBoot = void 0;
+      focusController.adoptAutomaticCameraState("remembered automatic optics produced live QR and were confirmed");
+      notePipelineEvent("auto-optics-memory-confirmed");
+      return;
+    }
+    if (decodedOnMemory) {
+      // Payload validity already proves the optics. Give lattice geometry time to
+      // finish without changing camera state underneath acquisition.
+      autoOpticsMemoryBootAt = now;
+      return;
+    }
+    if (now - bootAt >= AUTO_OPTICS_MEMORY_BOOT_MAX_MS)
+      void abandonAutomaticOpticsStartupMemory(track);
+    return;
+  }
+
+  if (autoOpticsRuntimeState === "seed") {
+    const seedDecoded = lastStreamDecodeAt >= autoOpticsAcquisitionSince;
+    if (gridLattice.locked) {
+      // Preserve the current manual seed, but hand the post-lock state machine
+      // the AE product that created it so normal robustness-boundary tuning can
+      // refine ISO after framing settles.
+      autoOpticsRuntimeState = "ae";
+      autoOpticsLockSince = now;
+      autoOpticsRetryAt = 0;
+      return;
+    }
+    if (seedDecoded) {
+      autoOpticsAcquisitionSince = now;
+      return;
+    }
+    if (now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS && now >= autoOpticsRescueRetryAt)
+      void rescueAutomaticQrAcquisition(track, now);
+    return;
+  }
+
+  if (autoOpticsRuntimeState === "rescue" || autoOpticsRuntimeState === "tuning" || autoOpticsRuntimeState === "settling") return;
   if (autoOpticsRuntimeState !== "ae") return;
 
-  // Cold acquisition stays on hardware AE. Remembered manual exposure can be
-  // badly wrong when ambient/screen brightness changed since the last session;
-  // applying it before the first QR used to create multi-second startup stalls.
-  // Remembered ISO is deliberately not used before first lock; memory is reused
-  // only after acquisition for the normal motion-safe shutter/ISO tuning pass.
   if (!gridLattice.locked) {
     autoOpticsLockSince = 0;
+    if (now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS && now >= autoOpticsRescueRetryAt)
+      void rescueAutomaticQrAcquisition(track, now);
     return;
   }
   if (!autoOpticsPoseUsable(autoOpticsPoseSnapshot())) {
@@ -4005,7 +4139,7 @@ function renderFocusDiagnostics() {
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
-    `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · restoring recent winner" : autoOpticsRuntimeState === "ae" ? " · bootstrap AE" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
+    `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · validating recent winner" : autoOpticsRuntimeState === "seed" ? " · short-shutter bootstrap" : autoOpticsRuntimeState === "rescue" ? " · acquisition exposure search" : autoOpticsRuntimeState === "ae" ? " · AE meter/fallback" : autoOpticsRuntimeState === "tuning" ? " · live ISO search" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,

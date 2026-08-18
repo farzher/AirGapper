@@ -309,7 +309,7 @@ class FocusController {
       return;
     }
     const observedFps = Math.max(12, Math.min(120, ((_a = this.latest) == null ? void 0 : _a.captureFps) || 30));
-    const frameSafeMax = 8e3 / observedFps;
+    const frameSafeMax = 1e4 / observedFps * 0.18;
     const exposureRange = {
       ...hardwareExposureRange,
       max: Math.max(hardwareExposureRange.min, Math.min(hardwareExposureRange.max, frameSafeMax))
