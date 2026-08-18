@@ -1,1 +1,1 @@
-v0.5.271 instant acquisition and bump recovery
+v0.5.272 acquisition liveness and early bump assist
