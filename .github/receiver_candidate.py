@@ -35,14 +35,15 @@ replace_once(
 replace_once(
     "send/main.js",
     '''        if (!nextCellAt) nextCellAt = now;\n      }\n\n      let painted = 0;''',
-    '''        if (!nextCellAt) nextCellAt = now + cellInterval;\n      }\n\n      // rAF can be suspended for seconds or minutes while the tab is hidden.\n      // Never burst overdue QR phases on resume. A delay larger than one whole\n      // sender page is a clock discontinuity, so rebase instead of catching up.\n      if (!nextCellAt || now - nextCellAt > pageInterval)\n        nextCellAt = now + cellInterval;\n\n      let painted = 0;'''
+    '''        if (!nextCellAt) nextCellAt = now;\n      }\n\n      // visibilitychange explicitly rebases this clock on tab restore. Also\n      // fence genuinely large scheduler stalls, but do not confuse an FPS above\n      // the display refresh rate with suspension: ordinary rAF lateness may\n      // still catch up exactly as before.\n      if (!nextCellAt || now - nextCellAt > 250)\n        nextCellAt = now + cellInterval;\n\n      let painted = 0;'''
 )
 
-# Single-thread fallback renderer gets the same clock semantics.
+# Single-thread fallback renderer gets the same clock semantics while preserving
+# its old high-FPS behavior when normal rAF cadence is slower than requested FPS.
 replace_once(
     "send/main.js",
     '''  activeSendFpsSetter = (fps) => {\n    interval = 1e3 / Math.max(1, fps);\n    nextAt = Math.min(nextAt, performance.now() + interval);\n  };\n  const tick = (now) => {\n    if (gen !== generation || generatorFailed) return;\n    requestAnimationFrame(tick);\n    if (now < nextAt) return;\n    if (now - nextAt > interval) nextAt = now;''',
-    '''  activeSendFpsSetter = (fps) => {\n    interval = 1e3 / Math.max(1, fps);\n    nextAt = Math.min(nextAt, performance.now() + interval);\n  };\n  activeSendClockRebase = () => { nextAt = 0; };\n  const tick = (now) => {\n    if (gen !== generation || generatorFailed) return;\n    requestAnimationFrame(tick);\n    if (!nextAt || now - nextAt > interval) nextAt = now + interval;\n    if (now < nextAt) return;'''
+    '''  activeSendFpsSetter = (fps) => {\n    interval = 1e3 / Math.max(1, fps);\n    nextAt = Math.min(nextAt, performance.now() + interval);\n  };\n  activeSendClockRebase = () => { nextAt = 0; };\n  const tick = (now) => {\n    if (gen !== generation || generatorFailed) return;\n    requestAnimationFrame(tick);\n    if (!nextAt || now - nextAt > 250) nextAt = now + interval;\n    if (now < nextAt) return;\n    if (now - nextAt > interval) nextAt = now;'''
 )
 
 # The app already emits pause/resume on visibility changes; use resume to fence
