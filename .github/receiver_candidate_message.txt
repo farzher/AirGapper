@@ -1,1 +1,0 @@
-v0.5.331 precompute threshold plane terms
