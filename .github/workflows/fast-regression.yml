@@ -36,6 +36,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify-release-signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify release signing secrets
+        env:
+          AIRGAPPER_ANDROID_KEYSTORE_B64: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_B64 }}
+          AIRGAPPER_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${AIRGAPPER_ANDROID_KEYSTORE_B64:-}" || { echo "::error::AIRGAPPER_ANDROID_KEYSTORE_B64 is missing"; exit 1; }
+          test -n "${AIRGAPPER_ANDROID_KEYSTORE_PASSWORD:-}" || { echo "::error::AIRGAPPER_ANDROID_KEYSTORE_PASSWORD is missing"; exit 1; }
+          printf '%s' "$AIRGAPPER_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/airgapper-release.jks"
+          chmod 600 "$RUNNER_TEMP/airgapper-release.jks"
+          keytool -list -v \
+            -keystore "$RUNNER_TEMP/airgapper-release.jks" \
+            -storepass "$AIRGAPPER_ANDROID_KEYSTORE_PASSWORD" \
+            -alias airgapper | grep -F 'SHA256: 6B:75:F5:F6:02:1C:56:E1:59:81:80:D1:31:88:07:EF:84:DF:75:7F:A7:E0:A5:9D:01:9F:83:C0:7F:9C:FB:24'
+          echo 'AIRGAPPER_RELEASE_SIGNING_SECRET_PASS'
+
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 35
