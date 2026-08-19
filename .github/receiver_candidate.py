@@ -11,8 +11,20 @@ def replace_once(path, old, new):
 send = "send/main.js"
 
 replace_once(send,
-'''  const temporalOrder = spatiallyDispersedOrder(gridCols, gridRows);\n  const phaseStep = temporalPhaseStep(gridCodes);\n''',
-'''  // Synchronous walls never use per-cell phase ordering. Avoid building and\n  // retaining scheduling state that cannot participate in this mode.\n  const temporalOrder = synchronousUpdates ? null : spatiallyDispersedOrder(gridCols, gridRows);\n  const phaseStep = synchronousUpdates ? 1 : temporalPhaseStep(gridCodes);\n''')
+'''  const updatePattern = selectedUpdatePattern();\n  const synchronousUpdates = updatePattern === "synchronous";\n  const temporalOrder = spatiallyDispersedOrder(gridCols, gridRows);\n  const phaseStep = temporalPhaseStep(gridCodes);\n''',
+'''  const updatePattern = selectedUpdatePattern();\n  const synchronousUpdates = updatePattern === "synchronous";\n  const workerPageRenderer = !staticStream && typeof Worker === "function";\n  const directSynchronousPages = workerPageRenderer && synchronousUpdates;\n  // Synchronous walls never use per-cell phase ordering. Avoid building and\n  // retaining scheduling state that cannot participate in this mode.\n  const temporalOrder = synchronousUpdates ? null : spatiallyDispersedOrder(gridCols, gridRows);\n  const phaseStep = synchronousUpdates ? 1 : temporalPhaseStep(gridCodes);\n''')
+
+replace_once(send,
+'''    if (staging.width !== totalW || staging.height !== totalH) {\n      staging.width = totalW;\n      staging.height = totalH;\n    }\n    const canvasW = Math.max(1, Math.round(displayW * scale));\n''',
+'''    if (!directSynchronousPages && (staging.width !== totalW || staging.height !== totalH)) {\n      staging.width = totalW;\n      staging.height = totalH;\n    }\n    const canvasW = Math.max(1, Math.round(displayW * scale));\n''')
+
+replace_once(send,
+'''    const stagingCtx = staging.getContext("2d");\n    cells.forEach((img, i) => {\n      if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);\n    });\n    if (fitStaging) {\n      const fitW = totalW * FIT_SUPERSAMPLE;\n      const fitH = totalH * FIT_SUPERSAMPLE;\n      if (fitStaging.width !== fitW || fitStaging.height !== fitH) {\n        fitStaging.width = fitW;\n        fitStaging.height = fitH;\n      }\n      const fitCtx = fitStaging.getContext("2d");\n      fitCtx.imageSmoothingEnabled = false;\n      fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);\n      renderFitCanvas();\n    } else {\n      const ctx = canvas.getContext("2d");\n      ctx.imageSmoothingEnabled = false;\n      if (landscape) {\n        ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);\n      } else {\n        ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);\n      }\n      ctx.drawImage(staging, 0, 0);\n    }\n''',
+'''    if (!directSynchronousPages) {\n      const stagingCtx = staging.getContext("2d");\n      cells.forEach((img, i) => {\n        if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);\n      });\n    }\n    if (fitStaging) {\n      const fitW = totalW * FIT_SUPERSAMPLE;\n      const fitH = totalH * FIT_SUPERSAMPLE;\n      if (fitStaging.width !== fitW || fitStaging.height !== fitH) {\n        fitStaging.width = fitW;\n        fitStaging.height = fitH;\n      }\n      if (!directSynchronousPages) {\n        const fitCtx = fitStaging.getContext("2d");\n        fitCtx.imageSmoothingEnabled = false;\n        fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);\n        renderFitCanvas();\n      }\n    } else if (!directSynchronousPages) {\n      const ctx = canvas.getContext("2d");\n      ctx.imageSmoothingEnabled = false;\n      if (landscape) {\n        ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);\n      } else {\n        ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);\n      }\n      ctx.drawImage(staging, 0, 0);\n    }\n''')
+
+replace_once(send,
+'''  if (!staticStream && typeof Worker === "function") {\n''',
+'''  if (workerPageRenderer) {\n''')
 
 replace_once(send,
 '''          version\n        }, transfer);\n''',
