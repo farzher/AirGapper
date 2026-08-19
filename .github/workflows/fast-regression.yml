@@ -50,7 +50,7 @@ jobs:
             echo 'native Camera2 integration already applied'
             exit 0
           fi
-          python3 .github/apply-native-camera2.py
+          python3 .github/run-native-camera2-patch.py
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android/app/src/main/java/com/airgapper/app/MainActivity.java \
