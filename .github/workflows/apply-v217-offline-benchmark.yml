@@ -42,11 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f .github/receiver_candidate.py ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
             python3 .github/receiver_candidate.py 2>&1 | tee /tmp/receiver-candidate-patch.log
             if [ -f .github/receiver_cleanup_extra.py ]; then
               python3 .github/receiver_cleanup_extra.py 2>&1 | tee -a /tmp/receiver-candidate-patch.log
             fi
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
             if git diff --quiet -- codec/source vendor/decimen-codec/source; then
               echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
             else
