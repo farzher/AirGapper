@@ -1,0 +1,1 @@
+v0.5.339 freeze transfer timing on final scan
