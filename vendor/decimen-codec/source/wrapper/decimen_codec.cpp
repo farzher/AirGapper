@@ -301,7 +301,7 @@ static bool guidedFinderTriplet(const BitMatrix& image, const DecimenGuidedTrack
     std::array<std::optional<ConcentricPattern>, 3> found;
     int anchor = -1;
     for (int index : order) {
-        found[index] = locateGuidedFinder(image, predicted[index], moduleSize, 4, metrics);
+        found[index] = locateGuidedFinder(image, predicted[index], moduleSize, 7, metrics);
         if (found[index]) {
             anchor = index;
             break;
@@ -314,7 +314,7 @@ static bool guidedFinderTriplet(const BitMatrix& image, const DecimenGuidedTrack
     for (int index = 0; index < 3; ++index) {
         if (index == anchor)
             continue;
-        found[index] = locateGuidedFinder(image, predicted[index] + delta, moduleSize, 2, metrics);
+        found[index] = locateGuidedFinder(image, predicted[index] + delta, moduleSize, 4, metrics);
         if (!found[index])
             return false;
     }

@@ -16,7 +16,7 @@ const EXACT_GEOMETRY_MS = 420;
 // wall itself is rigid, so publish coherent global motion and retain only the
 // slowly learned local residual that represents lens distortion.
 const LOCAL_GEOMETRY_LEARN_MAX_ERROR = 0.08;
-const LOCAL_GEOMETRY_MAX_RESIDUAL = 0.08;
+const LOCAL_GEOMETRY_MAX_RESIDUAL = 0.03;
 const LOCAL_GEOMETRY_ALPHA = 0.08;
 function corners(quad) {
   return quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];
@@ -282,6 +282,11 @@ class GridLattice {
       dx, dy, maxShift: Math.hypot(dx, dy)
     }, at);
   }
+  dropSlotCorrection(slot) {
+    if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
+    this.slotCorrections.delete(slot);
+    return this.candidate ? this.snapshot() : null;
+  }
   learnSlotCorrection(detection) {
     const candidate = this.candidate;
     if (!this.locked || !candidate || candidate.error > LOCAL_GEOMETRY_LEARN_MAX_ERROR) return;
@@ -297,9 +302,16 @@ class GridLattice {
     if (residual.some((point) => Math.hypot(point.x, point.y) > edge * LOCAL_GEOMETRY_MAX_RESIDUAL)) return;
     const previous = this.slotCorrections.get(detection.slotIndex);
     if (!previous || previous.length !== 4) {
-      // First CRC-backed sample establishes the local lens residual immediately;
-      // later samples only nudge it slowly so decoder corner noise cannot move
-      // one QR independently from the rest of the wall.
+      // A CRC-backed measured quad may establish the local residual immediately;
+      // the residual itself is tightly bounded above, and repeated unexplained
+      // misses can now evict this correction independently of the wall.
+      this.slotCorrections.set(detection.slotIndex, residual);
+      return;
+    }
+    const disagreement = Math.max(...residual.map((point, index) =>
+      Math.hypot(point.x - previous[index].x, point.y - previous[index].y)
+    ));
+    if (disagreement > edge * 0.018) {
       this.slotCorrections.set(detection.slotIndex, residual);
       return;
     }
