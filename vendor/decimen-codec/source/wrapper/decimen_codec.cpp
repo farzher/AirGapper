@@ -582,43 +582,40 @@ static bool buildSparseSampleMapBilinear(int dim, const PerspectiveTransform& fa
             if (!controls(x, y))
                 controls.set(x, y, fallback(centered(PointI(centers[x], centers[y]))));
 
-    // Every element is overwritten exactly once. Avoid value-initializing the
-    // full 177x177 PointF vector first, and emit rows sequentially so the map
-    // build is one forward write stream instead of tile-ordered random stores.
-    out.clear();
-    out.reserve(size_t(dim) * dim);
-    for (int y = 0; y < dim; ++y) {
-        int ry = 0;
-        while (ry + 1 < H && y >= centers[ry + 1])
-            ++ry;
-        const int y0 = centers[ry], y1 = centers[ry + 1];
-        const float invHeight = 1.0f / float(y1 - y0);
-        const float v = float(y - y0) * invHeight;
+    out.assign(size_t(dim) * dim, PointF{});
+    for (int ry = 0; ry < H; ++ry) {
         for (int rx = 0; rx < W; ++rx) {
             const int x0 = centers[rx], x1 = centers[rx + 1];
+            const int y0 = centers[ry], y1 = centers[ry + 1];
             const int beginX = rx == 0 ? 0 : x0;
             const int endX = rx == W - 1 ? dim : x1;
+            const int beginY = ry == 0 ? 0 : y0;
+            const int endY = ry == H - 1 ? dim : y1;
             const PointF q00 = *controls(rx, ry);
             const PointF q10 = *controls(rx + 1, ry);
             const PointF q11 = *controls(rx + 1, ry + 1);
             const PointF q01 = *controls(rx, ry + 1);
             const float invWidth = 1.0f / float(x1 - x0);
-            const PointF left{q00.x + (q01.x - q00.x) * v,
-                              q00.y + (q01.y - q00.y) * v};
-            const PointF right{q10.x + (q11.x - q10.x) * v,
-                               q10.y + (q11.y - q10.y) * v};
-            const PointF step{(right.x - left.x) * invWidth,
-                              (right.y - left.y) * invWidth};
-            PointF p{left.x + step.x * float(beginX - x0),
-                     left.y + step.y * float(beginX - x0)};
-            for (int x = beginX; x < endX; ++x) {
-                out.push_back(p + outputOffset);
-                p.x += step.x;
-                p.y += step.y;
+            const float invHeight = 1.0f / float(y1 - y0);
+            for (int y = beginY; y < endY; ++y) {
+                const float v = float(y - y0) * invHeight;
+                const PointF left{q00.x + (q01.x - q00.x) * v,
+                                  q00.y + (q01.y - q00.y) * v};
+                const PointF right{q10.x + (q11.x - q10.x) * v,
+                                   q10.y + (q11.y - q10.y) * v};
+                const PointF step{(right.x - left.x) * invWidth,
+                                  (right.y - left.y) * invWidth};
+                PointF p{left.x + step.x * float(beginX - x0),
+                         left.y + step.y * float(beginX - x0)};
+                for (int x = beginX; x < endX; ++x) {
+                    out[size_t(y) * dim + x] = p + outputOffset;
+                    p.x += step.x;
+                    p.y += step.y;
+                }
             }
         }
     }
-    return out.size() == size_t(dim) * dim;
+    return true;
 }
 
 static void seedGuidedTurboQuad(int id, int dim, const std::array<PointF, 4>& quad,
