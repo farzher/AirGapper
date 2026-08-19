@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  * Copyright (c) 2026 Evan Crawley (Bash Alarmist)
  *
- * Decimen-specific zxing-cpp WASM wrapper.
+ * AirGapper-specific zxing-cpp WASM wrapper.
  *
  * Two decode paths:
  *
@@ -12,7 +12,7 @@
  *  along (position only) so the receiver can aim crops at codes that
  *  detected but failed ECC.
  *
- *  readTracked — the Decimen fast path. The receiver already knows where a
+ *  readTracked — the AirGapper fast path. The receiver already knows where a
  *  code is (last decode's quad) and how big it is (module count), so
  *  detection — the expensive half of every decode — is skipped entirely:
  *  rebuild the module→pixel homography from the cached quad, binarize,
@@ -48,7 +48,7 @@
 #include "qrcode/QRFormatInformation.h"
 #include "qrcode/QRVersion.h"
 #include "ByteArray.h"
-#include "decimen_codec.h"
+#include "airgapper_codec.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,41 +66,41 @@
 
 using namespace ZXing;
 
-static_assert(sizeof(DecimenGuidedTrack) == 40,
-              "DecimenGuidedTrack JS ABI must use 40-byte records");
-static_assert(sizeof(DecimenGuidedResult) == 52,
-              "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 208,
-              "DecimenGuidedMetrics JS ABI must allocate 208 bytes");
-static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
-              "DecimenGuidedMetrics turboAttempts JS offset changed");
-static_assert(offsetof(DecimenGuidedMetrics, turboSuccesses) == 140,
-              "DecimenGuidedMetrics turboSuccesses JS offset changed");
-static_assert(offsetof(DecimenGuidedMetrics, stableRsAttempts) == 144,
-              "DecimenGuidedMetrics stableRsAttempts JS offset changed");
-static_assert(offsetof(DecimenGuidedMetrics, stableEligibleTracks) == 152,
-              "DecimenGuidedMetrics stableEligibleTracks JS offset changed");
+static_assert(sizeof(AirGapperGuidedTrack) == 40,
+              "AirGapperGuidedTrack JS ABI must use 40-byte records");
+static_assert(sizeof(AirGapperGuidedResult) == 52,
+              "AirGapperGuidedResult JS ABI must use 52-byte records");
+static_assert(sizeof(AirGapperGuidedMetrics) == 208,
+              "AirGapperGuidedMetrics JS ABI must allocate 208 bytes");
+static_assert(offsetof(AirGapperGuidedMetrics, turboAttempts) == 124,
+              "AirGapperGuidedMetrics turboAttempts JS offset changed");
+static_assert(offsetof(AirGapperGuidedMetrics, turboSuccesses) == 140,
+              "AirGapperGuidedMetrics turboSuccesses JS offset changed");
+static_assert(offsetof(AirGapperGuidedMetrics, stableRsAttempts) == 144,
+              "AirGapperGuidedMetrics stableRsAttempts JS offset changed");
+static_assert(offsetof(AirGapperGuidedMetrics, stableEligibleTracks) == 152,
+              "AirGapperGuidedMetrics stableEligibleTracks JS offset changed");
 
 namespace ZXing::QRCode {
 DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCorrectionLevel ecLevel);
 }
 
 // Stamped by the build (CMake definitions fed from build.sh, whose version
-// source of truth is package.json). The defaults only appear in by-hand
+// source of truth is VERSION). The defaults only appear in by-hand
 // compiles.
-#ifndef DECIMEN_CODEC_VERSION
-#define DECIMEN_CODEC_VERSION "0.0.0-dev"
+#ifndef AIRGAPPER_CODEC_VERSION
+#define AIRGAPPER_CODEC_VERSION "0.0.0-dev"
 #endif
-#ifndef DECIMEN_CODEC_BUILD
-#define DECIMEN_CODEC_BUILD "dev"
+#ifndef AIRGAPPER_CODEC_BUILD
+#define AIRGAPPER_CODEC_BUILD "dev"
 #endif
 
 /** Which build is this? version() is the package.json version; build() is
  *  the git short hash, "-dirty" when built from an uncommitted tree. */
-static std::string codecVersion() { return DECIMEN_CODEC_VERSION; }
-static std::string codecBuild() { return DECIMEN_CODEC_BUILD; }
+static std::string codecVersion() { return AIRGAPPER_CODEC_VERSION; }
+static std::string codecBuild() { return AIRGAPPER_CODEC_BUILD; }
 
-struct DecimenResult
+struct AirGapperResult
 {
 	bool valid{};
 	std::string error{};
@@ -136,7 +136,7 @@ static emscripten::val toUint8Array(const std::vector<uint8_t>& bytes)
 	return Uint8Array.new_(emscripten::typed_memory_view(bytes.size(), bytes.data()));
 }
 
-std::vector<DecimenResult> readFull(int bufferPtr, int width, int height, bool tryHarder, int maxSymbols,
+std::vector<AirGapperResult> readFull(int bufferPtr, int width, int height, bool tryHarder, int maxSymbols,
 									bool returnErrors)
 {
 	try {
@@ -152,7 +152,7 @@ std::vector<DecimenResult> readFull(int bufferPtr, int width, int height, bool t
 
 		auto barcodes = ReadBarcodes(iv, opts);
 
-		std::vector<DecimenResult> results;
+		std::vector<AirGapperResult> results;
 		results.reserve(barcodes.size());
 		for (auto&& barcode : barcodes) {
 			// symbol() is the sampled module matrix — its width IS the QR
@@ -169,7 +169,7 @@ std::vector<DecimenResult> readFull(int bufferPtr, int width, int height, bool t
 	}
 }
 
-static std::vector<DecimenResult> readFullYWithOptions(int bufferPtr, int width, int height, int stride,
+static std::vector<AirGapperResult> readFullYWithOptions(int bufferPtr, int width, int height, int stride,
                                                     bool tryHarder, bool tryDownscale,
                                                     int maxSymbols, bool returnErrors)
 {
@@ -184,7 +184,7 @@ static std::vector<DecimenResult> readFullYWithOptions(int bufferPtr, int width,
                         .returnErrors(returnErrors)
                         .maxNumberOfSymbols(maxSymbols);
         auto barcodes = ReadBarcodes(iv, opts);
-        std::vector<DecimenResult> results;
+        std::vector<AirGapperResult> results;
         results.reserve(barcodes.size());
         for (auto&& barcode : barcodes)
             results.push_back({barcode.isValid(), ToString(barcode.error()), toUint8Array(barcode.bytes()),
@@ -197,7 +197,7 @@ static std::vector<DecimenResult> readFullYWithOptions(int bufferPtr, int width,
     }
 }
 
-std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int stride, bool tryHarder,
+std::vector<AirGapperResult> readFullY(int bufferPtr, int width, int height, int stride, bool tryHarder,
                                     int maxSymbols, bool returnErrors)
 {
     return readFullYWithOptions(bufferPtr, width, height, stride, tryHarder, tryHarder, maxSymbols, returnErrors);
@@ -208,7 +208,7 @@ std::vector<DecimenResult> readFullY(int bufferPtr, int width, int height, int s
 // generic API otherwise keeps scanning 1/3 and 1/9 scale copies whenever the
 // full-resolution pass finds fewer than all 18 symbols. Those copies cannot
 // preserve enough pixels/module for our dense v40 wall and only burn CPU.
-std::vector<DecimenResult> readDenseY(int bufferPtr, int width, int height, int stride, int maxSymbols)
+std::vector<AirGapperResult> readDenseY(int bufferPtr, int width, int height, int stride, int maxSymbols)
 {
     return readFullYWithOptions(bufferPtr, width, height, stride, true, false, maxSymbols, false);
 }
@@ -229,7 +229,7 @@ static double guidedNowMs()
 static DecoderResult decodeWithoutErrorCorrection(const BitMatrix& bits);
 static bool hasValidCRC32(const ByteArray& bytes);
 
-static float guidedModuleSize(const DecimenGuidedTrack& track)
+static float guidedModuleSize(const AirGapperGuidedTrack& track)
 {
     const auto edge = [](float ax, float ay, float bx, float by) {
         return std::hypot(bx - ax, by - ay);
@@ -245,7 +245,7 @@ static float guidedModuleSize(const DecimenGuidedTrack& track)
 
 static std::optional<ConcentricPattern> locateGuidedFinder(const BitMatrix& image, PointF predicted,
                                                             float moduleSize, int maxRing,
-                                                            DecimenGuidedMetrics& metrics)
+                                                            AirGapperGuidedMetrics& metrics)
 {
     const int width = std::max(12, int(std::lround(moduleSize * 14.0f)));
     const float step = std::max(1.0f, moduleSize * 1.25f);
@@ -268,8 +268,8 @@ static std::optional<ConcentricPattern> locateGuidedFinder(const BitMatrix& imag
     return std::nullopt;
 }
 
-static bool guidedFinderTriplet(const BitMatrix& image, const DecimenGuidedTrack& track,
-                                QRCode::FinderPatternSet& out, DecimenGuidedMetrics& metrics)
+static bool guidedFinderTriplet(const BitMatrix& image, const AirGapperGuidedTrack& track,
+                                QRCode::FinderPatternSet& out, AirGapperGuidedMetrics& metrics)
 {
     const int dim = track.dimension;
     if (dim < 21 || dim > 177 || ((dim - 17) & 3))
@@ -491,7 +491,7 @@ static void pauseTurbo(bool refreshDistortion = false, int cooldown = GUIDED_TUR
     }
 }
 
-static bool turboSeedEligible(const DecimenGuidedTrack& track)
+static bool turboSeedEligible(const AirGapperGuidedTrack& track)
 {
     auto* cache = guidedTurboTrack(track.id);
     if (!cache || guidedModuleSize(track) < GUIDED_STABLE_RS_MIN_MODULE)
@@ -501,7 +501,7 @@ static bool turboSeedEligible(const DecimenGuidedTrack& track)
     return !cache->seeded || !cache->distortionAware || cache->dimension != track.dimension;
 }
 
-static std::array<PointF, 4> turboTrackQuad(const DecimenGuidedTrack& track)
+static std::array<PointF, 4> turboTrackQuad(const AirGapperGuidedTrack& track)
 {
     return {PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
             PointF{track.x2, track.y2}, PointF{track.x3, track.y3}};
@@ -640,7 +640,7 @@ static void seedGuidedTurbo(int id, int dim, const Position& pos,
     seedGuidedTurboQuad(id, dim, turboPositionQuad(pos), std::move(samples), distortionAware);
 }
 
-static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+static bool turboPose(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track,
                       float& dx, float& dy, float& residual)
 {
     if (!cache.seeded || cache.dimension != track.dimension ||
@@ -669,7 +669,7 @@ static bool turboPose(const GuidedTurboTrack& cache, const DecimenGuidedTrack& t
 }
 
 static bool turboStableWarpEligible(const GuidedTurboTrack& cache,
-                                     const DecimenGuidedTrack& track)
+                                     const AirGapperGuidedTrack& track)
 {
     if (!cache.seeded || !cache.distortionAware || cache.dimension != track.dimension ||
         cache.samples.size() != size_t(track.dimension) * track.dimension)
@@ -723,7 +723,7 @@ struct TurboFrameTransform
         return p + delta;
     }
 
-    TurboFrameTransform(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track)
+    TurboFrameTransform(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track)
         : perspective(
             QuadrilateralF{cache.seedQuad[0], cache.seedQuad[1], cache.seedQuad[2], cache.seedQuad[3]},
             QuadrilateralF{PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
@@ -830,7 +830,7 @@ struct TurboFrameTransform
 };
 
 static TurboFrameTransform turboFrameTransform(const GuidedTurboTrack& cache,
-                                                const DecimenGuidedTrack& track)
+                                                const AirGapperGuidedTrack& track)
 {
     return TurboFrameTransform(cache, track);
 }
@@ -885,7 +885,7 @@ static int turboNearestLum(const uint8_t* yPlane, int width, int height, int str
     return yPlane[size_t(y) * stride + x];
 }
 
-static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+static TurboLevels turboReadLevels(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track,
                                    const TurboFrameTransform& frameTransform,
                                    const uint8_t* yPlane, int width, int height, int stride, float dx, float dy)
 {
@@ -970,7 +970,7 @@ static int turboThreshold(const TurboThresholdPlane& plane, int x, int y)
     return std::clamp(int(std::lround(t)), plane.lo, plane.hi);
 }
 
-static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+static int turboModuleLum(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track,
                           const TurboFrameTransform& frameTransform,
                           const uint8_t* yPlane, int width, int height, int stride, int x, int y,
                           float dx, float dy, int threshold, float moduleSize)
@@ -1109,11 +1109,11 @@ static const TurboDataPlan& turboDataPlan(int dim)
     return plan;
 }
 
-static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track,
                                          const TurboFrameTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
-                                         DecimenGuidedMetrics& metrics)
+                                         AirGapperGuidedMetrics& metrics)
 {
     const int dim = track.dimension;
     const auto* version = QRCode::Version::Model2((dim - 17) / 4);
@@ -1545,11 +1545,11 @@ static DecoderResult decodeAirGapperSparseProgressive(
 // keeps the existing standalone data-only path for >=2.75 px/module, where that
 // minimal sampler is already the cheaper clean-wall implementation.
 static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
-                                         const DecimenGuidedTrack& track,
+                                         const AirGapperGuidedTrack& track,
                                          const TurboFrameTransform& frameTransform,
                                          const uint8_t* yPlane, int width, int height, int stride,
                                          float dx, float dy, const TurboLevels& levels,
-                                         DecimenGuidedMetrics& metrics, bool centerOnly = false,
+                                         AirGapperGuidedMetrics& metrics, bool centerOnly = false,
                                          bool progressive = false, bool allowRepair = true,
                                          bool* rsUsedOut = nullptr, bool* repairAttemptedOut = nullptr,
                                          bool* repairSuccessOut = nullptr)
@@ -1801,7 +1801,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     return decoded;
 }
 
-static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
+static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track,
                                                    const TurboFrameTransform& frameTransform,
                                                    const uint8_t* yPlane, int width, int height, int stride,
                                                    float predictedX, float predictedY)
@@ -1849,7 +1849,7 @@ static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache
 }
 
 static DetectorResult sampleGuidedSparse(const BitMatrix& image,
-                                         const DecimenGuidedTrack& track,
+                                         const AirGapperGuidedTrack& track,
                                          const QRCode::FinderPatternSet& fp,
                                          int* alignmentFoundOut,
                                          std::vector<PointF>* sampleMapOut,
@@ -1972,11 +1972,11 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
 } // namespace
 
 extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
-                                   const DecimenGuidedTrack* tracks, int trackCount,
-                                   DecimenGuidedResult* results, int resultCapacity,
+                                   const AirGapperGuidedTrack* tracks, int trackCount,
+                                   AirGapperGuidedResult* results, int resultCapacity,
                                    uint8_t* output, int outputCapacity, int maxSymbols,
                                    uint32_t fallbackAllowedMask, uint32_t repairAllowedMask,
-                                   DecimenGuidedMetrics* metrics)
+                                   AirGapperGuidedMetrics* metrics)
 {
     if (!metrics)
         return -1;
@@ -2015,7 +2015,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             auto& result = results[resultCount++];
             result = {};
             result.id = track.id;
-            result.status = DECIMEN_TRACK_PREDICTED;
+            result.status = AIRGAPPER_TRACK_PREDICTED;
             result.bytesOffset = outputUsed;
             result.bytesLength = int(bytes.size());
             result.dimension = track.dimension;
@@ -2409,7 +2409,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 order.push_back(i);
         const PointF imageCenter{width * 0.5, height * 0.5};
         std::sort(order.begin(), order.end(), [&](int a, int b) {
-            auto center = [](const DecimenGuidedTrack& t) {
+            auto center = [](const AirGapperGuidedTrack& t) {
                 return PointF{(t.x0 + t.x1 + t.x2 + t.x3) * 0.25f,
                               (t.y0 + t.y1 + t.y2 + t.y3) * 0.25f};
             };
@@ -2483,7 +2483,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (resultCount >= std::min({resultCapacity, maxSymbols, trackCount}))
                 break;
             const auto& absoluteTrack = tracks[trackIndex];
-            DecimenGuidedTrack localTrack = absoluteTrack;
+            AirGapperGuidedTrack localTrack = absoluteTrack;
             localTrack.x0 -= binX; localTrack.y0 -= binY;
             localTrack.x1 -= binX; localTrack.y1 -= binY;
             localTrack.x2 -= binX; localTrack.y2 -= binY;
@@ -2514,7 +2514,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 auto& result = results[resultCount++];
                 result = {};
                 result.id = track.id;
-                result.status = DECIMEN_TRACK_OK;
+                result.status = AIRGAPPER_TRACK_OK;
                 result.bytesOffset = outputUsed;
                 result.bytesLength = int(bytes.size());
                 result.dimension = detected.bits().width();
@@ -2557,7 +2557,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             auto& result = results[resultCount++];
                             result = {};
                             result.id = track.id;
-                            result.status = DECIMEN_TRACK_OK;
+                            result.status = AIRGAPPER_TRACK_OK;
                             result.bytesOffset = outputUsed;
                             result.bytesLength = int(bytes.size());
                             result.dimension = track.dimension;
@@ -2783,7 +2783,7 @@ static int finderScorePoints(const uint8_t* rgba, int width, int height, const T
 	return score;
 }
 
-DecimenResult readTracked(int bufferPtr, int width, int height, int dim, double x0, double y0, double x1, double y1,
+AirGapperResult readTracked(int bufferPtr, int width, int height, int dim, double x0, double y0, double x1, double y1,
 						  double x2, double y2, double x3, double y3)
 {
 	try {
@@ -3218,7 +3218,7 @@ static FastThresholdGrid buildFastThresholds(const PersistentTrack& track, const
 }
 
 template <class LumAt>
-static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, DecimenBatchMetrics& measured)
+static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, AirGapperBatchMetrics& measured)
 {
 	++measured.alignmentFitAttempts;
 	const auto thresholds = buildFastThresholds(track, lumAt);
@@ -3305,32 +3305,32 @@ static ByteArray decodeCachedTrack(PersistentTrack& track, const LumAt& lumAt, D
 
 template <class LumAt>
 static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
-                                      DecimenTrackedResult* results, int resultCapacity,
-                                      uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+                                      AirGapperTrackedResult* results, int resultCapacity,
+                                      uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics)
 {
-    DecimenBatchMetrics measured{};
+    AirGapperBatchMetrics measured{};
     const double totalStart = emscripten_get_now();
     int resultCount = 0;
     int outputUsed = 0;
 
     struct PendingTrack {
         PersistentTrack* track = nullptr;
-        DecimenTrackedResult* result = nullptr;
+        AirGapperTrackedResult* result = nullptr;
     };
     std::vector<PendingTrack> pending;
     pending.reserve(decoder.tracks.size());
 
-    auto tryTrack = [&](PersistentTrack& track, DecimenTrackedResult& result) {
+    auto tryTrack = [&](PersistentTrack& track, AirGapperTrackedResult& result) {
         ByteArray packet = track.crc32Payload ? decodeCachedTrack(track, lumAt, measured) : ByteArray{};
         if (packet.empty())
             return false;
         if (outputUsed + int(packet.size()) > outputCapacity) {
-            result.status = DECIMEN_TRACK_OUTPUT_FULL;
+            result.status = AIRGAPPER_TRACK_OUTPUT_FULL;
             result.bytesOffset = -1;
             return true;
         }
         std::memcpy(output + outputUsed, packet.data(), packet.size());
-        result.status = DECIMEN_TRACK_OK;
+        result.status = AIRGAPPER_TRACK_OK;
         result.bytesOffset = outputUsed;
         result.bytesLength = packet.size();
         outputUsed += packet.size();
@@ -3351,7 +3351,7 @@ static int decodeBatchCachedY(TrackedDecoder& decoder, const LumAt& lumAt,
         auto& result = results[resultCount++];
         ++measured.tracks;
         ++track.framesSinceReacquire;
-        result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
+        result = {track.id, AIRGAPPER_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
                   track.framesSinceReacquire, track.dx, track.dy};
         if (!tryTrack(track, result))
             pending.push_back({&track, &result});
@@ -3635,7 +3635,7 @@ static bool calibrateTrackSampleMap(PersistentTrack& track, const BitMatrix& ima
 	return true;
 }
 
-static void addBatchMetrics(DecimenBatchMetrics& dst, const DecimenBatchMetrics& src)
+static void addBatchMetrics(AirGapperBatchMetrics& dst, const AirGapperBatchMetrics& src)
 {
 	dst.anchorMs += src.anchorMs;
 	dst.samplingMs += src.samplingMs;
@@ -3668,10 +3668,10 @@ static void addBatchMetrics(DecimenBatchMetrics& dst, const DecimenBatchMetrics&
 // still skipped entirely. The old sparse tile-threshold sampler was faster in
 // synthetic frames but produced invalid format/bitstream data on real camera
 // input, so optimizing it only hid a correctness bug.
-static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageBits, DecimenTrackedResult* results,
-							 int resultCapacity, uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageBits, AirGapperTrackedResult* results,
+							 int resultCapacity, uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics)
 {
-	DecimenBatchMetrics measured{};
+	AirGapperBatchMetrics measured{};
 	const double totalStart = emscripten_get_now();
 	int resultCount = 0, outputUsed = 0, budgetedFallbacks = 0;
 	const size_t trackSlots = decoder.tracks.size();
@@ -3682,7 +3682,7 @@ static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageB
 			continue;
 
 		auto& result = results[resultCount++];
-		result = {track.id, DECIMEN_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
+		result = {track.id, AIRGAPPER_TRACK_MISS, outputUsed, 0, track.consecutiveMisses,
 				  track.framesSinceReacquire, track.dx, track.dy};
 		++measured.tracks;
 		++track.framesSinceReacquire;
@@ -3805,11 +3805,11 @@ static int decodeBatchBinarized(TrackedDecoder& decoder, const BitMatrix& imageB
 		}
 
 		if (outputUsed + int(packet.size()) > outputCapacity) {
-			result.status = DECIMEN_TRACK_OUTPUT_FULL;
+			result.status = AIRGAPPER_TRACK_OUTPUT_FULL;
 			result.bytesOffset = -1;
 		} else {
 			std::memcpy(output + outputUsed, packet.data(), packet.size());
-			result.status = DECIMEN_TRACK_OK;
+			result.status = AIRGAPPER_TRACK_OK;
 			result.bytesOffset = outputUsed;
 			result.bytesLength = packet.size();
 			outputUsed += packet.size();
@@ -3940,8 +3940,8 @@ EMSCRIPTEN_KEEPALIVE void setTrackedDecoderFallbackBudget(int handle, int maxRSF
 }
 
 EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
-											 DecimenTrackedResult* results, int resultCapacity,
-											 uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+											 AirGapperTrackedResult* results, int resultCapacity,
+											 uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics)
 {
 	auto* decoder = trackedDecoder(handle);
 	if (!decoder || !yPlane || width <= 0 || height <= 0 || stride < width || !results || resultCapacity < 0 ||
@@ -3956,7 +3956,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 				: int(yPlane[size_t(y) * stride + x]);
 		};
 
-		DecimenBatchMetrics measured{};
+		AirGapperBatchMetrics measured{};
 		int count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &measured);
 		if (measured.tracks > 0 && measured.successful == measured.tracks) {
 			measured.totalMs = emscripten_get_now() - totalStart;
@@ -4021,7 +4021,7 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 		}
 
 		if (calibratedAny) {
-			DecimenBatchMetrics retry{};
+			AirGapperBatchMetrics retry{};
 			count = decodeBatchCachedY(*decoder, lumAt, results, resultCapacity, output, outputCapacity, &retry);
 			addBatchMetrics(measured, retry);
 		}
@@ -4034,8 +4034,8 @@ EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchY(int handle, const uint8_t* yPlane, 
 }
 
 EMSCRIPTEN_KEEPALIVE int decodeTrackedBatchRGBA(int handle, const uint8_t* rgba, int width, int height, int stride,
-												DecimenTrackedResult* results, int resultCapacity,
-												uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics)
+												AirGapperTrackedResult* results, int resultCapacity,
+												uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics)
 {
 	auto* decoder = trackedDecoder(handle);
 	if (!decoder || !rgba || width <= 0 || height <= 0 || stride < width * 4 || !results || resultCapacity < 0 ||
@@ -4128,16 +4128,16 @@ emscripten::val binarizedRow(int bufferPtr, int width, int height, int y)
 	return toUint8Array(out);
 }
 
-EMSCRIPTEN_BINDINGS(DecimenCodec)
+EMSCRIPTEN_BINDINGS(AirGapperCodec)
 {
 	using namespace emscripten;
 
-	value_object<DecimenResult>("DecimenResult")
-		.field("valid", &DecimenResult::valid)
-		.field("error", &DecimenResult::error)
-		.field("bytes", &DecimenResult::bytes)
-		.field("position", &DecimenResult::position)
-		.field("modules", &DecimenResult::modules);
+	value_object<AirGapperResult>("AirGapperResult")
+		.field("valid", &AirGapperResult::valid)
+		.field("error", &AirGapperResult::error)
+		.field("bytes", &AirGapperResult::bytes)
+		.field("position", &AirGapperResult::position)
+		.field("modules", &AirGapperResult::modules);
 
 	value_object<PointI>("Point").field("x", &PointI::x).field("y", &PointI::y);
 
@@ -4147,7 +4147,7 @@ EMSCRIPTEN_BINDINGS(DecimenCodec)
 		.field("bottomRight", emscripten::index<2>())
 		.field("bottomLeft", emscripten::index<3>());
 
-	register_vector<DecimenResult>("vector<DecimenResult>");
+	register_vector<AirGapperResult>("vector<AirGapperResult>");
 
 	function("version", &codecVersion);
 	function("build", &codecBuild);

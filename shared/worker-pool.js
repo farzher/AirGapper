@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 const WORKER_JOB_TIMEOUT_MS = 12e3;
 class DecodeWorkerPool {
   constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable, onFrameSignature) {
@@ -11,13 +8,13 @@ class DecodeWorkerPool {
     this.onCompleted = onCompleted;
     this.onAvailable = onAvailable;
     this.onFrameSignature = onFrameSignature;
-    __publicField(this, "workers", []);
-    __publicField(this, "busy", []);
-    __publicField(this, "activeIds", []);
-    __publicField(this, "activeFull", []);
-    __publicField(this, "activeMeta", []);
-    __publicField(this, "jobTimers", []);
-    __publicField(this, "jobOptics", /* @__PURE__ */ new Map());
+    this.workers = [];
+    this.busy = [];
+    this.activeIds = [];
+    this.activeFull = [];
+    this.activeMeta = [];
+    this.jobTimers = [];
+    this.jobOptics = /* @__PURE__ */ new Map();
   }
   get size() {
     return this.workers.length;
@@ -180,7 +177,7 @@ class DecodeWorkerPool {
     return this.activeMeta.flatMap((meta, slot) => meta ? [{ ...meta, slot, ageMs: Math.max(0, now - meta.startedAt) }] : []);
   }
   /** Worker slots that can accept a job right now. Exposed so dense-grid
-   * schedulers can preserve per-worker native tracking affinity instead of
+   * schedulers can preserve per-worker decoder-cache affinity instead of
    * randomly moving a persistent QR batch between WASM instances. */
   get freeSlots() {
     const slots = [];
@@ -278,7 +275,7 @@ class DecodeWorkerPool {
   }
   /** Submit to a specific free worker. This is intentionally strict: callers
    * requesting affinity would rather drop a disposable camera frame than
-   * destroy another worker's warm native geometry cache. */
+   * destroy another worker's warm decoder geometry cache. */
   submitTo(slot, message, transfer) {
     return Number.isInteger(slot) && this.submitAtSlot(slot, message, transfer);
   }

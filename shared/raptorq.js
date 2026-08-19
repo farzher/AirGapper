@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import init, { Decoder, Encoder } from "../vendor/raptorq/raptorq.js";
 let ready = false;
 let loading;
@@ -16,7 +13,7 @@ function requireReady() {
 }
 class RaptorEncoder {
   constructor(payload, symbolSize) {
-    __publicField(this, "native");
+    this.native = undefined;
     requireReady();
     this.native = Encoder.with_defaults(payload, symbolSize);
     if (this.native.source_blocks() !== 1) {
@@ -33,7 +30,7 @@ class RaptorEncoder {
 }
 class RaptorDecoder {
   constructor(totalLen, symbolSize) {
-    __publicField(this, "native");
+    this.native = undefined;
     requireReady();
     this.native = Decoder.with_defaults(totalLen, symbolSize);
   }

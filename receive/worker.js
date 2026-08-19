@@ -1,8 +1,7 @@
-import { shouldRunFullDecode } from "../shared/decode-policy.js";
 import { parseFrame, parseVerifiedFramePayload } from "../shared/protocol.js";
 import { gridLayoutById } from "../shared/grid-layout.js";
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
-const ready = import(scalarCodec ? "../vendor/decimen-codec-android/decimen_codec.js" : "../vendor/decimen-codec/decimen_codec.js").then(({ default: DecimenCodec }) => DecimenCodec());
+const ready = import(scalarCodec ? "../codec/scalar/airgapper_codec.js" : "../codec/airgapper_codec.js").then(({ default: AirGapperCodec }) => AirGapperCodec());
 const ctx = self;
 function validPoint(point) {
   return Boolean(point && Number.isFinite(point.x) && Number.isFinite(point.y));
@@ -1118,7 +1117,7 @@ ctx.onmessage = async (e) => {
         }
       }
     }
-    if ((full || !strictHotPath) && shouldRunFullDecode(full, trackedAttempted, trackedHit)) {
+    if ((full || !strictHotPath) && (full || !trackedAttempted || !trackedHit)) {
       fallbackAttempted = !full;
       const appendResults = (vec, includeErrors, resultOx = ox, resultOy = oy, expectedSlot) => {
         try {

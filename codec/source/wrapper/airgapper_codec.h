@@ -6,17 +6,17 @@
 extern "C" {
 #endif
 
-enum DecimenTrackedStatus : int32_t {
-	DECIMEN_TRACK_INVALID = -1,
-	DECIMEN_TRACK_MISS = 0,
-	DECIMEN_TRACK_OK = 1,
-	DECIMEN_TRACK_OUTPUT_FULL = 2,
+enum AirGapperTrackedStatus : int32_t {
+	AIRGAPPER_TRACK_INVALID = -1,
+	AIRGAPPER_TRACK_MISS = 0,
+	AIRGAPPER_TRACK_OK = 1,
+	AIRGAPPER_TRACK_OUTPUT_FULL = 2,
 	// Bytes are valid, but the returned quad is a prediction from cached
 	// geometry rather than a fresh finder/alignment measurement.
-	DECIMEN_TRACK_PREDICTED = 3,
+	AIRGAPPER_TRACK_PREDICTED = 3,
 };
 
-struct DecimenTrackedResult {
+struct AirGapperTrackedResult {
 	int32_t id;
 	int32_t status;
 	int32_t bytesOffset;
@@ -27,13 +27,13 @@ struct DecimenTrackedResult {
 	float dy;
 };
 
-struct DecimenGuidedTrack {
+struct AirGapperGuidedTrack {
 	int32_t id;
 	int32_t dimension;
 	float x0, y0, x1, y1, x2, y2, x3, y3;
 };
 
-struct DecimenGuidedResult {
+struct AirGapperGuidedResult {
 	int32_t id;
 	int32_t status;
 	int32_t bytesOffset;
@@ -42,7 +42,7 @@ struct DecimenGuidedResult {
 	float x0, y0, x1, y1, x2, y2, x3, y3;
 };
 
-struct DecimenGuidedMetrics {
+struct AirGapperGuidedMetrics {
 	double totalMs;
 	double binarizeMs;
 	double finderMs;
@@ -89,7 +89,7 @@ struct DecimenGuidedMetrics {
 	uint32_t erasureRepairSuppressedMask;
 };
 
-struct DecimenBatchMetrics {
+struct AirGapperBatchMetrics {
 	double anchorMs;
 	double samplingMs;
 	double bitExtractionMs;
@@ -127,18 +127,18 @@ int setTrackedDecoderSampleMap(int handle, int slot, const float* xy, int pointC
 void setTrackedDecoderTrackCRC32(int handle, int slot, int enabled);
 void setTrackedDecoderFallbackBudget(int handle, int maxRSFallbacksPerFrame);
 int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, int stride,
-						 const DecimenGuidedTrack* tracks, int trackCount,
-						 DecimenGuidedResult* results, int resultCapacity,
+						 const AirGapperGuidedTrack* tracks, int trackCount,
+						 AirGapperGuidedResult* results, int resultCapacity,
 						 uint8_t* output, int outputCapacity, int maxSymbols,
 						 uint32_t fallbackAllowedMask, uint32_t repairAllowedMask,
-						 DecimenGuidedMetrics* metrics);
+						 AirGapperGuidedMetrics* metrics);
 
 int decodeTrackedBatchY(int handle, const uint8_t* yPlane, int width, int height, int stride,
-						DecimenTrackedResult* results, int resultCapacity,
-						uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics);
+						AirGapperTrackedResult* results, int resultCapacity,
+						uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics);
 int decodeTrackedBatchRGBA(int handle, const uint8_t* rgba, int width, int height, int stride,
-						   DecimenTrackedResult* results, int resultCapacity,
-						   uint8_t* output, int outputCapacity, DecimenBatchMetrics* metrics);
+						   AirGapperTrackedResult* results, int resultCapacity,
+						   uint8_t* output, int outputCapacity, AirGapperBatchMetrics* metrics);
 
 #ifdef __cplusplus
 }

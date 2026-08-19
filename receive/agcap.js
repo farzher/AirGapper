@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 const MAGIC = new TextEncoder().encode("AGCAP01\n");
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -72,20 +69,20 @@ class AgcapRecorder {
   constructor(durationMs, base) {
     this.durationMs = durationMs;
     this.base = base;
-    __publicField(this, "startedAt", performance.now());
-    __publicField(this, "callbacks", 0);
-    __publicField(this, "drops", 0);
-    __publicField(this, "pending", 0);
-    __publicField(this, "stored", 0);
-    __publicField(this, "stopped", false);
-    __publicField(this, "firstMediaTime");
-    __publicField(this, "lastMediaTime");
-    __publicField(this, "records", []);
-    __publicField(this, "bodyParts", []);
-    __publicField(this, "canvas", document.createElement("canvas"));
-    __publicField(this, "pixelFormat");
-    __publicField(this, "compression");
-    __publicField(this, "storageBytes", 0);
+    this.startedAt = performance.now();
+    this.callbacks = 0;
+    this.drops = 0;
+    this.pending = 0;
+    this.stored = 0;
+    this.stopped = false;
+    this.firstMediaTime = undefined;
+    this.lastMediaTime = undefined;
+    this.records = [];
+    this.bodyParts = [];
+    this.canvas = document.createElement("canvas");
+    this.pixelFormat = undefined;
+    this.compression = undefined;
+    this.storageBytes = 0;
   }
   get elapsedMs() {
     return performance.now() - this.startedAt;

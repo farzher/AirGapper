@@ -20,8 +20,8 @@ import {
 import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
 import { makeZip } from "../shared/zip.js";
-import { FRAME_BYTES_OPTIONS } from "../shared/send-settings.js";
 import { GRID_MARGIN_MODULES, gridLayoutId } from "../shared/grid-layout.js";
+const FRAME_BYTES_OPTIONS = [500, 1000, 1465, 1850, 2331, 2953];
 const HEADER_MARGIN = 0;
 const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
@@ -48,16 +48,15 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.348";
+const SEND_RUNTIME_BUILD = "v0.5.349";
 function selectedLayout() {
   const mode = cfgLayout.value;
-  return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
+  return mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
 }
 function isAutoLayout(mode = selectedLayout()) {
-  return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4";
+  return mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4";
 }
 function autoGridTargetModulePx(mode = selectedLayout()) {
-  if (mode === "auto") return 2;
   const match = /^auto-([1-4])$/.exec(mode);
   return match ? Number(match[1]) : 0;
 }
@@ -685,15 +684,8 @@ function restoreSendSettings() {
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
     if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "fixed-columns" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
-    if (saved.layout === "auto") {
-      // v0.5.307 Auto used a 2 px/module floor. Preserve that behavior when
-      // migrating saved settings into the explicit Auto density family.
-      cfgLayout.value = "auto-2";
-    } else if (saved.layout === "auto-1" || saved.layout === "auto-2" || saved.layout === "auto-3" || saved.layout === "auto-4" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
+    if (saved.layout === "auto-1" || saved.layout === "auto-2" || saved.layout === "auto-3" || saved.layout === "auto-4" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
       cfgLayout.value = saved.layout;
-    } else if (saved.layout === "five-three") {
-      cfgLayout.value = "three-five";
-      cfgOrientation.value = "landscape";
     }
     if (saved.orientation === "auto" || saved.orientation === "portrait" || saved.orientation === "landscape") {
       cfgOrientation.value = saved.orientation;

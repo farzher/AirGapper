@@ -7,7 +7,8 @@ self.onmessage = (event) => {
   const job = event.data;
   if (!job || job.type !== "render-page") return;
   try {
-    let version = job.version;
+    const version = Number(job.version);
+    if (!Number.isInteger(version) || version < 1 || version > 40) throw new Error("Render page needs a QR version");
     let modules = 0;
     let width = 0;
     let height = 0;
@@ -18,7 +19,6 @@ self.onmessage = (event) => {
         version,
         maskPattern: 4
       });
-      if (version === undefined) version = qr.version;
       if (!modules) {
         modules = qr.modules.size;
         width = modules * job.cols + job.margin * (job.cols + 1);
