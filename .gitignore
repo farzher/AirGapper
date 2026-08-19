@@ -5,5 +5,8 @@ android/app/build/
 android/local.properties
 *.apk
 !AirGapper.apk
+*.jks
+*.keystore
+*.p12
 codec/source/build-scalar/
 codec/source/build-simd/

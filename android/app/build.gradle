@@ -2,6 +2,10 @@ plugins {
     id "com.android.application"
 }
 
+def releaseKeystore = System.getenv("AIRGAPPER_RELEASE_KEYSTORE")
+def releasePassword = System.getenv("AIRGAPPER_RELEASE_PASSWORD")
+def hasReleaseSigning = releaseKeystore && releasePassword
+
 android {
     namespace "com.airgapper.app"
     compileSdk 35
@@ -17,9 +21,22 @@ android {
         }
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword releasePassword
+                keyAlias "airgapper"
+                keyPassword releasePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
         }
     }
@@ -39,6 +56,15 @@ android {
 
     sourceSets {
         main.assets.srcDir("$buildDir/generated/webAssets")
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseBuild = graph.allTasks.any { task ->
+        task.name == "assembleRelease" || task.name == "packageRelease" || task.name == "bundleRelease"
+    }
+    if (releaseBuild && !hasReleaseSigning) {
+        throw new GradleException("Release signing requires AIRGAPPER_RELEASE_KEYSTORE and AIRGAPPER_RELEASE_PASSWORD")
     }
 }
 
