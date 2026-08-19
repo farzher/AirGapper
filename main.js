@@ -1,6 +1,7 @@
 import { isAndroid, isIOS } from "./shared/platform.js";
+import { isAndroidApp } from "./shared/android.js";
 
-const APP_BUILD = "v0.5.349";
+const APP_BUILD = "v0.5.350";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -28,22 +29,24 @@ const installMenu = document.getElementById("install-menu");
 const pwaInstall = document.getElementById("pwa-install");
 const installHelp = document.getElementById("install-help");
 let deferredInstall;
-let installed = matchMedia("(display-mode: standalone)").matches || Boolean(navigator.standalone);
+let installHelpRequested = false;
+let installed = isAndroidApp() || matchMedia("(display-mode: standalone)").matches || Boolean(navigator.standalone);
 function closeInstallMenu(restoreFocus = false) {
   installMenu.hidden = true;
   installMenuButton.setAttribute("aria-expanded", "false");
   if (restoreFocus) installMenuButton.focus();
 }
 function installFallback() {
-  if (isIOS) return "Use Share → Add to Home Screen.";
-  if (isAndroid) return "Use your browser menu → Install app.";
-  return "Use your browser menu to install AirGapper.";
+  if (isIOS) return "If AirGapper isn't already installed, use Share → Add to Home Screen.";
+  if (isAndroid) return "If AirGapper isn't already installed, use your browser menu → Install app.";
+  return "If AirGapper isn't already installed, use your browser's install option.";
 }
 function syncInstallUi() {
   installShell.hidden = installed;
   pwaInstall.disabled = installed;
-  installHelp.hidden = installed || Boolean(deferredInstall);
-  installHelp.textContent = installed ? "" : installFallback();
+  const showHelp = !installed && !deferredInstall && installHelpRequested;
+  installHelp.hidden = !showHelp;
+  installHelp.textContent = showHelp ? installFallback() : "";
 }
 function openInstallMenu() {
   installMenu.hidden = false;
@@ -53,8 +56,8 @@ function openInstallMenu() {
 installMenuButton.addEventListener("click", () => installMenu.hidden ? openInstallMenu() : closeInstallMenu());
 pwaInstall.addEventListener("click", async () => {
   if (!deferredInstall) {
-    installHelp.hidden = false;
-    installHelp.textContent = installFallback();
+    installHelpRequested = true;
+    syncInstallUi();
     return;
   }
   const prompt = deferredInstall;
@@ -67,11 +70,13 @@ pwaInstall.addEventListener("click", async () => {
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   deferredInstall = event;
+  installHelpRequested = false;
   syncInstallUi();
 });
 window.addEventListener("appinstalled", () => {
   installed = true;
   deferredInstall = void 0;
+  installHelpRequested = false;
   closeInstallMenu();
   syncInstallUi();
 });
