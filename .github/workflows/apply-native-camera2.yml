@@ -1,0 +1,34 @@
+name: apply native Camera2 integration
+
+on:
+  push:
+    branches: [feature/native-camera2]
+    paths:
+      - .github/apply-native-camera2.py
+      - .github/workflows/apply-native-camera2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/native-camera2
+          fetch-depth: 1
+      - name: Apply integration patch
+        run: python3 .github/apply-native-camera2.py
+      - name: Commit generated changes
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android/app/src/main/java/com/airgapper/app/MainActivity.java \
+                  android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java \
+                  index.html shared/style.css receive/main.js receive/worker.js \
+                  main.js send/main.js sw.js .github/workflows/build-apk.yml
+          git diff --cached --check
+          git commit -m "integrate native Camera2 receiver" || exit 0
+          git push origin HEAD:feature/native-camera2
