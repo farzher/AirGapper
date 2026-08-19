@@ -1311,15 +1311,16 @@ static GuidedStableRsGate& guidedDenseStableRsGate(int id, int dimension)
 
 // Below ~2 px/module, a handheld phase/pose can make cached Stable-RS much
 // more expensive than going directly to current-frame sparse Guided recovery.
-// Keep Stable-RS while it earns wins, but if a recent 12-attempt window falls
-// below 25% success, bypass it and probe once per 32 eligible slots. CRC-backed
-// probe success immediately re-enables the cached path. Higher-density images
-// keep the normal Stable-RS behavior and do not contaminate this low-density gate.
+// Keep Stable-RS while it earns wins, but if a recent 8-attempt per-slot window falls
+// below 25% success, bypass it and probe once per 16 appearances of that slot.
+// With several workers, a 32-appearance per-worker probe could otherwise park a
+// recovered slot on Sparse for many seconds. CRC-backed probe success immediately
+// re-enables the cached path. Higher-density images keep normal Stable-RS behavior.
 static bool guidedTryDenseStableRs(GuidedStableRsGate& gate, float moduleSize)
 {
     if (moduleSize > GUIDED_STABLE_ADAPT_MAX_MODULE || !gate.suppressed)
         return true;
-    if (++gate.skipped >= 32) {
+    if (++gate.skipped >= 16) {
         gate.skipped = 0;
         return true;
     }
@@ -1341,7 +1342,7 @@ static void guidedNoteDenseStableRs(GuidedStableRsGate& gate, float moduleSize, 
     }
     ++gate.attempts;
     gate.successes += uint16_t(success);
-    if (gate.attempts >= 12 && int(gate.successes) * 4 < int(gate.attempts)) {
+    if (gate.attempts >= 8 && int(gate.successes) * 4 < int(gate.attempts)) {
         gate.suppressed = true;
         gate.attempts = 0;
         gate.successes = 0;
@@ -2013,17 +2014,47 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // Stable-RS has its own RS+CRC oracle and no longer depends on the old
         // global Turbo canary/promotion state. A bad cache cools locally below.
         float wallCorrectionX = 0, wallCorrectionY = 0;
-        int wallReferenceTries = 0;
-        for (int i = 0; i < trackCount && wallReferenceTries < 4; ++i) {
-            const int referenceId = tracks[i].id;
-            const uint32_t referenceBit = i < 32 ? (uint32_t(1) << i) : 0;
-            if (referenceBit && (repairAllowedMask & referenceBit) == 0)
+        std::vector<int> wallReferenceOrder;
+        wallReferenceOrder.reserve(std::min(trackCount, 32));
+        const PointF wallImageCenter{width * 0.5, height * 0.5};
+        auto trackCenter = [](const DecimenGuidedTrack& track) {
+            return PointF{(track.x0 + track.x1 + track.x2 + track.x3) * 0.25f,
+                          (track.y0 + track.y1 + track.y2 + track.y3) * 0.25f};
+        };
+        for (int i = 0; i < trackCount && i < 32; ++i) {
+            const uint32_t referenceBit = uint32_t(1) << i;
+            if ((repairAllowedMask & referenceBit) == 0)
                 continue;
+            const int referenceId = tracks[i].id;
             auto* cache = guidedTurboTrack(referenceId);
             if (!cache || !turboStableWarpEligible(*cache, tracks[i]))
                 continue;
             auto& referenceGate = guidedDenseStableRsGate(referenceId, tracks[i].dimension);
             if (guidedModuleSize(tracks[i]) <= GUIDED_STABLE_ADAPT_MAX_MODULE && referenceGate.suppressed)
+                continue;
+            wallReferenceOrder.push_back(i);
+        }
+        std::sort(wallReferenceOrder.begin(), wallReferenceOrder.end(), [&](int a, int b) {
+            const auto* ca = guidedTurboTrack(tracks[a].id);
+            const auto* cb = guidedTurboTrack(tracks[b].id);
+            const int sa = ca ? int(ca->stableSuccesses) : 0;
+            const int sb = cb ? int(cb->stableSuccesses) : 0;
+            if (sa != sb)
+                return sa > sb;
+            const PointF pa = trackCenter(tracks[a]);
+            const PointF pb = trackCenter(tracks[b]);
+            const double da = std::hypot(pa.x - wallImageCenter.x, pa.y - wallImageCenter.y);
+            const double db = std::hypot(pb.x - wallImageCenter.x, pb.y - wallImageCenter.y);
+            if (std::abs(da - db) > 1e-6)
+                return da < db;
+            return tracks[a].id < tracks[b].id;
+        });
+        int wallReferenceTries = 0;
+        for (int i : wallReferenceOrder) {
+            if (wallReferenceTries >= 4)
+                break;
+            auto* cache = guidedTurboTrack(tracks[i].id);
+            if (!cache)
                 continue;
             const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
             if (!frameTransform.isValid())

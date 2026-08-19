@@ -159,7 +159,9 @@ async function cameraLikeFrames(urls, count = 20) {
 
 async function generateSenderProfiles() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => history.state?.airgapperView === "home");
   await page.locator('[data-mode="send"]').click();
+  await page.waitForFunction(() => document.getElementById("sendView")?.classList.contains("active"));
   await page.evaluate(() => {
     for (const [id, value] of [
       ["cfg-layout", "three-six"],
