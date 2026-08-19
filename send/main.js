@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.347";
+const SEND_RUNTIME_BUILD = "v0.5.348";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -868,8 +868,12 @@ async function startStream(revealStage = false) {
   const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
   const updatePattern = selectedUpdatePattern();
   const synchronousUpdates = updatePattern === "synchronous";
-  const temporalOrder = spatiallyDispersedOrder(gridCols, gridRows);
-  const phaseStep = temporalPhaseStep(gridCodes);
+  const workerPageRenderer = !staticStream && typeof Worker === "function";
+  const directSynchronousPages = workerPageRenderer && synchronousUpdates;
+  // Synchronous walls never use per-cell phase ordering. Avoid building and
+  // retaining scheduling state that cannot participate in this mode.
+  const temporalOrder = synchronousUpdates ? null : spatiallyDispersedOrder(gridCols, gridRows);
+  const phaseStep = synchronousUpdates ? 1 : temporalPhaseStep(gridCodes);
   const temporalSourceOffset = (pageId, phase) => {
     if (gridCodes <= 1 || updatePattern === "fixed" || updatePattern === "synchronous") return phase;
     if (updatePattern === "fixed-columns") {
@@ -994,7 +998,7 @@ async function startStream(revealStage = false) {
     } else {
       scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);
     }
-    if (staging.width !== totalW || staging.height !== totalH) {
+    if (!directSynchronousPages && (staging.width !== totalW || staging.height !== totalH)) {
       staging.width = totalW;
       staging.height = totalH;
     }
@@ -1027,10 +1031,12 @@ async function startStream(revealStage = false) {
         canvas.style.top = `${dy}px`;
       }
     }
-    const stagingCtx = staging.getContext("2d");
-    cells.forEach((img, i) => {
-      if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
-    });
+    if (!directSynchronousPages) {
+      const stagingCtx = staging.getContext("2d");
+      cells.forEach((img, i) => {
+        if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
+      });
+    }
     if (fitStaging) {
       const fitW = totalW * FIT_SUPERSAMPLE;
       const fitH = totalH * FIT_SUPERSAMPLE;
@@ -1038,11 +1044,13 @@ async function startStream(revealStage = false) {
         fitStaging.width = fitW;
         fitStaging.height = fitH;
       }
-      const fitCtx = fitStaging.getContext("2d");
-      fitCtx.imageSmoothingEnabled = false;
-      fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
-      renderFitCanvas();
-    } else {
+      if (!directSynchronousPages) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
+        renderFitCanvas();
+      }
+    } else if (!directSynchronousPages) {
       const ctx = canvas.getContext("2d");
       ctx.imageSmoothingEnabled = false;
       if (landscape) {
@@ -1155,7 +1163,7 @@ async function startStream(revealStage = false) {
   // main thread still owns transport encoding so the large source payload is
   // not copied into every worker; workers receive only one page (~80 KiB) of
   // framed QR bytes and return a transferable ImageBitmap.
-  if (!staticStream && typeof Worker === "function") {
+  if (workerPageRenderer) {
     const hc = Math.max(1, navigator.hardwareConcurrency || 4);
     const workerCount = Math.max(1, Math.min(8, hc - 2 || 1));
     const maxPagesAhead = Math.max(3, Math.min(10, workerCount + 2));
@@ -1221,7 +1229,10 @@ async function startStream(revealStage = false) {
           cols: gridCols,
           rows: gridRows,
           margin: gridMargin,
-          version
+          // The transport planner already solved the exact byte capacity and
+          // therefore the QR version. Tell every worker immediately instead of
+          // making each worker rediscover it independently on its first page.
+          version: version ?? transport.qrVersion
         }, transfer);
         return true;
       } catch (error) {
@@ -1282,18 +1293,26 @@ async function startStream(revealStage = false) {
     };
     const drawPage = (page) => {
       const { source, totalW, totalH } = validatePage(page);
-      const stagingCtx = staging.getContext("2d");
-      stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
-      stagingCtx.globalCompositeOperation = "copy";
-      stagingCtx.imageSmoothingEnabled = false;
-      stagingCtx.drawImage(source, 0, 0, totalW, totalH);
-      stagingCtx.globalCompositeOperation = "source-over";
+      // A synchronous page is already a complete immutable wall from the
+      // worker. It never needs the persistent module-resolution staging wall
+      // used by phased/cell updates, so present it directly and remove one
+      // full-wall canvas copy from every sender frame.
+      let drawSource = source;
+      if (!synchronousUpdates) {
+        const stagingCtx = staging.getContext("2d");
+        stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
+        stagingCtx.globalCompositeOperation = "copy";
+        stagingCtx.imageSmoothingEnabled = false;
+        stagingCtx.drawImage(source, 0, 0, totalW, totalH);
+        stagingCtx.globalCompositeOperation = "source-over";
+        drawSource = staging;
+      }
       if (fitStaging) {
         const fitCtx = fitStaging.getContext("2d");
         fitCtx.setTransform(1, 0, 0, 1, 0, 0);
         fitCtx.globalCompositeOperation = "copy";
         fitCtx.imageSmoothingEnabled = false;
-        fitCtx.drawImage(staging, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
+        fitCtx.drawImage(drawSource, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
         fitCtx.globalCompositeOperation = "source-over";
         renderFitCanvas();
       } else {
@@ -1304,7 +1323,7 @@ async function startStream(revealStage = false) {
           ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
         else
           ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
-        ctx.drawImage(staging, 0, 0);
+        ctx.drawImage(drawSource, 0, 0);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalCompositeOperation = "source-over";
       }
