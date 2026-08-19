@@ -1,14 +1,17 @@
 package com.airgapper.app;
 
 import android.Manifest;
+import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
 import android.view.View;
@@ -17,6 +20,8 @@ import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ServiceWorkerClient;
+import android.webkit.ServiceWorkerController;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -35,7 +40,8 @@ import java.io.OutputStream;
 
 public final class MainActivity extends Activity {
     private static final String APP_HOST = "appassets.androidplatform.net";
-    private static final String APP_URL = "https://" + APP_HOST + "/assets/index.html";
+    private static final String ASSET_PREFIX = "/assets/";
+    private static final String APP_URL = "https://" + APP_HOST + ASSET_PREFIX + "index.html";
     private static final int CAMERA_REQUEST = 10;
     private static final int FILE_REQUEST = 11;
     private static final int SAVE_REQUEST = 12;
@@ -74,23 +80,63 @@ public final class MainActivity extends Activity {
 
         webView.addJavascriptInterface(new AndroidBridge(), "AirGapperAndroid");
         webView.setWebViewClient(new LocalWebViewClient());
+        installServiceWorkerAssetClient();
         webView.setWebChromeClient(new AppWebChromeClient());
         webView.loadUrl(APP_URL);
+    }
+
+    private WebResourceResponse serveLocalAsset(Uri uri) {
+        if (!"https".equals(uri.getScheme()) || !APP_HOST.equals(uri.getHost())) return null;
+        String path = uri.getPath();
+        if (path == null || !path.startsWith(ASSET_PREFIX)) return null;
+        String assetPath = path.substring(ASSET_PREFIX.length());
+        if (assetPath.isEmpty() || assetPath.contains("..") || assetPath.indexOf('\\') >= 0) return null;
+        try {
+            String mime = mimeType(assetPath);
+            String encoding = textEncoding(mime) ? "UTF-8" : null;
+            InputStream input = getAssets().open(assetPath, AssetManager.ACCESS_STREAMING);
+            return new WebResourceResponse(mime, encoding, input);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String mimeType(String path) {
+        String lower = path.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".html")) return "text/html";
+        if (lower.endsWith(".css")) return "text/css";
+        if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "text/javascript";
+        if (lower.endsWith(".wasm")) return "application/wasm";
+        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".webmanifest")) return "application/manifest+json";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        return "application/octet-stream";
+    }
+
+    private static boolean textEncoding(String mime) {
+        return mime.startsWith("text/") || mime.contains("javascript") || mime.contains("json") || mime.contains("xml");
+    }
+
+    private void installServiceWorkerAssetClient() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) installServiceWorkerAssetClientApi24();
+    }
+
+    @TargetApi(Build.VERSION_CODES.N)
+    private void installServiceWorkerAssetClientApi24() {
+        ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                return serveLocalAsset(request.getUrl());
+            }
+        });
     }
 
     private final class LocalWebViewClient extends WebViewClient {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-            Uri uri = request.getUrl();
-            if ("https".equals(uri.getScheme()) && APP_HOST.equals(uri.getHost()) &&
-                    "/assets/index.html".equals(uri.getPath())) {
-                try {
-                    return new WebResourceResponse("text/html", "UTF-8", getAssets().open("index.html"));
-                } catch (Exception ignored) {
-                    return null;
-                }
-            }
-            return null;
+            return serveLocalAsset(request.getUrl());
         }
 
         @Override
