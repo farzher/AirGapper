@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.343";
+const SEND_RUNTIME_BUILD = "v0.5.344";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -209,7 +209,7 @@ function updateAutoGridControlState() {
   // module density in the current viewport.
   cfgSize.disabled = false;
   cfgSize.title = automatic
-    ? `${autoGridTargetModulePx()}px Auto uses this Size when it fits and steps down only when needed`
+    ? `Auto ${autoGridTargetModulePx()}px uses this Size when it fits and steps down only when needed`
     : "";
 }
 function gcd(a, b) {
@@ -275,11 +275,14 @@ function gridRasterExtent(modules, cols, rows, margin = GRID_MARGIN) {
 }
 function senderDisplayBudgetCss() {
   if (document.body.classList.contains("qr-full")) {
-    // Fullscreen has no sender controls. Use the literal viewport; do not let a
-    // hidden element's stale box participate in Auto geometry.
+    // On mobile the layout viewport is integer-rounded while visualViewport can
+    // retain the fractional CSS size implied by a fractional devicePixelRatio.
+    // Solving against innerWidth/innerHeight can therefore create a bitmap that
+    // Chrome has to resample when true fullscreen settles.
+    const viewport = window.visualViewport;
     return {
-      width: Math.max(1, window.innerWidth),
-      height: Math.max(1, window.innerHeight)
+      width: Math.max(1, Number(viewport?.width) || window.innerWidth),
+      height: Math.max(1, Number(viewport?.height) || window.innerHeight)
     };
   }
   if (!stage.hidden) {
@@ -364,7 +367,7 @@ function chooseAutoGrid(
   const densityCandidates = candidates.filter((candidate) => candidate.displayModulePx + 1e-9 >= densityTarget);
   if (!densityCandidates.length) {
     throw new Error(
-      `${densityTarget}px Auto cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} on-screen px/module in this viewport.`
+      `Auto ${densityTarget}px cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} on-screen px/module in this viewport.`
     );
   }
   const resolvedMaximumFrameBytes = allowedFrameBytes.find((bytes) =>
@@ -543,6 +546,18 @@ function stopTransfer() {
   setStatus("");
 }
 let scrollBeforeFullscreen = 0;
+function settleFullscreenSenderGeometry() {
+  // requestFullscreen() changes the Android visual viewport asynchronously.
+  // Wait until the fullscreen layout has actually committed before the Auto
+  // solver chooses a wall for that viewport.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    resizeDisplay?.();
+    if (selectedFile && isAutoLayout()) {
+      clearTimeout(autoGridRefreshTimer);
+      autoGridRefreshTimer = setTimeout(() => void startStream(), 0);
+    }
+  }));
+}
 function setStageFullscreen(on) {
   if (on === document.body.classList.contains("qr-full")) return;
   if (on) scrollBeforeFullscreen = window.scrollY;
@@ -564,7 +579,11 @@ canvas.addEventListener("click", () => {
   if (entering) void ((_b = (_a = document.documentElement).requestFullscreen) == null ? void 0 : _b.call(_a).catch(() => void 0));
 });
 document.addEventListener("fullscreenchange", () => {
-  if (!document.fullscreenElement) setStageFullscreen(false);
+  if (!document.fullscreenElement) {
+    setStageFullscreen(false);
+    return;
+  }
+  if (document.body.classList.contains("qr-full")) settleFullscreenSenderGeometry();
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setStageFullscreen(false);
@@ -869,7 +888,7 @@ async function startStream(revealStage = false) {
     const sizeFallback = autoGrid.sizeFallback
       ? ` · Size ${formatBytes(autoGrid.requestedMaximumFrameBytes)}→${formatBytes(autoGrid.maximumFrameBytes)}`
       : "";
-    return `${autoGrid.targetModulePx}px Auto · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} on-screen px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
+    return `Auto ${autoGrid.targetModulePx}px · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} on-screen px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -983,6 +1002,25 @@ async function startStream(revealStage = false) {
     canvas.style.width = `${cssNativeW}px`;
     canvas.style.height = `${cssNativeH}px`;
     canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
+    // The backing bitmap is already an exact integer device-pixel raster. The
+    // last place it can become gray is compositor placement: flex centering a
+    // fractional-DPR canvas can put its top-left between device pixels. Snap the
+    // actual laid-out origin back onto the DPR grid without changing its layout
+    // size. Healthy DPR=1 desktop rendering remains unchanged.
+    canvas.style.position = "";
+    canvas.style.left = "";
+    canvas.style.top = "";
+    if (!fitScaling) {
+      void canvas.offsetWidth;
+      const rect = canvas.getBoundingClientRect();
+      const dx = (Math.round(rect.left * dpr) - rect.left * dpr) / dpr;
+      const dy = (Math.round(rect.top * dpr) - rect.top * dpr) / dpr;
+      if (Math.abs(dx) > 1e-7 || Math.abs(dy) > 1e-7) {
+        canvas.style.position = "relative";
+        canvas.style.left = `${dx}px`;
+        canvas.style.top = `${dy}px`;
+      }
+    }
     const stagingCtx = staging.getContext("2d");
     cells.forEach((img, i) => {
       if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
