@@ -114,4 +114,5 @@ jobs:
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
+          node benchmark/native-y8-worker-smoke.mjs
           node benchmark/corpus-suite.mjs
