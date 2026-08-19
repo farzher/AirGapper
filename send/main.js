@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.346";
+const SEND_RUNTIME_BUILD = "v0.5.347";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -163,9 +163,12 @@ function setSenderSettingsOpen(open) {
   sendSettingsPanel.hidden = !open;
   sendSettingsToggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
-function showStreamPanels(visible) {
+function showStreamPanels(visible, closeSettings = false) {
   sendControls.hidden = !visible;
-  if (!visible) setSenderSettingsOpen(false);
+  // Geometry/transport rebuilds briefly hide the toolbar. That is an internal
+  // render transition, not a user request to dismiss Settings. Preserve the
+  // popup while editing and only close it at a real send-session boundary.
+  if (closeSettings) setSenderSettingsOpen(false);
 }
 sendSettingsToggle?.addEventListener("click", () => {
   setSenderSettingsOpen(sendSettingsPanel?.hidden !== false);
@@ -542,7 +545,7 @@ function stopTransfer() {
   stage.hidden = true;
   stageError.hidden = true;
   if (sendStart) sendStart.hidden = false;
-  showStreamPanels(false);
+  showStreamPanels(false, true);
   cfgFile.value = "";
   updateFilePicker();
   setStatus("");
@@ -598,7 +601,7 @@ function applyMode() {
   stage.hidden = true;
   stageError.hidden = true;
   if (sendStart) sendStart.hidden = false;
-  showStreamPanels(false);
+  showStreamPanels(false, true);
   paneFile.hidden = false;
   paneSnippet.hidden = false;
   setStatus("");
