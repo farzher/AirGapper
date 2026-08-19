@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.336";
+const RECEIVER_RUNTIME_BUILD = "v0.5.337";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1272,6 +1272,8 @@ const slotFastYield = new Float32Array(SLOT_METRIC_COUNT);
 slotFastYield.fill(0.85);
 const slotFastSamples = new Uint16Array(SLOT_METRIC_COUNT);
 const slotFastUpdatedAt = new Float64Array(SLOT_METRIC_COUNT);
+const slotGeometryProbeUntil = new Float64Array(SLOT_METRIC_COUNT);
+const slotGeometryRetryAt = new Float64Array(SLOT_METRIC_COUNT);
 let autoTrackBudgetTarget = 32;
 let autoTrackBudgetUpdatedAt = -Infinity;
 let autoTrackBudgetCandidateCount = 0;
@@ -1358,6 +1360,26 @@ function resetSlotMetrics() {
   slotQualitySamples.fill(0);
   slotQualityScores.fill(0.5);
   slotAdaptiveWeak.fill(0);
+  slotGeometryProbeUntil.fill(0);
+  slotGeometryRetryAt.fill(0);
+}
+function resetSlotSchedulingHistory(slot, now = receiverNow()) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return false;
+  // Geometry changed, so all decode-quality evidence collected against the
+  // previous sampling transform is stale. Return this slot to neutral rather
+  // than letting an old miss streak keep it LOST/weak forever.
+  slotFastYield[index] = 0.85;
+  slotFastSamples[index] = 0;
+  slotFastUpdatedAt[index] = now;
+  slotQualitySamples[index] = 0;
+  slotQualityScores[index] = 0.65;
+  slotAdaptiveWeak[index] = 0;
+  slotRepairYield[index] = 0.28;
+  slotRepairSamples[index] = 0;
+  slotRepairCost[index] = 480;
+  resetGuidedFallbackSlot(index);
+  return true;
 }
 function noteSlotDecoded(slot) {
   const index = Number(slot);
@@ -1764,6 +1786,14 @@ function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
     selectedIds.add(entry.region.id);
   };
 
+  // Geometry self-heal is a short explicit exploration window. Put those
+  // slots ahead of normal yield ranking so a historically bad score cannot
+  // starve the exact slot we just repaired.
+  for (const entry of ranked) {
+    const slot = Number(entry.region.gridSlot);
+    if (Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotGeometryProbeUntil[slot] > now) add(entry);
+  }
+
   // Preserve a spatially distributed pose basis while spending the remaining
   // budget entirely on high-yield payload slots. Pick the BEST slot in each
   // quadrant, not a fixed corner, so a temporal seam can wipe one edge without
@@ -1835,7 +1865,11 @@ function adaptiveSlotProbeEvery(region) {
 function shouldScheduleAdaptiveSlot(region, sourceSequence, adaptive) {
   if (!adaptive) return true;
   const slot = Number(region.gridSlot);
-  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !slotAdaptiveWeak[slot]) return true;
+  if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) return true;
+  // A slot whose geometry was just self-healed must be allowed to prove the
+  // new transform immediately, regardless of its old weak-slot throttle.
+  if (slotGeometryProbeUntil[slot] > receiverNow()) return true;
+  if (!slotAdaptiveWeak[slot]) return true;
   const sequence = Number(sourceSequence);
   if (!Number.isFinite(sequence)) return true;
   // Stagger weak slots so several bad edge cells do not all consume the same
@@ -2960,12 +2994,29 @@ function noteDecodeCompleted(id, completion) {
           region.consecutiveMisses++;
           if (region.consecutiveMisses >= 3) region.decoded = false;
           if (region.consecutiveMisses >= 5 && region.gridSlot !== void 0) {
-            const healed = gridLattice.dropSlotCorrection(Number(region.gridSlot));
-            if (healed) {
+            const slot = Number(region.gridSlot);
+            const recoveryNow = receiverNow();
+            // Only self-heal a fully visible, comfortably sampled QR. Partial
+            // and sub-2px/module cells are expected to miss and must not keep
+            // resetting the scheduler. Rate-limit a genuinely bad full slot.
+            const geometryEligible = region.visibleFraction >= 0.88 && region.pixelsPerModule >= 2.4;
+            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
+              const healed = gridLattice.dropSlotCorrection(slot);
+              resetSlotSchedulingHistory(slot, recoveryNow);
+              slotGeometryProbeUntil[slot] = recoveryNow + 900;
+              slotGeometryRetryAt[slot] = recoveryNow + 3000;
+              region.consecutiveMisses = 0;
+              region.decodeConfidence = Math.max(region.decodeConfidence, 0.65);
+              resetTrackBudgetController();
               geometrySlotCorrectionResets++;
-              syncGrid(healed, receiverNow());
-              notePipelineEvent("slot-correction-reset", Number(region.gridSlot));
-              lastRecoveryReason = `slot s${region.gridSlot} dropped stale local geometry (${geometrySlotCorrectionResets})`;
+              if (healed) syncGrid(healed, recoveryNow);
+              const refreshed = regions.find((item) => Number(item.gridSlot) === slot);
+              if (refreshed) {
+                refreshed.consecutiveMisses = 0;
+                refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
+              }
+              notePipelineEvent("slot-geometry-reprobe", slot);
+              lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
             }
           }
         }
