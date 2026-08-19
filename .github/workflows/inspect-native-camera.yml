@@ -5,6 +5,8 @@ on:
     branches: [feature/native-camera2]
     paths:
       - .github/workflows/inspect-native-camera.yml
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: read
