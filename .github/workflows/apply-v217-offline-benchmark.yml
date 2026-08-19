@@ -19,6 +19,7 @@ on:
       - benchmark/corpora/**
       - .github/receiver_candidate.py
       - .github/receiver_candidate_message.txt
+      - .github/receiver_cleanup_extra.py
       - .github/workflows/apply-v217-offline-benchmark.yml
   workflow_dispatch:
 
@@ -42,6 +43,9 @@ jobs:
           set -euo pipefail
           if [ -f .github/receiver_candidate.py ]; then
             python3 .github/receiver_candidate.py 2>&1 | tee /tmp/receiver-candidate-patch.log
+            if [ -f .github/receiver_cleanup_extra.py ]; then
+              python3 .github/receiver_cleanup_extra.py 2>&1 | tee -a /tmp/receiver-candidate-patch.log
+            fi
             echo 'changed=true' >> "$GITHUB_OUTPUT"
             if git diff --quiet -- codec/source vendor/decimen-codec/source; then
               echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
@@ -118,7 +122,7 @@ jobs:
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json benchmark/hardware-corpus-summary.json
           MESSAGE="$(cat .github/receiver_candidate_message.txt 2>/dev/null || echo 'promote receiver candidate')"
-          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt .github/receiver_cleanup_extra.py
           rm -f .github/ambiguity_erasures_patch.py .github/ambiguity_dense_fence.py
           rm -f .github/v268*.py .github/workflows/v268-*.yml
           rm -f benchmark/v268*-ci.log benchmark/v268*-pass.log
@@ -157,7 +161,7 @@ jobs:
           } > benchmark/receiver-candidate-ci.log
           git config user.name "AirGapper Agent"
           git config user.email "actions@github.com"
-          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt
+          rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt .github/receiver_cleanup_extra.py
           rm -f .github/ambiguity_erasures_patch.py .github/ambiguity_dense_fence.py
           rm -f .github/v268*.py .github/workflows/v268-*.yml
           git add -A benchmark/receiver-candidate-ci.log .github
