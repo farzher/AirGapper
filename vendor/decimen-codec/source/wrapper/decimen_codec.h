@@ -87,12 +87,6 @@ struct DecimenGuidedMetrics {
 	uint32_t erasureRepairAttemptMask;
 	uint32_t erasureRepairSuccessMask;
 	uint32_t erasureRepairSuppressedMask;
-	uint32_t stablePrimaryAttempts;
-	uint32_t stablePrimarySuccesses;
-	uint32_t stableRobustRetryAttempts;
-	uint32_t stableRobustRetrySuccesses;
-	uint32_t stableLocalRetryAttempts;
-	uint32_t stableLocalRetrySuccesses;
 };
 
 struct DecimenBatchMetrics {

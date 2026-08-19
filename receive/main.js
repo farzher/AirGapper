@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.332";
+const RECEIVER_RUNTIME_BUILD = "v0.5.333";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1922,9 +1922,6 @@ const livePipeline = {
   guidedTurboSuccesses: 0,
   guidedStableRsAttempts: 0,
   guidedStableRsSuccesses: 0,
-  guidedStablePrimaryAttempts: 0, guidedStablePrimarySuccesses: 0,
-  guidedStableRobustRetryAttempts: 0, guidedStableRobustRetrySuccesses: 0,
-  guidedStableLocalRetryAttempts: 0, guidedStableLocalRetrySuccesses: 0,
   guidedStableEligibleTracks: 0,
   guidedTranslationWarpTracks: 0,
   guidedAffineWarpTracks: 0,
@@ -1962,11 +1959,7 @@ function resetLivePipeline(now = receiverNow()) {
     guidedGenericFallbackTracks: 0, guidedGenericFallbackSuccesses: 0, guidedGenericFallbackSkipped: 0,
     guidedSparseNoRsAttempts: 0, guidedSparseNoRsSuccesses: 0, guidedSparseRsFallbacks: 0, guidedSparseSkipped: 0,
     guidedTurboAttempts: 0, guidedTurboSuccesses: 0,
-    guidedStableRsAttempts: 0, guidedStableRsSuccesses: 0,
-    guidedStablePrimaryAttempts: 0, guidedStablePrimarySuccesses: 0,
-    guidedStableRobustRetryAttempts: 0, guidedStableRobustRetrySuccesses: 0,
-    guidedStableLocalRetryAttempts: 0, guidedStableLocalRetrySuccesses: 0,
-    guidedStableEligibleTracks: 0,
+    guidedStableRsAttempts: 0, guidedStableRsSuccesses: 0, guidedStableEligibleTracks: 0,
     guidedTranslationWarpTracks: 0, guidedAffineWarpTracks: 0, guidedPerspectiveWarpTracks: 0, guidedPerspectiveMeshWarpTracks: 0,
     guidedErasureRsAttempts: 0, guidedErasureRsSuccesses: 0, guidedErasureRepairCodewords: 0,
     guidedErasureRepairAttempts: 0, guidedErasureRepairSuccesses: 0, guidedErasureRepairSuppressed: 0,
@@ -2710,12 +2703,6 @@ function noteDecodeCompleted(id, completion) {
       livePipeline.guidedTurboSuccesses += Math.max(0, Number(guided.turboSuccesses) || 0);
       livePipeline.guidedStableRsAttempts += Math.max(0, Number(guided.stableRsAttempts) || 0);
       livePipeline.guidedStableRsSuccesses += Math.max(0, Number(guided.stableRsSuccesses) || 0);
-      livePipeline.guidedStablePrimaryAttempts += Math.max(0, Number(guided.stablePrimaryAttempts) || 0);
-      livePipeline.guidedStablePrimarySuccesses += Math.max(0, Number(guided.stablePrimarySuccesses) || 0);
-      livePipeline.guidedStableRobustRetryAttempts += Math.max(0, Number(guided.stableRobustRetryAttempts) || 0);
-      livePipeline.guidedStableRobustRetrySuccesses += Math.max(0, Number(guided.stableRobustRetrySuccesses) || 0);
-      livePipeline.guidedStableLocalRetryAttempts += Math.max(0, Number(guided.stableLocalRetryAttempts) || 0);
-      livePipeline.guidedStableLocalRetrySuccesses += Math.max(0, Number(guided.stableLocalRetrySuccesses) || 0);
       livePipeline.guidedStableEligibleTracks += Math.max(0, Number(guided.stableEligibleTracks) || 0);
       livePipeline.guidedTranslationWarpTracks += Math.max(0, Number(guided.translationWarpTracks) || 0);
       livePipeline.guidedAffineWarpTracks += Math.max(0, Number(guided.affineWarpTracks) || 0);
@@ -8854,12 +8841,6 @@ function fastRegressionResult(result, expectedFrames) {
     stableEligibleTracks: sumGuided("stableEligibleTracks"),
     stableRsAttempts: sumGuided("stableRsAttempts"),
     stableRsSuccesses: sumGuided("stableRsSuccesses"),
-    stablePrimaryAttempts: sumGuided("stablePrimaryAttempts"),
-    stablePrimarySuccesses: sumGuided("stablePrimarySuccesses"),
-    stableRobustRetryAttempts: sumGuided("stableRobustRetryAttempts"),
-    stableRobustRetrySuccesses: sumGuided("stableRobustRetrySuccesses"),
-    stableLocalRetryAttempts: sumGuided("stableLocalRetryAttempts"),
-    stableLocalRetrySuccesses: sumGuided("stableLocalRetrySuccesses"),
     sparseProfileAttempts: sumGuided("sparseProfileAttempts"),
     sparseProfileSuccesses: sumGuided("sparseProfileSuccesses"),
     dataOnlyAttempts: sumGuided("sparseNoRsAttempts"),
@@ -9132,7 +9113,7 @@ Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.t
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
 Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · turbo cost ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedTurboAttempts)).toFixed(2)}ms/attempt · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} [primary ${livePipeline.guidedStablePrimarySuccesses}/${livePipeline.guidedStablePrimaryAttempts} · robust ${livePipeline.guidedStableRobustRetrySuccesses}/${livePipeline.guidedStableRobustRetryAttempts} · local ${livePipeline.guidedStableLocalRetrySuccesses}/${livePipeline.guidedStableLocalRetryAttempts}] · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · turbo cost ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedTurboAttempts)).toFixed(2)}ms/attempt · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}
