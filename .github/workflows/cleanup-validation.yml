@@ -92,7 +92,7 @@ jobs:
           cd android
           ./gradlew assembleDebug
 
-      - name: Publish validated cleanup
+      - name: Publish validated code cleanup
         if: success() && github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.head_ref }}
@@ -103,10 +103,13 @@ jobs:
           cp benchmark/offline-summary.json benchmark/latest-result.json
           rm -rf node_modules benchmark/offline-summary.json benchmark/hardware-corpus-summary.json
           rm -f .github/receiver_candidate.py .github/receiver_candidate_message.txt .github/receiver_cleanup_extra.py
-          rm -f .github/workflows/cleanup-validation.yml
           rm -f .github/ambiguity_erasures_patch.py .github/ambiguity_dense_fence.py
-          rm -f .github/v268*.py .github/workflows/v268-*.yml
+          rm -f .github/v268*.py
           rm -f benchmark/v268*-ci.log benchmark/v268*-pass.log
+          # GitHub Actions tokens cannot author workflow files. Keep the branch's
+          # workflow directory unchanged here; the connector applies that small
+          # cleanup separately after this validated source commit lands.
+          git restore --source=HEAD -- .github/workflows
           git add -A
           git commit -m "v0.5.349 own AirGapper codec and simplify codebase"
           git push origin HEAD:"$HEAD_REF"
