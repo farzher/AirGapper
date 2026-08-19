@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.340";
+const SEND_RUNTIME_BUILD = "v0.5.341";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -171,7 +171,7 @@ sendSettingsToggle?.addEventListener("click", () => {
   setSenderSettingsOpen(sendSettingsPanel?.hidden !== false);
 });
 document.addEventListener("pointerdown", (event) => {
-  if (sendSettingsPanel?.hidden !== false && sendControls && !sendControls.contains(event.target)) {
+  if (sendSettingsPanel?.hidden === false && sendControls && !sendControls.contains(event.target)) {
     setSenderSettingsOpen(false);
   }
 });
@@ -325,7 +325,7 @@ function chooseAutoGrid(
     if (plan.mode === "direct") continue;
     for (const layout of AUTO_GRID_LAYOUTS) {
       const codes = layout.cols * layout.rows;
-      if (codes <= 1 || codes > AUTO_GRID_MAX_CODES) continue;
+      if (codes < 1 || codes > AUTO_GRID_MAX_CODES) continue;
       const margin = GRID_MARGIN;
       const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, margin);
       const totalW = extent.width;
