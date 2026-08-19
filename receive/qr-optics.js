@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 const MAX_MODULE_SAMPLES = 640;
 const MAX_EDGE_SAMPLES = 128;
 const MAX_TILES = 5;
@@ -15,27 +12,27 @@ function validQuad(quad) {
 }
 class StaticQrOpticsAnalyzer {
   constructor() {
-    __publicField(this, "black", new Float32Array(MAX_MODULE_SAMPLES));
-    __publicField(this, "white", new Float32Array(MAX_MODULE_SAMPLES));
-    __publicField(this, "edges", new Float32Array(MAX_EDGE_SAMPLES));
-    __publicField(this, "tileFocus", new Float32Array(MAX_TILES));
-    __publicField(this, "tileExposure", new Float32Array(MAX_TILES));
-    __publicField(this, "tileConfidence", new Float32Array(MAX_TILES));
-    __publicField(this, "tileTransition", new Float32Array(MAX_TILES));
-    __publicField(this, "tileBlack", new Float32Array(MAX_TILES));
-    __publicField(this, "tileWhite", new Float32Array(MAX_TILES));
-    __publicField(this, "tileSeparation", new Float32Array(MAX_TILES));
-    __publicField(this, "tileNoise", new Float32Array(MAX_TILES));
-    __publicField(this, "tileClipping", new Float32Array(MAX_TILES));
-    __publicField(this, "tileBanding", new Float32Array(MAX_TILES));
-    __publicField(this, "tileTemporal", new Float32Array(MAX_TILES));
-    __publicField(this, "transform", new Float64Array(8));
-    __publicField(this, "blackCount", 0);
-    __publicField(this, "whiteCount", 0);
-    __publicField(this, "edgeCount", 0);
-    __publicField(this, "correct", 0);
-    __publicField(this, "noiseSquared", 0);
-    __publicField(this, "noiseCount", 0);
+    this.black = new Float32Array(MAX_MODULE_SAMPLES);
+    this.white = new Float32Array(MAX_MODULE_SAMPLES);
+    this.edges = new Float32Array(MAX_EDGE_SAMPLES);
+    this.tileFocus = new Float32Array(MAX_TILES);
+    this.tileExposure = new Float32Array(MAX_TILES);
+    this.tileConfidence = new Float32Array(MAX_TILES);
+    this.tileTransition = new Float32Array(MAX_TILES);
+    this.tileBlack = new Float32Array(MAX_TILES);
+    this.tileWhite = new Float32Array(MAX_TILES);
+    this.tileSeparation = new Float32Array(MAX_TILES);
+    this.tileNoise = new Float32Array(MAX_TILES);
+    this.tileClipping = new Float32Array(MAX_TILES);
+    this.tileBanding = new Float32Array(MAX_TILES);
+    this.tileTemporal = new Float32Array(MAX_TILES);
+    this.transform = new Float64Array(8);
+    this.blackCount = 0;
+    this.whiteCount = 0;
+    this.edgeCount = 0;
+    this.correct = 0;
+    this.noiseSquared = 0;
+    this.noiseCount = 0;
   }
   analyze(image, targets, offsetX = 0, offsetY = 0) {
     let tileCount = 0;

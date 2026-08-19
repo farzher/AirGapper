@@ -5,5 +5,5 @@ android/app/build/
 android/local.properties
 *.apk
 !AirGapper.apk
-vendor/decimen-codec/source/build-scalar/
-vendor/decimen-codec/source/build-simd/
+codec/source/build-scalar/
+codec/source/build-simd/

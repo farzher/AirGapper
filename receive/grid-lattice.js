@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { gridLayoutById } from "../shared/grid-layout.js";
 // Preserve a proven wall through short optical/display-phase miss bursts.
 const WHOLE_GRID_LOSS_MS = 3200;
@@ -126,14 +123,14 @@ function distributedFitReady(layout, observations) {
 class GridLattice {
   constructor(onTransition) {
     this.onTransition = onTransition;
-    __publicField(this, "state", "SEARCH");
-    __publicField(this, "identity", "");
-    __publicField(this, "observations", []);
-    __publicField(this, "slotCorrections", /* @__PURE__ */ new Map());
-    __publicField(this, "candidate");
-    __publicField(this, "lastHitAt", 0);
-    __publicField(this, "frameWidth", 1);
-    __publicField(this, "frameHeight", 1);
+    this.state = "SEARCH";
+    this.identity = "";
+    this.observations = [];
+    this.slotCorrections = /* @__PURE__ */ new Map();
+    this.candidate = undefined;
+    this.lastHitAt = 0;
+    this.frameWidth = 1;
+    this.frameHeight = 1;
   }
   transition(next, reason, at) {
     var _a;

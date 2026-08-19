@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.348";
+const RECEIVER_RUNTIME_BUILD = "v0.5.349";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -244,18 +244,12 @@ const AUTO_OPTICS_FALLBACK_EXPOSURE = 50; // one 5 ms escape hatch for genuinely
 // has chosen 10 ms / ISO 100 and 10 ms / ISO 200 on adjacent runs, while the
 // latter sustained roughly 2-3x more useful throughput. Keep the shutter fixed
 // for motion, then spend a short one-time window finding the useful gain.
-const AUTO_OPTICS_GAIN_SETTLE_MS = 220;
 const AUTO_OPTICS_GAIN_SAMPLE_MS = 380;
 const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 20;
-const AUTO_OPTICS_GAIN_IMPROVEMENT = 1.08;
 // AirGapper is looking at an emissive black/white modem, not making a pleasing
 // photograph. Prefer less light when two candidates decode essentially alike.
-const AUTO_OPTICS_DARK_TIE_RATIO = 0.985;
-const AUTO_OPTICS_STARTUP_HEALTHY_YIELD = 0.45;
 const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.55;
 const AUTO_OPTICS_GAIN_MAX_PROBES = 8;
-const AUTO_OPTICS_GAIN_DIRECTION_YIELD_DELTA = 0.025;
-const AUTO_OPTICS_GAIN_MAX_BASE_RATIO = 8.0;
 const AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT = 0.08;
 const AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO = 0.72;
 const AUTO_OPTICS_CONTROL_RETRY_MS = 850;
@@ -266,20 +260,15 @@ const AUTO_OPTICS_HEALTHY_TAIL_YIELD = 0.20;
 const AUTO_OPTICS_REUSABLE_YIELD = 0.60;
 const AUTO_OPTICS_REUSABLE_TAIL_YIELD = 0.35;
 const AUTO_OPTICS_UNHEALTHY_RETRY_MS = 3000;
-const AUTO_OPTICS_NEAR_BEST_SCORE = 0.97;
 const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.03;
-const AUTO_OPTICS_AE_PRODUCT_CEILING = 6.0;
 const AUTO_OPTICS_POSE_STABLE_MS = 300;
 const AUTO_OPTICS_POSE_WAIT_MS = 700;
-const AUTO_OPTICS_NARROW_FOV_MAX_VISIBLE = 3;
-const AUTO_OPTICS_NARROW_FOV_RETRY_MS = 1800;
 const AUTO_OPTICS_POSE_MAX_CENTER_DRIFT = 0.035;
 const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // One stable tracked QR is enough to compare exposure candidates. Requiring
 // multiple visible slots makes Auto Optics impossible on a true 1x1 sender.
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 1200;
-const AUTO_OPTICS_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
 const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v5";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
@@ -3064,9 +3053,7 @@ const GEOMETRY_COLD_MISSES = 3;
 const GEOMETRY_COLLAPSE_MIN_TRACKS = 4;
 const GEOMETRY_COLLAPSE_HEALTHY_RATIO = 0.55;
 const GEOMETRY_COLLAPSE_BAD_RATIO = 0.28;
-const GEOMETRY_COLLAPSE_STREAK = 4;
 const GEOMETRY_COLLAPSE_MAX_GAP_MS = 650;
-const GEOMETRY_COLLAPSE_MIN_SPAN_MS = 180;
 // A short synchronized miss burst is common when a camera exposure crosses a
 // display transition. Keep proven geometry alive long enough for tracked
 // decoding and occasional generic rescue probes to recover it.

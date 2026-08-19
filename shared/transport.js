@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { codingMode, RAPTOR_PACKET_ID_BYTES } from "./coding-mode.js";
 import { RaptorDecoder, RaptorEncoder } from "./raptorq.js";
 const MDS_SYMBOLS = 256;
@@ -51,10 +48,10 @@ class TransportEncoder {
   constructor(payload, blockLen, streamSeed, mode) {
     this.blockLen = blockLen;
     this.streamSeed = streamSeed;
-    __publicField(this, "k");
-    __publicField(this, "mode");
-    __publicField(this, "byteBlocks");
-    __publicField(this, "raptor");
+    this.k = undefined;
+    this.mode = undefined;
+    this.byteBlocks = undefined;
+    this.raptor = undefined;
     this.mode = mode;
     const actualSourceLen = mode === "raptorq" ? blockLen - RAPTOR_PACKET_ID_BYTES : blockLen;
     this.k = Math.max(1, Math.ceil(payload.length / actualSourceLen));
@@ -90,16 +87,16 @@ class TransportDecoder {
     this.blockLen = blockLen;
     this.streamSeed = streamSeed;
     this.totalLen = totalLen;
-    __publicField(this, "mode");
-    __publicField(this, "seen", /* @__PURE__ */ new Set());
-    __publicField(this, "mdsBasis");
-    __publicField(this, "mdsBlocks", null);
-    __publicField(this, "raptor");
-    __publicField(this, "raptorPayload", null);
-    __publicField(this, "solvedCount", 0);
-    __publicField(this, "framesNew", 0);
-    __publicField(this, "framesDup", 0);
-    __publicField(this, "framesRedundant", 0);
+    this.mode = undefined;
+    this.seen = /* @__PURE__ */ new Set();
+    this.mdsBasis = undefined;
+    this.mdsBlocks = null;
+    this.raptor = undefined;
+    this.raptorPayload = null;
+    this.solvedCount = 0;
+    this.framesNew = 0;
+    this.framesDup = 0;
+    this.framesRedundant = 0;
     this.mode = codingMode(k);
     this.mdsBasis = new Array(k).fill(null);
     this.raptor = this.mode === "raptorq" ? new RaptorDecoder(totalLen, blockLen - RAPTOR_PACKET_ID_BYTES) : null;

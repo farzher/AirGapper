@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 
 EMSDK_VERSION=6.0.6
 ZXING_COMMIT=$(tr -d '[:space:]' < zxing-cpp.commit)
-SIMD=${DECIMEN_SIMD:-1}
-OUTPUT_DIR=${DECIMEN_OUTPUT_DIR:-..}
+SIMD=${AIRGAPPER_CODEC_SIMD:-1}
+OUTPUT_DIR=${AIRGAPPER_CODEC_OUTPUT_DIR:-..}
 if [ "$SIMD" = "0" ]; then
   BUILD_DIR=build-scalar
   SIMD_CMAKE=OFF
@@ -38,12 +38,12 @@ fi
 source ./emsdk/emsdk_env.sh >/dev/null 2>&1
 
 emcmake cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DDECIMEN_SIMD="$SIMD_CMAKE" \
-  -DDECIMEN_CODEC_VERSION="$VERSION" -DDECIMEN_CODEC_BUILD="$GIT_HASH" >/dev/null
+  -DAIRGAPPER_CODEC_SIMD="$SIMD_CMAKE" \
+  -DAIRGAPPER_CODEC_VERSION="$VERSION" -DAIRGAPPER_CODEC_BUILD="$GIT_HASH" >/dev/null
 cmake --build "$BUILD_DIR"
 
-BANNER="/*! decimen-codec v${VERSION} — build ${GIT_HASH} — (c) 2026 Evan Crawley (Bash Alarmist) — SPDX-License-Identifier: AGPL-3.0-or-later — https://github.com/bashalarmistalt/decimen-codec */"
+BANNER="/*! AirGapper QR codec v${VERSION} — build ${GIT_HASH} — wrapper copyright (c) 2026 Evan Crawley (Bash Alarmist), modified for AirGapper — SPDX-License-Identifier: AGPL-3.0-or-later */"
 mkdir -p dist "$OUTPUT_DIR"
-{ printf '%s\n' "$BANNER"; cat "$BUILD_DIR/decimen_codec.js"; } > dist/decimen_codec.js
-cp "$BUILD_DIR/decimen_codec.wasm" dist/decimen_codec.wasm
-cp dist/decimen_codec.js dist/decimen_codec.wasm "$OUTPUT_DIR"/
+{ printf '%s\n' "$BANNER"; cat "$BUILD_DIR/airgapper_codec.js"; } > dist/airgapper_codec.js
+cp "$BUILD_DIR/airgapper_codec.wasm" dist/airgapper_codec.wasm
+cp dist/airgapper_codec.js dist/airgapper_codec.wasm "$OUTPUT_DIR"/

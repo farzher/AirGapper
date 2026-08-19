@@ -1,5 +1,5 @@
 (() => {
-  const CACHE = "airgapper-static-js-v296";
+  const CACHE = "airgapper-static-js-v297";
   const PRECACHE = [
     "./main.js",
     "./icon-192.png",
@@ -17,8 +17,6 @@
     "./send/render-worker.js",
     "./shared/android.js",
     "./shared/coding-mode.js",
-    "./shared/decode-policy.js",
-    "./shared/dialog.js",
     "./shared/format.js",
     "./shared/frame-capacity.js",
     "./shared/grid-layout.js",
@@ -28,7 +26,6 @@
     "./shared/protocol.js",
     "./shared/qr-raster.js",
     "./shared/raptorq.js",
-    "./shared/send-settings.js",
     "./shared/snippet.js",
     "./shared/status-line.js",
     "./shared/style.css",
@@ -36,10 +33,10 @@
     "./shared/wake-lock.js",
     "./shared/worker-pool.js",
     "./shared/zip.js",
-    "./vendor/decimen-codec-android/decimen_codec.js",
-    "./vendor/decimen-codec-android/decimen_codec.wasm",
-    "./vendor/decimen-codec/decimen_codec.js",
-    "./vendor/decimen-codec/decimen_codec.wasm",
+    "./codec/scalar/airgapper_codec.js",
+    "./codec/scalar/airgapper_codec.wasm",
+    "./codec/airgapper_codec.js",
+    "./codec/airgapper_codec.wasm",
     "./vendor/qrcode.js",
     "./vendor/raptorq/raptorq.js",
     "./vendor/raptorq/raptorq_bg.wasm"

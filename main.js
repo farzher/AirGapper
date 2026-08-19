@@ -1,8 +1,6 @@
-var _a;
-import { closeOnBackdropClick } from "./shared/dialog.js";
 import { isAndroid, isIOS } from "./shared/platform.js";
 
-const APP_BUILD = "v0.5.348";
+const APP_BUILD = "v0.5.349";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -109,7 +107,7 @@ const headerQrButton = document.getElementById("receiver-link-open");
 const sendReceiverLinkButton = document.getElementById("send-receiver-link-open");
 const receiverLinkDialog = document.getElementById("receiver-link-dialog");
 const receiverLinkUrl = document.getElementById("receiver-link-url");
-const receiverUrl = (_a = headerQr.dataset.receiverUrl) != null ? _a : "";
+const receiverUrl = headerQr.dataset.receiverUrl ?? "";
 receiverLinkUrl.href = receiverUrl;
 try {
   const parsedReceiverUrl = new URL(receiverUrl);
@@ -122,7 +120,13 @@ receiverLinkUrl.rel = "noopener";
 const openReceiverLinkDialog = () => receiverLinkDialog.showModal();
 headerQrButton.addEventListener("click", openReceiverLinkDialog);
 sendReceiverLinkButton?.addEventListener("click", openReceiverLinkDialog);
-closeOnBackdropClick(receiverLinkDialog);
+receiverLinkDialog.addEventListener("click", (event) => {
+  if (event.target !== receiverLinkDialog) return;
+  const rect = receiverLinkDialog.getBoundingClientRect();
+  const inside = event.clientX >= rect.left && event.clientX <= rect.right &&
+    event.clientY >= rect.top && event.clientY <= rect.bottom;
+  if (!inside) receiverLinkDialog.close();
+});
 function showView(name, historyMode = "push") {
   if (name === active) {
     if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");

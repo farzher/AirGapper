@@ -1,5 +1,5 @@
 import { packFile } from "./protocol.js";
-const SNIPPET_MEDIA_TYPE = "application/vnd.decimen.snippet";
+const SNIPPET_MEDIA_TYPE = "application/vnd.airgapper.snippet";
 const SNIPPET_FILE_NAME = "snippet.txt";
 const MAX_SNIPPET_BYTES = 4 * 1024 * 1024;
 const MAX_SNIPPET_LABEL = `${MAX_SNIPPET_BYTES / 1024 / 1024} MB`;
