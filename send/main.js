@@ -40,7 +40,7 @@ const AUTO_GRID_LAYOUTS = (() => {
   for (let cols = 1; cols <= 32; cols++) {
     for (let rows = cols; rows <= 32; rows++) {
       const codes = cols * rows;
-      if (codes <= 1 || codes > AUTO_GRID_MAX_CODES) continue;
+      if (codes < 1 || codes > AUTO_GRID_MAX_CODES) continue;
       layouts.push({ id: cols * 64 + rows, cols, rows });
     }
   }
@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.336";
+const SEND_RUNTIME_BUILD = "v0.5.340";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -118,6 +118,8 @@ const filePickerLabel = document.getElementById("file-picker-label");
 const filePickerButton = document.getElementById("file-picker-button");
 const selectionSummary = document.getElementById("selection-summary");
 const sendControls = document.getElementById("send-controls");
+const sendSettingsToggle = document.getElementById("send-settings-toggle");
+const sendSettingsPanel = document.getElementById("send-settings-panel");
 const stageBottom = document.getElementById("stage-bottom");
 const snippetText = document.getElementById("snippet-text");
 const snippetLabel = document.getElementById("snippet-label");
@@ -156,9 +158,26 @@ function renderReceiverLink() {
   render(receiverLinkQrLarge, 240, 4);
 }
 renderReceiverLink();
+function setSenderSettingsOpen(open) {
+  if (!sendSettingsPanel || !sendSettingsToggle) return;
+  sendSettingsPanel.hidden = !open;
+  sendSettingsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
 function showStreamPanels(visible) {
   sendControls.hidden = !visible;
+  if (!visible) setSenderSettingsOpen(false);
 }
+sendSettingsToggle?.addEventListener("click", () => {
+  setSenderSettingsOpen(sendSettingsPanel?.hidden !== false);
+});
+document.addEventListener("pointerdown", (event) => {
+  if (sendSettingsPanel?.hidden !== false && sendControls && !sendControls.contains(event.target)) {
+    setSenderSettingsOpen(false);
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setSenderSettingsOpen(false);
+});
 const cfgFps = document.getElementById("cfg-fps");
 const cfgFpsCustom = document.getElementById("cfg-fps-custom");
 const speedControl = cfgFps.closest(".speed-control");
@@ -169,7 +188,7 @@ const cfgUpdatePattern = document.getElementById("cfg-update-pattern");
 const cfgOrientation = document.getElementById("cfg-orientation");
 function selectedFps() {
   const value = cfgFps.value === "custom" ? Number(cfgFpsCustom.value) : Number(cfgFps.value);
-  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 15;
+  return Number.isFinite(value) ? Math.max(1, Math.min(480, Math.round(value))) : 30;
 }
 function selectedUpdatePattern() {
   const value = cfgUpdatePattern?.value;
@@ -190,7 +209,7 @@ function updateAutoGridControlState() {
   // module density in the current viewport.
   cfgSize.disabled = false;
   cfgSize.title = automatic
-    ? `Auto ${autoGridTargetModulePx()} uses this Size when it fits and steps down only when needed`
+    ? `${autoGridTargetModulePx()}px Auto uses this Size when it fits and steps down only when needed`
     : "";
 }
 function gcd(a, b) {
@@ -316,6 +335,7 @@ function chooseAutoGrid(
       const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
       const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
       if (!(moduleScale > 0)) continue;
+      const displayModulePx = moduleScale / dpr;
       const renderedW = displayW * moduleScale;
       const renderedH = displayH * moduleScale;
       const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
@@ -328,6 +348,7 @@ function chooseAutoGrid(
         layout,
         codes,
         moduleScale,
+        displayModulePx,
         screenFill,
         changesPerRefresh,
         payloadPerSecond,
@@ -340,10 +361,10 @@ function chooseAutoGrid(
   // Size is a preference, not something Auto is free to ignore. Find the
   // largest selected-or-smaller Size that can actually preserve Auto N's
   // module density, then optimize the grid only within that Size.
-  const densityCandidates = candidates.filter((candidate) => candidate.moduleScale >= densityTarget);
+  const densityCandidates = candidates.filter((candidate) => candidate.displayModulePx + 1e-9 >= densityTarget);
   if (!densityCandidates.length) {
     throw new Error(
-      `Auto ${densityTarget} cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} px/module in this viewport.`
+      `${densityTarget}px Auto cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} on-screen px/module in this viewport.`
     );
   }
   const resolvedMaximumFrameBytes = allowedFrameBytes.find((bytes) =>
@@ -848,7 +869,7 @@ async function startStream(revealStage = false) {
     const sizeFallback = autoGrid.sizeFallback
       ? ` · Size ${formatBytes(autoGrid.requestedMaximumFrameBytes)}→${formatBytes(autoGrid.maximumFrameBytes)}`
       : "";
-    return `Auto ${autoGrid.targetModulePx} · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.moduleScale.toFixed(2)} display px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
+    return `${autoGrid.targetModulePx}px Auto · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} on-screen px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -1030,7 +1051,7 @@ async function startStream(revealStage = false) {
       }, 250);
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
-      setStatus(describeGrid());
+      setStatus("");
       if (false) {
         void fetch("/__diagnostics", {
           method: "POST",
@@ -1190,7 +1211,7 @@ async function startStream(revealStage = false) {
       }, 250);
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
-      setStatus(describeGrid());
+      setStatus("");
     };
     const ensurePageSource = (page, totalW, totalH) => {
       if (page.bitmap) return page.bitmap;
