@@ -1293,12 +1293,19 @@ struct GuidedStableRsGate
     uint16_t attempts = 0;
     uint16_t successes = 0;
     uint16_t skipped = 0;
+    int dimension = 0;
     bool suppressed = false;
 };
 
-static GuidedStableRsGate& guidedDenseStableRsGate()
+static GuidedStableRsGate& guidedDenseStableRsGate(int id, int dimension)
 {
-    static GuidedStableRsGate gate;
+    static std::array<GuidedStableRsGate, 128> gates;
+    static GuidedStableRsGate fallback;
+    auto& gate = id >= 0 && id < int(gates.size()) ? gates[id] : fallback;
+    if (gate.dimension != dimension) {
+        gate = {};
+        gate.dimension = dimension;
+    }
     return gate;
 }
 
@@ -1946,6 +1953,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // temporal/CPU fence must stop repair work, not prevent a successful
         // fallback we already paid for from healing the cache for next frame.
         std::vector<uint8_t> refreshTurboFromSparse(trackCount, 0);
+        std::vector<uint8_t> deferredStableGateFailure(trackCount, 0);
         int repairTracksSpent = 0;
         constexpr int GUIDED_MAX_REPAIR_TRACKS_PER_BATCH = 2;
 
@@ -2013,6 +2021,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 continue;
             auto* cache = guidedTurboTrack(referenceId);
             if (!cache || !turboStableWarpEligible(*cache, tracks[i]))
+                continue;
+            auto& referenceGate = guidedDenseStableRsGate(referenceId, tracks[i].dimension);
+            if (guidedModuleSize(tracks[i]) <= GUIDED_STABLE_ADAPT_MAX_MODULE && referenceGate.suppressed)
                 continue;
             const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
             if (!frameTransform.isValid())
@@ -2096,7 +2107,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             bool stableNeedsRefresh = false;
             if (!success && stableEligible) {
                 const float stableModuleSize = guidedModuleSize(track);
-                auto& stableRsGate = guidedDenseStableRsGate();
+                auto& stableRsGate = guidedDenseStableRsGate(track.id, track.dimension);
                 const bool stableProbeAllowed = guidedTryDenseStableRs(stableRsGate, stableModuleSize);
                 if (stableProbeAllowed) {
                     const auto frameTransform = turboFrameTransform(*cache, track);
@@ -2235,8 +2246,13 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 }
                                 if (!success && allowExpensiveRepair && !repairSpentThisTrack)
                                     success = retryLocalResidual();
-                                if (success || allowExpensiveRepair)
-                                    guidedNoteDenseStableRs(stableRsGate, stableModuleSize, success);
+                                if (success) {
+                                    guidedNoteDenseStableRs(stableRsGate, stableModuleSize, true);
+                                } else if (allowExpensiveRepair) {
+                                    guidedNoteDenseStableRs(stableRsGate, stableModuleSize, false);
+                                } else if (stableRsAttempted && i >= 0 && i < int(deferredStableGateFailure.size())) {
+                                    deferredStableGateFailure[i] = 1;
+                                }
                                 if (success) {
                                     ++metrics->stableRsSuccesses;
                                     cache->stableSuccesses = uint8_t(std::min(255, int(cache->stableSuccesses) + 1));
@@ -2483,6 +2499,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     ++metrics->fastDecodeSuccesses;
                     if (trackBit)
                         metrics->sparseSuccessMask |= trackBit;
+                    if (trackIndex >= 0 && trackIndex < int(deferredStableGateFailure.size()) &&
+                        deferredStableGateFailure[trackIndex]) {
+                        auto& stableRsGate = guidedDenseStableRsGate(track.id, track.dimension);
+                        guidedNoteDenseStableRs(stableRsGate, guidedModuleSize(track), false);
+                        deferredStableGateFailure[trackIndex] = 0;
+                    }
                 }
                 noteGuidedSparseOutcome(track.id, decodedTrack);
             } else {
