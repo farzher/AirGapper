@@ -512,7 +512,8 @@ static std::array<PointF, 4> turboPositionQuad(const Position& pos)
     return {PointF(pos[0]), PointF(pos[1]), PointF(pos[2]), PointF(pos[3])};
 }
 
-static std::vector<PointF> buildHomographySampleMap(int dim, const Position& pos)
+static std::vector<PointF> buildHomographySampleMap(int dim, const Position& pos,
+                                                    PointF outputOffset = PointF{0, 0})
 {
     std::vector<PointF> out;
     if (dim <= 0)
@@ -525,14 +526,15 @@ static std::vector<PointF> buildHomographySampleMap(int dim, const Position& pos
     out.resize(size_t(dim) * dim);
     for (int y = 0; y < dim; ++y)
         for (int x = 0; x < dim; ++x)
-            out[size_t(y) * dim + x] = map(centered(PointI{x, y}));
+            out[size_t(y) * dim + x] = map(centered(PointI{x, y})) + outputOffset;
     return out;
 }
 
 static bool buildSparseSampleMap(int dim, const PerspectiveTransform& fallback,
                                  Matrix<std::optional<PointF>>& controls,
                                  const std::vector<int>& centers,
-                                 std::vector<PointF>& out)
+                                 std::vector<PointF>& out,
+                                 PointF outputOffset = PointF{0, 0})
 {
     const int W = Size(centers) - 1;
     const int H = W;
@@ -560,7 +562,7 @@ static bool buildSparseSampleMap(int dim, const PerspectiveTransform& fallback,
                 return false;
             for (int y = beginY; y < endY; ++y)
                 for (int x = beginX; x < endX; ++x)
-                    out[size_t(y) * dim + x] = local(centered(PointI{x, y}));
+                    out[size_t(y) * dim + x] = local(centered(PointI{x, y})) + outputOffset;
         }
     return true;
 }
@@ -568,7 +570,8 @@ static bool buildSparseSampleMap(int dim, const PerspectiveTransform& fallback,
 static bool buildSparseSampleMapBilinear(int dim, const PerspectiveTransform& fallback,
                                          Matrix<std::optional<PointF>>& controls,
                                          const std::vector<int>& centers,
-                                         std::vector<PointF>& out)
+                                         std::vector<PointF>& out,
+                                         PointF outputOffset = PointF{0, 0})
 {
     const int W = Size(centers) - 1;
     const int H = W;
@@ -605,7 +608,7 @@ static bool buildSparseSampleMapBilinear(int dim, const PerspectiveTransform& fa
                 PointF p{left.x + step.x * float(beginX - x0),
                          left.y + step.y * float(beginX - x0)};
                 for (int x = beginX; x < endX; ++x) {
-                    out[size_t(y) * dim + x] = p;
+                    out[size_t(y) * dim + x] = p + outputOffset;
                     p.x += step.x;
                     p.y += step.y;
                 }
@@ -1840,7 +1843,8 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
                                          const QRCode::FinderPatternSet& fp,
                                          int* alignmentFoundOut,
                                          std::vector<PointF>* sampleMapOut,
-                                         GuidedSparseFastResult* fastOut)
+                                         GuidedSparseFastResult* fastOut,
+                                         PointF sampleMapOffset = PointF{0, 0})
 {
     if (fastOut) *fastOut = GuidedSparseFastResult{};
     const int dim = track.dimension;
@@ -1944,13 +1948,13 @@ static DetectorResult sampleGuidedSparse(const BitMatrix& image,
         auto decoded = decodeAirGapperSparseProgressive(image, dim, base, controls, centers, *fastOut);
         if (decoded.isValid() && !decoded.content().bytes.empty() && hasValidCRC32(decoded.content().bytes)) {
             fastOut->decoded = std::move(decoded);
-            if (sampleMapOut && !buildSparseSampleMapBilinear(dim, base, controls, centers, *sampleMapOut))
+            if (sampleMapOut && !buildSparseSampleMapBilinear(dim, base, controls, centers, *sampleMapOut, sampleMapOffset))
                 sampleMapOut->clear();
             return {};
         }
     }
 
-    if (sampleMapOut && !buildSparseSampleMap(dim, base, controls, centers, *sampleMapOut))
+    if (sampleMapOut && !buildSparseSampleMap(dim, base, controls, centers, *sampleMapOut, sampleMapOffset))
         sampleMapOut->clear();
     return SampleGrid(image, dim, dim, base, std::move(controls), centers, centers);
 }
@@ -2453,14 +2457,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             return resultCount;
         }
 
-        auto absolutizeMap = [&](std::vector<PointF>& map) {
-            if (!binX && !binY)
-                return;
-            for (auto& point : map) {
-                point.x += binX;
-                point.y += binY;
-            }
-        };
         auto absoluteQuad = [&](std::array<PointF, 4> quad) {
             if (binX || binY)
                 for (auto& point : quad) {
@@ -2529,7 +2525,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                      refreshTurboFromSparse[trackIndex]);
                 auto* mapOut = refreshTurboMap ? &sparseMap : nullptr;
                 GuidedSparseFastResult fast;
-                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut, &fast);
+                auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut, &fast,
+                                                 PointF{float(binX), float(binY)});
 
                 if (fast.attempted) {
                     ++metrics->sampleAttempts;
@@ -2563,11 +2560,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->successful;
                             ++metrics->sparseProfileSuccesses;
                             decodedTrack = true;
-                            if (mapOut && !sparseMap.empty()) {
-                                absolutizeMap(sparseMap);
+                            if (mapOut && !sparseMap.empty())
                                 seedGuidedTurboQuad(track.id, track.dimension, absoluteFastQuad,
                                                     std::move(sparseMap), true);
-                            }
                         }
                     }
                 }
@@ -2591,8 +2586,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                     decodeSpent += fastElapsed;
                     if (decodedTrack && mapOut) {
                         if (sparseMap.empty())
-                            sparseMap = buildHomographySampleMap(track.dimension, sparse.position());
-                        absolutizeMap(sparseMap);
+                            sparseMap = buildHomographySampleMap(track.dimension, sparse.position(),
+                                                                PointF{float(binX), float(binY)});
                         seedGuidedTurboQuad(track.id, track.dimension, absolutePositionQuad(sparse.position()),
                                             std::move(sparseMap), true);
                     }
@@ -2638,8 +2633,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             if (trackBit)
                                 metrics->fallbackSuccessMask |= trackBit;
                             if (turboSeedEligible(track)) {
-                                auto map = buildHomographySampleMap(track.dimension, detected.position());
-                                absolutizeMap(map);
+                                auto map = buildHomographySampleMap(track.dimension, detected.position(),
+                                                                   PointF{float(binX), float(binY)});
                                 seedGuidedTurboQuad(track.id, track.dimension, absolutePositionQuad(detected.position()),
                                                     std::move(map), false);
                             }
