@@ -1776,6 +1776,8 @@ static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache
         }
     };
     consider(predictedX, predictedY);
+    if (bestMatches >= 146)
+        return best;
     if (bestMatches < 143) {
         for (int oy = -1; oy <= 1; ++oy)
             for (int ox = -1; ox <= 1; ++ox)
@@ -1796,6 +1798,10 @@ static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache
     }
     if (bestScore < 0)
         return std::nullopt;
+    // A coarse integer search that already lands essentially perfectly is
+    // also done. Avoid eight additional half-pixel finder reads.
+    if (bestMatches >= 146)
+        return best;
     const PointF coarse = best;
     for (int hy = -1; hy <= 1; ++hy)
         for (int hx = -1; hx <= 1; ++hx)
@@ -2014,14 +2020,11 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         // Stable-RS has its own RS+CRC oracle and no longer depends on the old
         // global Turbo canary/promotion state. A bad cache cools locally below.
         float wallCorrectionX = 0, wallCorrectionY = 0;
-        std::vector<int> wallReferenceOrder;
-        wallReferenceOrder.reserve(std::min(trackCount, 32));
-        const PointF wallImageCenter{width * 0.5, height * 0.5};
-        auto trackCenter = [](const DecimenGuidedTrack& track) {
-            return PointF{(track.x0 + track.x1 + track.x2 + track.x3) * 0.25f,
-                          (track.y0 + track.y1 + track.y2 + track.y3) * 0.25f};
-        };
-        for (int i = 0; i < trackCount && i < 32; ++i) {
+        int wallReferenceTries = 0;
+        // Preserve the receiver's quality-aware track order. Only indices with
+        // an actual 32-bit repair-mask bit may influence the shared correction;
+        // a temporally fenced slot must not steer the rest of the wall.
+        for (int i = 0; i < trackCount && i < 32 && wallReferenceTries < 4; ++i) {
             const uint32_t referenceBit = uint32_t(1) << i;
             if ((repairAllowedMask & referenceBit) == 0)
                 continue;
@@ -2031,30 +2034,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 continue;
             auto& referenceGate = guidedDenseStableRsGate(referenceId, tracks[i].dimension);
             if (guidedModuleSize(tracks[i]) <= GUIDED_STABLE_ADAPT_MAX_MODULE && referenceGate.suppressed)
-                continue;
-            wallReferenceOrder.push_back(i);
-        }
-        std::sort(wallReferenceOrder.begin(), wallReferenceOrder.end(), [&](int a, int b) {
-            const auto* ca = guidedTurboTrack(tracks[a].id);
-            const auto* cb = guidedTurboTrack(tracks[b].id);
-            const int sa = ca ? int(ca->stableSuccesses) : 0;
-            const int sb = cb ? int(cb->stableSuccesses) : 0;
-            if (sa != sb)
-                return sa > sb;
-            const PointF pa = trackCenter(tracks[a]);
-            const PointF pb = trackCenter(tracks[b]);
-            const double da = std::hypot(pa.x - wallImageCenter.x, pa.y - wallImageCenter.y);
-            const double db = std::hypot(pb.x - wallImageCenter.x, pb.y - wallImageCenter.y);
-            if (std::abs(da - db) > 1e-6)
-                return da < db;
-            return tracks[a].id < tracks[b].id;
-        });
-        int wallReferenceTries = 0;
-        for (int i : wallReferenceOrder) {
-            if (wallReferenceTries >= 4)
-                break;
-            auto* cache = guidedTurboTrack(tracks[i].id);
-            if (!cache)
                 continue;
             const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
             if (!frameTransform.isValid())
