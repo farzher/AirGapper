@@ -842,14 +842,6 @@ static PointF turboWarpedPoint(const GuidedTurboTrack& cache,
     return frameTransform.perspectiveMesh ? frameTransform.meshWarp(p, x, y) : frameTransform(p);
 }
 
-static PointF turboWarpedPlanPoint(const GuidedTurboTrack& cache,
-                                   const TurboFrameTransform& frameTransform,
-                                   int x, int y, uint32_t sampleIndex)
-{
-    const PointF p = cache.samples[sampleIndex];
-    return frameTransform.perspectiveMesh ? frameTransform.meshWarp(p, x, y) : frameTransform(p);
-}
-
 static bool turboFinderIdeal(int x, int y)
 {
     return x == 0 || x == 6 || y == 0 || y == 6 || (x >= 2 && x <= 4 && y >= 2 && y <= 4);
@@ -971,9 +963,9 @@ static int turboThreshold(const TurboThresholdPlane& plane, int x, int y)
 static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrack& track,
                           const TurboFrameTransform& frameTransform,
                           const uint8_t* yPlane, int width, int height, int stride, int x, int y,
-                          uint32_t sampleIndex, float dx, float dy, int threshold, float moduleSize)
+                          float dx, float dy, int threshold, float moduleSize)
 {
-    const PointF p = turboWarpedPlanPoint(cache, frameTransform, x, y, sampleIndex);
+    const PointF p = turboWarpedPoint(cache, frameTransform, x, y);
     int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
     if (lum < 0 || moduleSize < GUIDED_STABLE_RS_MIN_MODULE ||
         std::abs(lum - threshold) > GUIDED_TURBO_AMBIGUOUS)
@@ -1135,7 +1127,6 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
             const int xx = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const uint32_t sampleIndex = entry >> 17;
             const int threshold = turboThreshold(thresholdPlane, xx, y);
             int lum;
             if (frameTransform.translationOnly && moduleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE) {
@@ -1143,11 +1134,11 @@ static DecoderResult decodeTurboDataOnly(const GuidedTurboTrack& cache, const De
                 // Dense CRC-Turbo deliberately retains the conservative
                 // bilinear/ambiguity-voted sampler below; its win comes from
                 // skipping RS, not from weakening optical sampling.
-                const PointF p = turboWarpedPlanPoint(cache, frameTransform, xx, y, sampleIndex);
+                const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
                 lum = turboModuleLum(cache, track, frameTransform, yPlane, width, height, stride,
-                                     xx, y, sampleIndex, dx, dy, threshold, moduleSize);
+                                     xx, y, dx, dy, threshold, moduleSize);
             }
             if (lum < 0) { failed = true; break; }
             value = uint8_t((value << 1) | uint8_t(mask != (lum <= threshold)));
@@ -1193,9 +1184,7 @@ static const std::vector<uint32_t>& turboCodewordPlan(int dim)
                 const int xx = x - col;
                 if (functionPattern.get(xx, y)) continue;
                 const uint32_t mask = uint32_t(QRCode::GetDataMaskBit(4, xx, y));
-                const uint32_t sampleIndex = uint32_t(y * dim + xx);
-                plan.push_back(uint32_t(xx) | (uint32_t(y) << 8) | (mask << 16) |
-                               (sampleIndex << 17));
+                plan.push_back(uint32_t(xx) | (uint32_t(y) << 8) | (mask << 16));
             }
         }
         readingUp = !readingUp;
@@ -1577,16 +1566,15 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int xx = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const uint32_t sampleIndex = entry >> 17;
             const int threshold = turboThreshold(thresholdPlane, xx, y);
             int lum;
             if (centerOnly) {
-                const PointF p = turboWarpedPlanPoint(cache, frameTransform, xx, y, sampleIndex);
+                const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
                 lum = turboNearestLum(yPlane, width, height, stride, p, dx, dy);
             } else {
                 lum = turboModuleLum(cache, track, frameTransform,
                                      yPlane, width, height, stride,
-                                     xx, y, sampleIndex, dx, dy, threshold, moduleSize);
+                                     xx, y, dx, dy, threshold, moduleSize);
             }
             if (lum < 0)
                 return false;
@@ -1604,9 +1592,8 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             const int xx = int(entry & 0xff);
             const int y = int((entry >> 8) & 0xff);
             const bool mask = ((entry >> 16) & 1) != 0;
-            const uint32_t sampleIndex = entry >> 17;
             const int threshold = turboThreshold(thresholdPlane, xx, y);
-            const PointF p = turboWarpedPlanPoint(cache, frameTransform, xx, y, sampleIndex);
+            const PointF p = turboWarpedPoint(cache, frameTransform, xx, y);
             const int lum = turboLum(yPlane, width, height, stride, p, dx, dy);
             if (lum < 0)
                 return false;
