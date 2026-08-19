@@ -278,7 +278,7 @@ final class NativeCameraBridge {
             activeMinFrameDurationNs = minDuration;
             Integer sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             activeSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
-            frameCredit = true;
+            frameCredit = false;
 
             imageReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2);
             imageReader.setOnImageAvailableListener(this::onImageAvailable, cameraHandler);
@@ -341,7 +341,7 @@ final class NativeCameraBridge {
                     try {
                         session.setRepeatingRequest(request.build(), null, cameraHandler);
                         running = true;
-                        frameCredit = true;
+                        frameCredit = false;
                         JSONObject started = new JSONObject();
                         started.put("cameraId", activeCameraId);
                         started.put("width", activeWidth);
