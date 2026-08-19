@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.349";
+const RECEIVER_RUNTIME_BUILD = "v0.5.350";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -4705,7 +4705,7 @@ function populateBrowserCapabilities(track) {
       label: formatCameraMode(active.width, active.height, activeFps)
     };
   }
-  browserModes = standardBrowserModes().filter((mode) => mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax && mode.fps >= fpsMin && mode.fps <= fpsMax);
+  browserModes = standardBrowserModes().filter((mode) => isAndroidApp() || mode.width >= widthMin && mode.width <= widthMax && mode.height >= heightMin && mode.height <= heightMax && mode.fps >= fpsMin && mode.fps <= fpsMax);
   const prior = cameraResolution.value;
   const options = browserModes.map((mode) => ({
     width: mode.width,
@@ -5426,6 +5426,7 @@ function stopReceiver() {
   captureGen++;
   receiverPaused = false;
   pauseStartedAt = 0;
+  transferFinalizing = false;
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stopFramePump();
