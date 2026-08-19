@@ -2,6 +2,7 @@ package com.airgapper.app;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -12,9 +13,12 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Range;
@@ -34,7 +38,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -48,7 +51,8 @@ import java.util.Set;
 final class NativeCameraBridge {
     static final int CAMERA_PERMISSION_REQUEST = 13;
 
-    private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
+    private static final String APP_HOST = "appassets.androidplatform.net";
+    private static final String APP_ORIGIN = "https://" + APP_HOST;
     private static final String OBJECT_NAME = "AirGapperNativeCamera";
     private static final int[] TEST_FPS = {30, 60};
     private static final Set<String> STANDARD_SIZES = new HashSet<>(Arrays.asList(
@@ -97,7 +101,9 @@ final class NativeCameraBridge {
             android.net.Uri sourceOrigin,
             boolean isMainFrame,
             JavaScriptReplyProxy proxy) {
-        if (!isMainFrame || !APP_ORIGIN.equals(sourceOrigin.toString())) return;
+        if (!isMainFrame
+                || !"https".equals(sourceOrigin.getScheme())
+                || !APP_HOST.equals(sourceOrigin.getHost())) return;
         replyProxy = proxy;
         final String data = message.getData();
         if (data == null) return;
@@ -316,21 +322,22 @@ final class NativeCameraBridge {
         ImageReader reader = imageReader;
         if (camera == null || reader == null) return;
         try {
-            CaptureRequest.Builder request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
-            request.addTarget(reader.getSurface());
-            request.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
-            request.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-            request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
+            CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            builder.addTarget(reader.getSurface());
+            builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
             int[] afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
             if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)) {
-                request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
             } else if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
-                request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             } else if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_AUTO)) {
-                request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
             }
+            CaptureRequest request = builder.build();
 
-            camera.createCaptureSession(Collections.singletonList(reader.getSurface()), new CameraCaptureSession.StateCallback() {
+            CameraCaptureSession.StateCallback callback = new CameraCaptureSession.StateCallback() {
                 @Override
                 public void onConfigured(CameraCaptureSession session) {
                     if (cameraDevice != camera) {
@@ -339,7 +346,7 @@ final class NativeCameraBridge {
                     }
                     captureSession = session;
                     try {
-                        session.setRepeatingRequest(request.build(), null, cameraHandler);
+                        session.setRepeatingRequest(request, null, cameraHandler);
                         running = true;
                         frameCredit = false;
                         JSONObject started = new JSONObject();
@@ -352,6 +359,7 @@ final class NativeCameraBridge {
                         started.put("fixedFps", activeFpsRange.getLower().equals(activeFpsRange.getUpper()));
                         started.put("minFrameDurationNs", activeMinFrameDurationNs);
                         started.put("sensorOrientation", activeSensorOrientation);
+                        started.put("sessionParameters", Build.VERSION.SDK_INT >= Build.VERSION_CODES.P);
                         reply(requestId, started);
                     } catch (Exception error) {
                         stopCameraInternal();
@@ -365,11 +373,33 @@ final class NativeCameraBridge {
                     stopCameraInternal();
                     replyError(requestId, "Camera2 capture session configuration failed");
                 }
-            }, cameraHandler);
+            };
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                createSessionApi28(camera, reader, request, callback);
+            } else {
+                camera.createCaptureSession(Collections.singletonList(reader.getSurface()), callback, cameraHandler);
+            }
         } catch (CameraAccessException error) {
             stopCameraInternal();
             replyError(requestId, error.getMessage() == null ? error.toString() : error.getMessage());
         }
+    }
+
+    @TargetApi(Build.VERSION_CODES.P)
+    private void createSessionApi28(
+            CameraDevice camera,
+            ImageReader reader,
+            CaptureRequest request,
+            CameraCaptureSession.StateCallback callback) throws CameraAccessException {
+        OutputConfiguration output = new OutputConfiguration(reader.getSurface());
+        SessionConfiguration session = new SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                Collections.singletonList(output),
+                command -> cameraHandler.post(command),
+                callback);
+        session.setSessionParameters(request);
+        camera.createCaptureSession(session);
     }
 
     private static boolean contains(int[] values, int wanted) {
