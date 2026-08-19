@@ -70,8 +70,8 @@ static_assert(sizeof(DecimenGuidedTrack) == 40,
               "DecimenGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(DecimenGuidedResult) == 52,
               "DecimenGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(DecimenGuidedMetrics) == 208,
-              "DecimenGuidedMetrics JS ABI must allocate 208 bytes");
+static_assert(sizeof(DecimenGuidedMetrics) == 232,
+              "DecimenGuidedMetrics JS ABI must allocate 232 bytes");
 static_assert(offsetof(DecimenGuidedMetrics, turboAttempts) == 124,
               "DecimenGuidedMetrics turboAttempts JS offset changed");
 static_assert(offsetof(DecimenGuidedMetrics, turboSuccesses) == 140,
@@ -80,6 +80,10 @@ static_assert(offsetof(DecimenGuidedMetrics, stableRsAttempts) == 144,
               "DecimenGuidedMetrics stableRsAttempts JS offset changed");
 static_assert(offsetof(DecimenGuidedMetrics, stableEligibleTracks) == 152,
               "DecimenGuidedMetrics stableEligibleTracks JS offset changed");
+static_assert(offsetof(DecimenGuidedMetrics, stablePrimaryAttempts) == 204,
+              "DecimenGuidedMetrics stablePrimaryAttempts JS offset changed");
+static_assert(offsetof(DecimenGuidedMetrics, stableLocalRetrySuccesses) == 224,
+              "DecimenGuidedMetrics stableLocalRetrySuccesses JS offset changed");
 
 namespace ZXing::QRCode {
 DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCorrectionLevel ecLevel);
@@ -2194,6 +2198,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             stableRsAttempted = true;
                             ++metrics->sampleAttempts;
                             ++metrics->stableRsAttempts;
+                            ++metrics->stableLocalRetryAttempts;
                             bool localRsUsed = false;
                             bool localRepairAttempted = false;
                             bool localRepairSuccess = false;
@@ -2209,7 +2214,9 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 if (!repairSpentThisTrack) { repairSpentThisTrack = true; ++repairTracksSpent; }
                             }
                             if (localRepairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
-                            return commitTurbo(i, localDecoded, refined->x, refined->y);
+                            const bool localSuccess = commitTurbo(i, localDecoded, refined->x, refined->y);
+                            if (localSuccess) ++metrics->stableLocalRetrySuccesses;
+                            return localSuccess;
                         };
 
                         if (!levels.ok) {
@@ -2251,6 +2258,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 stableRsAttempted = true;
                                 ++metrics->sampleAttempts;
                                 ++metrics->stableRsAttempts;
+                                ++metrics->stablePrimaryAttempts;
                                 bool rsUsed = false;
                                 bool repairAttempted = false;
                                 bool repairSuccess = false;
@@ -2271,11 +2279,13 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 }
                                 if (repairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
                                 success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                                if (success) ++metrics->stablePrimarySuccesses;
                                 const bool robustRetryWorthwhile = allowExpensiveRepair && !repairSpentThisTrack && centerOnlyRs &&
                                     stableModuleSize >= GUIDED_TURBO_CANARY_MIN_MODULE;
                                 if (!success && robustRetryWorthwhile) {
                                     ++metrics->sampleAttempts;
                                     ++metrics->stableRsAttempts;
+                                    ++metrics->stableRobustRetryAttempts;
                                     bool robustRsUsed = false;
                                     bool robustRepairAttempted = false;
                                     bool robustRepairSuccess = false;
@@ -2292,6 +2302,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                     }
                                     if (robustRepairSuccess && trackBit) metrics->erasureRepairSuccessMask |= trackBit;
                                     success = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
+                                    if (success) ++metrics->stableRobustRetrySuccesses;
                                 }
                                 if (!success && allowExpensiveRepair && !repairSpentThisTrack)
                                     success = retryLocalResidual();

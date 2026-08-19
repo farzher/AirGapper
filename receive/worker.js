@@ -49,7 +49,7 @@ const NATIVE_TRACK_OK = 1;
 const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 208;
+const GUIDED_METRICS_BYTES = 232;
 const GUIDED_OUTPUT_BYTES = 512 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -140,7 +140,13 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     erasureRepairCodewords: metricsView.getUint32(188, true),
     erasureRepairAttemptMask: metricsView.getUint32(192, true),
     erasureRepairSuccessMask: metricsView.getUint32(196, true),
-    erasureRepairSuppressedMask: metricsView.getUint32(200, true)
+    erasureRepairSuppressedMask: metricsView.getUint32(200, true),
+    stablePrimaryAttempts: metricsView.getUint32(204, true),
+    stablePrimarySuccesses: metricsView.getUint32(208, true),
+    stableRobustRetryAttempts: metricsView.getUint32(212, true),
+    stableRobustRetrySuccesses: metricsView.getUint32(216, true),
+    stableLocalRetryAttempts: metricsView.getUint32(220, true),
+    stableLocalRetrySuccesses: metricsView.getUint32(224, true)
   };
   const moduleSizes = tracks.map((track) => quadModuleSize(track.quad, track.dim)).filter((value) => value > 0 && Number.isFinite(value));
   if (moduleSizes.length) {
