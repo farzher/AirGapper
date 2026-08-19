@@ -1,0 +1,87 @@
+name: build APK
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - android/**
+      - codec/**
+      - receive/**
+      - send/**
+      - shared/**
+      - main.js
+      - index.html
+      - manifest.webmanifest
+      - sw.js
+      - icon-*.png
+      - .github/workflows/build-apk.yml
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-master
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build release APK
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew --no-daemon clean assembleRelease
+          cd ..
+          APK="$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)"
+          test -n "$APK"
+          cp "$APK" AirGapper.apk
+
+      - name: Verify packaged app
+        run: |
+          set -euo pipefail
+          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.349'
+          unzip -p AirGapper.apk assets/main.js | grep -q 'APP_BUILD = "v0.5.349"'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.js'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.wasm'
+          ls -lh AirGapper.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirGapper-v0.5.349
+          path: AirGapper.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish AirGapper.apk
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          if [ "$(git rev-parse origin/master)" != "$GITHUB_SHA" ]; then
+            echo "master moved while building; its push will produce the newer APK"
+            exit 0
+          fi
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AirGapper.apk
+          if git diff --cached --quiet; then
+            echo "AirGapper.apk is already current"
+            exit 0
+          fi
+          git commit -m "build AirGapper.apk v0.5.349"
+          git push origin HEAD:master
