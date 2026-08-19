@@ -11,6 +11,7 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
+    const jobId = 991351;
     const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
     const timer = setTimeout(() => {
       worker.terminate();
@@ -22,6 +23,7 @@ try {
       reject(new Error(event.message || "native Y8 worker failed"));
     };
     worker.onmessage = (event) => {
+      if (event.data?.id !== jobId) return;
       clearTimeout(timer);
       worker.terminate();
       resolve(event.data);
@@ -38,7 +40,7 @@ try {
     }
     const frame = y.buffer;
     worker.postMessage({
-      id: 991351,
+      id: jobId,
       videoFrame: frame,
       cropX: 0,
       cropY: 0,
