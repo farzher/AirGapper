@@ -79,7 +79,7 @@ jobs:
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           test -x "$APKSIGNER"
           "$APKSIGNER" verify --verbose --print-certs AirGapper.apk | tee /tmp/airgapper-apksigner.txt
-          ACTUAL_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' /tmp/airgapper-apksigner.txt | head -1 | tr '[:lower:]' '[:upper:]')"
+          ACTUAL_CERT="$(sed -n 's/^.*certificate SHA-256 digest: //p' /tmp/airgapper-apksigner.txt | head -1 | tr '[:lower:]' '[:upper:]')"
           EXPECTED_CERT="6B75F5F6021C56E1598180D1318807EF84DF757FA7E0A59D019F83C07F9CFB24"
           test "$ACTUAL_CERT" = "$EXPECTED_CERT" || { echo "::error::Unexpected AirGapper signing certificate: $ACTUAL_CERT"; exit 1; }
           ls -lh AirGapper.apk
