@@ -90,3 +90,5 @@ jobs:
           set -euo pipefail
           cd android
           ./gradlew assembleDebug
+
+# Retrigger after base gained validated-publish support.
