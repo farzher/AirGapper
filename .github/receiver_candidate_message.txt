@@ -1,0 +1,1 @@
+v0.5.344 fix mobile fullscreen pixel-perfect rendering
