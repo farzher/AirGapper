@@ -5,6 +5,7 @@ on:
     paths:
       - receive/**
       - shared/**
+      - codec/**
       - vendor/decimen-codec/**
       - vendor/decimen-codec-android/**
       - send/main.js
@@ -42,7 +43,7 @@ jobs:
           if [ -f .github/receiver_candidate.py ]; then
             python3 .github/receiver_candidate.py 2>&1 | tee /tmp/receiver-candidate-patch.log
             echo 'changed=true' >> "$GITHUB_OUTPUT"
-            if git diff --quiet -- vendor/decimen-codec/source; then
+            if git diff --quiet -- codec/source vendor/decimen-codec/source; then
               echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
             else
               echo 'codec_changed=true' >> "$GITHUB_OUTPUT"
@@ -58,18 +59,27 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
+            codec/source/emsdk
+            codec/source/third_party
+            codec/source/build-simd
+            codec/source/build-scalar
             vendor/decimen-codec/source/emsdk
             vendor/decimen-codec/source/third_party
             vendor/decimen-codec/source/build-simd
             vendor/decimen-codec/source/build-scalar
-          key: decimen-emsdk-6.0.6-zxing-${{ hashFiles('vendor/decimen-codec/source/zxing-cpp.commit') }}
+          key: airgapper-codec-emsdk-6.0.6-zxing-${{ hashFiles('codec/source/zxing-cpp.commit', 'vendor/decimen-codec/source/zxing-cpp.commit') }}
 
       - name: Build SIMD and scalar codecs
         if: steps.candidate.outputs.codec_changed == 'true'
         run: |
           set -euo pipefail
-          DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-simd.log
-          DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-scalar.log
+          if [ -d codec/source ]; then
+            AIRGAPPER_CODEC_SIMD=1 AIRGAPPER_CODEC_OUTPUT_DIR=.. codec/source/build.sh 2>&1 | tee /tmp/receiver-build-simd.log
+            AIRGAPPER_CODEC_SIMD=0 AIRGAPPER_CODEC_OUTPUT_DIR=../scalar codec/source/build.sh 2>&1 | tee /tmp/receiver-build-scalar.log
+          else
+            DECIMEN_SIMD=1 DECIMEN_OUTPUT_DIR=.. vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-simd.log
+            DECIMEN_SIMD=0 DECIMEN_OUTPUT_DIR=../../decimen-codec-android vendor/decimen-codec/source/build.sh 2>&1 | tee /tmp/receiver-build-scalar.log
+          fi
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
