@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.341";
+const SEND_RUNTIME_BUILD = "v0.5.342";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -886,7 +886,7 @@ async function startStream(revealStage = false) {
   const transportKey = `${payloadId}:${encoder.mode}:${encoder.k}:${blockLen}:${payload.length}`;
   let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;
   activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };
-  const extendedGrid = Boolean(autoGrid);
+  const extendedGrid = Boolean(autoGrid && gridCodes > 1);
   const header = {
     mode: encoder.mode,
     layoutId: extendedGrid ? 0 : gridLayoutId(gridCols, gridRows),
