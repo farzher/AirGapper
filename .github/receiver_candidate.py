@@ -27,11 +27,11 @@ replace_once(main,
 
 replace_once(main,
     '    streamKey = identity;\n    startTs = receiverNow();\n    progressEl.style.display = "block";',
-    '    streamKey = identity;\n    // Start on the first accepted packet below, after TransportDecoder has\n    // actually consumed it. Do not include pre-stream camera/acquisition time.\n    startTs = 0;\n    completionScanAt = 0;\n    progressEl.style.display = "block";')
+    '    streamKey = identity;\n    // Start on the first accepted camera scan below, after TransportDecoder has\n    // actually consumed it. Do not include pre-stream camera/acquisition time.\n    startTs = 0;\n    completionScanAt = 0;\n    progressEl.style.display = "block";')
 
 replace_once(main,
     '  decoder.addFrame(header.seq, block);\n  const receivedAt = receiverNow();\n  const duplicateFrame = decoder.framesNew === framesNewBefore;',
-    '  decoder.addFrame(header.seq, block);\n  const receivedAt = receiverNow();\n  if (!startTs) startTs = receivedAt;\n  // This is the optical-transfer end clock: the timestamp of the accepted\n  // packet that advanced the fountain decoder. Assembly, hashing, verification,\n  // UI painting and file unpacking happen after this and must not lower KB/s.\n  if (decoder.usefulSymbols > usefulBefore) completionScanAt = receivedAt;\n  const duplicateFrame = decoder.framesNew === framesNewBefore;')
+    '  decoder.addFrame(header.seq, block);\n  const receivedAt = receiverNow();\n  // Time optical transfer using the source scan timestamp, not worker-result\n  // arrival. Decoder latency can vary by hundreds of milliseconds and must not\n  // bias the first/last-scan throughput measurement.\n  const transferScanAt = info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt;\n  if (!startTs) startTs = transferScanAt;\n  // Freeze the end clock on the scan that actually advanced the fountain\n  // decoder. Assembly, hashing, verification, UI painting and file unpacking\n  // happen after this and must not lower the reported optical KB/s.\n  if (decoder.usefulSymbols > usefulBefore) completionScanAt = transferScanAt;\n  const duplicateFrame = decoder.framesNew === framesNewBefore;')
 
 old_paint = '''function paintTransferComplete() {
   // Snap, do not animate, the final 100%. Expensive assembly immediately after
