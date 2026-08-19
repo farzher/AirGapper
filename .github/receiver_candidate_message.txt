@@ -1,0 +1,1 @@
+v0.5.348 optimize synchronous sender rendering
