@@ -1,1 +1,0 @@
-v0.5.335 replace Auto Optics with QR-proven bounded control
