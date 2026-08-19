@@ -48,7 +48,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.344";
+const SEND_RUNTIME_BUILD = "v0.5.345";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto" || mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -315,11 +315,13 @@ function chooseAutoGrid(
   const allowedFrameBytes = FRAME_BYTES_OPTIONS
     .filter((bytes) => bytes <= requestedMaximumFrameBytes)
     .sort((a, b) => b - a);
-  const dpr = window.devicePixelRatio || 1;
   const landscape = landscapeGrid();
   const budgetCss = senderDisplayBudgetCss();
-  const budgetW = Math.max(1, budgetCss.width * dpr);
-  const budgetH = Math.max(1, budgetCss.height * dpr);
+  // Pixel Perfect is defined in final CSS/display pixels, not in an oversized
+  // DPR backing store that Chrome must shrink again. Keep the Auto solver in
+  // exactly the same coordinate space as the element that reaches the screen.
+  const budgetW = Math.max(1, budgetCss.width);
+  const budgetH = Math.max(1, budgetCss.height);
   const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
   const candidates = [];
   for (const maximumFrameBytes of allowedFrameBytes) {
@@ -338,7 +340,7 @@ function chooseAutoGrid(
       const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
       const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
       if (!(moduleScale > 0)) continue;
-      const displayModulePx = moduleScale / dpr;
+      const displayModulePx = moduleScale;
       const renderedW = displayW * moduleScale;
       const renderedH = displayH * moduleScale;
       const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
@@ -977,15 +979,17 @@ async function startStream(revealStage = false) {
     const budget = senderDisplayBudgetCss();
     const budgetW = budget.width;
     const budgetH = budget.height;
-    const availableScale = Math.min(budgetW * dpr / displayW, budgetH * dpr / displayH);
+    const cssAvailableScale = Math.min(budgetW / displayW, budgetH / displayH);
     if (fitScaling) {
-      scale = Math.max(Number.EPSILON, availableScale);
+      // Fit is intentionally filtered/resampled and may use a DPR-sized backing
+      // store for quality. Pixel Perfect below never does.
+      scale = Math.max(Number.EPSILON, cssAvailableScale * dpr);
     } else if (autoMode) {
-      // Pixel Perfect Auto may change layout/QR version, but it may NEVER
-      // resample modules or the one-source-pixel shared gap fractionally.
-      scale = Math.max(1, Math.floor(availableScale));
+      // Hard invariant: one QR source module becomes an integer number of final
+      // canvas/CSS pixels. There is no second CSS resize after this raster.
+      scale = Math.max(1, Math.floor(cssAvailableScale));
     } else {
-      scale = availableScale < 1 ? Math.max(Number.EPSILON, availableScale) : Math.floor(availableScale);
+      scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);
     }
     if (staging.width !== totalW || staging.height !== totalH) {
       staging.width = totalW;
@@ -997,16 +1001,15 @@ async function startStream(revealStage = false) {
       canvas.width = canvasW;
       canvas.height = canvasH;
     }
-    const cssNativeW = displayW * scale / dpr;
-    const cssNativeH = displayH * scale / dpr;
+    const cssNativeW = fitScaling ? displayW * scale / dpr : canvasW;
+    const cssNativeH = fitScaling ? displayH * scale / dpr : canvasH;
     canvas.style.width = `${cssNativeW}px`;
     canvas.style.height = `${cssNativeH}px`;
     canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
-    // The backing bitmap is already an exact integer device-pixel raster. The
-    // last place it can become gray is compositor placement: flex centering a
-    // fractional-DPR canvas can put its top-left between device pixels. Snap the
-    // actual laid-out origin back onto the DPR grid without changing its layout
-    // size. Healthy DPR=1 desktop rendering remains unchanged.
+    // Pixel Perfect's intrinsic bitmap and CSS box are now the SAME integer
+    // size. Chrome no longer gets a fractional DPR downscale opportunity that
+    // can synthesize gray module edges. Keep only origin snapping as a final
+    // guard against flex centering landing the bitmap between device pixels.
     canvas.style.position = "";
     canvas.style.left = "";
     canvas.style.top = "";
