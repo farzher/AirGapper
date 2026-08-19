@@ -1,0 +1,43 @@
+name: inspect native camera integration
+
+on:
+  push:
+    branches: [feature/native-camera2]
+    paths:
+      - .github/workflows/inspect-native-camera.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show receiver integration points
+        run: |
+          set -euo pipefail
+          for needle in \
+            'async function startReceiver' \
+            'function stopReceiver' \
+            'function processSourceFrame' \
+            'function sourceFrameMeta' \
+            'function cloneVideoFrame' \
+            'async function refreshCamera' \
+            'standardBrowserModes' \
+            'navigator.mediaDevices.getUserMedia' \
+            'let stream' \
+            'sourceTrack =' \
+            'video.srcObject'; do
+            echo "===== $needle ====="
+            grep -n -F "$needle" receive/main.js | head -10 || true
+          done
+          echo '===== context: startReceiver ====='
+          line=$(grep -n -F 'async function startReceiver' receive/main.js | head -1 | cut -d: -f1 || true)
+          if [ -n "$line" ]; then sed -n "$((line-40)),$((line+220))p" receive/main.js; fi
+          echo '===== context: processSourceFrame ====='
+          line=$(grep -n -F 'function processSourceFrame' receive/main.js | head -1 | cut -d: -f1 || true)
+          if [ -n "$line" ]; then sed -n "$((line-80)),$((line+240))p" receive/main.js; fi
+          echo '===== context: stopReceiver ====='
+          line=$(grep -n -F 'function stopReceiver' receive/main.js | head -1 | cut -d: -f1 || true)
+          if [ -n "$line" ]; then sed -n "$((line-60)),$((line+160))p" receive/main.js; fi
