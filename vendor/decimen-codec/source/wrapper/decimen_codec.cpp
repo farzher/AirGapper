@@ -1776,8 +1776,6 @@ static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache
         }
     };
     consider(predictedX, predictedY);
-    if (bestMatches >= 146)
-        return best;
     if (bestMatches < 143) {
         for (int oy = -1; oy <= 1; ++oy)
             for (int ox = -1; ox <= 1; ++ox)
@@ -1798,10 +1796,6 @@ static std::optional<PointF> turboRefineWallOffset(const GuidedTurboTrack& cache
     }
     if (bestScore < 0)
         return std::nullopt;
-    // A coarse integer search that already lands essentially perfectly is
-    // also done. Avoid eight additional half-pixel finder reads.
-    if (bestMatches >= 146)
-        return best;
     const PointF coarse = best;
     for (int hy = -1; hy <= 1; ++hy)
         for (int hx = -1; hx <= 1; ++hx)
