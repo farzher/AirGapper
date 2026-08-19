@@ -1003,25 +1003,39 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
         PointF{p.x + uy.x * inset, p.y + uy.y * inset},
         PointF{p.x - uy.x * inset, p.y - uy.y * inset}
     };
-    int values[5] = {lum, 0, 0, 0, 0};
-    for (int i = 0; i < 4; ++i) {
-        values[i + 1] = turboLum(yPlane, width, height, stride, probes[i], dx, dy);
-        if (values[i + 1] < 0)
+    // Both callers consume only (returnedLum <= threshold), so the median's
+    // numeric value is irrelevant; its side of the threshold is exactly the
+    // 3-of-5 vote. Preserve the old edge behavior by validating every probe
+    // before using early majority: previously any out-of-frame probe discarded
+    // the whole vote and returned the center sample.
+    auto bilinearInFrame = [&](PointF probe) {
+        const float px = float(probe.x) + dx;
+        const float py = float(probe.y) + dy;
+        const int x0 = int(std::floor(px));
+        const int y0 = int(std::floor(py));
+        return x0 >= 0 && y0 >= 0 && x0 + 1 < width && y0 + 1 < height;
+    };
+    for (const auto& probe : probes)
+        if (!bilinearInFrame(probe))
             return lum;
+
+    int darkVotes = int(lum <= threshold);
+    int lightVotes = 1 - darkVotes;
+    for (const auto& probe : probes) {
+        const int voteLum = turboLum(yPlane, width, height, stride, probe, dx, dy);
+        // bilinearInFrame above guarantees this, but retain a defensive fallback.
+        if (voteLum < 0)
+            return lum;
+        if (voteLum <= threshold)
+            ++darkVotes;
+        else
+            ++lightVotes;
+        if (darkVotes >= 3)
+            return threshold;
+        if (lightVotes >= 3)
+            return threshold + 1;
     }
-    // We only need the median of five. A fixed eight-comparison network is
-    // cheaper in WASM than invoking the generic tiny-range sort thousands
-    // of times on a dense ambiguous frame, with identical output.
-    auto swapIf = [](int& a, int& b) { if (a > b) std::swap(a, b); };
-    swapIf(values[0], values[1]);
-    swapIf(values[3], values[4]);
-    swapIf(values[0], values[2]);
-    swapIf(values[1], values[2]);
-    swapIf(values[0], values[3]);
-    swapIf(values[2], values[3]);
-    swapIf(values[1], values[4]);
-    swapIf(values[1], values[2]);
-    return values[2];
+    return darkVotes >= 3 ? threshold : threshold + 1;
 }
 
 static const std::vector<uint32_t>& turboCodewordPlan(int dim);
