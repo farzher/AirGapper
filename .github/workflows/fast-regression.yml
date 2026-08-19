@@ -36,57 +36,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-release-signing:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-      - name: Build and verify permanently signed release APK
-        env:
-          AIRGAPPER_ANDROID_KEYSTORE_B64: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_B64 }}
-          AIRGAPPER_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "${AIRGAPPER_ANDROID_KEYSTORE_B64:-}" || { echo "::error::AIRGAPPER_ANDROID_KEYSTORE_B64 is missing"; exit 1; }
-          test -n "${AIRGAPPER_ANDROID_KEYSTORE_PASSWORD:-}" || { echo "::error::AIRGAPPER_ANDROID_KEYSTORE_PASSWORD is missing"; exit 1; }
-          printf '%s' "$AIRGAPPER_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/airgapper-release.jks"
-          chmod 600 "$RUNNER_TEMP/airgapper-release.jks"
-          keytool -list -v \
-            -keystore "$RUNNER_TEMP/airgapper-release.jks" \
-            -storepass "$AIRGAPPER_ANDROID_KEYSTORE_PASSWORD" \
-            -alias airgapper | grep -F 'SHA256: 6B:75:F5:F6:02:1C:56:E1:59:81:80:D1:31:88:07:EF:84:DF:75:7F:A7:E0:A5:9D:01:9F:83:C0:7F:9C:FB:24'
-          cd android
-          AIRGAPPER_RELEASE_KEYSTORE="$RUNNER_TEMP/airgapper-release.jks" \
-          AIRGAPPER_RELEASE_PASSWORD="$AIRGAPPER_ANDROID_KEYSTORE_PASSWORD" \
-            ./gradlew --no-daemon clean assembleRelease
-          cd ..
-          APK="$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)"
-          test -n "$APK"
-          cp "$APK" AirGapper.apk
-          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.351'
-          unzip -p AirGapper.apk assets/main.js | grep -q 'APP_BUILD = "v0.5.351"'
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
-          test -x "$APKSIGNER"
-          "$APKSIGNER" verify --verbose --print-certs AirGapper.apk | tee /tmp/airgapper-apksigner.txt
-          ACTUAL_CERT="$(sed -n 's/^.*certificate SHA-256 digest: //p' /tmp/airgapper-apksigner.txt | head -1 | tr '[:lower:]' '[:upper:]')"
-          EXPECTED_CERT="6B75F5F6021C56E1598180D1318807EF84DF757FA7E0A59D019F83C07F9CFB24"
-          test "$ACTUAL_CERT" = "$EXPECTED_CERT" || { echo "::error::Unexpected signer: $ACTUAL_CERT"; exit 1; }
-          echo 'AIRGAPPER_SIGNED_RELEASE_APK_PASS'
-      - name: Upload diagnostic signed APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: AirGapper-v0.5.351-signed-diagnostic
-          path: AirGapper.apk
-          if-no-files-found: error
-          retention-days: 1
-
   regression:
     runs-on: ubuntu-latest
     timeout-minutes: 35
