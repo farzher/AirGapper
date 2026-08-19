@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.338";
+const RECEIVER_RUNTIME_BUILD = "v0.5.339";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -951,6 +951,7 @@ function releaseTransportDecoder() {
 }
 let streamKey = "";
 let startTs = 0;
+let completionScanAt = 0;
 let captureGen = 0;
 let cameraStartGen = 0;
 let receiverPaused = false;
@@ -5436,6 +5437,7 @@ function stopReceiver() {
   releaseTransportDecoder();
   streamKey = "";
   startTs = 0;
+  completionScanAt = 0;
   done = false;
   regions.length = 0;
   gridLattice.reset();
@@ -5553,6 +5555,10 @@ function stopReceiver() {
   etaLabel.textContent = "";
   bar.style.width = "0";
   bar.classList.remove("error", "finalizing");
+  void bar.offsetWidth;
+  bar.style.removeProperty("transition");
+  bar.style.removeProperty("animation");
+  bar.style.removeProperty("opacity");
   metricsEl.style.display = "none";
   metric("m-cap").textContent = "— fps";
   metric("m-dec").textContent = "— QR/s";
@@ -5592,6 +5598,7 @@ function resumeReceiver() {
   const pausedFor = receiverNow() - pauseStartedAt;
   receiverPaused = false;
   if (startTs) startTs += pausedFor;
+  if (completionScanAt) completionScanAt += pausedFor;
   if (cameraStartedTs) cameraStartedTs += pausedFor;
   void start();
 }
@@ -7651,6 +7658,7 @@ function resetActiveTransfer() {
   releaseTransportDecoder();
   streamKey = "";
   startTs = 0;
+  completionScanAt = 0;
   regions.length = 0;
   gridLattice.reset();
   gridShape = "";
@@ -7682,6 +7690,10 @@ function resetActiveTransfer() {
   transferFinalizing = false;
   completionDiagnosticsText = "";
   bar.style.width = "0";
+  void bar.offsetWidth;
+  bar.style.removeProperty("transition");
+  bar.style.removeProperty("animation");
+  bar.style.removeProperty("opacity");
   progressEl.setAttribute("aria-valuenow", "0");
   progressLabel.textContent = "0%";
   transferSizeLabel.textContent = "";
@@ -7877,7 +7889,10 @@ function onDecoded(bytes, box, info) {
     duplicateQrTimes.length = 0;
   resetDuplicateAttribution();
     streamKey = identity;
-    startTs = receiverNow();
+    // Start on the first accepted camera scan below, after TransportDecoder has
+    // actually consumed it. Do not include pre-stream camera/acquisition time.
+    startTs = 0;
+    completionScanAt = 0;
     progressEl.style.display = "block";
     progressStatus.style.display = "block";
   }
@@ -7886,6 +7901,15 @@ function onDecoded(bytes, box, info) {
   const redundantBefore = decoder.framesRedundant;
   decoder.addFrame(header.seq, block);
   const receivedAt = receiverNow();
+  // Time optical transfer using the source scan timestamp, not worker-result
+  // arrival. Decoder latency can vary by hundreds of milliseconds and must not
+  // bias the first/last-scan throughput measurement.
+  const transferScanAt = info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt;
+  if (!startTs) startTs = transferScanAt;
+  // Freeze the end clock on the scan that actually advanced the fountain
+  // decoder. Assembly, hashing, verification, UI painting and file unpacking
+  // happen after this and must not lower the reported optical KB/s.
+  if (decoder.usefulSymbols > usefulBefore) completionScanAt = transferScanAt;
   const duplicateFrame = decoder.framesNew === framesNewBefore;
   (duplicateFrame ? duplicateQrTimes : uniqueQrTimes).push(receivedAt);
   noteDuplicateAttribution(header.seq, info?.sourceSequence, duplicateFrame);
@@ -7933,23 +7957,28 @@ function onDecoded(bytes, box, info) {
   }
 }
 function paintTransferComplete() {
-  // Snap, do not animate, the final 100%. Expensive assembly immediately after
-  // completion can block animation frames for large transfers; leaving the
-  // normal width transition active makes the bar appear stuck around 97-99%.
+  // Final completion is a state change, not an animation. Override motion on the
+  // element itself before changing width so selector timing/compositor state can
+  // never leave the bar visually sitting at 97-99% while assembly blocks JS.
   bar.classList.add("finalizing");
   bar.getAnimations?.().forEach((animation) => animation.cancel());
+  bar.style.setProperty("transition", "none", "important");
+  bar.style.setProperty("animation", "none", "important");
+  bar.style.setProperty("opacity", "1", "important");
   bar.style.width = "100%";
+  // Force the 100% layout now; the render turn below is only for paint.
+  void bar.offsetWidth;
   progressEl.setAttribute("aria-valuenow", "100");
   progressLabel.textContent = "100%";
   transferSizeLabel.textContent = "";
   etaLabel.textContent = "Processing…";
 }
 async function waitForProgressPaint() {
-  // One rAF is still before paint. Resolve from the following frame: yielding
-  // between the two callbacks gives the browser a guaranteed rendering turn
-  // with the snapped 100% bar and Processing label visible.
+  // rAF runs immediately before rendering. A zero-delay task queued from that
+  // callback runs after that rendering opportunity, so heavy assembly cannot
+  // start until the snapped 100% state has had a chance to hit the screen.
   await new Promise((resolve) =>
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
+    requestAnimationFrame(() => setTimeout(resolve, 0))
   );
 }
 function quiesceCompletedTransfer() {
@@ -7972,6 +8001,10 @@ async function finalizeCompletedTransfer(payloadId) {
   transferFinalizing = true;
   const completingDecoder = decoder;
   const completingGeneration = captureGen;
+  // Freeze transfer duration at the last useful optical scan, before any UI or
+  // final-processing latency. This is the number shown as “X MB in Y seconds”.
+  const transferEndAt = completionScanAt || receiverNow();
+  const transferSeconds = Math.max(1e-3, (transferEndAt - startTs) / 1e3);
   paintTransferComplete();
   await waitForProgressPaint();
   if (done || decoder !== completingDecoder || captureGen !== completingGeneration) {
@@ -7981,9 +8014,8 @@ async function finalizeCompletedTransfer(payloadId) {
   freezeCompletionDiagnostics();
   quiesceCompletedTransfer();
   const payload = completingDecoder.assemble();
-  const seconds = (receiverNow() - startTs) / 1e3;
   const ok = fnv1a(payload) === payloadId;
-  await finish(payload, ok, seconds);
+  await finish(payload, ok, transferSeconds);
 }
 function updateProgressEstimate() {
   if (!decoder || transferFinalizing) return;
@@ -8058,7 +8090,8 @@ async function finish(container, hashOk, seconds) {
       file.bytes.fill(0);
       return;
     }
-    seconds = (receiverNow() - startTs) / 1e3;
+    // `seconds` was frozen at the last useful scan. Verification and file
+    // processing are intentionally excluded from optical-transfer throughput.
     document.body.classList.add("receive-complete");
     document.body.classList.remove("receive-mode");
     transferSizeLabel.textContent = "";
