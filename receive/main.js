@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.342";
+const RECEIVER_RUNTIME_BUILD = "v0.5.343";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -7978,7 +7978,7 @@ async function waitForProgressPaint() {
   // callback runs after that rendering opportunity, so heavy assembly cannot
   // start until the snapped 100% state has had a chance to hit the screen.
   await new Promise((resolve) =>
-    requestAnimationFrame(() => setTimeout(resolve, 0))
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50)))
   );
 }
 function quiesceCompletedTransfer() {
