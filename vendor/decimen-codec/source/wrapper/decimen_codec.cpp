@@ -973,14 +973,29 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
     // cross a QR edge; using fractions of neighboring module-center vectors
     // stays safely inside the cell even under perspective.
     const int dim = track.dimension;
-    const PointF left = turboWarpedPoint(cache, frameTransform, std::max(0, x - 1), y);
-    const PointF right = turboWarpedPoint(cache, frameTransform, std::min(dim - 1, x + 1), y);
-    const PointF up = turboWarpedPoint(cache, frameTransform, x, std::max(0, y - 1));
-    const PointF down = turboWarpedPoint(cache, frameTransform, x, std::min(dim - 1, y + 1));
+    const int lx = std::max(0, x - 1), rx = std::min(dim - 1, x + 1);
+    const int uyIndex = std::max(0, y - 1), dyIndex = std::min(dim - 1, y + 1);
     const float xDiv = (x > 0 && x + 1 < dim) ? 2.0f : 1.0f;
     const float yDiv = (y > 0 && y + 1 < dim) ? 2.0f : 1.0f;
-    const PointF ux{(right.x - left.x) / xDiv, (right.y - left.y) / xDiv};
-    const PointF uy{(down.x - up.x) / yDiv, (down.y - up.y) / yDiv};
+    PointF ux, uy;
+    if (frameTransform.translationOnly) {
+        // Translation cancels from neighboring-point differences exactly. The
+        // distortion-aware cache already stores the calibrated module centers,
+        // so do not re-run four transforms just to recover the same local basis.
+        const PointF& left = cache.samples[size_t(y) * dim + lx];
+        const PointF& right = cache.samples[size_t(y) * dim + rx];
+        const PointF& up = cache.samples[size_t(uyIndex) * dim + x];
+        const PointF& down = cache.samples[size_t(dyIndex) * dim + x];
+        ux = PointF{(right.x - left.x) / xDiv, (right.y - left.y) / xDiv};
+        uy = PointF{(down.x - up.x) / yDiv, (down.y - up.y) / yDiv};
+    } else {
+        const PointF left = turboWarpedPoint(cache, frameTransform, lx, y);
+        const PointF right = turboWarpedPoint(cache, frameTransform, rx, y);
+        const PointF up = turboWarpedPoint(cache, frameTransform, x, uyIndex);
+        const PointF down = turboWarpedPoint(cache, frameTransform, x, dyIndex);
+        ux = PointF{(right.x - left.x) / xDiv, (right.y - left.y) / xDiv};
+        uy = PointF{(down.x - up.x) / yDiv, (down.y - up.y) / yDiv};
+    }
     const float inset = moduleSize < 3.0f ? 0.16f : 0.22f;
     const PointF probes[4] = {
         PointF{p.x + ux.x * inset, p.y + ux.y * inset},
@@ -994,7 +1009,18 @@ static int turboModuleLum(const GuidedTurboTrack& cache, const DecimenGuidedTrac
         if (values[i + 1] < 0)
             return lum;
     }
-    std::sort(std::begin(values), std::end(values));
+    // We only need the median of five. A fixed eight-comparison network is
+    // cheaper in WASM than invoking the generic tiny-range sort thousands
+    // of times on a dense ambiguous frame, with identical output.
+    auto swapIf = [](int& a, int& b) { if (a > b) std::swap(a, b); };
+    swapIf(values[0], values[1]);
+    swapIf(values[3], values[4]);
+    swapIf(values[0], values[2]);
+    swapIf(values[1], values[2]);
+    swapIf(values[0], values[3]);
+    swapIf(values[2], values[3]);
+    swapIf(values[1], values[4]);
+    swapIf(values[1], values[2]);
     return values[2];
 }
 
