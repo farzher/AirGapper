@@ -75,6 +75,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
           fetch-depth: 1
 
+      - name: Build Android app
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug
+
       - name: Cache codec toolchain
         uses: actions/cache@v4
         with:
@@ -109,9 +115,3 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/corpus-suite.mjs
-
-      - name: Build Android app
-        run: |
-          set -euo pipefail
-          cd android
-          ./gradlew assembleDebug
