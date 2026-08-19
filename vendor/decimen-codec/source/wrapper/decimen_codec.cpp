@@ -2302,8 +2302,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 }
             }
 
-            if (!success && stableEligible && stableRsAttempted &&
-                allowExpensiveRepair && cache->misses > 0)
+            if (!success && stableEligible && stableRsAttempted)
                 refreshTurboFromSparse[i] = 1;
             metrics->fastDecodeMs += guidedNowMs() - turboStarted;
             const bool decoderAttempted = directAttempted || stableRsAttempted;
