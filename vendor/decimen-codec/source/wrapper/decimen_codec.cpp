@@ -1644,7 +1644,8 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     };
 
     ByteArray raw(totalCodewords);
-    ByteArray ambiguityScore;
+    ByteArray ambiguityScore(totalCodewords);
+    std::fill(ambiguityScore.begin(), ambiguityScore.end(), uint8_t(255));
     bool erasureSampling = false;
     int ambiguousCount = 0;
     int firstParityCodeword = 0;
@@ -1657,10 +1658,6 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         auto& noRsGate = guidedStableNoRsGate();
         const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
         erasureSampling = !tryNoRsFirst && !centerOnly && moduleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
-        if (erasureSampling) {
-            ambiguityScore.resize(totalCodewords);
-            std::fill(ambiguityScore.begin(), ambiguityScore.end(), uint8_t(255));
-        }
         ByteArray progressiveData;
         if (tryNoRsFirst)
             progressiveData.resize(dataPlan.dataCodewords);
