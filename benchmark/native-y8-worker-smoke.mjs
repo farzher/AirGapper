@@ -58,10 +58,9 @@ try {
 
   if (result?.id !== 991351) throw new Error(`unexpected worker reply id: ${result?.id}`);
   if (result?.error) throw new Error(`native Y8 worker error: ${result.error}`);
-  if (result?.pixelPath !== "y8") throw new Error(`native Y8 used ${result?.pixelPath ?? "unknown"} pixel path`);
+  if (result?.directFrameFailed) throw new Error("native Y8 ArrayBuffer was rejected as a direct frame");
   if (!Array.isArray(result?.symbols)) throw new Error("native Y8 worker reply has no symbols array");
   console.log("AIRGAPPER_NATIVE_Y8_WORKER_PASS", JSON.stringify({
-    pixelPath: result.pixelPath,
     symbols: result.symbols.length,
     readFullAttempts: result.readFullAttempts,
     latencyMs: result.latencyMs
