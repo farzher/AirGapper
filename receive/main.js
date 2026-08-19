@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.345";
+const RECEIVER_RUNTIME_BUILD = "v0.5.346";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -895,6 +895,14 @@ async function maintainManualOptics(now) {
 }
 focusMode.value = manualFocusMode;
 const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
+const DEVELOPER_MODE_EVER_KEY = "airgapper:developer-mode-ever:v1";
+let developerModeEverUsed = false;
+try { developerModeEverUsed = localStorage.getItem(DEVELOPER_MODE_EVER_KEY) === "1"; } catch {}
+function rememberDeveloperModeUse() {
+  if (developerModeEverUsed) return;
+  developerModeEverUsed = true;
+  try { localStorage.setItem(DEVELOPER_MODE_EVER_KEY, "1"); } catch {}
+}
 const settingsToggleTimes = [];
 let previousSettingsToggleAt = 0;
 receiverSettings.addEventListener("toggle", () => {
@@ -908,7 +916,10 @@ receiverSettings.addEventListener("toggle", () => {
   }
   settingsToggleTimes.push(now);
   while (settingsToggleTimes.length && settingsToggleTimes[0] < now - DEV_SETTINGS_TOGGLE_WINDOW_MS) settingsToggleTimes.shift();
-  if (receiverSettings.open && settingsToggleTimes.length >= 3) receiverDevActions.hidden = false;
+  if (receiverSettings.open && settingsToggleTimes.length >= 3) {
+    receiverDevActions.hidden = false;
+    rememberDeveloperModeUse();
+  }
 });
 const metric = (id) => document.getElementById(id);
 let replayClock;
@@ -2540,7 +2551,11 @@ function freezeCompletionDiagnostics() {
   // verification can drain the camera/worker recent window.
   updateStats(true);
   completionDiagnosticsText = diagnosticsText();
-  void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
+  // Clipboard mutation is developer behavior. Normal users should never have
+  // their clipboard replaced merely because a receive completed. Once this
+  // browser/device has actually unlocked Developer Mode, retain the convenient
+  // auto-copy behavior across future sessions.
+  if (developerModeEverUsed) void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
 }
 let cameraStartedTs = 0;
 const timeline = [];

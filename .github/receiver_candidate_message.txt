@@ -1,1 +1,0 @@
-v0.5.346 only auto-copy diagnostics for developers
