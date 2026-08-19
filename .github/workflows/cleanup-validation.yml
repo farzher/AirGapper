@@ -1,4 +1,4 @@
-name: cleanup validation
+name: cleanup migration validation
 
 on:
   pull_request:
