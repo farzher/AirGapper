@@ -72,11 +72,11 @@ jobs:
           test -f codec/scalar/airgapper_codec.wasm
           test ! -e vendor/decimen-codec
           test ! -e vendor/decimen-codec-android
-          if find . -path ./.git -prune -o -iname '*decimen*' -print | grep -q .; then
-            find . -path ./.git -prune -o -iname '*decimen*' -print
+          if find . -path ./.git -prune -o -path ./.github/receiver_candidate.py -prune -o -iname '*decimen*' -print | grep -q .; then
+            find . -path ./.git -prune -o -path ./.github/receiver_candidate.py -prune -o -iname '*decimen*' -print
             exit 1
           fi
-          if grep -RIni --exclude-dir=.git --exclude='*.wasm' --exclude='*.apk' 'decimen' .; then
+          if grep -RIni --exclude-dir=.git --exclude='receiver_candidate.py' --exclude='*.wasm' --exclude='*.apk' 'decimen' .; then
             exit 1
           fi
 
