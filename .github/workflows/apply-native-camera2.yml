@@ -32,3 +32,5 @@ jobs:
           git diff --cached --check
           git commit -m "integrate native Camera2 receiver" || exit 0
           git push origin HEAD:feature/native-camera2
+
+# Temporary branch-only workflow. Delete before merging PR #5.
