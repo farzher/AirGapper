@@ -51,12 +51,13 @@ jobs:
             exit 0
           fi
           python3 .github/run-native-camera2-patch.py
+          git checkout -- .github/workflows/build-apk.yml
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android/app/src/main/java/com/airgapper/app/MainActivity.java \
                   android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java \
                   index.html shared/style.css receive/main.js receive/worker.js \
-                  main.js send/main.js sw.js .github/workflows/build-apk.yml
+                  main.js send/main.js sw.js
           git diff --cached --check
           git commit -m "integrate native Camera2 receiver"
           git push origin HEAD:feature/native-camera2
