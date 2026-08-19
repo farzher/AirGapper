@@ -47,6 +47,7 @@ public final class MainActivity extends Activity {
     private static final int SAVE_REQUEST = 12;
 
     private WebView webView;
+    private NativeCameraBridge nativeCameraBridge;
     private PermissionRequest cameraRequest;
     private ValueCallback<Uri[]> fileCallback;
     private View fullscreenView;
@@ -79,6 +80,7 @@ public final class MainActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         webView.addJavascriptInterface(new AndroidBridge(), "AirGapperAndroid");
+        nativeCameraBridge = new NativeCameraBridge(this, webView);
         webView.setWebViewClient(new LocalWebViewClient());
         installServiceWorkerAssetClient();
         webView.setWebChromeClient(new AppWebChromeClient());
@@ -233,6 +235,7 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (nativeCameraBridge != null && nativeCameraBridge.onRequestPermissionsResult(requestCode, results)) return;
         if (requestCode != CAMERA_REQUEST) return;
         boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
         if (cameraRequest != null) {
@@ -403,6 +406,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (nativeCameraBridge != null) nativeCameraBridge.stop();
         webView.evaluateJavascript(
                 "window.airgapperSuspend && window.airgapperSuspend()",
                 ignored -> webView.onPause());
@@ -420,6 +424,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (nativeCameraBridge != null) {
+            nativeCameraBridge.close();
+            nativeCameraBridge = null;
+        }
         discardPendingDownload();
         if (downloadToSave != null) downloadToSave.delete();
         downloadToSave = null;

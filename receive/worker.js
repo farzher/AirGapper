@@ -644,6 +644,7 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
+    const usedNativeYBuffer = ownedVideoFrame instanceof ArrayBuffer;
     // Direct camera frames use the Y8 Guided lane first. Buffered RGBA frames
     // (corpus replay, benchmark images, legacy/canvas inputs) already have
     // trusted lattice geometry, so do not throw that information away by
@@ -666,7 +667,19 @@ ctx.onmessage = async (e) => {
     let pixels;
     const zx = await ready;
     let ptr;
-    if (ownedVideoFrame) {
+    if (usedNativeYBuffer) {
+      const byteLength = Math.min(
+        ownedVideoFrame.byteLength,
+        payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w
+      );
+      pixels = new Uint8Array(ownedVideoFrame, 0, byteLength);
+      ptr = inputBuffer(zx, pixels.byteLength);
+      if (!ptr) throw new Error("Could not allocate WASM native Y input buffer");
+      zx.HEAPU8.set(pixels, ptr);
+      decodePixelFormat = "y8";
+      if (inputStride < w) throw new Error("Native camera Y stride is invalid");
+      ownedVideoFrame = null;
+    } else if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
       const copyAsRgba = pixelFormat !== "y8";
       const copyOptions = copyAsRgba ? { rect, format: "RGBA" } : { rect };

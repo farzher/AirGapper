@@ -39,8 +39,16 @@ import {
   showScanCaptureMenuOnAndroid
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
+import {
+  ackNativeCameraFrame,
+  listNativeCameras,
+  nativeCameraAvailable,
+  setNativeCameraFrameHandler,
+  startNativeCamera,
+  stopNativeCamera
+} from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.350";
+const RECEIVER_RUNTIME_BUILD = "v0.5.351";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -106,6 +114,8 @@ const scanDialogStatus = document.getElementById("scan-dialog-status");
 const scanSightingLegend = document.getElementById("scan-sighting-legend");
 const scanCapture = document.getElementById("scan-capture");
 const video = document.getElementById("video");
+const nativePreview = document.getElementById("native-camera-preview");
+const nativePreviewCtx = nativePreview?.getContext("2d");
 const preview = document.getElementById("preview");
 const cameraBox = document.querySelector(".preview");
 const overlay = document.getElementById("detect-overlay");
@@ -228,6 +238,17 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 1280;
 let requestedHeight = 720;
 let requestedFps = 60;
+const nativeCamera2 = isAndroidApp() && nativeCameraAvailable();
+const nativeStreamShim = Object.freeze({
+  __airgapperNativeCamera: true,
+  getTracks: () => [],
+  getVideoTracks: () => []
+});
+let nativeCameraCatalog;
+let nativeCameraInfo;
+let nativeCameraRunning = false;
+let nativeCameraUnsupportedReason = "";
+let nativePreviewLastAt = -Infinity;
 const AUTO_QR_EV_BIAS = -0.75;
 const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
@@ -651,6 +672,79 @@ function standardBrowserModes() {
 function browserModeSuffix(key) {
   return browserModeResults[key] === true ? "" : browserModeResults[key] === false ? " · Retry" : " · Try";
 }
+function nativeModeLabel(mode) {
+  if (mode.fixedFps) return formatCameraMode(mode.width, mode.height, mode.fps);
+  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}`;
+}
+function selectedNativeCamera() {
+  const cameras = nativeCameraCatalog?.cameras ?? [];
+  if (preferredCameraDeviceId) {
+    const explicit = cameras.find((camera) => camera.id === preferredCameraDeviceId);
+    if (explicit) return explicit;
+  }
+  return cameras.find((camera) => camera.facing === "rear" && camera.modes?.length)
+    ?? cameras.find((camera) => camera.modes?.length)
+    ?? cameras[0];
+}
+function nativeAutoMode(camera) {
+  const modes = camera?.modes ?? [];
+  const exact = (width, height, fps) => modes.find((mode) =>
+    mode.width === width && mode.height === height && mode.fps === fps && mode.fixedFps);
+  return exact(1280, 720, 60)
+    ?? exact(1920, 1080, 60)
+    ?? modes.find((mode) => mode.fps === 60 && mode.fixedFps)
+    ?? modes.find((mode) => mode.fps === 60)
+    ?? exact(1280, 720, 30)
+    ?? modes[modes.length - 1];
+}
+function populateNativeCameraModes() {
+  if (!nativeCamera2 || !nativeCameraCatalog) return;
+  const camera = selectedNativeCamera();
+  const prior = cameraResolution.value;
+  browserModes = (camera?.modes ?? []).map((mode) => ({ ...mode, label: nativeModeLabel(mode) }))
+    .sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
+  cameraResolution.replaceChildren(
+    new Option("Auto", "auto"),
+    ...browserModes.map((mode) => new Option(mode.label, mode.key))
+  );
+  cameraResolution.value = browserModes.some((mode) => mode.key === prior) ? prior : "auto";
+  const automatic = nativeAutoMode(camera);
+  const selected = browserModes.find((mode) => mode.key === cameraResolution.value) ?? automatic;
+  if (selected) {
+    requestedWidth = selected.width;
+    requestedHeight = selected.height;
+    requestedFps = selected.fps;
+  }
+  cameraResolutionLabel.textContent = "Mode";
+  cameraExposureControl.hidden = true;
+  cameraOpticsManual.hidden = true;
+  opticsAutoActions.hidden = true;
+  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+}
+async function refreshNativeCameraDevices() {
+  if (!nativeCamera2) return false;
+  const catalog = await listNativeCameras();
+  if (!catalog.supported) {
+    nativeCameraUnsupportedReason = catalog.reason || "Native Camera2 binary bridge unavailable";
+    nativeCameraCatalog = catalog;
+    return false;
+  }
+  nativeCameraUnsupportedReason = "";
+  nativeCameraCatalog = catalog;
+  const cameras = catalog.cameras ?? [];
+  const options = [new Option("Rear camera (auto)", "")];
+  for (const camera of cameras) options.push(new Option(camera.label || `Camera ${camera.id}`, camera.id));
+  cameraDevice.replaceChildren(...options);
+  if (preferredCameraDeviceId && cameras.some((camera) => camera.id === preferredCameraDeviceId)) {
+    cameraDevice.value = preferredCameraDeviceId;
+  } else {
+    preferredCameraDeviceId = "";
+    cameraDevice.value = "";
+  }
+  cameraDevice.disabled = cameras.length <= 1;
+  populateNativeCameraModes();
+  return true;
+}
 function populateCameraOptions() {
   browserModes = standardBrowserModes();
   cameraResolution.replaceChildren(
@@ -770,12 +864,16 @@ function showRequestedCameraSettings() {
   cameraResolutionLabel.textContent = "Mode";
   captureScanBtn.hidden = false;
   decodeWorkersControl.hidden = legacyAndroidApp;
-  video.hidden = false;
+  video.hidden = nativeCamera2;
+  if (nativePreview) nativePreview.hidden = !nativeCamera2;
   cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
+if (nativeCamera2) void refreshNativeCameraDevices().catch((error) => {
+  nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error);
+});
 let frameId = 0;
 const focusController = new FocusController(
   applyCameraConstraint,
@@ -4840,8 +4938,8 @@ function drawOverlay(now) {
   lastOverlayDrawAt = now;
   const cw = overlay.clientWidth;
   const ch = overlay.clientHeight;
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+  const vw = nativeCameraRunning ? receiverFrameWidth : video.videoWidth;
+  const vh = nativeCameraRunning ? receiverFrameHeight : video.videoHeight;
   if (!cw || !ch || !vw || !vh) return;
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(cw * dpr);
@@ -5101,7 +5199,9 @@ function renderFocusDiagnostics() {
   const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
     : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
-  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
+  const sourceLine = nativeCameraInfo
+    ? `Camera2 ${nativeCameraInfo.cameraId} · YUV ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump Camera2 Y8 · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
+    : sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
     return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
@@ -5192,6 +5292,13 @@ const changeCameraSettings = async () => {
   var _a, _b;
   showRequestedCameraSettings();
   saveCameraSettings();
+  if (nativeCamera2) {
+    populateNativeCameraModes();
+    if (!stream || done) return;
+    stopReceiver();
+    await start();
+    return;
+  }
   const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
@@ -5259,13 +5366,15 @@ cameraResolution.addEventListener("change", () => {
 cameraDevice?.addEventListener("change", () => {
   preferredCameraDeviceId = cameraDevice.value;
   automaticCameraUpgradeAttempted = false;
-  if (!preferredCameraDeviceId) automaticCameraDeviceId = learnedAutomaticCameraId();
+  if (nativeCamera2) {
+    populateNativeCameraModes();
+  } else if (!preferredCameraDeviceId) automaticCameraDeviceId = learnedAutomaticCameraId();
   saveCameraSettings();
   if (!stream || done) return;
   stopReceiver();
   void start();
 });
-navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+if (!nativeCamera2) navigator.mediaDevices?.addEventListener?.("devicechange", () => {
   void refreshCameraDevices(stream?.getVideoTracks()[0]);
 });
 cameraExposureAuto.addEventListener("change", () => {
@@ -5359,6 +5468,153 @@ decodeWorkers.addEventListener("change", () => {
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
+function stopNativeReceiverSource() {
+  if (!nativeCamera2) return;
+  nativeCameraRunning = false;
+  nativeCameraInfo = void 0;
+  setNativeCameraFrameHandler();
+  void stopNativeCamera();
+  if (nativePreview) {
+    nativePreview.hidden = true;
+    nativePreview.width = 0;
+    nativePreview.height = 0;
+  }
+}
+function drawNativePreview(source) {
+  if (!nativePreviewCtx || !source.nativeY || !source.width || !source.height) return;
+  const now = performance.now();
+  if (now - nativePreviewLastAt < 80) return;
+  nativePreviewLastAt = now;
+  const outWidth = Math.min(480, source.width);
+  const outHeight = Math.max(1, Math.round(source.height * outWidth / source.width));
+  if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
+    nativePreview.width = outWidth;
+    nativePreview.height = outHeight;
+  }
+  const rgba = nativePreviewCtx.createImageData(outWidth, outHeight);
+  const sx = source.width / outWidth;
+  const sy = source.height / outHeight;
+  for (let y = 0; y < outHeight; y++) {
+    const sourceRow = Math.min(source.height - 1, Math.floor((y + 0.5) * sy)) * source.width;
+    for (let x = 0; x < outWidth; x++) {
+      const luma = source.nativeY[sourceRow + Math.min(source.width - 1, Math.floor((x + 0.5) * sx))];
+      const at = (y * outWidth + x) * 4;
+      rgba.data[at] = luma;
+      rgba.data[at + 1] = luma;
+      rgba.data[at + 2] = luma;
+      rgba.data[at + 3] = 255;
+    }
+  }
+  nativePreviewCtx.putImageData(rgba, 0, 0);
+}
+function nativeSourceFrame(buffer, width, height, gen) {
+  if (!nativeCameraRunning || done || gen !== captureGen) {
+    ackNativeCameraFrame();
+    return;
+  }
+  const callbackTime = performance.now();
+  const sequence = benchmarkRecordingSequence++;
+  latestSourceFrameSequence = sequence;
+  if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
+  framePumpProcessorTotal++;
+  processSourceFrame({
+    sequence,
+    opticsEpoch: void 0,
+    width,
+    height,
+    callbackTimeMs: callbackTime,
+    mediaTimeMs: callbackTime,
+    presentationTimeMs: callbackTime,
+    expectedDisplayTimeMs: callbackTime,
+    nativeY: new Uint8Array(buffer),
+    nativeBuffer: buffer,
+    nativeAck: ackNativeCameraFrame
+  }, gen);
+}
+async function startNativeReceiver(startAttempt, transportReady) {
+  let catalogReady = Boolean(nativeCameraCatalog?.supported);
+  if (!catalogReady) {
+    try {
+      catalogReady = await refreshNativeCameraDevices();
+    } catch (error) {
+      nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) return;
+  if (!catalogReady) {
+    pool.resize(0);
+    offerRetry(`Native Camera2: ${nativeCameraUnsupportedReason || "camera bridge unavailable"}`);
+    return;
+  }
+  const camera = selectedNativeCamera();
+  const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);
+  if (!camera || !selectedMode) {
+    pool.resize(0);
+    offerRetry("Native Camera2: no supported YUV camera mode found");
+    return;
+  }
+  requestedWidth = selectedMode.width;
+  requestedHeight = selectedMode.height;
+  requestedFps = selectedMode.fps;
+  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+  cameraActual.textContent = `${nativeModeLabel(selectedMode)} · Camera2`;
+  startBtn.disabled = true;
+  startBtn.style.display = "none";
+  video.srcObject = null;
+  video.hidden = true;
+  if (nativePreview) nativePreview.hidden = false;
+
+  const futureGen = captureGen + 1;
+  setNativeCameraFrameHandler((buffer) => nativeSourceFrame(buffer, requestedWidth, requestedHeight, futureGen));
+  let started;
+  let transportError;
+  try {
+    [started, transportError] = await Promise.all([
+      startNativeCamera({
+        cameraId: camera.id,
+        width: requestedWidth,
+        height: requestedHeight,
+        fps: requestedFps
+      }),
+      transportReady
+    ]);
+  } catch (error) {
+    setNativeCameraFrameHandler();
+    void stopNativeCamera();
+    if (startAttempt === cameraStartGen) pool.resize(0);
+    offerRetry(`Native Camera2: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (transportError) {
+    setNativeCameraFrameHandler();
+    void stopNativeCamera();
+    if (startAttempt === cameraStartGen) pool.resize(0);
+    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
+    return;
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) {
+    setNativeCameraFrameHandler();
+    void stopNativeCamera();
+    return;
+  }
+
+  stream = nativeStreamShim;
+  nativeCameraRunning = true;
+  nativeCameraInfo = started;
+  preview.classList.remove("camera-loading");
+  setStatus("");
+  cameraStartedTs = receiverNow();
+  resetLivePipeline(cameraStartedTs);
+  captureGen = futureGen;
+  framePumpMode = "Camera2 Y8";
+  framePumpStartedAt = receiverNow();
+  framePumpFirstFrameAt = 0;
+  framePumpProcessorTotal = 0;
+  framePumpProcessorDiscarded = 0;
+  statsTimer = setInterval(updateStats, STATS_TICK_MS);
+  ackNativeCameraFrame();
+  await requestScreenWakeLock();
+}
 const { setStatus, showError } = statusLine(stats);
 function restartButton(label) {
   const button = document.createElement("button");
@@ -5430,6 +5686,7 @@ function stopReceiver() {
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stopFramePump();
+  stopNativeReceiverSource();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -5584,6 +5841,7 @@ function pauseReceiver() {
   captureGen++;
   releaseScreenWakeLock();
   stopFramePump();
+  stopNativeReceiverSource();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -5637,6 +5895,10 @@ async function start() {
   progressStatus.style.display = "block";
   progressEl.style.display = "block";
   showRequestedCameraSettings();
+  if (nativeCamera2) {
+    await startNativeReceiver(startAttempt, transportReady);
+    return;
+  }
   if (!((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia)) {
     if (startAttempt === cameraStartGen) pool.resize(0);
     offerRetry(
@@ -5813,16 +6075,24 @@ function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
     videoFrame
   };
 }
+function releaseSourceFrame(frame) {
+  frame.videoFrame?.close();
+  if (frame.nativeAck) {
+    const ack = frame.nativeAck;
+    frame.nativeAck = void 0;
+    ack();
+  }
+}
 function processSourceFrame(frame, gen) {
   if (done || gen !== captureGen) {
-    frame.videoFrame?.close();
+    releaseSourceFrame(frame);
     return;
   }
   if (frameModeSync) {
     const matches = sameModeSize(frame, frameModeSync);
     if (!matches && performance.now() - frameModeSync.startedAt < FRAME_MODE_SYNC_TIMEOUT_MS) {
       frameModeMismatchDrops++;
-      frame.videoFrame?.close();
+      releaseSourceFrame(frame);
       return;
     }
     if (!matches) {
@@ -5859,7 +6129,7 @@ function processSourceFrame(frame, gen) {
       orientation
     }, frame.videoFrame, video);
     recordCorpusBtn.textContent = recorder.complete ? "Saving…" : `Stop · ${Math.max(1, Math.ceil((recorder.durationMs - recorder.elapsedMs) / 1e3))}s`;
-    frame.videoFrame?.close();
+    releaseSourceFrame(frame);
     queueOverlayDraw();
     if (recorder.complete) void finishCorpusRecording(recorder);
     return;
@@ -5869,7 +6139,7 @@ function processSourceFrame(frame, gen) {
     lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
     console.error("AirGapper captureFrame failed", error);
   }).finally(() => {
-    frame.videoFrame?.close();
+    releaseSourceFrame(frame);
     if (done || gen !== captureGen) return;
     queueOverlayDraw();
   });
@@ -6262,7 +6532,22 @@ function readBoundedVideoCrop(source, x, y, w, h) {
   const right = Math.min(source.width, x + w);
   const bottom = Math.min(source.height, y + h);
   if (right > sx && bottom > sy) {
-    if (source.image) {
+    if (source.nativeY) {
+      const crop = new Uint8ClampedArray((right - sx) * (bottom - sy) * 4);
+      let out = 0;
+      for (let row = sy; row < bottom; row++) {
+        const rowBase = row * source.width;
+        for (let col = sx; col < right; col++) {
+          const luma = source.nativeY[rowBase + col];
+          crop[out++] = luma; crop[out++] = luma; crop[out++] = luma; crop[out++] = 255;
+        }
+      }
+      const cropCanvas = document.createElement("canvas");
+      cropCanvas.width = right - sx;
+      cropCanvas.height = bottom - sy;
+      cropCanvas.getContext("2d").putImageData(new ImageData(crop, cropCanvas.width, cropCanvas.height), 0, 0);
+      ctx.drawImage(cropCanvas, sx - x, sy - y);
+    } else if (source.image) {
       if (replaySourceCanvas.width !== source.width || replaySourceCanvas.height !== source.height) {
         replaySourceCanvas.width = source.width;
         replaySourceCanvas.height = source.height;
@@ -6528,6 +6813,26 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   // finished retiring that slot. Missing geometry is a normal erasure during
   // target loss, never a reason to throw from the camera loop.
   if (tracks.some((track) => !track || !validQuadObject(track.quad) || !track.dim)) return null;
+  if (source.nativeY && source.nativeBuffer instanceof ArrayBuffer && source.nativeBuffer.byteLength) {
+    const cropX = Math.max(0, Math.min(source.width, Math.floor(x)));
+    const cropY = Math.max(0, Math.min(source.height, Math.floor(y)));
+    const cropRight = Math.max(cropX, Math.min(source.width, Math.ceil(x + w)));
+    const cropBottom = Math.max(cropY, Math.min(source.height, Math.ceil(y + h)));
+    const cropWidth = cropRight - cropX;
+    const cropHeight = cropBottom - cropY;
+    if (cropWidth < 2 || cropHeight < 2) return null;
+    return {
+      frame: source.nativeBuffer,
+      cropX: 0, cropY: 0,
+      w: cropWidth, h: cropHeight,
+      ox: cropX, oy: cropY,
+      tracks,
+      pixelFormat: "y8",
+      yOffset: cropY * source.width + cropX,
+      yStride: source.width,
+      payloadBytes: source.nativeBuffer.byteLength
+    };
+  }
   // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
   // path for every receiver state. Never decline direct Y8 because an optics
   // sample is due; doing so used to fall through to live <video> canvas readback.
@@ -6805,10 +7110,22 @@ async function captureFrame(source) {
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   if (captureNextScan && !pendingScanCapture && source.videoFrame && !source.image) await captureDirectSourceScan(source);
+  if (captureNextScan && !pendingScanCapture && source.nativeY && !source.image) {
+    pendingScanCapture = {
+      image: yToImageData(source.nativeY.slice(), source.width, source.height),
+      ox: 0, oy: 0, full: !gridLattice.locked,
+      tracks: gridLattice.locked ? regions.filter((region) => validQuadObject(region.quad)).map((region) => region.quad) : [],
+      scaleX: 1, scaleY: 1, rawY: true
+    };
+    scanDialogStatus.textContent = `Captured exact native Camera2 Y frame ${source.width}×${source.height} · waiting for decoder…`;
+  }
+  if (source.nativeY) drawNativePreview(source);
   const now = receiverNow();
-  void maintainManualOptics(now);
-  maintainAcquisitionAutofocus(now);
-  maintainAutomaticQrOptics(now);
+  if (!source.nativeY) {
+    void maintainManualOptics(now);
+    maintainAcquisitionAutofocus(now);
+    maintainAutomaticQrOptics(now);
+  }
   const trace = replayRunning ? {
     sequence: source.sequence,
     timestampMs: now,
@@ -7232,7 +7549,7 @@ async function captureFrame(source) {
       id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
       quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32)
     })) : [];
-    const directFull = source.videoFrame && !source.image
+    const directFull = (source.videoFrame || source.nativeY) && !source.image
       ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, recoveryTracks)
       : null;
     if (directFull) {
@@ -7249,6 +7566,9 @@ async function captureFrame(source) {
           oy: directFull.oy,
           full: true,
           pixelFormat: "y8",
+          yOffset: directFull.yOffset,
+          yStride: directFull.yStride,
+          payloadBytes: directFull.payloadBytes,
           outputMap: directFull.outputMap,
           tracks: directFull.tracks,
           acquisitionMode
@@ -7257,14 +7577,14 @@ async function captureFrame(source) {
         "DIRECT RECOVERY Y8",
         trace,
         source.sequence
-      )) directFull.frame.close();
+      )) directFull.frame.close?.();
       if (trace) trace.stateAfter = gridLattice.state;
       activeBenchmarkFrame = void 0;
       return;
     }
     // A TrackProcessor source is never allowed to switch to the live <video>
     // canvas path. Drop this recovery attempt and use the next camera frame.
-    if (source.videoFrame && !source.image) {
+    if ((source.videoFrame || source.nativeY) && !source.image) {
       notePipelineEvent("direct-recovery-y8-unavailable");
       if (trace) {
         trace.decision = "direct recovery Y8 unavailable; frame dropped";
@@ -7373,7 +7693,7 @@ async function captureFrame(source) {
 // several jobs only duplicates frame mapping/binarization work. Spatial lanes
 // remain a Strict-mode diagnostic; the normal hot path parallelizes across
 // successive camera frames and lets each worker keep its own tracker warm.
-const laneCount = strictHotPathActive() && lockedLayout
+const laneCount = !source.nativeY && strictHotPathActive() && lockedLayout
   ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1
     ? Math.max(lockedLayout.cols, lockedLayout.rows)
     : Math.min(lockedLayout.cols, lockedLayout.rows))
@@ -7454,7 +7774,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         workerSlot
       );
       if (!accepted) {
-        direct?.frame.close();
+        direct?.frame.close?.();
         continue;
       }
       cropAttempts.set(id, group.regions.map((region) => ({ region, quad: region.quad })));
@@ -7498,7 +7818,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const healthyGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
       const freeWorkers = Math.max(0, pool.size - pool.busyCount);
       if (healthyGrid && freeWorkers === 0) {
-        const bufferedLatest = !strictHotPathActive() && queuePendingGridLane(0, source, {
+        const bufferedLatest = !source.nativeY && !strictHotPathActive() && queuePendingGridLane(0, source, {
           x, y, w, h,
           tracks: batchTracks,
           regions: batchRegions,
@@ -7528,7 +7848,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: sharedDirect.cropX, cropY: sharedDirect.cropY, w: sharedDirect.w, h: sharedDirect.h, ox: sharedDirect.ox, oy: sharedDirect.oy, full: false, tracks: sharedDirect.tracks, pixelFormat: sharedDirect.pixelFormat, outputMap: sharedDirect.outputMap, strictHotPath: strictHotPathActive() }
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: sharedDirect.cropX, cropY: sharedDirect.cropY, w: sharedDirect.w, h: sharedDirect.h, ox: sharedDirect.ox, oy: sharedDirect.oy, full: false, tracks: sharedDirect.tracks, pixelFormat: sharedDirect.pixelFormat, yOffset: sharedDirect.yOffset, yStride: sharedDirect.yStride, payloadBytes: sharedDirect.payloadBytes, outputMap: sharedDirect.outputMap, strictHotPath: strictHotPathActive() }
           : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictHotPath: strictHotPathActive() };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
@@ -7540,7 +7860,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
           source.sequence,
           batchRegions
         )) {
-          sharedDirect?.frame.close();
+          sharedDirect?.frame.close?.();
           cropAttempts.delete(id2);
           poolBusyTimes.push(now);
           if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) cancelScanCapture();
@@ -7629,7 +7949,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     const message = direct
-      ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: "y8", outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
+      ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: "y8", yOffset: direct.yOffset, yStride: direct.yStride, payloadBytes: direct.payloadBytes, outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
       : { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive() };
     const transfer = direct ? [direct.frame] : [img.data.buffer];
     if (!submitReceiverJob(
@@ -7648,6 +7968,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     }
     if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
     submitted = true;
+    if (source.nativeY) break;
   }
   if (!submitted && scheduledRegions.length > 0) {
     poolBusyTimes.push(now);
