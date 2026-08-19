@@ -12,6 +12,7 @@ on:
       - main.js
       - index.html
       - sw.js
+      - android/**
       - benchmark/offline-runner.mjs
       - benchmark/grid-lattice-regression.mjs
       - benchmark/run-agcap.mjs
@@ -21,6 +22,8 @@ on:
       - .github/receiver_candidate_message.txt
       - .github/receiver_cleanup_extra.py
       - .github/workflows/apply-v217-offline-benchmark.yml
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions: { contents: write }
@@ -32,7 +35,7 @@ concurrency:
 jobs:
   fast-regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -57,6 +60,25 @@ jobs:
             echo 'codec_changed=false' >> "$GITHUB_OUTPUT"
           fi
           git diff --check
+
+      - name: Assert cleanup ownership
+        if: steps.candidate.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          test -d codec/source
+          test -f codec/airgapper_codec.js
+          test -f codec/airgapper_codec.wasm
+          test -f codec/scalar/airgapper_codec.js
+          test -f codec/scalar/airgapper_codec.wasm
+          test ! -e vendor/decimen-codec
+          test ! -e vendor/decimen-codec-android
+          if find . -path ./.git -prune -o -iname '*decimen*' -print | grep -q .; then
+            find . -path ./.git -prune -o -iname '*decimen*' -print
+            exit 1
+          fi
+          if grep -RIni --exclude-dir=.git --exclude='*.wasm' --exclude='*.apk' 'decimen' .; then
+            exit 1
+          fi
 
       - name: Cache codec toolchain
         if: steps.candidate.outputs.codec_changed == 'true'
@@ -103,6 +125,12 @@ jobs:
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs 2>&1 | tee /tmp/receiver-regression.log
           node benchmark/corpus-suite.mjs 2>&1 | tee /tmp/hardware-corpus.log
 
+      - name: Build Android app
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -110,11 +138,12 @@ jobs:
           path: |
             benchmark/offline-summary.json
             benchmark/hardware-corpus-summary.json
+            android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Promote passing candidate
-        if: success() && steps.candidate.outputs.changed == 'true'
+        if: success() && github.event_name == 'push' && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
@@ -132,7 +161,7 @@ jobs:
           git push origin HEAD:master
 
       - name: Record normal regression
-        if: success() && steps.candidate.outputs.changed != 'true'
+        if: success() && github.event_name == 'push' && steps.candidate.outputs.changed != 'true'
         run: |
           set -euo pipefail
           git config user.name "AirGapper Agent"
@@ -147,7 +176,7 @@ jobs:
           fi
 
       - name: Record candidate rejection
-        if: failure() && steps.candidate.outputs.changed == 'true'
+        if: failure() && github.event_name == 'push' && steps.candidate.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git reset --hard HEAD
