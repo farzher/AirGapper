@@ -1940,6 +1940,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         int resultCount = 0;
         int outputUsed = 0;
         std::vector<uint8_t> completed(trackCount, 0);
+        // A CRC-valid current-frame Sparse result is authoritative evidence
+        // that a failed cached Stable-RS map should be replaced. Keep this
+        // batch-local request separate from the expensive-repair fence: a
+        // temporal/CPU fence must stop repair work, not prevent a successful
+        // fallback we already paid for from healing the cache for next frame.
+        std::vector<uint8_t> refreshTurboFromSparse(trackCount, 0);
         int repairTracksSpent = 0;
         constexpr int GUIDED_MAX_REPAIR_TRACKS_PER_BATCH = 2;
 
@@ -2147,6 +2153,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                         };
 
                         if (!levels.ok) {
+                            // Finder/threshold evidence cannot land the cached
+                            // map on this live QR. If Sparse succeeds later in
+                            // this same batch, capture its fresh distortion map.
+                            refreshTurboFromSparse[i] = 1;
                             success = retryLocalResidual();
                             if (success) {
                                 guidedNoteDenseStableRs(stableRsGate, stableModuleSize, true);
@@ -2237,6 +2247,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 }
             }
 
+            if (!success && stableEligible && stableRsAttempted)
+                refreshTurboFromSparse[i] = 1;
             metrics->fastDecodeMs += guidedNowMs() - turboStarted;
             const bool decoderAttempted = directAttempted || stableRsAttempted;
             if (success) {
@@ -2398,7 +2410,10 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             if (guidedSparseAllowed(track.id)) {
                 ++metrics->fastDecodeAttempts;
                 std::vector<PointF> sparseMap;
-                auto* mapOut = turboSeedEligible(track) ? &sparseMap : nullptr;
+                const bool refreshTurboMap = turboSeedEligible(track) ||
+                    (trackIndex >= 0 && trackIndex < int(refreshTurboFromSparse.size()) &&
+                     refreshTurboFromSparse[trackIndex]);
+                auto* mapOut = refreshTurboMap ? &sparseMap : nullptr;
                 GuidedSparseFastResult fast;
                 auto sparse = sampleGuidedSparse(*bits, track, finderSet, nullptr, mapOut, &fast);
 

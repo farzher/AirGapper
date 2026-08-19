@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.313";
+const RECEIVER_RUNTIME_BUILD = "v0.5.314";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -1226,6 +1226,11 @@ const TEMPORAL_BAND_AVOID_MS = 500;
 const TEMPORAL_MODEL_FRESH_MS = 900;
 const TEMPORAL_MODEL_RISK_THRESHOLD = 0.34;
 const TEMPORAL_MODEL_OVERLAY_THRESHOLD = 0.18;
+let temporalPredictionFrames = 0;
+let temporalPredictionRiskAttempts = 0;
+let temporalPredictionRiskMisses = 0;
+let temporalPredictionSafeAttempts = 0;
+let temporalPredictionSafeMisses = 0;
 const GUIDED_REPAIR_PRESSURE_LIMIT = 1;
 const temporalBandModel = {
   axis: "",
@@ -1442,6 +1447,50 @@ function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
   const radius = Math.max(0.6, model.width * 0.58 + 0.35);
   const modeled = model.confidence * Math.exp(-0.5 * (distance / radius) ** 2);
   return Math.max(risk, Math.min(1, modeled));
+}
+function temporalPredictionSnapshot(trackSlots, sourceSequence, now = receiverNow()) {
+  const model = predictedTemporalBand(sourceSequence, now);
+  if (!model || model.confidence < 0.08) return null;
+  const slots = [...new Set((trackSlots ?? []).map(Number).filter((slot) =>
+    Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT
+  ))];
+  if (!slots.length) return null;
+  return slots.map((slot) => [slot, temporalBandRiskForSlot(slot, sourceSequence, now)]);
+}
+function noteTemporalPredictionOutcome(prediction, outputSlots) {
+  if (!Array.isArray(prediction) || !prediction.length) return;
+  temporalPredictionFrames++;
+  for (const [slotRaw, riskRaw] of prediction) {
+    const slot = Number(slotRaw);
+    const risk = Math.max(0, Math.min(1, Number(riskRaw) || 0));
+    const missed = !outputSlots.has(slot);
+    if (risk >= TEMPORAL_MODEL_RISK_THRESHOLD) {
+      temporalPredictionRiskAttempts++;
+      temporalPredictionRiskMisses += Number(missed);
+    } else {
+      temporalPredictionSafeAttempts++;
+      temporalPredictionSafeMisses += Number(missed);
+    }
+  }
+}
+function resetTemporalPredictionValidation() {
+  temporalPredictionFrames = 0;
+  temporalPredictionRiskAttempts = 0;
+  temporalPredictionRiskMisses = 0;
+  temporalPredictionSafeAttempts = 0;
+  temporalPredictionSafeMisses = 0;
+}
+function temporalPredictionSummary() {
+  const riskAttempts = temporalPredictionRiskAttempts;
+  const safeAttempts = temporalPredictionSafeAttempts;
+  const misses = temporalPredictionRiskMisses + temporalPredictionSafeMisses;
+  if (!temporalPredictionFrames || !(riskAttempts + safeAttempts))
+    return "Temporal prediction waiting for a learned band";
+  const riskMiss = riskAttempts ? temporalPredictionRiskMisses / riskAttempts : 0;
+  const safeMiss = safeAttempts ? temporalPredictionSafeMisses / safeAttempts : 0;
+  const recall = misses ? temporalPredictionRiskMisses / misses : 0;
+  const coverage = riskAttempts / Math.max(1, riskAttempts + safeAttempts);
+  return `Temporal predicted-risk miss ${(riskMiss * 100).toFixed(0)}% (${temporalPredictionRiskMisses}/${riskAttempts}) · safe miss ${(safeMiss * 100).toFixed(1)}% (${temporalPredictionSafeMisses}/${safeAttempts}) · miss recall ${(recall * 100).toFixed(0)}% · risk coverage ${(coverage * 100).toFixed(0)}% · ${temporalPredictionFrames} frames`;
 }
 function countMaskBits(mask) {
   let value = mask >>> 0;
@@ -1666,7 +1715,13 @@ function estimatedAutoTrackBudget(candidates, now) {
   }
   if (now - autoTrackBudgetUpdatedAt >= TRACK_BUDGET_UPDATE_MS) {
     if (bestCount < autoTrackBudgetTarget) autoTrackBudgetTarget = Math.max(bestCount, autoTrackBudgetTarget - 4);
-    else if (bestCount > autoTrackBudgetTarget) autoTrackBudgetTarget = Math.min(bestCount, autoTrackBudgetTarget + 2);
+    else if (bestCount > autoTrackBudgetTarget) {
+      // If the measured optimum is the whole wall, recover quickly from a
+      // transient pressure cut. Partial optima still ramp cautiously so a
+      // noisy cost estimate cannot immediately flood the workers again.
+      const rise = bestCount === count ? 4 : 2;
+      autoTrackBudgetTarget = Math.min(bestCount, autoTrackBudgetTarget + rise);
+    }
     autoTrackBudgetUpdatedAt = now;
   }
   autoTrackBudgetTarget = Math.max(minimum, Math.min(count, autoTrackBudgetTarget));
@@ -2606,6 +2661,7 @@ function noteDecodeCompleted(id, completion) {
         .map((symbol) => Number(symbol.header?.slotIndex))
         .filter((slot) => Number.isFinite(slot) && submittedSlots.has(slot)));
       const slotResults = [...submittedSlots].map((slot) => [slot, outputSlots.has(slot) ? 1 : 0]);
+      noteTemporalPredictionOutcome(auditMode.temporalPrediction, outputSlots);
       const attributedOutputs = submittedSlots.size
         ? outputSlots.size
         : Math.min(Math.max(0, Number(auditMode.tracks) || 0), outputSymbols);
@@ -4963,6 +5019,7 @@ function renderFocusDiagnostics() {
       const band = predictedTemporalBand(Math.max(temporalBandLastSource, 0) + 1, perfNow);
       return band ? `Rolling  ${band.axis === "r" ? "row" : "col"} ${band.position.toFixed(2)}/${band.span} · width ${band.width.toFixed(2)} · velocity ${band.velocity >= 0 ? "+" : ""}${band.velocity.toFixed(2)} slots/frame · confidence ${(band.confidence * 100).toFixed(0)}%` : "Rolling  —";
     })(),
+    temporalPredictionSummary(),
     decoder ? `Framing  ${transportSourceBytes} source + ${transportMetadataBytes} metadata = ${transportFrameBytes} QR bytes · ${(transportMetadataBytes / Math.max(1, transportFrameBytes) * 100).toFixed(2)}% metadata` : "",
     `Focus    requested ${(_e = diagnostic.requestedMode) != null ? _e : "—"} · actual ${(_f = diagnostic.actualMode) != null ? _f : "—"} · distance ${(_g = diagnostic.actualDistance) != null ? _g : "—"}`,
     `AF       modes ${(diagnostic.hardwareFocusModes ?? []).join(",") || "—"} · POI ${diagnostic.poiSupported ? "yes" : "no"} · single-shot ${diagnostic.singleShotAfRejected ? "rejected" : diagnostic.seekingAfVerified ? "confirmed" : "unproven"} · ROI nudges ${diagnostic.continuousAfNudges}`,
@@ -5301,6 +5358,14 @@ function stopReceiver() {
   uniqueQrTimes.length = 0;
   duplicateQrTimes.length = 0;
   resetDuplicateAttribution();
+  resetTemporalBandModel();
+  temporalBandSkipThroughSource.fill(-1);
+  temporalBandDetections = 0;
+  temporalBandSkippedTracks = 0;
+  temporalBandLastKey = "";
+  temporalBandLastSource = -1;
+  temporalBandRepeat = 0;
+  resetTemporalPredictionValidation();
   repeatSkipTimes.length = 0;
   latestRepeatSignature = undefined;
   poolBusyTimes.length = 0;
@@ -6135,6 +6200,10 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       ? message.tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger)
       : []
   };
+  if (!auditMode.full && !auditMode.autoOpticsProbe && auditMode.trackSlots.length)
+    auditMode.temporalPrediction = temporalPredictionSnapshot(
+      auditMode.trackSlots, auditMode.sourceSequence, receiverNow()
+    );
   message.jobKind = kind;
   message.trackCount = auditMode.tracks;
   message.sourceSequence = sourceSequence;
@@ -9044,7 +9113,7 @@ Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.t
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
 Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
-Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
+Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · turbo cost ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedTurboAttempts)).toFixed(2)}ms/attempt · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
 Active  ${activeSummary}
