@@ -40,7 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.312";
+const RECEIVER_RUNTIME_BUILD = "v0.5.313";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -153,11 +153,17 @@ function selectedWorkerCount() {
   return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
 }
 const TRACKS_PER_FRAME_KEY = "airgapper:tracks-per-frame:v1";
+function tracksPerFrameMode() {
+  return decodeTracksPerFrame?.value || "auto";
+}
+function unlimitedTracksPerFrame() {
+  return tracksPerFrameMode() === "all";
+}
 function selectedTracksPerFrameLimit() {
-  const value = decodeTracksPerFrame?.value;
-  if (!value || value === "auto") return Infinity;
+  const value = tracksPerFrameMode();
+  if (value === "auto" || value === "all") return Infinity;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(1, Math.min(128, Math.trunc(parsed))) : Infinity;
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(SLOT_METRIC_COUNT, Math.trunc(parsed))) : Infinity;
 }
 if (decodeTracksPerFrame) {
   try {
@@ -1669,7 +1675,7 @@ function estimatedAutoTrackBudget(candidates, now) {
   return autoTrackBudgetTarget;
 }
 function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
-  if (candidates.length <= 1 || autoOpticsMeasurementSlots?.size || strictHotPathActive()) {
+  if (candidates.length <= 1 || autoOpticsMeasurementSlots?.size || strictHotPathActive() || unlimitedTracksPerFrame()) {
     lastTrackBudgetCandidates = candidates.length;
     lastTrackBudgetSelected = candidates.length;
     return candidates;
@@ -4914,14 +4920,16 @@ function renderFocusDiagnostics() {
     validTrackedQuad(region, receiverFrameWidth, receiverFrameHeight)
   );
   const decodableSlotCount = diagnosticCandidates.length;
-  const diagnosticAdaptiveWeak = adaptiveWeakSlotScheduling(diagnosticCandidates);
+  const diagnosticAdaptiveWeak = !unlimitedTracksPerFrame() && adaptiveWeakSlotScheduling(diagnosticCandidates);
   const adaptiveScheduledEquivalent = diagnosticCandidates.reduce((sum, region) =>
     sum + (diagnosticAdaptiveWeak ? 1 / adaptiveSlotProbeEvery(region) : 1), 0
   );
   const configuredTrackLimit = selectedTracksPerFrameLimit();
   const diagnosticTrackBudget = Math.min(
     diagnosticCandidates.length,
-    Number.isFinite(configuredTrackLimit) ? configuredTrackLimit : Math.max(1, lastTrackBudgetSelected || diagnosticCandidates.length)
+    unlimitedTracksPerFrame()
+      ? diagnosticCandidates.length
+      : Number.isFinite(configuredTrackLimit) ? configuredTrackLimit : Math.max(1, lastTrackBudgetSelected || diagnosticCandidates.length)
   );
   const scheduledSlotEquivalent = Math.min(adaptiveScheduledEquivalent, diagnosticTrackBudget);
   const qrOpportunityRate = sourceCaptureRate * scheduledSlotEquivalent;
@@ -4950,7 +4958,7 @@ function renderFocusDiagnostics() {
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · salvage ${lastGuidedRepairAllowed}/${lastGuidedRepairCandidates} · fences ${guidedRepairTemporalFences} seam/${guidedRepairPressureFences} CPU · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${unlimitedTracksPerFrame() ? `unlimited ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"}` : Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · salvage ${lastGuidedRepairAllowed}/${lastGuidedRepairCandidates} · fences ${guidedRepairTemporalFences} seam/${guidedRepairPressureFences} CPU · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     (() => {
       const band = predictedTemporalBand(Math.max(temporalBandLastSource, 0) + 1, perfNow);
       return band ? `Rolling  ${band.axis === "r" ? "row" : "col"} ${band.position.toFixed(2)}/${band.span} · width ${band.width.toFixed(2)} · velocity ${band.velocity >= 0 ? "+" : ""}${band.velocity.toFixed(2)} slots/frame · confidence ${(band.confidence * 100).toFixed(0)}%` : "Rolling  —";
@@ -7111,7 +7119,7 @@ async function captureFrame(source) {
   for (const region of regions) {
     if (region.gridSlot === void 0 && region.decoded && region.quad && !validTrackedQuad(region, vw, vh)) invalidateTrackedQuad(region);
   }
-  const allBatchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, 32);
+  const allBatchCandidates = (gridLattice.active ? visibleGridSlots.filter(isGridDecodeCandidate) : regions.filter((region) => region.observed && region.decoded)).filter((region) => region.quad && region.dim && validTrackedQuad(region, vw, vh)).slice(0, SLOT_METRIC_COUNT);
   const batchCandidates = autoOpticsMeasurementSlots?.size
     ? allBatchCandidates.filter((region) => autoOpticsMeasurementSlots.has(Number(region.gridSlot)))
     : allBatchCandidates;
@@ -7121,7 +7129,8 @@ async function captureFrame(source) {
   // motion wobble. That only lengthens Guided jobs and causes newer frames to be
   // replaced while workers chew on known failures. Auto Optics is the exception:
   // its frozen physical-slot cohort must be identical for every candidate.
-  const adaptiveWeakSlots = gridLattice.active && !autoOpticsMeasurementSlots?.size && adaptiveWeakSlotScheduling(batchCandidates);
+  const unlimitedTrackedScan = unlimitedTracksPerFrame();
+  const adaptiveWeakSlots = gridLattice.active && !unlimitedTrackedScan && !autoOpticsMeasurementSlots?.size && adaptiveWeakSlotScheduling(batchCandidates);
   let batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
@@ -7130,7 +7139,8 @@ async function captureFrame(source) {
   // With normal worker latency this often expires before scheduling and costs
   // nothing; on a fast worker it saves work while the stripe is still nearby.
   // The slot automatically re-enters on the next source frame after that.
-  batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence));
+  if (!unlimitedTrackedScan)
+    batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence));
 
   // Weak-slot throttling is good when a few QRs are genuinely poor, but it can
   // self-lock a partially stale wall: stale geometry misses, becomes weak, then
