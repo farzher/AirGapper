@@ -1,5 +1,7 @@
 #pragma once
 
+// Minimal compatibility surface for compiling the shared AirGapper codec
+// under the Android NDK. Browser builds still use Emscripten's real header.
 #include <chrono>
 
 #ifndef EMSCRIPTEN_KEEPALIVE
