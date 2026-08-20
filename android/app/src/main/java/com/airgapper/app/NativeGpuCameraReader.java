@@ -19,6 +19,8 @@ import java.nio.FloatBuffer;
 final class NativeGpuCameraReader implements AutoCloseable {
     interface Sink {
         boolean takeFrameCredit();
+        default boolean directFrame() { return false; }
+        default void onDirectFrame(ByteBuffer bytes, long timestampNs) {}
         void onFrame(byte[] bytes, long timestampNs);
         void onError(String message);
     }
@@ -223,8 +225,14 @@ final class NativeGpuCameraReader implements AutoCloseable {
             readback.clear();
             GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RED, GLES20.GL_UNSIGNED_BYTE, readback);
             readback.position(0);
-            readback.get(output, outputOffset, width * height);
-            sink.onFrame(output, timestampNs);
+            if (sink.directFrame()) {
+                // The v2 decoder consumes this reusable direct buffer before we
+                // return to the camera loop. No full-resolution Java/WebView copy.
+                sink.onDirectFrame(readback, timestampNs);
+            } else {
+                readback.get(output, outputOffset, width * height);
+                sink.onFrame(output, timestampNs);
+            }
         } catch (Exception error) {
             sink.onError(error.getMessage() == null ? error.toString() : error.getMessage());
         }

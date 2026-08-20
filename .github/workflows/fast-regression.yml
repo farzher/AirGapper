@@ -64,6 +64,13 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check JavaScript syntax
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < main.js
+          node --input-type=module --check < receive/main.js
+          node --input-type=module --check < shared/native-camera-v2.js
+
       - name: Run grid regression
         run: |
           node benchmark/grid-lattice-regression.mjs
@@ -85,6 +92,7 @@ jobs:
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
+        if: always()
         run: |
           set -euo pipefail
           cd android
