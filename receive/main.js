@@ -32,7 +32,6 @@ import {
 } from "./focus-controller.js";
 import { StaticQrOpticsAnalyzer } from "./qr-optics.js";
 import {
-  ACQUISITION_ESCALATE_MS,
   acquisitionRacePolicy,
   automaticOpticsHoldThreshold,
   legacyTemporalRiskWeight,
@@ -5314,7 +5313,7 @@ function renderFocusDiagnostics() {
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · temporal bands ${temporalBandDetections}/${temporalBandSkippedTracks} skips · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · slot self-heals ${geometrySlotCorrectionResets} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
-    `Acquire  ${gridLattice.active ? "done" : `${acquisitionAgeMs.toFixed(0)}ms race`} · robust hunts ${acquisitionHuntScans} · sighting retries ${acquisitionSightingScans} · finder hints ${acquisitionSightings}`,
+    `Acquire  ${gridLattice.active ? "done" : `${(acquisitionRaceStartedAt ? Math.max(0, perfNow - acquisitionRaceStartedAt) : 0).toFixed(0)}ms race`} · robust hunts ${acquisitionHuntScans} · sighting retries ${acquisitionSightingScans} · finder hints ${acquisitionSightings}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
