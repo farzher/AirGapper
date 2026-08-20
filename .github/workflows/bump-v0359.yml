@@ -6,6 +6,8 @@ on:
     paths:
       - .github/bump-v0359.py
       - .github/workflows/bump-v0359.yml
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
