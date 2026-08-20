@@ -54,29 +54,22 @@ jobs:
           text = path.read_text()
           start_marker = 'function nativeV2PreviewBounds(quad) {\\n'
           end_marker = 'async function startNativeReceiver(startAttempt, transportReady) {'
-          start = text.index(start_marker)
-          end = text.index(end_marker, start)
-          repaired = text[start:end].replace('\\n', '\n')
-          text = text[:start] + repaired + text[end:]
-          path.write_text(text)
-          PY
-
-          git fetch origin master --depth=1
-          git checkout origin/master -- .github/workflows/fast-regression.yml
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/fast-regression.yml')
-          text = path.read_text()
-          needle = "      - name: Run grid regression\n"
-          syntax = """      - name: Check JavaScript syntax\n        run: |\n          set -euo pipefail\n          node --input-type=module --check < main.js\n          node --input-type=module --check < receive/main.js\n          node --input-type=module --check < shared/native-camera-v2.js\n\n"""
-          if syntax not in text:
-              text = text.replace(needle, syntax + needle, 1)
-          path.write_text(text)
+          if start_marker not in text:
+              print('native-v2 receiver block already repaired')
+          else:
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              repaired = text[start:end].replace('\\n', '\n')
+              path.write_text(text[:start] + repaired + text[end:])
           PY
 
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add receive/main.js .github/workflows/fast-regression.yml
+          git add receive/main.js
+          if git diff --cached --quiet; then
+            echo "receiver is already repaired"
+            exit 0
+          fi
           git commit -m "fix Camera2 native receiver integration"
           git push origin HEAD:feature/apk-camera-v2
 
