@@ -1,7 +1,7 @@
 from pathlib import Path
 
 EXPECTED = {
-    "index.html": [("v0.5.358", "v0.5.359", 1)],
+    "index.html": [("v0.5.358", "v0.5.359", 2)],
     "main.js": [("v0.5.358", "v0.5.359", 1)],
     "receive/main.js": [("v0.5.358", "v0.5.359", 1)],
     "sw.js": [("airgapper-static-js-v358", "airgapper-static-js-v359", 1)],
