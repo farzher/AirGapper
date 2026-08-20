@@ -1,0 +1,41 @@
+name: apply browser optimization patch
+
+on:
+  push:
+    branches:
+      - opt/browser-acquisition-autooptics
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: opt/browser-acquisition-autooptics
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply browser acquisition and optics patch
+        run: python3 tools/apply-browser-opt-pass.py
+      - name: Validate policy and JavaScript syntax
+        run: |
+          node benchmark/browser-performance-policy-smoke.mjs
+          node --check receive/main.js
+          node --check receive/worker.js
+          node --check receive/performance-policy.js
+      - name: Commit product changes
+        run: |
+          if git diff --quiet; then
+            echo 'No product changes to commit'
+            exit 0
+          fi
+          git config user.name 'AirGapper Build'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add receive/main.js receive/worker.js receive/performance-policy.js benchmark/browser-performance-policy-smoke.mjs main.js send/main.js index.html sw.js android/app/build.gradle
+          git commit -m 'optimize browser acquisition and automatic optics'
+          git push origin HEAD:opt/browser-acquisition-autooptics
