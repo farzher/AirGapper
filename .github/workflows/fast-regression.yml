@@ -46,7 +46,7 @@ jobs:
           ref: ${{ github.event_name == 'push' && 'fix/native-v2-preview' || '' }}
 
       - name: Apply v0.5.359 source bump
-        if: ${{ github.event_name == 'push' && hashFiles('.github/bump-v0359.py') != '' }}
+        if: ${{ github.event_name == 'push' }}
         run: |
           set -euo pipefail
           if grep -q 'APP_BUILD = "v0.5.359"' main.js; then
