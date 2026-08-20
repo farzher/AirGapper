@@ -32,6 +32,13 @@ import {
 } from "./focus-controller.js";
 import { StaticQrOpticsAnalyzer } from "./qr-optics.js";
 import {
+  ACQUISITION_ESCALATE_MS,
+  acquisitionRacePolicy,
+  automaticOpticsHoldThreshold,
+  legacyTemporalRiskWeight,
+  temporalHardSkip
+} from "./performance-policy.js";
+import {
   copyTextOnAndroid,
   isAndroidApp,
   isLegacyAndroidApp,
@@ -49,7 +56,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.353";
+const RECEIVER_RUNTIME_BUILD = "v0.5.354";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -255,7 +262,7 @@ const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
-const AUTO_OPTICS_LOCK_SETTLE_MS = 1200;
+const AUTO_OPTICS_LOCK_SETTLE_MS = 700;
 const AUTO_OPTICS_RECENT_DECODE_MS = 900;
 const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
 const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
@@ -290,7 +297,7 @@ const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // One stable tracked QR is enough to compare exposure candidates. Requiring
 // multiple visible slots makes Auto Optics impossible on a true 1x1 sender.
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
-const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 1200;
+const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 850;
 const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
 const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v5";
 const AUTO_OPTICS_HISTORY_LIMIT = 32;
@@ -307,12 +314,13 @@ const AUTO_OPTICS_MEMORY_BOOT_MAX_MS = 650;
 const AUTO_OPTICS_COLLAPSE_YIELD = 0.12;
 const AUTO_OPTICS_COLLAPSE_RETRY_MS = 1500;
 const AUTO_OPTICS_HOLD_SAMPLE_MS = 700;
-const AUTO_OPTICS_HOLD_COLLAPSE_MS = 2500;
+const AUTO_OPTICS_HOLD_COLLAPSE_MS = 1400;
 const AUTO_OPTICS_HOLD_MIN_ATTEMPTS = 40;
+const AUTO_OPTICS_LOST_RECALIBRATE_MS = 1200;
 // Once a startup winner is found, never poke the camera periodically. Hold it
 // until live per-QR yield falls far enough below that measured winner to prove
 // the scene/optics changed, then recalibrate from neutral hardware AE.
-const AUTO_OPTICS_HOLD_DEGRADE_RATIO = 0.45;
+const AUTO_OPTICS_HOLD_DEGRADE_RATIO = 0.70;
 const AUTO_OPTICS_BASELINE_SAMPLE_MS = 320;
 const AUTO_OPTICS_CANDIDATE_SAMPLE_MS = 280;
 const AUTO_OPTICS_HEALTHY_HOLD_YIELD = 0.82;
@@ -1346,7 +1354,7 @@ let temporalBandSkippedTracks = 0;
 let temporalBandLastKey = "";
 let temporalBandLastSource = -1;
 let temporalBandRepeat = 0;
-const TEMPORAL_BAND_AVOID_MS = 500;
+const TEMPORAL_BAND_AVOID_MS = 140;
 const TEMPORAL_MODEL_FRESH_MS = 900;
 const TEMPORAL_MODEL_RISK_THRESHOLD = 0.34;
 const TEMPORAL_MODEL_OVERLAY_THRESHOLD = 0.18;
@@ -1583,16 +1591,20 @@ function predictedTemporalBand(sourceSequence, now = receiverNow()) {
 function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
   const index = Number(slot);
   if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return 0;
-  let risk = temporalBandAvoidUntil[index] > now ? 0.98 : 0;
+  const legacyRisk = temporalBandAvoidUntil[index] > now ? 0.98 : 0;
   const model = predictedTemporalBand(sourceSequence, now);
   const layout = lastGridSnapshot?.layout;
-  if (!model || !layout || model.confidence < 0.08) return risk;
+  if (!model || !layout || model.confidence < 0.08) return legacyRisk;
   const coordinate = model.axis === "c" ? index % layout.cols : Math.floor(index / layout.cols);
   let distance = Math.abs(coordinate - model.position);
   if (model.span > 1) distance = Math.min(distance, model.span - distance);
   const radius = Math.max(0.6, model.width * 0.58 + 0.35);
   const modeled = model.confidence * Math.exp(-0.5 * (distance / radius) ** 2);
-  return Math.max(risk, Math.min(1, modeled));
+  // A confident moving seam supersedes the old per-slot timer. As soon as the
+  // predicted band moves away, that QR re-enters instead of remaining poisoned
+  // for half a second by a historical miss.
+  const fallback = legacyRisk * legacyTemporalRiskWeight(model.confidence);
+  return Math.max(fallback, Math.min(1, modeled));
 }
 function temporalPredictionSnapshot(trackSlots, sourceSequence, now = receiverNow()) {
   const model = predictedTemporalBand(sourceSequence, now);
@@ -1788,12 +1800,21 @@ function temporalBandMissSlots(auditMode, completion) {
   notePipelineEvent("temporal-band", misses.length);
   return transientBand ? new Set(misses) : new Set();
 }
-function shouldScheduleTemporalBandSlot(region, sourceSequence) {
+function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNow()) {
   const slot = Number(region.gridSlot);
   const sequence = Number(sourceSequence);
   if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !Number.isFinite(sequence)) return true;
-  if (sequence > temporalBandSkipThroughSource[slot]) return true;
+  const explicitSkip = sequence <= temporalBandSkipThroughSource[slot];
+  const model = predictedTemporalBand(sequence, now);
+  const risk = temporalBandRiskForSlot(slot, sequence, now);
+  if (!temporalHardSkip({
+    explicitSkip,
+    risk,
+    confidence: model?.confidence ?? 0,
+    measurement: Boolean(autoOpticsMeasurementSlots?.size)
+  })) return true;
   temporalBandSkippedTracks++;
+  trackBudgetTemporalAvoided++;
   return false;
 }
 function recentTrackPressure(now) {
@@ -2977,6 +2998,12 @@ function noteDecodeCompleted(id, completion) {
   }
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
+  if (fullJob?.acquisition && completion.symbolCount === 0 && completion.sightings?.length) {
+    const sightedAt = receiverNow();
+    for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, sightedAt, false);
+    acquisitionSightings += Math.min(3, completion.sightings.length);
+    notePipelineEvent("acquisition-finder-sighting", completion.sightings.length);
+  }
   // A recovery finder pass can fail payload/RS decode while still locating
   // several QR bodies accurately. Once a wall has been proven, use that
   // coherent positional evidence to recenter the stored lattice instead of
@@ -3145,11 +3172,14 @@ function noteDecodeCompleted(id, completion) {
 const REGION_TTL_MS = 5e3;
 const SIGHTING_REGION_TTL_MS = 3e3;
 const ACQUISITION_SCAN_MS = 20;
-// The first acquisition frame is global. After that, prefer the much cheaper
-// overlapping seed windows; with one-QR lock there is no reason to repeatedly
-// scan the whole dense wall while waiting for cross-axis confirmation.
-const ACQUISITION_FULL_EVERY = 4;
-const ACQUISITION_DEEP_EVERY = 13;
+// Before the first valid QR, latency matters more than CPU efficiency. Run a
+// complementary race: dense full-frame + cheap tiles immediately, then add one
+// error-aware robust finder after a short zero-QR stall. Finder-only sightings
+// become next-frame targeted retries instead of being discarded.
+let acquisitionRaceStartedAt = 0;
+let acquisitionHuntScans = 0;
+let acquisitionSightingScans = 0;
+let acquisitionSightings = 0;
 const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
 // therefore cannot consume CPU in the healthy LOCKED throughput path.
@@ -4671,9 +4701,26 @@ function maintainAutomaticQrOptics(now) {
 
   if (autoOpticsRuntimeState === "manual") {
     const poseUsable = gridLattice.locked && autoOpticsPoseUsable(autoOpticsPoseSnapshot());
+    const decodeSilenceMs = lastStreamDecodeAt ? Math.max(0, now - lastStreamDecodeAt) : Infinity;
+    const temporal = predictedTemporalBand(latestSourceFrameSequence + 1, now);
+    const temporalCoverage = temporal?.span ? temporal.width / temporal.span : 0;
+    // A narrow rolling-shutter seam is normal and is now filtered before QR CPU.
+    // Only a band covering much of the wall is allowed to invalidate an optics
+    // measurement; otherwise a permanent small seam would freeze learning forever.
+    const temporalDominant = Boolean(temporal && temporal.confidence >= 0.72 && temporalCoverage >= 0.42);
     if (!poseUsable) {
       autoOpticsHoldSample = void 0;
-      autoOpticsHoldCollapseSince = 0;
+      if (decoderFreshnessHoldActive || temporalDominant || decodeSilenceMs < AUTO_OPTICS_LOST_RECALIBRATE_MS) {
+        autoOpticsHoldCollapseSince = 0;
+        return;
+      }
+      if (!autoOpticsHoldCollapseSince) {
+        autoOpticsHoldCollapseSince = now;
+        autoOpticsTuneSummary = `held winner lost QR · proving scene change`;
+        return;
+      }
+      if (now - autoOpticsHoldCollapseSince >= 450)
+        void recoverCollapsedAutomaticOptics(track, 0, "held optics lost QR lock");
       return;
     }
     if (!autoOpticsHoldSample || now - autoOpticsHoldSample.at < AUTO_OPTICS_HOLD_SAMPLE_MS) return;
@@ -4684,27 +4731,27 @@ function maintainAutomaticQrOptics(now) {
     if (attempts < AUTO_OPTICS_HOLD_MIN_ATTEMPTS) return;
 
     const yieldRate = outputs / attempts;
-    const degradationThreshold = Math.max(AUTO_OPTICS_COLLAPSE_YIELD, autoOpticsHeldYield * AUTO_OPTICS_HOLD_DEGRADE_RATIO);
-    const temporal = predictedTemporalBand(latestSourceFrameSequence + 1, now);
-    const temporalBusy = Boolean(temporal && temporal.confidence >= 0.45);
-    // Rolling-shutter bands and camera motion are not brightness evidence. Do not
-    // let them destabilize the sensor controller.
-    if (temporalBusy || decoderFreshnessHoldActive) {
+    const degradationThreshold = automaticOpticsHoldThreshold(autoOpticsHeldYield, AUTO_OPTICS_COLLAPSE_YIELD);
+    // Good locked scan: learn the observed ceiling but DO NOT touch the camera.
+    if (yieldRate >= degradationThreshold) {
+      autoOpticsHeldYield = Math.max(autoOpticsHeldYield, Math.min(1, yieldRate));
       autoOpticsHoldCollapseSince = 0;
       return;
     }
-    if (yieldRate >= degradationThreshold) {
+    // Camera motion and a wall-wide temporal failure are not exposure evidence.
+    if (temporalDominant || decoderFreshnessHoldActive) {
       autoOpticsHoldCollapseSince = 0;
       return;
     }
     if (!autoOpticsHoldCollapseSince) {
       autoOpticsHoldCollapseSince = now;
+      autoOpticsTuneSummary = `held ${(autoOpticsHeldYield * 100).toFixed(0)}% · live ${(yieldRate * 100).toFixed(0)}% · verifying degradation`;
       return;
     }
     if (now - autoOpticsHoldCollapseSince >= AUTO_OPTICS_HOLD_COLLAPSE_MS) {
       const reason = yieldRate < AUTO_OPTICS_COLLAPSE_YIELD
         ? "held optics nearly blind"
-        : `held optics persistently degraded from ${(autoOpticsHeldYield * 100).toFixed(0)}%`;
+        : `held optics degraded ${(autoOpticsHeldYield * 100).toFixed(0)}→${(yieldRate * 100).toFixed(0)}%`;
       void recoverCollapsedAutomaticOptics(track, yieldRate, reason);
     }
     return;
@@ -5267,6 +5314,7 @@ function renderFocusDiagnostics() {
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · temporal bands ${temporalBandDetections}/${temporalBandSkippedTracks} skips · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · slot self-heals ${geometrySlotCorrectionResets} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
+    `Acquire  ${gridLattice.active ? "done" : `${acquisitionAgeMs.toFixed(0)}ms race`} · robust hunts ${acquisitionHuntScans} · sighting retries ${acquisitionSightingScans} · finder hints ${acquisitionSightings}`,
     `Useful   ${diagnostic.lastUsefulDecodeAt === void 0 ? "none" : `${((performance.now() - diagnostic.lastUsefulDecodeAt) / 1e3).toFixed(1)}s ago`}`,
     `Counts   full AF+AE ${diagnostic.fullResetCount} · focus-only ${diagnostic.focusRefinementCount} · AF pulses ${diagnostic.seekingAfRetries} (${diagnostic.seekingAfVerified} single-shot · ${diagnostic.seekingAfUnconfirmed} rejected/unconfirmed · ${diagnostic.continuousAfNudges} ROI) · exposure-only ${diagnostic.exposureRefinementCount}`,
     `Optimizer ${diagnostic.optimizeState}${diagnostic.optimizeRound ? ` · round ${diagnostic.optimizeRound}` : ""}${diagnostic.optimizeVisit ? ` · visit ${diagnostic.optimizeVisit}` : ""}`,
@@ -5659,6 +5707,10 @@ async function startNativeReceiver(startAttempt, transportReady) {
   preview.classList.remove("camera-loading");
   setStatus("");
   cameraStartedTs = receiverNow();
+  acquisitionRaceStartedAt = 0;
+  acquisitionHuntScans = 0;
+  acquisitionSightingScans = 0;
+  acquisitionSightings = 0;
   resetLivePipeline(cameraStartedTs);
   captureGen = futureGen;
   framePumpMode = started.pipeline === "gpu" ? "Camera2 GPU Y8" : "Camera2 Y8";
@@ -6052,6 +6104,10 @@ async function start() {
   syncPreviewAspect();
   setStatus("");
   cameraStartedTs = receiverNow();
+  acquisitionRaceStartedAt = 0;
+  acquisitionHuntScans = 0;
+  acquisitionSightingScans = 0;
+  acquisitionSightings = 0;
   resetLivePipeline(cameraStartedTs);
   captureGen++;
   startFramePump(captureGen, activeTrack);
@@ -6746,7 +6802,8 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
         thorough: Boolean(message.thorough),
         native: true,
         reacquire: gridLattice.locked,
-        acquisition: !gridLattice.locked
+        acquisition: !gridLattice.locked,
+        acquisitionMode: message.acquisitionMode
       });
     }
   }
@@ -7362,6 +7419,17 @@ async function captureFrame(source) {
   // over to tracked QR work.
   const preLatticeDiscovery = !gridLattice.active;
   const acquisitionDiscovery = preLatticeDiscovery;
+  if (preLatticeDiscovery) {
+    if (!acquisitionRaceStartedAt) acquisitionRaceStartedAt = now;
+  } else {
+    acquisitionRaceStartedAt = 0;
+  }
+  const acquisitionAgeMs = acquisitionRaceStartedAt ? Math.max(0, now - acquisitionRaceStartedAt) : 0;
+  const acquisitionSighting = acquisitionDiscovery && !lastGridSnapshot
+    ? regions.filter((region) => !region.decoded && region.gridSlot === void 0 &&
+        now - (region.sightedSeen ?? region.seen) < SIGHTING_REGION_TTL_MS)
+      .sort((a, b) => (b.sightedSeen ?? b.seen) - (a.sightedSeen ?? a.seen))[0]
+    : void 0;
   const gridNeedsDiscovery = preLatticeDiscovery || (lockedGeometryTrusted
     ? allLockedCandidatesCold
     : visibleGridSlots.some((region) => !region.decoded || region.slotState === "LOST"));
@@ -7470,13 +7538,29 @@ async function captureFrame(source) {
     // senders), but rotate the intervening attempts through overlapping 3x3
     // seed windows. Any verified packet declares layout + slot and immediately
     // gives the lattice useful provisional geometry.
-    const fullFrameSeed = captureNextScan || (fullScans - 1) % ACQUISITION_FULL_EVERY === 0;
-    let acquisitionMode = captureNextScan ? "thorough" : fullFrameSeed
-      ? fullScans % ACQUISITION_DEEP_EVERY === 0 ? "deep" : "fast"
-      : "seed";
-    if (localRecoverySeedScan) acquisitionMode = "recovery";
+    const acquisitionPolicy = acquisitionRacePolicy({
+      scanIndex: fullScans,
+      ageMs: acquisitionAgeMs,
+      captureNextScan: Boolean(captureNextScan),
+      localRecovery: Boolean(localRecoverySeedScan),
+      hasSighting: Boolean(acquisitionSighting)
+    });
+    const fullFrameSeed = acquisitionPolicy.fullFrame;
+    let acquisitionMode = acquisitionPolicy.mode;
+    if (acquisitionMode === "hunt") acquisitionHuntScans++;
+    if (acquisitionMode === "sighting") acquisitionSightingScans++;
     let scanX = 0, scanY = 0, scanW = vw, scanH = vh;
-    if (!captureNextScan && acquisitionDiscovery && !lastGridSnapshot && !fullFrameSeed) {
+    if (acquisitionPolicy.targetSighting && acquisitionSighting) {
+      const edge = Math.max(acquisitionSighting.w, acquisitionSighting.h);
+      const pad = Math.max(24, edge * 0.65);
+      const quantum = 16;
+      scanX = Math.max(0, Math.floor((acquisitionSighting.x - pad) / quantum) * quantum);
+      scanY = Math.max(0, Math.floor((acquisitionSighting.y - pad) / quantum) * quantum);
+      const right = Math.min(vw, Math.ceil((acquisitionSighting.x + acquisitionSighting.w + pad) / quantum) * quantum);
+      const bottom = Math.min(vh, Math.ceil((acquisitionSighting.y + acquisitionSighting.h + pad) / quantum) * quantum);
+      scanW = Math.max(32, right - scanX);
+      scanH = Math.max(32, bottom - scanY);
+    } else if (!captureNextScan && acquisitionDiscovery && !lastGridSnapshot && !fullFrameSeed) {
       const seed = acquisitionSeedWindow(acquisitionTileCursor++, vw, vh);
       scanX = seed.x;
       scanY = seed.y;
@@ -7694,8 +7778,8 @@ async function captureFrame(source) {
   // With normal worker latency this often expires before scheduling and costs
   // nothing; on a fast worker it saves work while the stripe is still nearby.
   // The slot automatically re-enters on the next source frame after that.
-  if (!unlimitedTrackedScan)
-    batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence));
+  if (!unlimitedTrackedScan && !autoOpticsMeasurementSlots?.size)
+    batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence, now));
 
   // Weak-slot throttling is good when a few QRs are genuinely poor, but it can
   // self-lock a partially stale wall: stale geometry misses, becomes weak, then
