@@ -89,6 +89,7 @@ jobs:
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-y8-worker-smoke.mjs
           node benchmark/native-camera-bridge-smoke.mjs
+          node benchmark/native-camera-v2-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
