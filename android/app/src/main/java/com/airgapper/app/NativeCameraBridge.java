@@ -14,6 +14,8 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -23,6 +25,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Range;
+import android.util.Rational;
 import android.util.Size;
 import android.view.Surface;
 import android.webkit.WebView;
@@ -86,6 +89,17 @@ final class NativeCameraBridge {
     private int activeSensorOrientation;
     private String activeFacing = "unknown";
     private String activePipeline = "yuv";
+    private String activeFpsControl = "ae";
+    private CameraCharacteristics activeCharacteristics;
+    private CaptureRequest.Builder activeBuilder;
+    private long activeFrameDurationNs;
+    private String currentFocusMode = "continuous";
+    private String currentExposureMode = "continuous";
+    private Float currentFocusDistance;
+    private Long currentExposureTimeNs;
+    private Integer currentIso;
+    private double currentExposureCompensationEv;
+    private long lastSettingsEventNs;
 
     NativeCameraBridge(Activity activity, WebView webView) {
         this.activity = activity;
@@ -129,6 +143,9 @@ final class NativeCameraBridge {
                     break;
                 case "ack":
                     frameCredit = true;
+                    break;
+                case "apply":
+                    applyRequested(command);
                     break;
                 default:
                     replyError(command.optInt("requestId"), "Unknown native camera command: " + op);
@@ -183,6 +200,8 @@ final class NativeCameraBridge {
             camera.put("label", "Camera " + cameraId + " · " + facingName(facing));
             Integer orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             camera.put("sensorOrientation", orientation == null ? 0 : orientation);
+            camera.put("capabilities", cameraCapabilities(chars));
+            boolean manualSensor = hasCapability(chars, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
             JSONArray aeRanges = new JSONArray();
             for (Range<Integer> range : ranges) aeRanges.put(range.getLower() + "-" + range.getUpper());
             camera.put("aeRanges", aeRanges);
@@ -205,7 +224,6 @@ final class NativeCameraBridge {
                     // 60 fps mode merely because it is not in our old browser-size list.
                     if (fps != 60 && !STANDARD_SIZES.contains(sizeKey)) continue;
                     Range<Integer> range = chooseFpsRange(ranges, fps);
-                    if (range == null) continue;
                     String pipeline = null;
                     long minDuration = Long.MAX_VALUE;
                     if (yuvSize != null && durationAllows(yuvDuration, fps)) {
@@ -216,16 +234,19 @@ final class NativeCameraBridge {
                         minDuration = gpuDuration;
                     }
                     if (pipeline == null) continue;
+                    String fpsControl = range != null ? "ae" : manualSensor && fps == 60 ? "manual" : "";
+                    if (fpsControl.isEmpty()) continue;
                     Size size = pipeline.equals("yuv") ? yuvSize : gpuSize;
                     JSONObject mode = new JSONObject();
-                    mode.put("key", sizeKey + "@" + fps + ":" + pipeline);
+                    mode.put("key", sizeKey + "@" + fps + ":" + pipeline + ":" + fpsControl);
                     mode.put("width", size.getWidth());
                     mode.put("height", size.getHeight());
                     mode.put("fps", fps);
                     mode.put("pipeline", pipeline);
-                    mode.put("fixedFps", range.getLower() == fps && range.getUpper() == fps);
-                    mode.put("fpsMin", range.getLower());
-                    mode.put("fpsMax", range.getUpper());
+                    mode.put("fpsControl", fpsControl);
+                    mode.put("fixedFps", range == null || range.getLower() == fps && range.getUpper() == fps);
+                    mode.put("fpsMin", range == null ? fps : range.getLower());
+                    mode.put("fpsMax", range == null ? fps : range.getUpper());
                     mode.put("minFrameDurationNs", minDuration);
                     mode.put("yuvMinFrameDurationNs", yuvSize == null ? 0 : yuvDuration);
                     mode.put("gpuMinFrameDurationNs", gpuSize == null ? 0 : gpuDuration);
@@ -300,11 +321,12 @@ final class NativeCameraBridge {
         final int height = command.optInt("height");
         final int fps = command.optInt("fps");
         final String pipeline = command.optString("pipeline", "yuv");
-        cameraHandler.post(() -> startCamera(requestId, cameraId, width, height, fps, pipeline));
+        final String fpsControl = command.optString("fpsControl", "ae");
+        cameraHandler.post(() -> startCamera(requestId, cameraId, width, height, fps, pipeline, fpsControl));
     }
 
     @SuppressLint("MissingPermission")
-    private void startCamera(int requestId, String cameraId, int width, int height, int fps, String pipeline) {
+    private void startCamera(int requestId, String cameraId, int width, int height, int fps, String pipeline, String fpsControl) {
         stopCameraInternal();
         final long generation = cameraGeneration;
         try {
@@ -319,20 +341,27 @@ final class NativeCameraBridge {
             Size requestedSize = findSize(sizes, width + "x" + height);
             if (requestedSize == null) throw new IllegalArgumentException(width + "x" + height + " " + (gpu ? "PRIVATE/GPU" : "YUV") + " unavailable on camera " + cameraId);
             Range<Integer> range = chooseFpsRange(ranges, fps);
+            boolean manualFps = "manual".equals(fpsControl);
             long minDuration = gpu
                     ? map.getOutputMinFrameDuration(SurfaceTexture.class, requestedSize)
                     : map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, requestedSize);
-            if (range == null || !durationAllows(minDuration, fps)) {
+            if (!durationAllows(minDuration, fps) || !manualFps && range == null) {
                 throw new IllegalArgumentException(width + "x" + height + " @ " + fps + " fps unavailable on camera " + cameraId + " via " + pipeline);
+            }
+            if (manualFps && !hasCapability(chars, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)) {
+                throw new IllegalArgumentException("Manual sensor FPS control unavailable on camera " + cameraId);
             }
 
             activeCameraId = cameraId;
             activeWidth = width;
             activeHeight = height;
             activeRequestedFps = fps;
-            activeFpsRange = range;
+            activeFpsRange = range != null ? range : new Range<>(fps, fps);
             activeMinFrameDurationNs = minDuration;
             activePipeline = gpu ? "gpu" : "yuv";
+            activeFpsControl = manualFps ? "manual" : "ae";
+            activeFrameDurationNs = Math.max(minDuration, Math.round(1_000_000_000.0 / fps));
+            activeCharacteristics = chars;
             Integer sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             activeSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
             activeFacing = facingName(chars.get(CameraCharacteristics.LENS_FACING));
@@ -404,17 +433,39 @@ final class NativeCameraBridge {
         if (camera == null || target == null || generation != cameraGeneration) return;
         try {
             CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            activeBuilder = builder;
             builder.addTarget(target);
             builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
+            if ("manual".equals(activeFpsControl)) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                Range<Long> exposureRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+                Range<Integer> isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+                long seedExposure = clampLong(3_500_000L, exposureRange);
+                int seedIso = clampInt(200, isoRange);
+                builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, Math.min(seedExposure, Math.max(1, activeFrameDurationNs - 100_000L)));
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, seedIso);
+                currentExposureMode = "manual";
+                currentExposureTimeNs = seedExposure;
+                currentIso = seedIso;
+            } else {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
+                currentExposureMode = "continuous";
+            }
             int[] afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
             if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)) {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+                currentFocusMode = "continuous";
             } else if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                currentFocusMode = "continuous";
             } else if (contains(afModes, CaptureRequest.CONTROL_AF_MODE_AUTO)) {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                currentFocusMode = "single-shot";
+            } else {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                currentFocusMode = "manual";
             }
             CaptureRequest request = builder.build();
 
@@ -427,7 +478,7 @@ final class NativeCameraBridge {
                     }
                     captureSession = session;
                     try {
-                        session.setRepeatingRequest(request, null, cameraHandler);
+                        session.setRepeatingRequest(request, captureCallback, cameraHandler);
                         running = true;
                         frameCredit = false;
                         JSONObject started = new JSONObject();
@@ -442,6 +493,9 @@ final class NativeCameraBridge {
                         started.put("sensorOrientation", activeSensorOrientation);
                         started.put("facing", activeFacing);
                         started.put("pipeline", activePipeline);
+                        started.put("fpsControl", activeFpsControl);
+                        started.put("capabilities", cameraCapabilities(chars));
+                        started.put("settings", currentSettingsJson());
                         started.put("sessionParameters", Build.VERSION.SDK_INT >= Build.VERSION_CODES.P);
                         reply(requestId, started);
                     } catch (Exception error) {
@@ -483,6 +537,226 @@ final class NativeCameraBridge {
                 callback);
         session.setSessionParameters(request);
         camera.createCaptureSession(session);
+    }
+
+    private final CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+            Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+            Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+            Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
+            Integer af = result.get(CaptureResult.CONTROL_AF_MODE);
+            Integer ae = result.get(CaptureResult.CONTROL_AE_MODE);
+            Integer comp = result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION);
+            if (exposure != null) currentExposureTimeNs = exposure;
+            if (iso != null) currentIso = iso;
+            if (focus != null) currentFocusDistance = focus;
+            if (af != null) currentFocusMode = focusModeName(af);
+            if (ae != null) currentExposureMode = ae == CaptureRequest.CONTROL_AE_MODE_OFF ? "manual" : "continuous";
+            if (comp != null && activeCharacteristics != null) {
+                Rational step = activeCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+                currentExposureCompensationEv = comp * (step == null ? 1.0 : step.doubleValue());
+            }
+            long now = System.nanoTime();
+            if (now - lastSettingsEventNs >= 200_000_000L) {
+                lastSettingsEventNs = now;
+                try {
+                    JSONObject event = new JSONObject();
+                    event.put("event", "settings");
+                    event.put("settings", currentSettingsJson());
+                    postString(event.toString());
+                } catch (Exception ignored) {}
+            }
+        }
+    };
+
+    private static boolean hasCapability(CameraCharacteristics chars, int wanted) {
+        int[] values = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        return contains(values, wanted);
+    }
+
+    private static long clampLong(long value, Range<Long> range) {
+        if (range == null) return value;
+        return Math.max(range.getLower(), Math.min(range.getUpper(), value));
+    }
+
+    private static int clampInt(int value, Range<Integer> range) {
+        if (range == null) return value;
+        return Math.max(range.getLower(), Math.min(range.getUpper(), value));
+    }
+
+    private static String focusModeName(int mode) {
+        if (mode == CaptureRequest.CONTROL_AF_MODE_OFF) return "manual";
+        if (mode == CaptureRequest.CONTROL_AF_MODE_AUTO || mode == CaptureRequest.CONTROL_AF_MODE_MACRO) return "single-shot";
+        return "continuous";
+    }
+
+    private JSONObject cameraCapabilities(CameraCharacteristics chars) throws Exception {
+        JSONObject caps = new JSONObject();
+        JSONArray focusModes = new JSONArray();
+        int[] af = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+        if (contains(af, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO) || contains(af, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) focusModes.put("continuous");
+        if (contains(af, CaptureRequest.CONTROL_AF_MODE_AUTO) || contains(af, CaptureRequest.CONTROL_AF_MODE_MACRO)) focusModes.put("single-shot");
+        Float minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        if (minFocus != null && minFocus > 0 && contains(af, CaptureRequest.CONTROL_AF_MODE_OFF)) {
+            focusModes.put("manual");
+            caps.put("focusDistance", new JSONObject().put("min", 0).put("max", minFocus).put("step", Math.max(0.001, minFocus / 200.0)));
+        }
+        caps.put("focusMode", focusModes);
+        caps.put("pointsOfInterest", false);
+
+        JSONArray exposureModes = new JSONArray();
+        exposureModes.put("continuous");
+        Range<Long> exposure = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        Range<Integer> iso = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        if (hasCapability(chars, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) && exposure != null && iso != null) {
+            exposureModes.put("manual");
+            caps.put("exposureTime", new JSONObject()
+                    .put("min", exposure.getLower() / 100_000.0)
+                    .put("max", exposure.getUpper() / 100_000.0)
+                    .put("step", 0.1));
+            caps.put("iso", new JSONObject().put("min", iso.getLower()).put("max", iso.getUpper()).put("step", 1));
+        }
+        caps.put("exposureMode", exposureModes);
+        Range<Integer> compensation = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+        Rational compensationStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+        if (compensation != null && compensationStep != null && compensationStep.doubleValue() > 0) {
+            double step = compensationStep.doubleValue();
+            caps.put("exposureCompensation", new JSONObject()
+                    .put("min", compensation.getLower() * step)
+                    .put("max", compensation.getUpper() * step)
+                    .put("step", step));
+        }
+        return caps;
+    }
+
+    private JSONObject currentSettingsJson() throws Exception {
+        JSONObject settings = new JSONObject();
+        settings.put("deviceId", activeCameraId);
+        settings.put("width", activeWidth);
+        settings.put("height", activeHeight);
+        settings.put("frameRate", activeRequestedFps);
+        settings.put("focusMode", currentFocusMode);
+        if (currentFocusDistance != null) settings.put("focusDistance", currentFocusDistance);
+        settings.put("exposureMode", currentExposureMode);
+        if (currentExposureTimeNs != null) settings.put("exposureTime", currentExposureTimeNs / 100_000.0);
+        if (currentIso != null) settings.put("iso", currentIso);
+        settings.put("exposureCompensation", currentExposureCompensationEv);
+        return settings;
+    }
+
+    private void applyRequested(JSONObject command) {
+        final int requestId = command.optInt("requestId");
+        final JSONObject patch = command.optJSONObject("patch");
+        cameraHandler.post(() -> {
+            try {
+                if (!running || captureSession == null || activeBuilder == null || activeCharacteristics == null)
+                    throw new IllegalStateException("Native Camera2 is not running");
+                if (patch == null) throw new IllegalArgumentException("Missing native optics patch");
+                CaptureRequest.Builder builder = activeBuilder;
+
+                boolean triggerSingleAf = false;
+                if (patch.has("focusMode")) {
+                    String mode = patch.optString("focusMode", "continuous");
+                    int[] af = activeCharacteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+                    if ("manual".equals(mode)) {
+                        if (!contains(af, CaptureRequest.CONTROL_AF_MODE_OFF)) throw new IllegalArgumentException("Manual focus unavailable");
+                        builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                        builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+                        currentFocusMode = "manual";
+                    } else if ("single-shot".equals(mode)) {
+                        if (!contains(af, CaptureRequest.CONTROL_AF_MODE_AUTO)) throw new IllegalArgumentException("Single-shot AF unavailable");
+                        builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                        builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+                        currentFocusMode = "single-shot";
+                        triggerSingleAf = true;
+                    } else {
+                        int selected = contains(af, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                                ? CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                                : CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+                        if (!contains(af, selected)) throw new IllegalArgumentException("Continuous AF unavailable");
+                        builder.set(CaptureRequest.CONTROL_AF_MODE, selected);
+                        builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL);
+                        currentFocusMode = "continuous";
+                    }
+                }
+                if (patch.has("focusDistance")) {
+                    Float max = activeCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+                    if (max == null || max <= 0) throw new IllegalArgumentException("Manual focus distance unavailable");
+                    float value = (float) Math.max(0, Math.min(max, patch.optDouble("focusDistance")));
+                    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                    builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, value);
+                    builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+                    currentFocusMode = "manual";
+                    currentFocusDistance = value;
+                }
+
+                if (patch.has("exposureMode")) {
+                    String mode = patch.optString("exposureMode", "continuous");
+                    if ("manual".equals(mode)) {
+                        if (!hasCapability(activeCharacteristics, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
+                            throw new IllegalArgumentException("Manual exposure unavailable");
+                        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                        builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                        currentExposureMode = "manual";
+                    } else if ("manual".equals(activeFpsControl)) {
+                        // This stream can sustain the requested frame duration,
+                        // but the HAL did not advertise a matching hardware-AE
+                        // FPS range. Keep sensor timing manual rather than asking
+                        // AE for an unsupported range. AutoOptics can still read
+                        // the current exposure/ISO as its baseline and then tune
+                        // the same manual sensor controls.
+                        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                        builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                        currentExposureMode = "manual";
+                    } else {
+                        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                        if (activeFpsRange != null) builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
+                        currentExposureMode = "continuous";
+                    }
+                }
+                if (patch.has("exposureTime")) {
+                    Range<Long> range = activeCharacteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+                    long ns = clampLong(Math.round(patch.optDouble("exposureTime") * 100_000.0), range);
+                    ns = Math.min(ns, Math.max(1, activeFrameDurationNs - 100_000L));
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                    builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ns);
+                    currentExposureMode = "manual";
+                    currentExposureTimeNs = ns;
+                }
+                if (patch.has("iso")) {
+                    Range<Integer> range = activeCharacteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+                    int iso = clampInt((int) Math.round(patch.optDouble("iso")), range);
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                    builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+                    currentExposureMode = "manual";
+                    currentIso = iso;
+                }
+                if (patch.has("exposureCompensation")) {
+                    Range<Integer> range = activeCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+                    Rational step = activeCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+                    if (range != null && step != null && step.doubleValue() > 0) {
+                        int value = clampInt((int) Math.round(patch.optDouble("exposureCompensation") / step.doubleValue()), range);
+                        builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, value);
+                        currentExposureCompensationEv = value * step.doubleValue();
+                    }
+                }
+
+                if (triggerSingleAf) {
+                    captureSession.capture(builder.build(), captureCallback, cameraHandler);
+                    builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+                }
+                CaptureRequest repeat = builder.build();
+                captureSession.setRepeatingRequest(repeat, captureCallback, cameraHandler);
+                JSONObject result = new JSONObject();
+                result.put("settings", currentSettingsJson());
+                reply(requestId, result);
+            } catch (Exception error) {
+                replyError(requestId, error.getMessage() == null ? error.toString() : error.getMessage());
+            }
+        });
     }
 
     private static boolean contains(int[] values, int wanted) {
@@ -596,6 +870,13 @@ final class NativeCameraBridge {
         captureSurface = null;
         activeCameraId = "";
         activePipeline = "yuv";
+        activeFpsControl = "ae";
+        activeCharacteristics = null;
+        activeBuilder = null;
+        currentFocusDistance = null;
+        currentExposureTimeNs = null;
+        currentIso = null;
+        lastSettingsEventNs = 0;
     }
 
     void close() {

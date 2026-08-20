@@ -2,7 +2,67 @@ const endpoint = globalThis.AirGapperNativeCamera;
 let installed = false;
 let nextRequestId = 1;
 let frameHandler;
+let activeTrack;
 const pending = new Map();
+
+function scalarConstraint(value) {
+  if (value && typeof value === "object") {
+    if ("exact" in value) return value.exact;
+    if ("ideal" in value) return value.ideal;
+  }
+  return value;
+}
+
+function flattenConstraints(constraints = {}) {
+  const source = constraints.advanced?.[0] ?? constraints;
+  const patch = {};
+  for (const key of [
+    "focusMode", "focusDistance", "pointsOfInterest",
+    "exposureMode", "exposureTime", "iso", "exposureCompensation"
+  ]) {
+    if (source[key] !== undefined) patch[key] = scalarConstraint(source[key]);
+  }
+  return patch;
+}
+
+function makeNativeTrack(started) {
+  let ended = false;
+  const capabilities = started.capabilities ?? {};
+  const settings = {
+    deviceId: String(started.cameraId ?? ""),
+    width: Number(started.width) || undefined,
+    height: Number(started.height) || undefined,
+    frameRate: Number(started.fps) || undefined,
+    focusMode: started.settings?.focusMode,
+    focusDistance: started.settings?.focusDistance,
+    exposureMode: started.settings?.exposureMode,
+    exposureTime: started.settings?.exposureTime,
+    iso: started.settings?.iso,
+    exposureCompensation: started.settings?.exposureCompensation
+  };
+  const track = {
+    id: `camera2:${settings.deviceId}`,
+    kind: "video",
+    label: `Camera2 ${settings.deviceId}`,
+    get readyState() { return ended ? "ended" : "live"; },
+    getCapabilities() { return capabilities; },
+    getSettings() { return { ...settings }; },
+    async applyConstraints(constraints = {}) {
+      if (ended) throw new Error("Native Camera2 track ended");
+      const patch = flattenConstraints(constraints);
+      if (!Object.keys(patch).length) return;
+      const result = await request("apply", { patch }, 3500);
+      if (result.settings) Object.assign(settings, result.settings);
+    },
+    stop() { ended = true; },
+    _update(next) { if (!ended && next) Object.assign(settings, next); }
+  };
+  return track;
+}
+
+function nativeCameraTrack() {
+  return activeTrack;
+}
 
 function install() {
   if (installed || !endpoint?.postMessage) return Boolean(endpoint?.postMessage);
@@ -10,15 +70,18 @@ function install() {
   endpoint.onmessage = (event) => {
     const data = event?.data;
     if (data instanceof ArrayBuffer) {
+      // The bytes are JS-owned once WebView delivered this ArrayBuffer. Release
+      // Camera2 immediately so camera delivery overlaps asynchronous receiver
+      // and worker work exactly like MediaStreamTrackProcessor. v0.5.352 waited
+      // for captureFrame() to finish and accidentally serialized the camera to
+      // roughly one source frame per full receive pass.
+      ackNativeCameraFrame();
       if (frameHandler) {
         try {
           frameHandler(data);
         } catch (error) {
           console.error("Native camera frame handler failed", error);
-          ackNativeCameraFrame();
         }
-      } else {
-        ackNativeCameraFrame();
       }
       return;
     }
@@ -27,6 +90,10 @@ function install() {
     try {
       message = JSON.parse(data);
     } catch {
+      return;
+    }
+    if (message?.event === "settings") {
+      activeTrack?._update(message.settings);
       return;
     }
     const requestId = Number(message?.requestId);
@@ -67,11 +134,17 @@ async function listNativeCameras() {
   return request("list");
 }
 
-async function startNativeCamera({ cameraId, width, height, fps, pipeline }) {
-  return request("start", { cameraId, width, height, fps, pipeline }, 15000);
+async function startNativeCamera({ cameraId, width, height, fps, pipeline, fpsControl }) {
+  activeTrack?.stop();
+  activeTrack = undefined;
+  const started = await request("start", { cameraId, width, height, fps, pipeline, fpsControl }, 15000);
+  activeTrack = makeNativeTrack(started);
+  return started;
 }
 
 async function stopNativeCamera() {
+  activeTrack?.stop();
+  activeTrack = undefined;
   if (!install()) return;
   try {
     await request("stop", {}, 3000);
@@ -96,6 +169,7 @@ export {
   ackNativeCameraFrame,
   listNativeCameras,
   nativeCameraAvailable,
+  nativeCameraTrack,
   setNativeCameraFrameHandler,
   startNativeCamera,
   stopNativeCamera
