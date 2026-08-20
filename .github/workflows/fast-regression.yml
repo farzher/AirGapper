@@ -51,11 +51,12 @@ jobs:
       - name: Apply runtime patch
         run: |
           set -euo pipefail
-          if grep -q 'APP_BUILD = "v0.5.352"' main.js; then
-            echo 'native runtime patch already applied'
-            exit 0
+          if ! grep -q 'APP_BUILD = "v0.5.352"' main.js; then
+            python3 .github/patch-native-camera-runtime.py
           fi
-          python3 .github/patch-native-camera-runtime.py
+          if ! grep -q 'never hide a usable native' android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java; then
+            python3 .github/patch-native-camera-runtime-followup.py
+          fi
           git checkout -- .github/workflows/build-apk.yml
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -64,7 +65,11 @@ jobs:
                   android/app/build.gradle shared/native-camera.js receive/main.js \
                   index.html main.js send/main.js sw.js
           git diff --cached --check
-          git commit -m "fix native Camera2 runtime and add 60fps GPU path"
+          if git diff --cached --quiet; then
+            echo 'native runtime patch already applied'
+            exit 0
+          fi
+          git commit -m "finish native Camera2 60fps runtime handling"
           git push origin HEAD:fix/native-camera-runtime
 
   regression:
