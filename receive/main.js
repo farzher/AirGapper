@@ -54,7 +54,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.357";
+const RECEIVER_RUNTIME_BUILD = "v0.5.358";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -3006,6 +3006,25 @@ function estimateSenderFrameRate(now = receiverNow()) {
 }
 function noteDecodeCompleted(id, completion) {
   const auditMode = hotPathJobMode.get(id);
+  // Native cached-CRC hits intentionally avoid re-emitting duplicate payloads,
+  // but a full CRC-fast batch is still fresh visual proof for every tracked QR.
+  // Refresh geometry health only; do not count these as transport progress.
+  const nativeTracks = Math.max(0, Number(completion.nativeMetrics?.tracks) || 0);
+  const nativeCrcFast = Math.max(0, Number(completion.nativeMetrics?.crcFastSuccesses) || 0);
+  const nativeMisses = Math.max(0, Number(completion.nativeMetrics?.misses) || 0);
+  if (!auditMode?.full && nativeTracks > 0 && nativeCrcFast === nativeTracks && nativeMisses === 0) {
+    const proofAt = receiverNow();
+    for (const slot of auditMode?.trackSlots ?? []) {
+      const region = regions.find((candidate) => candidate.gridSlot === slot);
+      if (!region?.decoded) continue;
+      region.seen = proofAt;
+      region.decodedSeen = proofAt;
+      region.sightedSeen = proofAt;
+      region.consecutiveMisses = 0;
+      region.detectionConfidence = 1;
+      region.decodeConfidence = 1;
+    }
+  }
   if (!replayRunning && livePipeline.startedAt && auditMode) {
     const latencyMs = Math.max(0, Number(completion.latencyMs) || 0);
     const copyMs = Math.max(0, Number(completion.frameCopyMs) || 0);
