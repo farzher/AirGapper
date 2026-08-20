@@ -49,17 +49,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/patch-native-v2-preview.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('.github/workflows/fast-regression.yml')
-          s = p.read_text()
-          s = s.replace('permissions:\n  contents: write', 'permissions:\n  contents: read', 1)
-          start = s.index('      - name: Apply native-v2 preview patch\n')
-          end = s.index('      - name: Cache codec toolchain\n', start)
-          s = s[:start] + s[end:]
-          p.write_text(s)
-          PY
-          rm .github/patch-native-v2-preview.py
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- \
@@ -67,8 +56,7 @@ jobs:
             shared/native-camera-v2.js \
             receive/main.js \
             benchmark/native-camera-v2-bridge-smoke.mjs \
-            .github/workflows/fast-regression.yml \
-            .github/patch-native-v2-preview.py
+            .github/workflows/fast-regression.yml
           git diff --cached --check
           git status --short
           git commit -m "fix native-v2 preview transport"
