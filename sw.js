@@ -11,6 +11,7 @@
     "./receive/focus-controller.js",
     "./receive/grid-lattice.js",
     "./receive/main.js",
+    "./receive/performance-policy.js",
     "./receive/qr-optics.js",
     "./receive/worker.js",
     "./send/main.js",
