@@ -65,7 +65,7 @@ import {
   submitNativeCameraV2Plan
 } from "../shared/native-camera-v2.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.358";
+const RECEIVER_RUNTIME_BUILD = "v0.5.359";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
