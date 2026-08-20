@@ -1,0 +1,41 @@
+name: fix browser optimization final
+
+on:
+  push:
+    branches:
+      - opt/browser-acquisition-autooptics
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: opt/browser-acquisition-autooptics
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply final fix
+        run: python3 tools/fix-browser-opt-final.py
+      - name: Validate syntax and policy
+        run: |
+          node --check receive/main.js
+          node benchmark/browser-performance-policy-smoke.mjs
+      - name: Commit final product fix
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'AirGapper Build'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add receive/main.js
+          git commit -m 'fix acquisition diagnostics scope'
+          git push origin HEAD:opt/browser-acquisition-autooptics
