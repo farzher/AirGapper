@@ -56,8 +56,7 @@ jobs:
             shared/native-camera-v2.js \
             receive/main.js \
             benchmark/native-camera-v2-bridge-smoke.mjs \
-            index.html main.js sw.js android/app/build.gradle \
-            .github/workflows/build-apk.yml
+            index.html main.js sw.js android/app/build.gradle
           git diff --cached --check
           if ! git diff --cached --quiet; then
             git commit -m "fix native-v2 preview quality and direct YUV default"
