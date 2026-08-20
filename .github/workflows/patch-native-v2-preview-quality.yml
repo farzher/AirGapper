@@ -1,0 +1,62 @@
+name: apply native-v2 preview quality hotfix
+
+on:
+  push:
+    branches: [fix/native-v2-preview-quality-v360]
+    paths:
+      - .github/patch-native-v2-preview-quality.py
+      - .github/workflows/patch-native-v2-preview-quality.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: fix/native-v2-preview-quality-v360
+
+      - name: Apply patch
+        run: python3 .github/patch-native-v2-preview-quality.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check JavaScript and bridge smoke
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < shared/native-camera-v2.js
+          node --input-type=module --check < receive/main.js
+          node benchmark/native-camera-v2-bridge-smoke.mjs
+
+      - name: Build Android debug APK
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Commit hotfix
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            android/app/src/main/java/com/airgapper/app/NativeCameraV2Bridge.java \
+            shared/native-camera-v2.js \
+            receive/main.js \
+            benchmark/native-camera-v2-bridge-smoke.mjs \
+            index.html main.js sw.js android/app/build.gradle \
+            .github/workflows/build-apk.yml
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "Hotfix already applied"
+            exit 0
+          fi
+          git commit -m "fix native-v2 preview quality and direct YUV default"
+          git push origin HEAD:fix/native-v2-preview-quality-v360
