@@ -51,11 +51,12 @@ jobs:
       - name: Apply native camera patch
         run: |
           set -euo pipefail
-          if grep -q 'APP_BUILD = "v0.5.353"' main.js; then
-            echo 'native Camera2 v0.5.353 patch already applied'
-            exit 0
+          if ! grep -q 'APP_BUILD = "v0.5.353"' main.js; then
+            python3 .github/patch-native-camera-v353.py
           fi
-          python3 .github/patch-native-camera-v353.py
+          if ! grep -q 'shared/native-camera.js has already ACKed ownership' receive/main.js; then
+            python3 .github/patch-native-camera-v353-followup.py
+          fi
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android/app/build.gradle \
@@ -63,7 +64,11 @@ jobs:
                   shared/native-camera.js receive/main.js send/main.js \
                   index.html main.js sw.js
           git diff --cached --check
-          git commit -m "v0.5.353 restore native camera throughput and optics"
+          if git diff --cached --quiet; then
+            echo 'native Camera2 v0.5.353 product patch already applied'
+            exit 0
+          fi
+          git commit -m "fix native Camera2 frame-credit startup seam"
           git push origin HEAD:fix/native-camera-v353
 
   regression:
