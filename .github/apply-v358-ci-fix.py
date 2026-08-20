@@ -14,7 +14,7 @@ anchor = '''function noteDecodeCompleted(id, completion) {\n  const auditMode = 
 replacement = '''function noteDecodeCompleted(id, completion) {\n  const auditMode = hotPathJobMode.get(id);\n  // Native cached-CRC hits intentionally avoid re-emitting duplicate payloads,\n  // but a full CRC-fast batch is still fresh visual proof for every tracked QR.\n  // Refresh geometry health only; do not count these as transport progress.\n  const nativeTracks = Math.max(0, Number(completion.nativeMetrics?.tracks) || 0);\n  const nativeCrcFast = Math.max(0, Number(completion.nativeMetrics?.crcFastSuccesses) || 0);\n  const nativeMisses = Math.max(0, Number(completion.nativeMetrics?.misses) || 0);\n  if (!auditMode?.full && nativeTracks > 0 && nativeCrcFast === nativeTracks && nativeMisses === 0) {\n    const proofAt = receiverNow();\n    for (const slot of auditMode?.trackSlots ?? []) {\n      const region = regions.find((candidate) => candidate.gridSlot === slot);\n      if (!region?.decoded) continue;\n      region.seen = proofAt;\n      region.decodedSeen = proofAt;\n      region.sightedSeen = proofAt;\n      region.consecutiveMisses = 0;\n      region.detectionConfidence = 1;\n      region.decodeConfidence = 1;\n    }\n  }\n'''
 replace_once("receive/main.js", anchor, replacement)
 
-for path in ["main.js", "receive/main.js", "send/main.js", "index.html", ".github/workflows/build-apk.yml"]:
+for path in ["main.js", "receive/main.js", "send/main.js", "index.html"]:
     p = Path(path)
     text = p.read_text(encoding="utf-8")
     if "v0.5.357" not in text:
