@@ -1,0 +1,41 @@
+name: apply native-v2 preview hotfix
+
+on:
+  push:
+    branches: [fix/native-v2-preview]
+    paths:
+      - .github/patch-native-v2-preview.py
+      - .github/workflows/apply-native-v2-preview-hotfix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply hotfix
+        run: python3 .github/patch-native-v2-preview.py
+      - name: Commit clean patch
+        run: |
+          set -euo pipefail
+          rm .github/patch-native-v2-preview.py
+          rm .github/workflows/apply-native-v2-preview-hotfix.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            android/app/src/main/java/com/airgapper/app/NativeCameraV2Bridge.java \
+            shared/native-camera-v2.js \
+            receive/main.js \
+            benchmark/native-camera-v2-bridge-smoke.mjs \
+            .github/workflows/fast-regression.yml \
+            .github/patch-native-v2-preview.py \
+            .github/workflows/apply-native-v2-preview-hotfix.yml
+          git diff --cached --check
+          git status --short
+          git commit -m "fix native-v2 preview transport"
+          git push origin HEAD:fix/native-v2-preview
