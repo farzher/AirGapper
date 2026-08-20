@@ -67,8 +67,8 @@ async function listNativeCameras() {
   return request("list");
 }
 
-async function startNativeCamera({ cameraId, width, height, fps }) {
-  return request("start", { cameraId, width, height, fps }, 12000);
+async function startNativeCamera({ cameraId, width, height, fps, pipeline }) {
+  return request("start", { cameraId, width, height, fps, pipeline }, 15000);
 }
 
 async function stopNativeCamera() {

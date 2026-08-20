@@ -48,7 +48,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.351";
+const RECEIVER_RUNTIME_BUILD = "v0.5.352";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -673,8 +673,20 @@ function browserModeSuffix(key) {
   return browserModeResults[key] === true ? "" : browserModeResults[key] === false ? " · Retry" : " · Try";
 }
 function nativeModeLabel(mode) {
-  if (mode.fixedFps) return formatCameraMode(mode.width, mode.height, mode.fps);
-  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}`;
+  const path = mode.pipeline === "gpu" ? " · GPU" : "";
+  if (mode.fixedFps) return `${formatCameraMode(mode.width, mode.height, mode.fps)}${path}`;
+  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}${path}`;
+}
+function nativePreviewRotation(info = nativeCameraInfo ?? selectedNativeCamera()) {
+  if (!info) return 0;
+  const sensor = Number(info.sensorOrientation) || 0;
+  const device = Number(screen.orientation?.angle ?? window.orientation ?? 0) || 0;
+  const sign = info.facing === "front" ? 1 : -1;
+  return ((sensor - device * sign) % 360 + 360) % 360;
+}
+function syncNativePreviewAspect(width = requestedWidth, height = requestedHeight, info = nativeCameraInfo ?? selectedNativeCamera()) {
+  const rotation = nativePreviewRotation(info);
+  cameraBox.style.aspectRatio = rotation === 90 || rotation === 270 ? `${height} / ${width}` : `${width} / ${height}`;
 }
 function selectedNativeCamera() {
   const cameras = nativeCameraCatalog?.cameras ?? [];
@@ -719,7 +731,7 @@ function populateNativeCameraModes() {
   cameraExposureControl.hidden = true;
   cameraOpticsManual.hidden = true;
   opticsAutoActions.hidden = true;
-  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
 }
 async function refreshNativeCameraDevices() {
   if (!nativeCamera2) return false;
@@ -866,7 +878,8 @@ function showRequestedCameraSettings() {
   decodeWorkersControl.hidden = legacyAndroidApp;
   video.hidden = nativeCamera2;
   if (nativePreview) nativePreview.hidden = !nativeCamera2;
-  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+  if (nativeCamera2) syncNativePreviewAspect();
+  else cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
 restoreCameraSettings();
@@ -4942,13 +4955,30 @@ function drawOverlay(now) {
   const vh = nativeCameraRunning ? receiverFrameHeight : video.videoHeight;
   if (!cw || !ch || !vw || !vh) return;
   const dpr = window.devicePixelRatio || 1;
-  const pw = Math.round(cw * dpr);
-  const ph = Math.round(ch * dpr);
-  if (overlay.width !== pw || overlay.height !== ph) {
-    overlay.width = pw;
-    overlay.height = ph;
+  const physicalPw = Math.round(cw * dpr);
+  const physicalPh = Math.round(ch * dpr);
+  if (overlay.width !== physicalPw || overlay.height !== physicalPh) {
+    overlay.width = physicalPw;
+    overlay.height = physicalPh;
   }
-  overlayCtx.clearRect(0, 0, pw, ph);
+  overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+  overlayCtx.clearRect(0, 0, physicalPw, physicalPh);
+  const rotation = nativeCameraRunning ? nativePreviewRotation() : 0;
+  let pw = physicalPw;
+  let ph = physicalPh;
+  overlayCtx.save();
+  if (rotation === 90) {
+    overlayCtx.translate(physicalPw, 0);
+    overlayCtx.rotate(Math.PI / 2);
+    pw = physicalPh; ph = physicalPw;
+  } else if (rotation === 180) {
+    overlayCtx.translate(physicalPw, physicalPh);
+    overlayCtx.rotate(Math.PI);
+  } else if (rotation === 270) {
+    overlayCtx.translate(0, physicalPh);
+    overlayCtx.rotate(-Math.PI / 2);
+    pw = physicalPh; ph = physicalPw;
+  }
   const scale = Math.min(pw / vw, ph / vh);
   const offX = (pw - vw * scale) / 2;
   const offY = (ph - vh * scale) / 2;
@@ -5065,6 +5095,7 @@ function drawOverlay(now) {
   overlayCtx.globalAlpha = 1;
   overlayCtx.shadowBlur = 0;
   overlayCtx.setLineDash([]);
+  overlayCtx.restore();
 }
 function focusGeometry() {
   const snapshot = lastGridSnapshot;
@@ -5200,7 +5231,7 @@ function renderFocusDiagnostics() {
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
     : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
   const sourceLine = nativeCameraInfo
-    ? `Camera2 ${nativeCameraInfo.cameraId} · YUV ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump Camera2 Y8 · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
+    ? `Camera2 ${nativeCameraInfo.cameraId} · ${nativeCameraInfo.pipeline === "gpu" ? "PRIVATE→GPU Y8" : "YUV"} ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${framePumpMode} · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
     : sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
@@ -5468,6 +5499,7 @@ decodeWorkers.addEventListener("change", () => {
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
+screen.orientation?.addEventListener?.("change", () => { if (nativeCamera2) { syncNativePreviewAspect(); queueOverlayDraw(); } });
 function stopNativeReceiverSource() {
   if (!nativeCamera2) return;
   nativeCameraRunning = false;
@@ -5485,19 +5517,26 @@ function drawNativePreview(source) {
   const now = performance.now();
   if (now - nativePreviewLastAt < 80) return;
   nativePreviewLastAt = now;
-  const outWidth = Math.min(480, source.width);
-  const outHeight = Math.max(1, Math.round(source.height * outWidth / source.width));
+  const rotation = nativePreviewRotation();
+  const rotated = rotation === 90 || rotation === 270;
+  const displayWidth = rotated ? source.height : source.width;
+  const displayHeight = rotated ? source.width : source.height;
+  const outWidth = Math.min(480, displayWidth);
+  const outHeight = Math.max(1, Math.round(displayHeight * outWidth / displayWidth));
   if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
     nativePreview.width = outWidth;
     nativePreview.height = outHeight;
   }
   const rgba = nativePreviewCtx.createImageData(outWidth, outHeight);
-  const sx = source.width / outWidth;
-  const sy = source.height / outHeight;
   for (let y = 0; y < outHeight; y++) {
-    const sourceRow = Math.min(source.height - 1, Math.floor((y + 0.5) * sy)) * source.width;
+    const dy = Math.min(displayHeight - 1, Math.floor((y + 0.5) * displayHeight / outHeight));
     for (let x = 0; x < outWidth; x++) {
-      const luma = source.nativeY[sourceRow + Math.min(source.width - 1, Math.floor((x + 0.5) * sx))];
+      const dx = Math.min(displayWidth - 1, Math.floor((x + 0.5) * displayWidth / outWidth));
+      let sx = dx, sy = dy;
+      if (rotation === 90) { sx = dy; sy = source.height - 1 - dx; }
+      else if (rotation === 180) { sx = source.width - 1 - dx; sy = source.height - 1 - dy; }
+      else if (rotation === 270) { sx = source.width - 1 - dy; sy = dx; }
+      const luma = source.nativeY[sy * source.width + sx];
       const at = (y * outWidth + x) * 4;
       rgba.data[at] = luma;
       rgba.data[at + 1] = luma;
@@ -5556,7 +5595,7 @@ async function startNativeReceiver(startAttempt, transportReady) {
   requestedWidth = selectedMode.width;
   requestedHeight = selectedMode.height;
   requestedFps = selectedMode.fps;
-  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
   cameraActual.textContent = `${nativeModeLabel(selectedMode)} · Camera2`;
   startBtn.disabled = true;
   startBtn.style.display = "none";
@@ -5565,7 +5604,7 @@ async function startNativeReceiver(startAttempt, transportReady) {
   if (nativePreview) nativePreview.hidden = false;
 
   const futureGen = captureGen + 1;
-  setNativeCameraFrameHandler((buffer) => nativeSourceFrame(buffer, requestedWidth, requestedHeight, futureGen));
+  setNativeCameraFrameHandler();
   let started;
   let transportError;
   try {
@@ -5574,14 +5613,16 @@ async function startNativeReceiver(startAttempt, transportReady) {
         cameraId: camera.id,
         width: requestedWidth,
         height: requestedHeight,
-        fps: requestedFps
+        fps: requestedFps,
+        pipeline: selectedMode.pipeline
       }),
       transportReady
     ]);
   } catch (error) {
     setNativeCameraFrameHandler();
     void stopNativeCamera();
-    if (startAttempt === cameraStartGen) pool.resize(0);
+    if (startAttempt !== cameraStartGen || receiverPaused) return;
+    pool.resize(0);
     offerRetry(`Native Camera2: ${error instanceof Error ? error.message : String(error)}`);
     return;
   }
@@ -5599,14 +5640,16 @@ async function startNativeReceiver(startAttempt, transportReady) {
   }
 
   stream = nativeStreamShim;
-  nativeCameraRunning = true;
   nativeCameraInfo = started;
+  nativeCameraRunning = true;
+  syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
+  setNativeCameraFrameHandler((buffer) => nativeSourceFrame(buffer, started.width ?? requestedWidth, started.height ?? requestedHeight, futureGen));
   preview.classList.remove("camera-loading");
   setStatus("");
   cameraStartedTs = receiverNow();
   resetLivePipeline(cameraStartedTs);
   captureGen = futureGen;
-  framePumpMode = "Camera2 Y8";
+  framePumpMode = started.pipeline === "gpu" ? "Camera2 GPU Y8" : "Camera2 Y8";
   framePumpStartedAt = receiverNow();
   framePumpFirstFrameAt = 0;
   framePumpProcessorTotal = 0;
