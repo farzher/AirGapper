@@ -37,7 +37,9 @@ concurrency:
 
 jobs:
   apply-native-camera-runtime:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-runtime'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-runtime') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'fix/native-camera-runtime')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -74,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref == 'refs/heads/fix/native-camera-runtime' && 'fix/native-camera-runtime' || github.sha }}
+          ref: ${{ (github.head_ref == 'fix/native-camera-runtime' || github.ref == 'refs/heads/fix/native-camera-runtime') && 'fix/native-camera-runtime' || github.sha }}
           fetch-depth: 1
 
       - name: Build Android app
