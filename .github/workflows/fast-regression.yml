@@ -67,6 +67,7 @@ jobs:
       - name: Run grid regression
         run: |
           node benchmark/grid-lattice-regression.mjs
+          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
 
       - name: Install browser benchmark dependency
