@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   repair-camera-v2:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2') || (github.event_name == 'pull_request' && github.head_ref == 'feature/apk-camera-v2')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -61,9 +61,6 @@ jobs:
           path.write_text(text)
           PY
 
-          # Restore the permanent regression workflow, then permanently add a
-          # fast module-parse gate so malformed integration code fails before
-          # Playwright waits on a broken page.
           git fetch origin master --depth=1
           git checkout origin/master -- .github/workflows/fast-regression.yml
           python3 - <<'PY'
@@ -84,7 +81,7 @@ jobs:
           git push origin HEAD:feature/apk-camera-v2
 
   regression:
-    if: github.ref != 'refs/heads/feature/apk-camera-v2'
+    if: github.ref != 'refs/heads/feature/apk-camera-v2' && github.head_ref != 'feature/apk-camera-v2'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
