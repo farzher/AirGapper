@@ -82,17 +82,39 @@ assert.equal(previews.length, 1);
 assert.deepEqual([...previews[0].y], [10, 20, 30, 40]);
 assert.ok(calls.some((call) => call.op === "binaryAck"), "native-v2 must acknowledge working ArrayBuffer delivery");
 
+function colorPreviewPacket() {
+  const buffer = new ArrayBuffer(34);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x32565041, true);
+  view.setUint16(4, 28, true);
+  view.setUint16(6, 2, true);
+  view.setInt32(8, 2, true);
+  view.setInt32(12, 2, true);
+  view.setInt32(16, 90, true);
+  view.setInt32(20, 1280, true);
+  view.setInt32(24, 720, true);
+  new Uint8Array(buffer, 28).set([81, 81, 81, 81, 90, 240]);
+  return buffer;
+}
+
+endpoint.onmessage({ data: colorPreviewPacket() });
+assert.equal(previews.length, 2);
+assert.equal(previews[1].format, "yuv420p");
+assert.deepEqual([...previews[1].y], [81, 81, 81, 81]);
+assert.deepEqual([...previews[1].u], [90]);
+assert.deepEqual([...previews[1].v], [240]);
+
 const viewPacket = new Uint8Array(previewPacket());
 endpoint.onmessage({ data: viewPacket });
-assert.equal(previews.length, 2, "native-v2 should accept ArrayBuffer views defensively");
+assert.equal(previews.length, 3, "native-v2 should accept ArrayBuffer views defensively");
 
 const fallbackBytes = new Uint8Array(previewPacket());
 endpoint.onmessage({ data: JSON.stringify({
   event: "binaryFallback",
   data: Buffer.from(fallbackBytes).toString("base64")
 }) });
-assert.equal(previews.length, 3, "base64 fallback must use the same preview parser");
-assert.deepEqual([...previews[2].y], [10, 20, 30, 40]);
+assert.equal(previews.length, 4, "base64 fallback must use the same preview parser");
+assert.deepEqual([...previews[3].y], [10, 20, 30, 40]);
 
 endpoint.onmessage({ data: JSON.stringify({
   event: "frame", width: 1280, height: 720, frameNumber: 7,

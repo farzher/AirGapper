@@ -167,21 +167,42 @@ function parseGuidedMetrics(view, offset, bytes) {
 function parsePreview(buffer, view) {
   if (buffer.byteLength < PREVIEW_HEADER_BYTES) return null;
   const headerBytes = view.getUint16(4, true);
+  const version = view.getUint16(6, true);
   const width = view.getInt32(8, true);
   const height = view.getInt32(12, true);
-  if (headerBytes < PREVIEW_HEADER_BYTES || width <= 0 || height <= 0 || headerBytes + width * height > buffer.byteLength)
-    return null;
+  if (headerBytes < PREVIEW_HEADER_BYTES || width <= 0 || height <= 0) return null;
+  const yBytes = width * height;
+  if (version === 1) {
+    if (headerBytes + yBytes > buffer.byteLength) return null;
+    return {
+      type: "preview",
+      format: "y8",
+      width,
+      height,
+      orientation: view.getInt32(16, true),
+      sourceWidth: view.getInt32(20, true),
+      sourceHeight: view.getInt32(24, true),
+      y: new Uint8Array(buffer, headerBytes, yBytes)
+    };
+  }
+  if (version !== 2 || (width & 1) || (height & 1)) return null;
+  const chromaWidth = width >> 1;
+  const chromaHeight = height >> 1;
+  const chromaBytes = chromaWidth * chromaHeight;
+  if (headerBytes + yBytes + chromaBytes * 2 > buffer.byteLength) return null;
   return {
     type: "preview",
+    format: "yuv420p",
     width,
     height,
     orientation: view.getInt32(16, true),
     sourceWidth: view.getInt32(20, true),
     sourceHeight: view.getInt32(24, true),
-    y: new Uint8Array(buffer, headerBytes, width * height)
+    y: new Uint8Array(buffer, headerBytes, yBytes),
+    u: new Uint8Array(buffer, headerBytes + yBytes, chromaBytes),
+    v: new Uint8Array(buffer, headerBytes + yBytes + chromaBytes, chromaBytes)
   };
 }
-
 function parseDecodeResult(buffer, view) {
   if (buffer.byteLength < RESULT_HEADER_BYTES) return null;
   const headerBytes = view.getUint16(4, true);

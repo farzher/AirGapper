@@ -65,7 +65,7 @@ import {
   submitNativeCameraV2Plan
 } from "../shared/native-camera-v2.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.359";
+const RECEIVER_RUNTIME_BUILD = "v0.5.360";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -777,13 +777,21 @@ function selectedNativeCamera() {
 }
 function nativeAutoMode(camera) {
   const modes = camera?.modes ?? [];
-  const exact = (width, height, fps) => modes.find((mode) =>
-    mode.width === width && mode.height === height && mode.fps === fps && mode.fixedFps);
-  return exact(1280, 720, 60)
+  const exact = (width, height, fps, pipeline) => modes.find((mode) =>
+    mode.width === width && mode.height === height && mode.fps === fps && mode.fixedFps &&
+    (!pipeline || mode.pipeline === pipeline));
+  // Prefer direct YUV frames. PRIVATE/GPU modes require a synchronous full-frame
+  // readback before native decode and are a useful manual experiment, not a safe
+  // automatic default on phones where YUV tops out below 60 fps.
+  return exact(1280, 720, 60, "yuv")
+    ?? exact(1280, 720, 30, "yuv")
+    ?? exact(1920, 1080, 30, "yuv")
+    ?? modes.find((mode) => mode.pipeline === "yuv" && mode.fps === 30 && mode.fixedFps)
+    ?? modes.find((mode) => mode.pipeline === "yuv" && mode.fixedFps)
+    ?? exact(1280, 720, 60)
     ?? exact(1920, 1080, 60)
     ?? modes.find((mode) => mode.fps === 60 && mode.fixedFps)
     ?? modes.find((mode) => mode.fps === 60)
-    ?? exact(1280, 720, 30)
     ?? modes[modes.length - 1];
 }
 function populateNativeCameraModes() {
@@ -5572,8 +5580,12 @@ function drawNativeV2Preview(packet) {
     nativePreview.height = outHeight;
     nativePreviewImage = void 0;
   }
+  cameraBox.style.aspectRatio = `${outWidth} / ${outHeight}`;
   const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);
   nativePreviewImage = rgba;
+  const color = packet.format === "yuv420p" && packet.u?.length && packet.v?.length;
+  const chromaWidth = packet.width >> 1;
+  const clampByte = (value) => value < 0 ? 0 : value > 255 ? 255 : value;
   for (let y = 0; y < outHeight; y++) {
     for (let x = 0; x < outWidth; x++) {
       let sx = x, sy = y;
@@ -5582,7 +5594,20 @@ function drawNativeV2Preview(packet) {
       else if (rotation === 270) { sx = packet.width - 1 - y; sy = x; }
       const luma = packet.y[sy * packet.width + sx];
       const at = (y * outWidth + x) * 4;
-      rgba.data[at] = luma; rgba.data[at + 1] = luma; rgba.data[at + 2] = luma; rgba.data[at + 3] = 255;
+      if (color) {
+        const uv = (sy >> 1) * chromaWidth + (sx >> 1);
+        const c = Math.max(0, luma - 16) * 298;
+        const d = packet.u[uv] - 128;
+        const e = packet.v[uv] - 128;
+        rgba.data[at] = clampByte((c + 409 * e + 128) >> 8);
+        rgba.data[at + 1] = clampByte((c - 100 * d - 208 * e + 128) >> 8);
+        rgba.data[at + 2] = clampByte((c + 516 * d + 128) >> 8);
+      } else {
+        rgba.data[at] = luma;
+        rgba.data[at + 1] = luma;
+        rgba.data[at + 2] = luma;
+      }
+      rgba.data[at + 3] = 255;
     }
   }
   nativePreviewCtx.putImageData(rgba, 0, 0);
