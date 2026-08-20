@@ -7,6 +7,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
+import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -23,6 +24,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Range;
 import android.util.Size;
+import android.view.Surface;
 import android.webkit.WebView;
 
 import androidx.webkit.JavaScriptReplyProxy;
@@ -72,6 +74,9 @@ final class NativeCameraBridge {
     private CameraDevice cameraDevice;
     private CameraCaptureSession captureSession;
     private ImageReader imageReader;
+    private NativeGpuCameraReader gpuReader;
+    private Surface captureSurface;
+    private long cameraGeneration;
     private String activeCameraId = "";
     private int activeWidth;
     private int activeHeight;
@@ -79,6 +84,8 @@ final class NativeCameraBridge {
     private Range<Integer> activeFpsRange;
     private long activeMinFrameDurationNs;
     private int activeSensorOrientation;
+    private String activeFacing = "unknown";
+    private String activePipeline = "yuv";
 
     NativeCameraBridge(Activity activity, WebView webView) {
         this.activity = activity;
@@ -165,8 +172,9 @@ final class NativeCameraBridge {
             StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             Range<Integer>[] ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
             if (map == null || ranges == null) continue;
-            Size[] sizes = map.getOutputSizes(ImageFormat.YUV_420_888);
-            if (sizes == null || sizes.length == 0) continue;
+            Size[] yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888);
+            Size[] gpuSizes = map.getOutputSizes(SurfaceTexture.class);
+            if ((yuvSizes == null || yuvSizes.length == 0) && (gpuSizes == null || gpuSizes.length == 0)) continue;
 
             JSONObject camera = new JSONObject();
             camera.put("id", cameraId);
@@ -175,25 +183,52 @@ final class NativeCameraBridge {
             camera.put("label", "Camera " + cameraId + " · " + facingName(facing));
             Integer orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             camera.put("sensorOrientation", orientation == null ? 0 : orientation);
+            JSONArray aeRanges = new JSONArray();
+            for (Range<Integer> range : ranges) aeRanges.put(range.getLower() + "-" + range.getUpper());
+            camera.put("aeRanges", aeRanges);
             JSONArray modes = new JSONArray();
 
-            Arrays.sort(sizes, Comparator.comparingLong(size -> (long) size.getWidth() * size.getHeight()));
-            for (Size size : sizes) {
-                String sizeKey = size.getWidth() + "x" + size.getHeight();
-                if (!STANDARD_SIZES.contains(sizeKey)) continue;
-                long minDuration = map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, size);
+            Set<String> sizeKeys = new HashSet<>();
+            if (yuvSizes != null) for (Size size : yuvSizes) sizeKeys.add(size.getWidth() + "x" + size.getHeight());
+            if (gpuSizes != null) for (Size size : gpuSizes) sizeKeys.add(size.getWidth() + "x" + size.getHeight());
+            String[] orderedKeys = sizeKeys.toArray(new String[0]);
+            Arrays.sort(orderedKeys, Comparator.comparingLong(NativeCameraBridge::sizeArea));
+            for (String sizeKey : orderedKeys) {
+                long area = sizeArea(sizeKey);
+                if (area < 640L * 480L || area > 4096L * 2160L) continue;
+                Size yuvSize = findSize(yuvSizes, sizeKey);
+                Size gpuSize = findSize(gpuSizes, sizeKey);
+                long yuvDuration = yuvSize == null ? Long.MAX_VALUE : map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, yuvSize);
+                long gpuDuration = gpuSize == null ? Long.MAX_VALUE : map.getOutputMinFrameDuration(SurfaceTexture.class, gpuSize);
                 for (int fps : TEST_FPS) {
+                    // Keep the 30 fps menu compact, but never hide a usable native
+                    // 60 fps mode merely because it is not in our old browser-size list.
+                    if (fps != 60 && !STANDARD_SIZES.contains(sizeKey)) continue;
                     Range<Integer> range = chooseFpsRange(ranges, fps);
-                    if (range == null || !durationAllows(minDuration, fps)) continue;
+                    if (range == null) continue;
+                    String pipeline = null;
+                    long minDuration = Long.MAX_VALUE;
+                    if (yuvSize != null && durationAllows(yuvDuration, fps)) {
+                        pipeline = "yuv";
+                        minDuration = yuvDuration;
+                    } else if (gpuSize != null && durationAllows(gpuDuration, fps)) {
+                        pipeline = "gpu";
+                        minDuration = gpuDuration;
+                    }
+                    if (pipeline == null) continue;
+                    Size size = pipeline.equals("yuv") ? yuvSize : gpuSize;
                     JSONObject mode = new JSONObject();
-                    mode.put("key", sizeKey + "@" + fps);
+                    mode.put("key", sizeKey + "@" + fps + ":" + pipeline);
                     mode.put("width", size.getWidth());
                     mode.put("height", size.getHeight());
                     mode.put("fps", fps);
+                    mode.put("pipeline", pipeline);
                     mode.put("fixedFps", range.getLower() == fps && range.getUpper() == fps);
                     mode.put("fpsMin", range.getLower());
                     mode.put("fpsMax", range.getUpper());
                     mode.put("minFrameDurationNs", minDuration);
+                    mode.put("yuvMinFrameDurationNs", yuvSize == null ? 0 : yuvDuration);
+                    mode.put("gpuMinFrameDurationNs", gpuSize == null ? 0 : gpuDuration);
                     modes.put(mode);
                 }
             }
@@ -202,6 +237,24 @@ final class NativeCameraBridge {
         }
         result.put("cameras", cameras);
         return result;
+    }
+
+    private static long sizeArea(String key) {
+        int split = key.indexOf('x');
+        if (split <= 0) return Long.MAX_VALUE;
+        try {
+            return (long) Integer.parseInt(key.substring(0, split)) * Integer.parseInt(key.substring(split + 1));
+        } catch (NumberFormatException ignored) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private static Size findSize(Size[] sizes, String key) {
+        if (sizes == null) return null;
+        for (Size size : sizes) {
+            if ((size.getWidth() + "x" + size.getHeight()).equals(key)) return size;
+        }
+        return null;
     }
 
     private static boolean durationAllows(long minDurationNs, int fps) {
@@ -246,12 +299,14 @@ final class NativeCameraBridge {
         final int width = command.optInt("width");
         final int height = command.optInt("height");
         final int fps = command.optInt("fps");
-        cameraHandler.post(() -> startCamera(requestId, cameraId, width, height, fps));
+        final String pipeline = command.optString("pipeline", "yuv");
+        cameraHandler.post(() -> startCamera(requestId, cameraId, width, height, fps, pipeline));
     }
 
     @SuppressLint("MissingPermission")
-    private void startCamera(int requestId, String cameraId, int width, int height, int fps) {
+    private void startCamera(int requestId, String cameraId, int width, int height, int fps, String pipeline) {
         stopCameraInternal();
+        final long generation = cameraGeneration;
         try {
             if (cameraId.isEmpty()) throw new IllegalArgumentException("No Camera2 camera selected");
             CameraCharacteristics chars = cameraManager.getCameraCharacteristics(cameraId);
@@ -259,21 +314,16 @@ final class NativeCameraBridge {
             Range<Integer>[] ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
             if (map == null || ranges == null) throw new IllegalStateException("Camera has no YUV configuration map");
 
-            Size requestedSize = null;
-            Size[] sizes = map.getOutputSizes(ImageFormat.YUV_420_888);
-            if (sizes != null) {
-                for (Size size : sizes) {
-                    if (size.getWidth() == width && size.getHeight() == height) {
-                        requestedSize = size;
-                        break;
-                    }
-                }
-            }
-            if (requestedSize == null) throw new IllegalArgumentException(width + "x" + height + " YUV unavailable on camera " + cameraId);
+            boolean gpu = "gpu".equals(pipeline);
+            Size[] sizes = gpu ? map.getOutputSizes(SurfaceTexture.class) : map.getOutputSizes(ImageFormat.YUV_420_888);
+            Size requestedSize = findSize(sizes, width + "x" + height);
+            if (requestedSize == null) throw new IllegalArgumentException(width + "x" + height + " " + (gpu ? "PRIVATE/GPU" : "YUV") + " unavailable on camera " + cameraId);
             Range<Integer> range = chooseFpsRange(ranges, fps);
-            long minDuration = map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, requestedSize);
+            long minDuration = gpu
+                    ? map.getOutputMinFrameDuration(SurfaceTexture.class, requestedSize)
+                    : map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, requestedSize);
             if (range == null || !durationAllows(minDuration, fps)) {
-                throw new IllegalArgumentException(width + "x" + height + " @ " + fps + " fps unavailable on camera " + cameraId);
+                throw new IllegalArgumentException(width + "x" + height + " @ " + fps + " fps unavailable on camera " + cameraId + " via " + pipeline);
             }
 
             activeCameraId = cameraId;
@@ -282,22 +332,52 @@ final class NativeCameraBridge {
             activeRequestedFps = fps;
             activeFpsRange = range;
             activeMinFrameDurationNs = minDuration;
+            activePipeline = gpu ? "gpu" : "yuv";
             Integer sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
             activeSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
+            activeFacing = facingName(chars.get(CameraCharacteristics.LENS_FACING));
             frameCredit = false;
 
-            imageReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2);
-            imageReader.setOnImageAvailableListener(this::onImageAvailable, cameraHandler);
+            if (gpu) {
+                gpuReader = new NativeGpuCameraReader(cameraHandler, new NativeGpuCameraReader.Sink() {
+                    @Override
+                    public boolean takeFrameCredit() {
+                        if (!running || !frameCredit || generation != cameraGeneration) return false;
+                        frameCredit = false;
+                        return true;
+                    }
+
+                    @Override
+                    public void onFrame(byte[] bytes) {
+                        sendFrame(bytes);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        frameCredit = true;
+                    }
+                });
+                captureSurface = gpuReader.open(width, height);
+            } else {
+                imageReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2);
+                imageReader.setOnImageAvailableListener(this::onImageAvailable, cameraHandler);
+                captureSurface = imageReader.getSurface();
+            }
             cameraManager.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice camera) {
+                    if (generation != cameraGeneration) {
+                        camera.close();
+                        return;
+                    }
                     cameraDevice = camera;
-                    configureSession(requestId, chars);
+                    configureSession(requestId, chars, generation);
                 }
 
                 @Override
                 public void onDisconnected(CameraDevice camera) {
                     camera.close();
+                    if (generation != cameraGeneration) return;
                     if (cameraDevice == camera) cameraDevice = null;
                     running = false;
                     replyError(requestId, "Camera2 disconnected");
@@ -306,6 +386,7 @@ final class NativeCameraBridge {
                 @Override
                 public void onError(CameraDevice camera, int error) {
                     camera.close();
+                    if (generation != cameraGeneration) return;
                     if (cameraDevice == camera) cameraDevice = null;
                     running = false;
                     replyError(requestId, "Camera2 open error " + error);
@@ -317,13 +398,13 @@ final class NativeCameraBridge {
         }
     }
 
-    private void configureSession(int requestId, CameraCharacteristics chars) {
+    private void configureSession(int requestId, CameraCharacteristics chars, long generation) {
         CameraDevice camera = cameraDevice;
-        ImageReader reader = imageReader;
-        if (camera == null || reader == null) return;
+        Surface target = captureSurface;
+        if (camera == null || target == null || generation != cameraGeneration) return;
         try {
             CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
-            builder.addTarget(reader.getSurface());
+            builder.addTarget(target);
             builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
@@ -340,7 +421,7 @@ final class NativeCameraBridge {
             CameraCaptureSession.StateCallback callback = new CameraCaptureSession.StateCallback() {
                 @Override
                 public void onConfigured(CameraCaptureSession session) {
-                    if (cameraDevice != camera) {
+                    if (cameraDevice != camera || generation != cameraGeneration) {
                         session.close();
                         return;
                     }
@@ -359,6 +440,8 @@ final class NativeCameraBridge {
                         started.put("fixedFps", activeFpsRange.getLower().equals(activeFpsRange.getUpper()));
                         started.put("minFrameDurationNs", activeMinFrameDurationNs);
                         started.put("sensorOrientation", activeSensorOrientation);
+                        started.put("facing", activeFacing);
+                        started.put("pipeline", activePipeline);
                         started.put("sessionParameters", Build.VERSION.SDK_INT >= Build.VERSION_CODES.P);
                         reply(requestId, started);
                     } catch (Exception error) {
@@ -376,9 +459,9 @@ final class NativeCameraBridge {
             };
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                createSessionApi28(camera, reader, request, callback);
+                createSessionApi28(camera, target, request, callback);
             } else {
-                camera.createCaptureSession(Collections.singletonList(reader.getSurface()), callback, cameraHandler);
+                camera.createCaptureSession(Collections.singletonList(target), callback, cameraHandler);
             }
         } catch (CameraAccessException error) {
             stopCameraInternal();
@@ -389,10 +472,10 @@ final class NativeCameraBridge {
     @TargetApi(Build.VERSION_CODES.P)
     private void createSessionApi28(
             CameraDevice camera,
-            ImageReader reader,
+            Surface target,
             CaptureRequest request,
             CameraCaptureSession.StateCallback callback) throws CameraAccessException {
-        OutputConfiguration output = new OutputConfiguration(reader.getSurface());
+        OutputConfiguration output = new OutputConfiguration(target);
         SessionConfiguration session = new SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
                 Collections.singletonList(output),
@@ -463,7 +546,14 @@ final class NativeCameraBridge {
         });
     }
 
+    private void cancelPendingPermissionStart() {
+        JSONObject pending = pendingPermissionStart;
+        pendingPermissionStart = null;
+        if (pending != null) replyError(pending.optInt("requestId"), "Camera start cancelled");
+    }
+
     private void stopRequested(int requestId) {
+        cancelPendingPermissionStart();
         cameraHandler.post(() -> {
             stopCameraInternal();
             try {
@@ -475,10 +565,12 @@ final class NativeCameraBridge {
     }
 
     void stop() {
+        cancelPendingPermissionStart();
         cameraHandler.post(this::stopCameraInternal);
     }
 
     private void stopCameraInternal() {
+        cameraGeneration++;
         running = false;
         frameCredit = false;
         try {
@@ -496,7 +588,14 @@ final class NativeCameraBridge {
         } catch (Exception ignored) {
         }
         imageReader = null;
+        try {
+            if (gpuReader != null) gpuReader.close();
+        } catch (Exception ignored) {
+        }
+        gpuReader = null;
+        captureSurface = null;
         activeCameraId = "";
+        activePipeline = "yuv";
     }
 
     void close() {
