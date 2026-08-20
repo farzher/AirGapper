@@ -43,9 +43,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          ref: ${{ github.event_name == 'pull_request' && 'fix/native-v2-preview-quality-v360' || '' }}
 
       - name: Apply v0.5.360 native preview hotfix
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/fix/native-v2-preview-quality-v360' }}
         run: |
           set -euo pipefail
           python3 .github/patch-native-v2-preview-quality.py
