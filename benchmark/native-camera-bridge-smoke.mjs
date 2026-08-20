@@ -90,7 +90,14 @@ assert.equal(track.getSettings().exposureTime, 28);
 assert.equal(track.getSettings().iso, 320);
 
 native.setNativeCameraFrameHandler(() => order.push("frame"));
-endpoint.onmessage({ data: new ArrayBuffer(64) });
+const frame = new ArrayBuffer(89);
+const view = new DataView(frame);
+view.setUint32(0, 0x32594741, true);
+view.setUint16(4, 88, true);
+view.setUint32(8, 1, true);
+view.setUint32(12, 1, true);
+view.setUint32(16, 1, true);
+endpoint.onmessage({ data: frame });
 assert.deepEqual(order.slice(-2), ["ack", "frame"], "native frame credit must be returned before receive work begins");
 
 await native.stopNativeCamera();
