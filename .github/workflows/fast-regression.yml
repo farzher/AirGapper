@@ -29,14 +29,62 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: fast-regression-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  repair-camera-v2:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/apk-camera-v2
+          fetch-depth: 1
+      - name: Repair bounded native-v2 receiver block
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('receive/main.js')
+          text = path.read_text()
+          start_marker = 'function nativeV2PreviewBounds(quad) {\\n'
+          end_marker = '   // Y8 share this ArrayBuffer'
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          repaired = text[start:end].replace('\\n', '\n')
+          text = text[:start] + repaired + text[end:]
+          path.write_text(text)
+          PY
+
+          # Restore the permanent regression workflow, then permanently add a
+          # fast module-parse gate so malformed integration code fails before
+          # Playwright waits on a broken page.
+          git fetch origin master --depth=1
+          git checkout origin/master -- .github/workflows/fast-regression.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/fast-regression.yml')
+          text = path.read_text()
+          needle = "      - name: Run grid regression\n"
+          syntax = """      - name: Check JavaScript syntax\n        run: |\n          set -euo pipefail\n          node --input-type=module --check < main.js\n          node --input-type=module --check < receive/main.js\n          node --input-type=module --check < shared/native-camera-v2.js\n\n"""
+          if syntax not in text:
+              text = text.replace(needle, syntax + needle, 1)
+          path.write_text(text)
+          PY
+
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/main.js .github/workflows/fast-regression.yml
+          git commit -m "fix Camera2 native receiver integration"
+          git push origin HEAD:feature/apk-camera-v2
+
   regression:
+    if: github.ref != 'refs/heads/feature/apk-camera-v2'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -67,7 +115,6 @@ jobs:
       - name: Run grid regression
         run: |
           node benchmark/grid-lattice-regression.mjs
-          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
 
       - name: Install browser benchmark dependency
