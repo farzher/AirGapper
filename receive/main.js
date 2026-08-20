@@ -5478,7 +5478,360 @@ function drawNativePreview(source) {
   }
   nativePreviewCtx.putImageData(rgba, 0, 0);
 }
-function nativeV2PreviewBounds(quad) {\n  if (!validQuadObject(quad)) return null;\n  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];\n  const left = Math.min(...points.map((point) => point.x));\n  const top = Math.min(...points.map((point) => point.y));\n  const right = Math.max(...points.map((point) => point.x));\n  const bottom = Math.max(...points.map((point) => point.y));\n  const w = right - left, h = bottom - top;\n  return w > 0 && h > 0 ? { x: left, y: top, w, h } : null;\n}\nfunction nativeV2TrackModuleSize(track) {\n  if (!track?.dim || !validQuadObject(track.quad)) return 0;\n  const points = [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft];\n  return Math.min(...points.map((point, index) => {\n    const next = points[(index + 1) % points.length];\n    return Math.hypot(next.x - point.x, next.y - point.y);\n  })) / track.dim;\n}\nfunction nativeV2WallMotion(samples) {\n  if (!samples.length) return null;\n  const median = (values) => {\n    const sorted = [...values].sort((a, b) => a - b);\n    const mid = sorted.length >> 1;\n    return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;\n  };\n  if (samples.length >= 2) {\n    const meanX = samples.reduce((sum, item) => sum + item.x, 0) / samples.length;\n    const meanY = samples.reduce((sum, item) => sum + item.y, 0) / samples.length;\n    const meanQx = samples.reduce((sum, item) => sum + item.x + item.dx, 0) / samples.length;\n    const meanQy = samples.reduce((sum, item) => sum + item.y + item.dy, 0) / samples.length;\n    let denom = 0, real = 0, imag = 0;\n    for (const item of samples) {\n      const px = item.x - meanX, py = item.y - meanY;\n      const qx = item.x + item.dx - meanQx, qy = item.y + item.dy - meanQy;\n      denom += px * px + py * py;\n      real += px * qx + py * qy;\n      imag += px * qy - py * qx;\n    }\n    if (denom > 1) {\n      const a = real / denom, b = imag / denom;\n      const motion = {\n        a, b,\n        tx: meanQx - a * meanX + b * meanY,\n        ty: meanQy - b * meanX - a * meanY\n      };\n      const scale = Math.hypot(a, b);\n      const rotation = Math.atan2(b, a);\n      const residuals = samples.map((item) => {\n        const x = a * item.x - b * item.y + motion.tx;\n        const y = b * item.x + a * item.y + motion.ty;\n        return Math.hypot(x - item.x - item.dx, y - item.y - item.dy);\n      });\n      const shifts = samples.map((item) => {\n        const x = a * item.x - b * item.y + motion.tx;\n        const y = b * item.x + a * item.y + motion.ty;\n        return Math.hypot(x - item.x, y - item.y);\n      });\n      if (scale >= 0.975 && scale <= 1.025 && Math.abs(rotation) <= 0.035 &&\n          Math.max(...residuals) <= 1.05 && Math.max(...shifts) <= 5.1) {\n        return {\n          kind: "similarity", ...motion,\n          dx: samples.reduce((sum, item) => sum + item.dx, 0) / samples.length,\n          dy: samples.reduce((sum, item) => sum + item.dy, 0) / samples.length,\n          samples: samples.length,\n          residual: Math.sqrt(residuals.reduce((sum, value) => sum + value * value, 0) / residuals.length),\n          maxShift: Math.max(...shifts)\n        };\n      }\n    }\n  }\n  const dx = median(samples.map((item) => item.dx));\n  const dy = median(samples.map((item) => item.dy));\n  const coherent = samples.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);\n  if (coherent.length >= Math.max(1, Math.ceil(samples.length * 0.6)) && Math.hypot(dx, dy) <= 4.5) {\n    return {\n      kind: "translation", a: 1, b: 0, tx: dx, ty: dy, dx, dy,\n      samples: coherent.length,\n      residual: Math.max(0, ...coherent.map((item) => Math.hypot(item.dx - dx, item.dy - dy))),\n      maxShift: Math.hypot(dx, dy)\n    };\n  }\n  return null;\n}\nfunction drawNativeV2Preview(packet) {\n  if (!nativePreviewCtx || !packet?.y || !packet.width || !packet.height) return;\n  const rotation = nativePreviewRotation({ sensorOrientation: packet.orientation, facing: nativeCameraInfo?.facing });\n  const rotated = rotation === 90 || rotation === 270;\n  const outWidth = rotated ? packet.height : packet.width;\n  const outHeight = rotated ? packet.width : packet.height;\n  if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {\n    nativePreview.width = outWidth;\n    nativePreview.height = outHeight;\n    nativePreviewImage = void 0;\n  }\n  const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);\n  nativePreviewImage = rgba;\n  for (let y = 0; y < outHeight; y++) {\n    for (let x = 0; x < outWidth; x++) {\n      let sx = x, sy = y;\n      if (rotation === 90) { sx = y; sy = packet.height - 1 - x; }\n      else if (rotation === 180) { sx = packet.width - 1 - x; sy = packet.height - 1 - y; }\n      else if (rotation === 270) { sx = packet.width - 1 - y; sy = x; }\n      const luma = packet.y[sy * packet.width + sx];\n      const at = (y * outWidth + x) * 4;\n      rgba.data[at] = luma; rgba.data[at + 1] = luma; rgba.data[at + 2] = luma; rgba.data[at + 3] = 255;\n    }\n  }\n  nativePreviewCtx.putImageData(rgba, 0, 0);\n}\nfunction nativeV2SourceFrame(frame, gen) {\n  if (!nativeCameraV2Running || done || gen !== captureGen || !frame) return;\n  const callbackTime = performance.now();\n  const sequence = sourceFrameSequence++;\n  latestSourceFrameSequence = sequence;\n  latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);\n  if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();\n  framePumpProcessorTotal++;\n  processSourceFrame({\n    nativeV2: true,\n    sequence,\n    cameraSequence: frame.frameNumber,\n    cameraSettingsEpoch: frame.settingsEpoch,\n    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,\n    width: frame.width || nativeCameraInfo?.width || requestedWidth,\n    height: frame.height || nativeCameraInfo?.height || requestedHeight,\n    callbackTimeMs: callbackTime,\n    mediaTimeMs: frame.timestampNs > 0 ? frame.timestampNs / 1e6 : callbackTime,\n    presentationTimeMs: callbackTime,\n    expectedDisplayTimeMs: callbackTime,\n    cameraMetadata: {\n      timestampNs: frame.timestampNs,\n      frameNumber: frame.frameNumber,\n      exposureTimeNs: frame.exposureTimeNs,\n      frameDurationNs: frame.frameDurationNs,\n      rollingShutterSkewNs: frame.rollingShutterSkewNs,\n      focusDistance: frame.focusDistance,\n      iso: frame.iso,\n      settingsEpoch: frame.settingsEpoch,\n      orientation: frame.orientation\n    }\n  }, gen);\n}\nfunction submitNativeV2Job(message, sourceSequence, sourceCapturedAt) {\n  if (!nativeCameraV2Running || nativeV2ActiveJob) return false;\n  const tracks = Array.isArray(message.tracks) ? message.tracks : [];\n  const guided = !message.full && Boolean(message.guidedDecode) && tracks.length > 0;\n  const plan = {\n    mode: guided ? "guided" : "full",\n    jobId: message.id,\n    sourceSequence: Number(sourceSequence) || 0,\n    cropX: Math.max(0, Math.round(Number(message.ox) || 0)),\n    cropY: Math.max(0, Math.round(Number(message.oy) || 0)),\n    cropWidth: Math.max(0, Math.round(Number(message.w) || 0)),\n    cropHeight: Math.max(0, Math.round(Number(message.h) || 0)),\n    tryHarder: Boolean(message.full ? message.acquisitionMode !== "fast" : true),\n    tryDownscale: Boolean(message.full && message.acquisitionMode === "thorough"),\n    returnErrors: Boolean(message.full),\n    maxSymbols: guided ? tracks.length : Math.min(8, Math.max(1, tracks.length || (message.full ? 1 : 4))),\n    fallbackMask: Number(message.guidedFallbackMask ?? 0xffffffff) >>> 0,\n    repairMask: Number(message.guidedRepairMask ?? 0xffffffff) >>> 0\n  };\n  if (guided) {\n    plan.tracks = tracks.map((track, index) => ({\n      id: Number(track.id ?? track.slot ?? index),\n      slot: Number(track.slot ?? track.id ?? index),\n      dim: Number(track.dim),\n      quad: [\n        track.quad.topLeft.x, track.quad.topLeft.y,\n        track.quad.topRight.x, track.quad.topRight.y,\n        track.quad.bottomRight.x, track.quad.bottomRight.y,\n        track.quad.bottomLeft.x, track.quad.bottomLeft.y\n      ]\n    }));\n  }\n  if (!submitNativeCameraV2Plan(plan)) return false;\n  nativeV2ActiveJob = {\n    id: message.id, message, sourceSequence, sourceCapturedAt,\n    opticsEpoch: message.opticsEpoch,\n    submittedAt: performance.now()\n  };\n  return true;\n}\nfunction completeNativeV2Job(packet) {\n  const job = nativeV2ActiveJob;\n  if (!job) return;\n  if (packet?.type === "decode" && packet.jobId !== job.id) return;\n  nativeV2ActiveJob = void 0;\n  const message = job.message;\n  if (packet?.type === "error") {\n    noteDecodeCompleted(job.id, {\n      full: Boolean(message.full), symbolCount: 0, sightingCount: 0,\n      trackedAttempted: !message.full, trackedHit: false, fallbackAttempted: false, fallbackSucceeded: false,\n      readFullAttempts: Number(Boolean(message.full)), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,\n      targetedSuccesses: 0, latencyMs: performance.now() - job.submittedAt, frameCopyMs: 0,\n      symbols: [], sightings: [], error: packet.detail || "Native Camera2 NDK decode failed"\n    });\n    return;\n  }\n  const metrics = packet.guidedMetrics;\n  const tracks = Array.isArray(message.tracks) ? message.tracks : [];\n  if (metrics && tracks.length) {\n    const sizes = tracks.map(nativeV2TrackModuleSize).filter((value) => value > 0 && Number.isFinite(value));\n    metrics.moduleSizeMin = sizes.length ? Math.min(...sizes) : 0;\n    metrics.moduleSizeMax = sizes.length ? Math.max(...sizes) : 0;\n    metrics.moduleSizeAvg = sizes.length ? sizes.reduce((sum, value) => sum + value, 0) / sizes.length : 0;\n  }\n  const expectedSlots = new Set(tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger));\n  const acceptedSlots = new Set();\n  const symbols = [];\n  const sightings = [];\n  const motionSamples = [];\n  for (const record of packet.records ?? []) {\n    const box = nativeV2PreviewBounds(record.quad);\n    if ((record.status !== 1 && record.status !== 3) || !record.bytes?.length) {\n      if (message.full && box) sightings.push(box);\n      continue;\n    }\n    const parsed = parseFrame(record.bytes);\n    const slot = parsed?.header?.slotIndex;\n    if (!parsed || (expectedSlots.size && !expectedSlots.has(slot)) || acceptedSlots.has(slot)) continue;\n    acceptedSlots.add(slot);\n    const lane = tracks.findIndex((track) => Number(track.slot ?? track.id) === slot);\n    const bit = lane >= 0 && lane < 32 ? (1 << lane) >>> 0 : 0;\n    const decodePath = message.full ? "acquire"\n      : packet.mode === 1\n        ? bit && metrics && (metrics.fallbackSuccessMask & bit) ? "fallback"\n          : bit && metrics && (metrics.sparseSuccessMask & bit) ? "sparse" : "hot"\n        : "robust";\n    const symbol = {\n      bytes: record.bytes, box, quad: record.quad, modules: record.dimension,\n      tracked: !message.full, geometryMeasured: record.status === 1, decodePath, crc32: true,\n      verifiedPayload: true, header: parsed.header\n    };\n    symbols.push(symbol);\n    if (!message.full && lane >= 0 && validQuadObject(tracks[lane]?.quad)) {\n      const input = tracks[lane].quad;\n      const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];\n      const dx = names.reduce((sum, name) => sum + record.quad[name].x - input[name].x, 0) / names.length;\n      const dy = names.reduce((sum, name) => sum + record.quad[name].y - input[name].y, 0) / names.length;\n      if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 5.1) {\n        const points = names.map((name) => input[name]);\n        motionSamples.push({\n          dx, dy,\n          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,\n          y: points.reduce((sum, point) => sum + point.y, 0) / points.length\n        });\n      }\n    }\n  }\n  const wallMotion = nativeV2WallMotion(motionSamples);\n  if (wallMotion) for (const symbol of symbols) symbol.wallMotion = wallMotion;\n  const auditMode = hotPathJobMode.get(job.id);\n  if (auditMode) {\n    auditMode.cameraTimestampNs = packet.timestampNs;\n    auditMode.rollingShutterSkewNs = packet.rollingShutterSkewNs;\n    auditMode.cameraOrientation = packet.orientation;\n    auditMode.cameraSettingsEpoch = packet.settingsEpoch;\n  }\n  for (const symbol of symbols) {\n    onDecoded(symbol.bytes, symbol.box, {\n      scanId: job.id, sourceSequence: job.sourceSequence, opticsEpoch: job.opticsEpoch,\n      quad: symbol.quad, modules: symbol.modules, tracked: symbol.tracked,\n      geometryMeasured: symbol.geometryMeasured, wallMotion: symbol.wallMotion, decodePath: symbol.decodePath,\n      crc32: symbol.crc32, verifiedPayload: true, header: symbol.header\n    });\n  }\n  if (!gridLattice.active) for (const sighting of sightings.slice(0, 3)) noteRegion(sighting, receiverNow(), false);\n  const latencyMs = performance.now() - job.submittedAt;\n  noteDecodeCompleted(job.id, {\n    full: Boolean(message.full), symbolCount: symbols.length, sightingCount: sightings.length,\n    trackedAttempted: !message.full, trackedHit: !message.full && symbols.length > 0,\n    fallbackAttempted: !message.full && packet.mode === 0, fallbackSucceeded: !message.full && packet.mode === 0 && symbols.length > 0,\n    readFullAttempts: Number(packet.mode === 0), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,\n    targetedSuccesses: 0, latencyMs, frameCopyMs: 0, nativeMs: metrics?.totalMs ?? 0,\n    guidedMetrics: metrics, pixelPath: packet.mode === 1 ? "ndk-guided" : "ndk-full",\n    symbols, sightings\n  });\n}\nasync function startNativeV2Receiver(startAttempt, transportReady) {\n  let catalogReady = Boolean(nativeCameraCatalog?.supported);\n  if (!catalogReady) {\n    try { catalogReady = await refreshNativeCameraDevices(); }\n    catch (error) { nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error); }\n  }\n  if (startAttempt !== cameraStartGen || receiverPaused) return;\n  if (!catalogReady) {\n    pool.resize(0);\n    offerRetry(`Native Camera2 NDK: ${nativeCameraUnsupportedReason || "camera bridge unavailable"}`);\n    return;\n  }\n  const camera = selectedNativeCamera();\n  const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);\n  if (!camera || !selectedMode) {\n    pool.resize(0);\n    offerRetry("Native Camera2 NDK: no supported mode found");\n    return;\n  }\n  requestedWidth = selectedMode.width; requestedHeight = selectedMode.height; requestedFps = selectedMode.fps;\n  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);\n  cameraActual.textContent = `${nativeModeLabel(selectedMode)} · native decode`;\n  startBtn.disabled = true; startBtn.style.display = "none";\n  video.srcObject = null; video.hidden = true;\n  if (nativePreview) nativePreview.hidden = false;\n  const futureGen = captureGen + 1;\n  let started, transportError;\n  try {\n    [started, transportError] = await Promise.all([\n      startNativeCameraV2({\n        cameraId: camera.id, width: requestedWidth, height: requestedHeight, fps: requestedFps,\n        sensorFps: selectedMode.sensorFps ?? requestedFps, pipeline: selectedMode.pipeline,\n        fpsControl: selectedMode.fpsControl, highSpeed: selectedMode.highSpeed\n      }),\n      transportReady\n    ]);\n  } catch (error) {\n    void stopNativeCameraV2();\n    if (startAttempt !== cameraStartGen || receiverPaused) return;\n    pool.resize(0);\n    offerRetry(`Native Camera2 NDK: ${error instanceof Error ? error.message : String(error)}`);\n    return;\n  }\n  if (transportError) {\n    void stopNativeCameraV2(); pool.resize(0);\n    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);\n    return;\n  }\n  if (startAttempt !== cameraStartGen || receiverPaused) { void stopNativeCameraV2(); return; }\n  stream = nativeStreamShim;\n  nativeCameraInfo = { ...started, nativeDecode: true };\n  nativeCameraV2Running = true; nativeCameraRunning = false; nativeV2ActiveJob = void 0;\n  latestNativeSettingsEpoch = 0;\n  const nativeTrack = nativeCameraV2Track();\n  if (nativeTrack) {\n    populateBrowserCapabilities(nativeTrack);\n    attachCameraController(nativeTrack);\n    if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native NDK camera started");\n  }\n  syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);\n  setNativeCameraV2PreviewHandler(drawNativeV2Preview);\n  setNativeCameraV2ResultHandler(completeNativeV2Job);\n  setNativeCameraV2FrameHandler((frame) => nativeV2SourceFrame(frame, futureGen));\n  preview.classList.remove("camera-loading"); setStatus("");\n  cameraStartedTs = receiverNow();\n  acquisitionRaceStartedAt = 0; acquisitionHuntScans = 0; acquisitionSightingScans = 0; acquisitionSightings = 0;\n  resetLivePipeline(cameraStartedTs);\n  captureGen = futureGen;\n  framePumpMode = "Camera2 NDK"; framePumpStartedAt = receiverNow(); framePumpFirstFrameAt = 0;\n  framePumpProcessorTotal = 0; framePumpProcessorDiscarded = 0;\n  statsTimer = setInterval(updateStats, STATS_TICK_MS);\n  await requestScreenWakeLock();\n}\n\nfunction nativeSourceFrame(frame, gen) {\n  // shared/native-camera.js has already ACKed ownership. Camera2 metadata and
+function nativeV2PreviewBounds(quad) {
+  if (!validQuadObject(quad)) return null;
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  const left = Math.min(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const right = Math.max(...points.map((point) => point.x));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const w = right - left, h = bottom - top;
+  return w > 0 && h > 0 ? { x: left, y: top, w, h } : null;
+}
+function nativeV2TrackModuleSize(track) {
+  if (!track?.dim || !validQuadObject(track.quad)) return 0;
+  const points = [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft];
+  return Math.min(...points.map((point, index) => {
+    const next = points[(index + 1) % points.length];
+    return Math.hypot(next.x - point.x, next.y - point.y);
+  })) / track.dim;
+}
+function nativeV2WallMotion(samples) {
+  if (!samples.length) return null;
+  const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+  if (samples.length >= 2) {
+    const meanX = samples.reduce((sum, item) => sum + item.x, 0) / samples.length;
+    const meanY = samples.reduce((sum, item) => sum + item.y, 0) / samples.length;
+    const meanQx = samples.reduce((sum, item) => sum + item.x + item.dx, 0) / samples.length;
+    const meanQy = samples.reduce((sum, item) => sum + item.y + item.dy, 0) / samples.length;
+    let denom = 0, real = 0, imag = 0;
+    for (const item of samples) {
+      const px = item.x - meanX, py = item.y - meanY;
+      const qx = item.x + item.dx - meanQx, qy = item.y + item.dy - meanQy;
+      denom += px * px + py * py;
+      real += px * qx + py * qy;
+      imag += px * qy - py * qx;
+    }
+    if (denom > 1) {
+      const a = real / denom, b = imag / denom;
+      const motion = {
+        a, b,
+        tx: meanQx - a * meanX + b * meanY,
+        ty: meanQy - b * meanX - a * meanY
+      };
+      const scale = Math.hypot(a, b);
+      const rotation = Math.atan2(b, a);
+      const residuals = samples.map((item) => {
+        const x = a * item.x - b * item.y + motion.tx;
+        const y = b * item.x + a * item.y + motion.ty;
+        return Math.hypot(x - item.x - item.dx, y - item.y - item.dy);
+      });
+      const shifts = samples.map((item) => {
+        const x = a * item.x - b * item.y + motion.tx;
+        const y = b * item.x + a * item.y + motion.ty;
+        return Math.hypot(x - item.x, y - item.y);
+      });
+      if (scale >= 0.975 && scale <= 1.025 && Math.abs(rotation) <= 0.035 &&
+          Math.max(...residuals) <= 1.05 && Math.max(...shifts) <= 5.1) {
+        return {
+          kind: "similarity", ...motion,
+          dx: samples.reduce((sum, item) => sum + item.dx, 0) / samples.length,
+          dy: samples.reduce((sum, item) => sum + item.dy, 0) / samples.length,
+          samples: samples.length,
+          residual: Math.sqrt(residuals.reduce((sum, value) => sum + value * value, 0) / residuals.length),
+          maxShift: Math.max(...shifts)
+        };
+      }
+    }
+  }
+  const dx = median(samples.map((item) => item.dx));
+  const dy = median(samples.map((item) => item.dy));
+  const coherent = samples.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
+  if (coherent.length >= Math.max(1, Math.ceil(samples.length * 0.6)) && Math.hypot(dx, dy) <= 4.5) {
+    return {
+      kind: "translation", a: 1, b: 0, tx: dx, ty: dy, dx, dy,
+      samples: coherent.length,
+      residual: Math.max(0, ...coherent.map((item) => Math.hypot(item.dx - dx, item.dy - dy))),
+      maxShift: Math.hypot(dx, dy)
+    };
+  }
+  return null;
+}
+function drawNativeV2Preview(packet) {
+  if (!nativePreviewCtx || !packet?.y || !packet.width || !packet.height) return;
+  const rotation = nativePreviewRotation({ sensorOrientation: packet.orientation, facing: nativeCameraInfo?.facing });
+  const rotated = rotation === 90 || rotation === 270;
+  const outWidth = rotated ? packet.height : packet.width;
+  const outHeight = rotated ? packet.width : packet.height;
+  if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
+    nativePreview.width = outWidth;
+    nativePreview.height = outHeight;
+    nativePreviewImage = void 0;
+  }
+  const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);
+  nativePreviewImage = rgba;
+  for (let y = 0; y < outHeight; y++) {
+    for (let x = 0; x < outWidth; x++) {
+      let sx = x, sy = y;
+      if (rotation === 90) { sx = y; sy = packet.height - 1 - x; }
+      else if (rotation === 180) { sx = packet.width - 1 - x; sy = packet.height - 1 - y; }
+      else if (rotation === 270) { sx = packet.width - 1 - y; sy = x; }
+      const luma = packet.y[sy * packet.width + sx];
+      const at = (y * outWidth + x) * 4;
+      rgba.data[at] = luma; rgba.data[at + 1] = luma; rgba.data[at + 2] = luma; rgba.data[at + 3] = 255;
+    }
+  }
+  nativePreviewCtx.putImageData(rgba, 0, 0);
+}
+function nativeV2SourceFrame(frame, gen) {
+  if (!nativeCameraV2Running || done || gen !== captureGen || !frame) return;
+  const callbackTime = performance.now();
+  const sequence = sourceFrameSequence++;
+  latestSourceFrameSequence = sequence;
+  latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);
+  if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
+  framePumpProcessorTotal++;
+  processSourceFrame({
+    nativeV2: true,
+    sequence,
+    cameraSequence: frame.frameNumber,
+    cameraSettingsEpoch: frame.settingsEpoch,
+    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,
+    width: frame.width || nativeCameraInfo?.width || requestedWidth,
+    height: frame.height || nativeCameraInfo?.height || requestedHeight,
+    callbackTimeMs: callbackTime,
+    mediaTimeMs: frame.timestampNs > 0 ? frame.timestampNs / 1e6 : callbackTime,
+    presentationTimeMs: callbackTime,
+    expectedDisplayTimeMs: callbackTime,
+    cameraMetadata: {
+      timestampNs: frame.timestampNs,
+      frameNumber: frame.frameNumber,
+      exposureTimeNs: frame.exposureTimeNs,
+      frameDurationNs: frame.frameDurationNs,
+      rollingShutterSkewNs: frame.rollingShutterSkewNs,
+      focusDistance: frame.focusDistance,
+      iso: frame.iso,
+      settingsEpoch: frame.settingsEpoch,
+      orientation: frame.orientation
+    }
+  }, gen);
+}
+function submitNativeV2Job(message, sourceSequence, sourceCapturedAt) {
+  if (!nativeCameraV2Running || nativeV2ActiveJob) return false;
+  const tracks = Array.isArray(message.tracks) ? message.tracks : [];
+  const guided = !message.full && Boolean(message.guidedDecode) && tracks.length > 0;
+  const plan = {
+    mode: guided ? "guided" : "full",
+    jobId: message.id,
+    sourceSequence: Number(sourceSequence) || 0,
+    cropX: Math.max(0, Math.round(Number(message.ox) || 0)),
+    cropY: Math.max(0, Math.round(Number(message.oy) || 0)),
+    cropWidth: Math.max(0, Math.round(Number(message.w) || 0)),
+    cropHeight: Math.max(0, Math.round(Number(message.h) || 0)),
+    tryHarder: Boolean(message.full ? message.acquisitionMode !== "fast" : true),
+    tryDownscale: Boolean(message.full && message.acquisitionMode === "thorough"),
+    returnErrors: Boolean(message.full),
+    maxSymbols: guided ? tracks.length : Math.min(8, Math.max(1, tracks.length || (message.full ? 1 : 4))),
+    fallbackMask: Number(message.guidedFallbackMask ?? 0xffffffff) >>> 0,
+    repairMask: Number(message.guidedRepairMask ?? 0xffffffff) >>> 0
+  };
+  if (guided) {
+    plan.tracks = tracks.map((track, index) => ({
+      id: Number(track.id ?? track.slot ?? index),
+      slot: Number(track.slot ?? track.id ?? index),
+      dim: Number(track.dim),
+      quad: [
+        track.quad.topLeft.x, track.quad.topLeft.y,
+        track.quad.topRight.x, track.quad.topRight.y,
+        track.quad.bottomRight.x, track.quad.bottomRight.y,
+        track.quad.bottomLeft.x, track.quad.bottomLeft.y
+      ]
+    }));
+  }
+  if (!submitNativeCameraV2Plan(plan)) return false;
+  nativeV2ActiveJob = {
+    id: message.id, message, sourceSequence, sourceCapturedAt,
+    opticsEpoch: message.opticsEpoch,
+    submittedAt: performance.now()
+  };
+  return true;
+}
+function completeNativeV2Job(packet) {
+  const job = nativeV2ActiveJob;
+  if (!job) return;
+  if (packet?.type === "decode" && packet.jobId !== job.id) return;
+  nativeV2ActiveJob = void 0;
+  const message = job.message;
+  if (packet?.type === "error") {
+    noteDecodeCompleted(job.id, {
+      full: Boolean(message.full), symbolCount: 0, sightingCount: 0,
+      trackedAttempted: !message.full, trackedHit: false, fallbackAttempted: false, fallbackSucceeded: false,
+      readFullAttempts: Number(Boolean(message.full)), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,
+      targetedSuccesses: 0, latencyMs: performance.now() - job.submittedAt, frameCopyMs: 0,
+      symbols: [], sightings: [], error: packet.detail || "Native Camera2 NDK decode failed"
+    });
+    return;
+  }
+  const metrics = packet.guidedMetrics;
+  const tracks = Array.isArray(message.tracks) ? message.tracks : [];
+  if (metrics && tracks.length) {
+    const sizes = tracks.map(nativeV2TrackModuleSize).filter((value) => value > 0 && Number.isFinite(value));
+    metrics.moduleSizeMin = sizes.length ? Math.min(...sizes) : 0;
+    metrics.moduleSizeMax = sizes.length ? Math.max(...sizes) : 0;
+    metrics.moduleSizeAvg = sizes.length ? sizes.reduce((sum, value) => sum + value, 0) / sizes.length : 0;
+  }
+  const expectedSlots = new Set(tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger));
+  const acceptedSlots = new Set();
+  const symbols = [];
+  const sightings = [];
+  const motionSamples = [];
+  for (const record of packet.records ?? []) {
+    const box = nativeV2PreviewBounds(record.quad);
+    if ((record.status !== 1 && record.status !== 3) || !record.bytes?.length) {
+      if (message.full && box) sightings.push(box);
+      continue;
+    }
+    const parsed = parseFrame(record.bytes);
+    const slot = parsed?.header?.slotIndex;
+    if (!parsed || (expectedSlots.size && !expectedSlots.has(slot)) || acceptedSlots.has(slot)) continue;
+    acceptedSlots.add(slot);
+    const lane = tracks.findIndex((track) => Number(track.slot ?? track.id) === slot);
+    const bit = lane >= 0 && lane < 32 ? (1 << lane) >>> 0 : 0;
+    const decodePath = message.full ? "acquire"
+      : packet.mode === 1
+        ? bit && metrics && (metrics.fallbackSuccessMask & bit) ? "fallback"
+          : bit && metrics && (metrics.sparseSuccessMask & bit) ? "sparse" : "hot"
+        : "robust";
+    const symbol = {
+      bytes: record.bytes, box, quad: record.quad, modules: record.dimension,
+      tracked: !message.full, geometryMeasured: record.status === 1, decodePath, crc32: true,
+      verifiedPayload: true, header: parsed.header
+    };
+    symbols.push(symbol);
+    if (!message.full && lane >= 0 && validQuadObject(tracks[lane]?.quad)) {
+      const input = tracks[lane].quad;
+      const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+      const dx = names.reduce((sum, name) => sum + record.quad[name].x - input[name].x, 0) / names.length;
+      const dy = names.reduce((sum, name) => sum + record.quad[name].y - input[name].y, 0) / names.length;
+      if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 5.1) {
+        const points = names.map((name) => input[name]);
+        motionSamples.push({
+          dx, dy,
+          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+          y: points.reduce((sum, point) => sum + point.y, 0) / points.length
+        });
+      }
+    }
+  }
+  const wallMotion = nativeV2WallMotion(motionSamples);
+  if (wallMotion) for (const symbol of symbols) symbol.wallMotion = wallMotion;
+  const auditMode = hotPathJobMode.get(job.id);
+  if (auditMode) {
+    auditMode.cameraTimestampNs = packet.timestampNs;
+    auditMode.rollingShutterSkewNs = packet.rollingShutterSkewNs;
+    auditMode.cameraOrientation = packet.orientation;
+    auditMode.cameraSettingsEpoch = packet.settingsEpoch;
+  }
+  for (const symbol of symbols) {
+    onDecoded(symbol.bytes, symbol.box, {
+      scanId: job.id, sourceSequence: job.sourceSequence, opticsEpoch: job.opticsEpoch,
+      quad: symbol.quad, modules: symbol.modules, tracked: symbol.tracked,
+      geometryMeasured: symbol.geometryMeasured, wallMotion: symbol.wallMotion, decodePath: symbol.decodePath,
+      crc32: symbol.crc32, verifiedPayload: true, header: symbol.header
+    });
+  }
+  if (!gridLattice.active) for (const sighting of sightings.slice(0, 3)) noteRegion(sighting, receiverNow(), false);
+  const latencyMs = performance.now() - job.submittedAt;
+  noteDecodeCompleted(job.id, {
+    full: Boolean(message.full), symbolCount: symbols.length, sightingCount: sightings.length,
+    trackedAttempted: !message.full, trackedHit: !message.full && symbols.length > 0,
+    fallbackAttempted: !message.full && packet.mode === 0, fallbackSucceeded: !message.full && packet.mode === 0 && symbols.length > 0,
+    readFullAttempts: Number(packet.mode === 0), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,
+    targetedSuccesses: 0, latencyMs, frameCopyMs: 0, nativeMs: metrics?.totalMs ?? 0,
+    guidedMetrics: metrics, pixelPath: packet.mode === 1 ? "ndk-guided" : "ndk-full",
+    symbols, sightings
+  });
+}
+async function startNativeV2Receiver(startAttempt, transportReady) {
+  let catalogReady = Boolean(nativeCameraCatalog?.supported);
+  if (!catalogReady) {
+    try { catalogReady = await refreshNativeCameraDevices(); }
+    catch (error) { nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error); }
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) return;
+  if (!catalogReady) {
+    pool.resize(0);
+    offerRetry(`Native Camera2 NDK: ${nativeCameraUnsupportedReason || "camera bridge unavailable"}`);
+    return;
+  }
+  const camera = selectedNativeCamera();
+  const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);
+  if (!camera || !selectedMode) {
+    pool.resize(0);
+    offerRetry("Native Camera2 NDK: no supported mode found");
+    return;
+  }
+  requestedWidth = selectedMode.width; requestedHeight = selectedMode.height; requestedFps = selectedMode.fps;
+  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
+  cameraActual.textContent = `${nativeModeLabel(selectedMode)} · native decode`;
+  startBtn.disabled = true; startBtn.style.display = "none";
+  video.srcObject = null; video.hidden = true;
+  if (nativePreview) nativePreview.hidden = false;
+  const futureGen = captureGen + 1;
+  let started, transportError;
+  try {
+    [started, transportError] = await Promise.all([
+      startNativeCameraV2({
+        cameraId: camera.id, width: requestedWidth, height: requestedHeight, fps: requestedFps,
+        sensorFps: selectedMode.sensorFps ?? requestedFps, pipeline: selectedMode.pipeline,
+        fpsControl: selectedMode.fpsControl, highSpeed: selectedMode.highSpeed
+      }),
+      transportReady
+    ]);
+  } catch (error) {
+    void stopNativeCameraV2();
+    if (startAttempt !== cameraStartGen || receiverPaused) return;
+    pool.resize(0);
+    offerRetry(`Native Camera2 NDK: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (transportError) {
+    void stopNativeCameraV2(); pool.resize(0);
+    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
+    return;
+  }
+  if (startAttempt !== cameraStartGen || receiverPaused) { void stopNativeCameraV2(); return; }
+  stream = nativeStreamShim;
+  nativeCameraInfo = { ...started, nativeDecode: true };
+  nativeCameraV2Running = true; nativeCameraRunning = false; nativeV2ActiveJob = void 0;
+  latestNativeSettingsEpoch = 0;
+  const nativeTrack = nativeCameraV2Track();
+  if (nativeTrack) {
+    populateBrowserCapabilities(nativeTrack);
+    attachCameraController(nativeTrack);
+    if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native NDK camera started");
+  }
+  syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
+  setNativeCameraV2PreviewHandler(drawNativeV2Preview);
+  setNativeCameraV2ResultHandler(completeNativeV2Job);
+  setNativeCameraV2FrameHandler((frame) => nativeV2SourceFrame(frame, futureGen));
+  preview.classList.remove("camera-loading"); setStatus("");
+  cameraStartedTs = receiverNow();
+  acquisitionRaceStartedAt = 0; acquisitionHuntScans = 0; acquisitionSightingScans = 0; acquisitionSightings = 0;
+  resetLivePipeline(cameraStartedTs);
+  captureGen = futureGen;
+  framePumpMode = "Camera2 NDK"; framePumpStartedAt = receiverNow(); framePumpFirstFrameAt = 0;
+  framePumpProcessorTotal = 0; framePumpProcessorDiscarded = 0;
+  statsTimer = setInterval(updateStats, STATS_TICK_MS);
+  await requestScreenWakeLock();
+}
+
+function nativeSourceFrame(frame, gen) {
+  // shared/native-camera.js has already ACKed ownership. Camera2 metadata and
   // Y8 share this ArrayBuffer, so candidate fencing uses the capture epoch that
   // actually produced these pixels rather than a main-thread apply timestamp.
   if (!nativeCameraRunning || done || gen !== captureGen || !frame) return;
