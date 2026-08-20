@@ -699,6 +699,16 @@ final class NativeCameraBridge {
                         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
                         builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
                         currentExposureMode = "manual";
+                    } else if ("manual".equals(activeFpsControl)) {
+                        // This stream can sustain the requested frame duration,
+                        // but the HAL did not advertise a matching hardware-AE
+                        // FPS range. Keep sensor timing manual rather than asking
+                        // AE for an unsupported range. AutoOptics can still read
+                        // the current exposure/ISO as its baseline and then tune
+                        // the same manual sensor controls.
+                        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                        builder.set(CaptureRequest.SENSOR_FRAME_DURATION, activeFrameDurationNs);
+                        currentExposureMode = "manual";
                     } else {
                         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                         if (activeFpsRange != null) builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, activeFpsRange);
