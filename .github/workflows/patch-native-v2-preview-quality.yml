@@ -1,3 +1,4 @@
+# Temporary one-shot patch runner; removed before merge.
 name: apply native-v2 preview quality hotfix
 
 on:
