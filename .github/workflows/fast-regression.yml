@@ -65,7 +65,9 @@ jobs:
           node-version: 22
 
       - name: Run grid regression
-        run: node benchmark/grid-lattice-regression.mjs
+        run: |
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
 
       - name: Install browser benchmark dependency
         run: npm install --no-save --package-lock=false playwright@1.55.0
