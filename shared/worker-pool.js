@@ -27,7 +27,9 @@ class DecodeWorkerPool {
     return this.workers.length;
   }
   get busyCount() {
-    return this.busy.filter(Boolean).length;
+    let count = 0;
+    for (let index = 0; index < this.busy.length; index++) count += Number(this.busy[index]);
+    return count;
   }
   configureWorker(slot, worker) {
     worker.onmessage = (event) => {

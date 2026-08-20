@@ -1,7 +1,7 @@
 import { isAndroid, isIOS } from "./shared/platform.js";
 import { isAndroidApp } from "./shared/android.js";
 
-const APP_BUILD = "v0.5.356";
+const APP_BUILD = "v0.5.357";
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 

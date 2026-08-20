@@ -54,7 +54,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.356";
+const RECEIVER_RUNTIME_BUILD = "v0.5.357";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -653,9 +653,11 @@ function automaticCameraScore(device, index) {
   const focusModes = Array.isArray(caps?.focusMode) ? caps.focusMode : [];
   const af = focusModes.includes("continuous") ? 1 : 0;
   const mainHint = /camera\s*0(?:\D|$)|main/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
-  // Sensor/video resolution dominates first-use selection. Measured AirGapper
-  // throughput is strong enough to separate cameras exposing similar modes.
-  return area + fps * 10000 + goodput * 1000 + af * 50000 + mainHint * 1000 - index;
+  // A 7x4 wall needs more than 35.7 camera frames/s to reach 1000 QR/s.
+  // Prefer a camera capable of crossing that hard cadence threshold before
+  // comparing resolution; measured throughput separates cameras in each tier.
+  const cadenceTier = fps >= 36 ? 1 : 0;
+  return cadenceTier * 1e9 + area + fps * 10000 + goodput * 1000 + af * 50000 + mainHint * 1000 - index;
 }
 function bestAutomaticCameraDevice(devices) {
   if (!devices.length) return undefined;
@@ -1095,6 +1097,16 @@ const STATS_WINDOW_MS = 1e3;
 const STATS_TICK_MS = 200;
 const DIAGNOSTICS_TICK_MS = 1000;
 let lastDiagnosticsPaintAt = -Infinity;
+function pruneTimestampSamples(samples, cutoff) {
+  let count = 0;
+  while (count < samples.length && samples[count] < cutoff) count++;
+  if (count) samples.splice(0, count);
+}
+function pruneTimedSamples(samples, cutoff) {
+  let count = 0;
+  while (count < samples.length && samples[count].at < cutoff) count++;
+  if (count) samples.splice(0, count);
+}
 let stream = null;
 let decoder = null;
 function releaseTransportDecoder() {
@@ -1175,7 +1187,11 @@ function stableLockedLaneCrop(groupIndex, key, laneCount, vw, vh, minX, minY, ma
 function queuePendingGridLane(groupIndex, source, geometry) {
   const direct = mappedDirectTrackedFrame(source, geometry.x, geometry.y, geometry.w, geometry.h, geometry.tracks);
   if (!direct) return false;
-  if (pendingGridLanes[groupIndex]) pendingLaneReplaceTimes.push(receiverNow());
+  if (pendingGridLanes[groupIndex]) {
+    const replacedAt = receiverNow();
+    pendingLaneReplaceTimes.push(replacedAt);
+    pruneTimestampSamples(pendingLaneReplaceTimes, replacedAt - STATS_WINDOW_MS);
+  }
   discardPendingGridLane(groupIndex);
   pendingGridLanes[groupIndex] = { ...geometry, direct };
   return true;
@@ -1264,6 +1280,7 @@ function resetDuplicateAttribution() {
   duplicateSourceDelta.unknown = 0;
 }
 function noteDuplicateAttribution(esi, sourceSequence, duplicate) {
+  if (receiverDevActions.hidden && !replayRunning) return;
   const sequence = Number(sourceSequence);
   const prior = sourceSequencesByEsi.get(esi) ?? [];
   if (duplicate) {
@@ -1384,6 +1401,8 @@ const TEMPORAL_BAND_MAX_REPEAT = 3;
 const TEMPORAL_BAND_SKIP_SOURCE_FRAMES = 1;
 const temporalBandSkipThroughSource = new Int32Array(SLOT_METRIC_COUNT);
 temporalBandSkipThroughSource.fill(-1);
+const temporalCleanThroughSource = new Int32Array(SLOT_METRIC_COUNT);
+temporalCleanThroughSource.fill(-1);
 let temporalBandDetections = 0;
 let temporalBandSkippedTracks = 0;
 let temporalBandLastKey = "";
@@ -1398,6 +1417,7 @@ let temporalPredictionRiskAttempts = 0;
 let temporalPredictionRiskMisses = 0;
 let temporalPredictionSafeAttempts = 0;
 let temporalPredictionSafeMisses = 0;
+let temporalProbeCursor = 0;
 const GUIDED_REPAIR_PRESSURE_LIMIT = 1;
 const temporalBandModel = {
   axis: "",
@@ -1540,19 +1560,33 @@ function resetSlotSchedulingHistory(slot, now = receiverNow()) {
   resetGuidedFallbackSlot(index);
   return true;
 }
-function noteSlotDecoded(slot) {
+function noteSlotDecoded(slot, sourceSequence) {
   const index = Number(slot);
   if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return;
   // A CRC-valid probe is authoritative: immediately remove every temporal and
   // weak-slot fence so the scheduler cannot preserve a stale blind spot.
   temporalBandAvoidUntil[index] = 0;
   temporalBandSkipThroughSource[index] = -1;
+  const sequence = Number(sourceSequence);
+  if (Number.isFinite(sequence)) {
+    // One CRC-valid result is authoritative evidence that this slot is readable
+    // again. Worker latency may mean sequence+1 was already submitted, so in a
+    // live scan keep the next not-yet-captured frame open. Replays retain their
+    // recorded clock so results stay deterministic.
+    const recoverySequence = replayRunning
+      ? sequence
+      : Math.max(sequence, Number(latestSourceFrameSequence) || sequence);
+    temporalCleanThroughSource[index] = Math.max(
+      temporalCleanThroughSource[index],
+      Math.trunc(recoverySequence) + 1
+    );
+  }
   slotAdaptiveWeak[index] = 0;
   slotQualityScores[index] = Math.max(slotQualityScores[index], SLOT_WEAK_RECOVERY_SCORE);
   slotFastYield[index] = Math.max(slotFastYield[index], 0.85);
   resetGuidedFallbackSlot(index);
 }
-function noteSlotMetric(slot, hit) {
+function noteSlotMetric(slot, hit, sourceSequence) {
   const index = Number(slot);
   if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return;
   slotAttemptCounts[index]++;
@@ -1561,7 +1595,7 @@ function noteSlotMetric(slot, hit) {
     // A weak-slot probe that succeeds is real CRC-backed evidence. Restore it
     // immediately, then let the EWMA decide again only after another sustained
     // miss run instead of making one lucky/failed frame flap the scheduler.
-    noteSlotDecoded(index);
+    noteSlotDecoded(index, sourceSequence);
   }
   slotQualitySamples[index] = Math.min(65535, slotQualitySamples[index] + 1);
   slotQualityScores[index] = slotQualityScores[index] * 0.9 + Number(hit) * 0.1;
@@ -1583,6 +1617,9 @@ function resetTemporalBandModel() {
   temporalBandModel.confidence = 0;
   temporalBandModel.detections = 0;
   temporalBandAvoidUntil.fill(0);
+  temporalBandSkipThroughSource.fill(-1);
+  temporalCleanThroughSource.fill(-1);
+  temporalProbeCursor = 0;
 }
 function updateTemporalBandModel(missPoints, hitPoints, sourceSequence, now) {
   if (missPoints.length < 2 || hitPoints.length < 2 || !Number.isFinite(sourceSequence) ||
@@ -1647,12 +1684,10 @@ function predictedTemporalBand(sourceSequence, now = receiverNow()) {
     confidence
   };
 }
-function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
-  const index = Number(slot);
-  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return 0;
+function temporalBandRiskForRegion(region, index, sourceSequence, now, model) {
+  const sequence = Number(sourceSequence);
+  if (Number.isFinite(sequence) && sequence <= temporalCleanThroughSource[index]) return 0;
   const legacyRisk = temporalBandAvoidUntil[index] > now ? 0.98 : 0;
-  const model = predictedTemporalBand(sourceSequence, now);
-  const region = regions.find((item) => Number(item.gridSlot) === index);
   const quad = region?.quad;
   if (!model || !quad || model.confidence < 0.08) return legacyRisk;
   const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
@@ -1664,14 +1699,61 @@ function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
   const fallback = legacyRisk * legacyTemporalRiskWeight(model.confidence);
   return Math.max(fallback, Math.min(1, modeled));
 }
-function temporalPredictionSnapshot(trackSlots, sourceSequence, now = receiverNow()) {
+function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return 0;
+  const model = predictedTemporalBand(sourceSequence, now);
+  const region = regions.find((item) => Number(item.gridSlot) === index);
+  return temporalBandRiskForRegion(region, index, sourceSequence, now, model);
+}
+function temporalScheduleForSource(sourceSequence, now = receiverNow(), probeCandidates) {
+  const sequence = Number(sourceSequence);
+  const model = predictedTemporalBand(sequence, now);
+  const risks = new Float32Array(SLOT_METRIC_COUNT);
+  const visible = [];
+  let cleanCount = 0;
+  for (const region of regions) {
+    const slot = Number(region.gridSlot);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || region.slotState === "OFFSCREEN") continue;
+    const risk = temporalBandRiskForRegion(region, slot, sequence, now, model);
+    risks[slot] = risk;
+    visible.push(region);
+    if (risk < TEMPORAL_MODEL_RISK_THRESHOLD) cleanCount++;
+  }
+  const riskMissRate = temporalPredictionRiskAttempts
+    ? temporalPredictionRiskMisses / temporalPredictionRiskAttempts
+    : 0;
+  const safeMissRate = temporalPredictionSafeAttempts
+    ? temporalPredictionSafeMisses / temporalPredictionSafeAttempts
+    : 0;
+  // A global blur/exposure collapse makes both risky and safe regions miss.
+  // Require the learned band to predict materially worse outcomes before it is
+  // allowed to remove tracks from a frame.
+  const validated = temporalPredictionRiskAttempts >= 12 && temporalPredictionSafeAttempts >= 12 &&
+    riskMissRate >= 0.70 && riskMissRate - safeMissRate >= 0.25;
+  const risky = (probeCandidates ?? visible)
+    .filter((region) => risks[Number(region.gridSlot)] >= 0.65)
+    .sort((a, b) => Number(a.gridSlot) - Number(b.gridSlot));
+  const hardSkipEnabled = Boolean(model && model.confidence >= 0.72 && validated && cleanCount >= 4 && risky.length);
+  let probeSlot = -1;
+  if (hardSkipEnabled) {
+    probeSlot = Number(risky[temporalProbeCursor % risky.length].gridSlot);
+  }
+  return { sequence, model, risks, cleanCount, hardSkipEnabled, probeSlot };
+}
+function temporalPredictionSnapshot(tracks, sourceSequence, now = receiverNow()) {
   const model = predictedTemporalBand(sourceSequence, now);
   if (!model || model.confidence < 0.08) return null;
-  const slots = [...new Set((trackSlots ?? []).map(Number).filter((slot) =>
-    Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT
-  ))];
-  if (!slots.length) return null;
-  return slots.map((slot) => [slot, temporalBandRiskForSlot(slot, sourceSequence, now)]);
+  const risks = new Map();
+  for (const track of tracks ?? []) {
+    const slot = Number(track?.slot ?? track?.id ?? track);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || risks.has(slot)) continue;
+    const suppliedRisk = Number(track?.temporalRisk);
+    risks.set(slot, Number.isFinite(suppliedRisk)
+      ? suppliedRisk
+      : temporalBandRiskForSlot(slot, sourceSequence, now));
+  }
+  return risks.size ? [...risks] : null;
 }
 function noteTemporalPredictionOutcome(prediction, outputSlots) {
   if (!Array.isArray(prediction) || !prediction.length) return;
@@ -1745,6 +1827,7 @@ function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) 
   const items = [];
   let mask = 0;
   const list = tracks ?? [];
+  const sequence = Number(sourceSequence);
   // Native salvage has 32 bits. They address batch lanes, not physical slots.
   // Lanes >=32 still run the cheap tracked/sparse path but cannot enter
   // ambiguity repair or generic SampleQR fallback.
@@ -1753,8 +1836,16 @@ function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) 
     const slot = Number(track?.slot ?? track?.id);
     if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) continue;
     const bit = (1 << lane) >>> 0;
-    const risk = temporalBandRiskForSlot(slot, sourceSequence, now);
-    if (risk >= TEMPORAL_MODEL_RISK_THRESHOLD) {
+    const suppliedRisk = Number(track?.temporalRisk);
+    const risk = Number.isFinite(suppliedRisk)
+      ? suppliedRisk
+      : temporalBandRiskForSlot(slot, sourceSequence, now);
+    // A freshly observed seam may not yet have enough history for a hard track
+    // skip. Still fence its one-frame explicit misses from expensive repair and
+    // generic fallback while preserving the cheap decode as a recovery probe.
+    const explicitFrameFence = Number.isFinite(sequence) && sequence >= temporalBandLastSource &&
+      sequence <= temporalBandSkipThroughSource[slot];
+    if (explicitFrameFence || risk >= TEMPORAL_MODEL_RISK_THRESHOLD) {
       guidedRepairTemporalFences++;
       continue;
     }
@@ -1786,7 +1877,7 @@ function noteSlotFastMetric(slot, hit) {
   slotFastSamples[index] = Math.min(65535, slotFastSamples[index] + 1);
   slotFastUpdatedAt[index] = receiverNow();
 }
-function slotSchedulingYield(region, now, sourceSequence = temporalBandLastSource + 1) {
+function slotSchedulingYield(region, now, sourceSequence = temporalBandLastSource + 1, temporalPlan) {
   const slot = Number(region.gridSlot);
   if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT) return 0.5;
   // Fast evidence decays back toward a neutral prior so a temporarily crossed
@@ -1799,12 +1890,12 @@ function slotSchedulingYield(region, now, sourceSequence = temporalBandLastSourc
   let estimate = fast * 0.72 + longYield * 0.28;
   const visible = Math.max(0.15, Math.min(1, Number(region.visibleFraction) || 1));
   estimate *= 0.82 + visible * 0.18;
-  const temporalRisk = temporalBandRiskForSlot(slot, sourceSequence, now);
+  const temporalRisk = temporalPlan?.risks?.[slot] ?? temporalBandRiskForSlot(slot, sourceSequence, now);
   if (temporalRisk > 0) estimate *= Math.max(0.06, 1 - temporalRisk * 0.94);
   if ((region.consecutiveMisses || 0) > 0) estimate *= Math.max(0.35, 1 - Math.min(5, region.consecutiveMisses) * 0.10);
   return Math.max(0.01, Math.min(1, estimate));
 }
-function temporalBandMissSlots(auditMode, completion, ignoredMisses = new Set()) {
+function temporalBandMissSlots(auditMode, completion, attempts = [], ignoredMisses = new Set()) {
   const layout = lastGridSnapshot?.layout;
   const sourceSequence = Number(auditMode?.sourceSequence);
   if (!layout || auditMode?.full || auditMode?.autoOpticsProbe || !Number.isFinite(sourceSequence)) return new Set();
@@ -1817,9 +1908,9 @@ function temporalBandMissSlots(auditMode, completion, ignoredMisses = new Set())
   const misses = submitted.filter((slot) => !output.has(slot));
   if (hits.length < TEMPORAL_BAND_MIN_HITS || misses.length < TEMPORAL_BAND_MIN_MISSES || misses.length > submitted.length * 0.45) return new Set();
 
+  const capturedQuads = new Map(attempts.map((attempt) => [Number(attempt.region?.gridSlot), attempt.quad]));
   const pointFor = (slot) => {
-    const region = regions.find((item) => Number(item.gridSlot) === slot);
-    const quad = region?.quad;
+    const quad = capturedQuads.get(slot) ?? regions.find((item) => Number(item.gridSlot) === slot)?.quad;
     if (!quad) return null;
     const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
     if (points.some((point) => !point || !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
@@ -1865,24 +1956,13 @@ function temporalBandMissSlots(auditMode, completion, ignoredMisses = new Set())
   notePipelineEvent("temporal-band", misses.length);
   return transientBand ? new Set(misses) : new Set();
 }
-function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNow()) {
+function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNow(), plan) {
   const slot = Number(region.gridSlot);
   const sequence = Number(sourceSequence);
   if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !Number.isFinite(sequence)) return true;
   if (autoOpticsMeasurementSlots?.size) return true;
-  const model = predictedTemporalBand(sequence, now);
-  const risk = temporalBandRiskForSlot(slot, sequence, now);
-  const precision = temporalPredictionRiskAttempts >= 12
-    ? temporalPredictionRiskMisses / temporalPredictionRiskAttempts
-    : 0;
-  const visible = regions.filter((item) => item.gridSlot !== void 0 && item.slotState !== "OFFSCREEN");
-  const cleanCount = visible.reduce((count, item) =>
-    count + Number(temporalBandRiskForSlot(item.gridSlot, sequence, now) < 0.34), 0);
-  const risky = visible.filter((item) => temporalBandRiskForSlot(item.gridSlot, sequence, now) >= 0.65)
-    .sort((a, b) => Number(a.gridSlot) - Number(b.gridSlot));
-  const probe = risky.length ? risky[Math.abs(Math.trunc(sequence)) % risky.length] : void 0;
-  const hardSkip = Boolean(model && model.confidence >= 0.72 && risk >= 0.65 &&
-    precision >= 0.70 && cleanCount >= 4 && Number(probe?.gridSlot) !== slot);
+  const schedule = plan ?? temporalScheduleForSource(sequence, now);
+  const hardSkip = schedule.hardSkipEnabled && schedule.risks[slot] >= 0.65 && schedule.probeSlot !== slot;
   if (!hardSkip) return true;
   temporalBandSkippedTracks++;
   trackBudgetTemporalAvoided++;
@@ -1890,10 +1970,11 @@ function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNo
 }
 function recentTrackPressure(now) {
   const cutoff = now - 1000;
-  return poolBusyTimes.some((at) => at > cutoff) || pendingLaneReplaceTimes.some((at) => at > cutoff) ||
+  return (poolBusyTimes.length > 0 && poolBusyTimes[poolBusyTimes.length - 1] > cutoff) ||
+    (pendingLaneReplaceTimes.length > 0 && pendingLaneReplaceTimes[pendingLaneReplaceTimes.length - 1] > cutoff) ||
     (pool.size > 0 && pool.busyCount >= Math.max(1, pool.size - 1));
 }
-function estimatedAutoTrackBudget(candidates, now) {
+function estimatedAutoTrackBudget(candidates, now, sourceSequence, temporalPlan) {
   const count = candidates.length;
   if (count <= TRACK_BUDGET_MIN || strictHotPathActive() || replayRunning || autoOpticsMeasurementSlots?.size) return count;
   if (!recentTrackPressure(now)) {
@@ -1929,7 +2010,7 @@ function estimatedAutoTrackBudget(candidates, now) {
     return count;
   }
 
-  const yields = candidates.map((region) => slotSchedulingYield(region, now)).sort((a, b) => b - a);
+  const yields = candidates.map((region) => slotSchedulingYield(region, now, sourceSequence, temporalPlan)).sort((a, b) => b - a);
   const minimum = Math.min(TRACK_BUDGET_MIN, count);
   let cumulative = 0;
   let allScore = 0;
@@ -1967,7 +2048,7 @@ function estimatedAutoTrackBudget(candidates, now) {
   autoTrackBudgetReason = `yield/cost ${bestCount}/${count} +${gain.toFixed(0)}%`;
   return autoTrackBudgetTarget;
 }
-function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
+function selectTrackedRegionsForBudget(candidates, sourceSequence, now, temporalPlan) {
   const codecLimit = 32;
   if (candidates.length <= 1 || autoOpticsMeasurementSlots?.size || strictHotPathActive() || unlimitedTracksPerFrame()) {
     lastTrackBudgetCandidates = candidates.length;
@@ -1985,13 +2066,13 @@ function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
   const budget = Math.max(1, Math.min(
     codecLimit,
     candidates.length,
-    Number.isFinite(manualLimit) ? manualLimit : estimatedAutoTrackBudget(candidates, now)
+    Number.isFinite(manualLimit) ? manualLimit : estimatedAutoTrackBudget(candidates, now, sourceSequence, temporalPlan)
   ));
   lastTrackBudgetCandidates = candidates.length;
   lastTrackBudgetSelected = budget;
   if (budget >= candidates.length) return candidates;
 
-  const ranked = candidates.map((region) => ({ region, score: slotSchedulingYield(region, now, sourceSequence) }))
+  const ranked = candidates.map((region) => ({ region, score: slotSchedulingYield(region, now, sourceSequence, temporalPlan) }))
     .sort((a, b) => b.score - a.score || Number(a.region.gridSlot) - Number(b.region.gridSlot));
   const selected = [];
   const selectedIds = new Set();
@@ -2008,6 +2089,11 @@ function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
     const slot = Number(entry.region.gridSlot);
     if (Number.isInteger(slot) && slot >= 0 && slot < SLOT_METRIC_COUNT && slotGeometryProbeUntil[slot] > now) add(entry);
   }
+
+  // The temporal probe is the CRC-backed escape hatch for a recovered band.
+  // Reserve it before yield ranking so the budget controller cannot discard it.
+  if (temporalPlan?.probeSlot >= 0)
+    add(ranked.find(({ region }) => Number(region.gridSlot) === temporalPlan.probeSlot));
 
   // Preserve a spatially distributed pose basis while spending the remaining
   // budget entirely on high-yield payload slots. Pick the BEST slot in each
@@ -2862,11 +2948,24 @@ function notePipelineEvent(kind, value = 0) {
 }
 const QUALITY_WINDOW_MS = 3e3;
 function pruneSequenceSamples(region, now) {
-  while (region.sequenceSamples.length && region.sequenceSamples[0].at < now - QUALITY_WINDOW_MS) {
-    region.sequenceSamples.shift();
-  }
+  let count = 0;
+  while (count < region.sequenceSamples.length && region.sequenceSamples[count].at < now - QUALITY_WINDOW_MS) count++;
+  if (count) region.sequenceSamples.splice(0, count);
 }
 function noteSequence(region, seq, now) {
+  // Normal operation only needs to know that this slot has produced a packet.
+  // Retaining and sorting three seconds of per-packet history is solely for the
+  // developer sender-rate diagnostic and is expensive near 1000 QR/s.
+  if (receiverDevActions.hidden && !replayRunning) {
+    if (region.sequenceSamples.length) {
+      region.sequenceSamples[0].seq = seq;
+      region.sequenceSamples[0].at = now;
+      region.sequenceSamples.length = 1;
+    } else {
+      region.sequenceSamples.push({ seq, at: now });
+    }
+    return;
+  }
   pruneSequenceSamples(region, now);
   if (!region.sequenceSamples.some((sample) => sample.seq === seq)) {
     region.sequenceSamples.push({ seq, at: now });
@@ -2919,7 +3018,7 @@ function noteDecodeCompleted(id, completion) {
     const guidedMs = Math.max(0, Number(guided?.totalMs) || 0);
     livePipeline.completedJobs++;
     const outputSymbols = Math.max(0, Number(completion.symbolCount) || 0);
-    if (!auditMode.full && Number.isFinite(auditMode.sourceSequence)) {
+    if (!completion.repeatSkipped && !auditMode.full && Number.isFinite(auditMode.sourceSequence)) {
       const submittedSlots = new Set((auditMode.trackSlots ?? []).map(Number).filter(Number.isFinite));
       const outputSlots = new Set(completion.symbols
         .map((symbol) => Number(symbol.header?.slotIndex))
@@ -3002,7 +3101,13 @@ function noteDecodeCompleted(id, completion) {
     if (completion.error === "Decode worker timed out") livePipeline.timeouts++;
     else if (completion.error) livePipeline.errors++;
     if (!auditMode.full) {
-      if (auditMode.guided) noteGuidedCompletion(auditMode.guidedStage, outputSymbols, auditMode.tracks, latencyMs, auditMode.autoOpticsProbe);
+      if (auditMode.guided) noteGuidedCompletion(
+        auditMode.guidedStage,
+        outputSymbols,
+        auditMode.tracks,
+        latencyMs,
+        auditMode.autoOpticsProbe || completion.repeatSkipped
+      );
       else if (!auditMode.autoOpticsProbe && !completion.error && completion.readFullAttempts) noteGuidedRobustBaseline(latencyMs);
     }
   }
@@ -3020,10 +3125,11 @@ function noteDecodeCompleted(id, completion) {
       guidedSampleMs: completion.guidedMetrics?.sampleMs || 0,
       guidedDecodeMs: completion.guidedMetrics?.decodeMs || 0
     });
+    pruneTimedSamples(hotJobCompletionSamples, receiverNow() - TRACK_BUDGET_WINDOW_MS);
   }
   hotPathJobMode.delete(id);
   const auditThisCompletion = Boolean(auditMode && auditMode.generation === hotPathAuditGeneration && auditMode.strict === strictHotPathEnabled);
-  if (!replayRunning && auditThisCompletion && !auditMode?.full && gridLattice.locked &&
+  if (!completion.repeatSkipped && !replayRunning && auditThisCompletion && !auditMode?.full && gridLattice.locked &&
       auditMode.tracks >= GEOMETRY_COLLAPSE_MIN_TRACKS && id >= geometryCoverageLastScanId) {
     geometryCoverageLastScanId = id;
     const now = receiverNow();
@@ -3155,7 +3261,9 @@ function noteDecodeCompleted(id, completion) {
   }
   if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
   if (completion.repeatSkipped) {
-    repeatSkipTimes.push(receiverNow());
+    const skippedAt = receiverNow();
+    repeatSkipTimes.push(skippedAt);
+    pruneTimestampSamples(repeatSkipTimes, skippedAt - STATS_WINDOW_MS);
     notePipelineEvent("repeat-frame-skip", Number.isFinite(completion.repeatDistance) ? completion.repeatDistance : 0);
   }
   if (auditThisCompletion && completion.nativeMetrics) {
@@ -3210,27 +3318,28 @@ function noteDecodeCompleted(id, completion) {
     const slot = Number(region.gridSlot);
     if (Number.isInteger(slot) && !completedSlots.has(slot) && id < (region.lastHitScanId ?? -1)) staleMissSlots.add(slot);
   }
-  const temporalMisses = !auditMode?.autoOpticsProbe ? temporalBandMissSlots(auditMode, completion, staleMissSlots) : new Set();
+  const temporalMisses = !auditMode?.autoOpticsProbe
+    ? temporalBandMissSlots(auditMode, completion, attempts, staleMissSlots)
+    : new Set();
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
     region.lastAttemptAt = receiverNow();
     region.averageDecodeCostMs = region.averageDecodeCostMs ? region.averageDecodeCostMs * 0.8 + completion.latencyMs * 0.2 : completion.latencyMs;
-    const hit = completion.symbols.some((symbol) => {
-      const decodedSlot = Number(symbol.header?.slotIndex);
-      if (region.gridSlot !== void 0 && Number.isInteger(decodedSlot)) return decodedSlot === region.gridSlot;
-      return Boolean(symbol.box && regionAt(symbol.box) === region);
-    });
+    const gridSlot = Number(region.gridSlot);
+    const hit = region.gridSlot !== void 0 && Number.isInteger(gridSlot)
+      ? completedSlots.has(gridSlot)
+      : completion.symbols.some((symbol) => Boolean(symbol.box && regionAt(symbol.box) === region));
     const staleMiss = !hit && id < (region.lastHitScanId ?? -1);
     if (!auditMode?.autoOpticsProbe && !staleMiss) {
       const temporalBandMiss = !hit && temporalMisses.has(Number(region.gridSlot));
-      if (region.gridSlot !== void 0) noteSlotFastMetric(region.gridSlot, hit);
+      if (region.gridSlot !== void 0 && !temporalBandMiss) noteSlotFastMetric(region.gridSlot, hit);
       // A coherent rolling-shutter seam is an erasure of this camera frame,
       // not evidence that the physical QR slot is intrinsically weak. Keep
       // successful slots training normally, but quarantine seam misses from
       // the long-lived weak-slot/confidence model.
       if (!temporalBandMiss) {
-        if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
+        if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit, auditMode?.sourceSequence);
         region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
         if (!hit) {
           region.consecutiveMisses++;
@@ -3334,7 +3443,7 @@ function noteRegion(box, now, decoded = true, info) {
       if (geometryIsFresh) Object.assign(r, box);
       r.seen = now;
       r.decoded = true;
-      if (r.gridSlot !== void 0) noteSlotDecoded(r.gridSlot);
+      if (r.gridSlot !== void 0) noteSlotDecoded(r.gridSlot, info?.sourceSequence);
       r.decodedSeen = now;
       r.sightedSeen = now;
       lastDecodedRegionSize = Math.max(box.w, box.h);
@@ -3409,7 +3518,7 @@ function markGridRegionDecoded(region, now, info) {
   region.crc32 = info?.crc32 ?? true;
   if (info?.scanId !== void 0)
     region.lastHitScanId = Math.max(region.lastHitScanId ?? -1, info.scanId);
-  if (region.gridSlot !== void 0) noteSlotDecoded(region.gridSlot);
+  if (region.gridSlot !== void 0) noteSlotDecoded(region.gridSlot, info?.sourceSequence);
   lastDecodedRegionSize = Math.max(lastDecodedRegionSize, region.w || 0, region.h || 0);
   return region;
 }
@@ -4935,14 +5044,14 @@ function renderFocusDiagnostics() {
   const perfNow = receiverNow();
   const windowStart = perfNow - STATS_WINDOW_MS;
   const sourceCaptureRate = captureTimes.reduce((count, at) => count + Number(at > windowStart), 0) / (STATS_WINDOW_MS / 1e3);
-  for (const samples of [hotJobSubmitSamples, hotJobCompletionSamples, workerLoadSamples]) {
-    while (samples.length && samples[0].at <= windowStart) samples.shift();
-  }
-  while (pendingLaneReplaceTimes.length && pendingLaneReplaceTimes[0] <= windowStart) pendingLaneReplaceTimes.shift();
-  while (repeatSkipTimes.length && repeatSkipTimes[0] <= windowStart) repeatSkipTimes.shift();
+  pruneTimedSamples(hotJobSubmitSamples, windowStart);
+  pruneTimedSamples(hotJobCompletionSamples, perfNow - TRACK_BUDGET_WINDOW_MS);
+  pruneTimedSamples(workerLoadSamples, windowStart);
+  pruneTimestampSamples(pendingLaneReplaceTimes, windowStart);
+  pruneTimestampSamples(repeatSkipTimes, windowStart);
   const repeatSkipRate = repeatSkipTimes.length / (STATS_WINDOW_MS / 1e3);
   const trackedSubmits = hotJobSubmitSamples.filter((sample) => !sample.full);
-  const trackedCompletions = hotJobCompletionSamples.filter((sample) => !sample.full);
+  const trackedCompletions = hotJobCompletionSamples.filter((sample) => !sample.full && sample.at >= windowStart);
   const submittedJobsRate = trackedSubmits.length / (STATS_WINDOW_MS / 1e3);
   const completedJobsRate = trackedCompletions.length / (STATS_WINDOW_MS / 1e3);
   const attemptedQrRate = trackedSubmits.reduce((sum, sample) => sum + sample.tracks, 0) / (STATS_WINDOW_MS / 1e3);
@@ -6400,6 +6509,9 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
     if (trace) trace.decision = "strict pre-lock: only full acquisition allowed";
     return false;
   }
+  // Temporal prediction and salvage masks must describe the camera frame being
+  // submitted, not whichever older frame last updated the band model.
+  message.sourceSequence = sourceSequence;
   const guidedStage = chooseGuidedStage(message);
   if (guidedStage) {
     const fallbackMask = guidedFallbackMaskForTracks(message.tracks);
@@ -6431,15 +6543,17 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
     cameraSettingsEpoch: Number(message.cameraSettingsEpoch),
     trackSlots: Array.isArray(message.tracks)
       ? message.tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger)
-      : []
+      : [],
+    temporalProbeSlot: Array.isArray(message.tracks)
+      ? Number(message.tracks.find((track) => track.temporalProbe)?.slot)
+      : -1
   };
   if (!auditMode.full && !auditMode.autoOpticsProbe && auditMode.trackSlots.length)
     auditMode.temporalPrediction = temporalPredictionSnapshot(
-      auditMode.trackSlots, auditMode.sourceSequence, receiverNow()
+      message.tracks, auditMode.sourceSequence, receiverNow()
     );
   message.jobKind = kind;
   message.trackCount = auditMode.tracks;
-  message.sourceSequence = sourceSequence;
   if (sourceOpticsEpoch !== void 0) message.opticsEpoch = sourceOpticsEpoch;
   const repeatEligible = Boolean(
     guidedStage && !auditMode.full && auditMode.tracks >= 2 && message.pixelFormat === "y8" &&
@@ -6452,6 +6566,8 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
   const accepted = preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
   if (!accepted && guidedStage) guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (accepted) {
+    if (Number.isInteger(auditMode.temporalProbeSlot) && auditMode.temporalProbeSlot >= 0)
+      temporalProbeCursor++;
     hotPathJobMode.set(message.id, auditMode);
     const submittedAt = receiverNow();
     if (!replayRunning && livePipeline.startedAt && !livePipeline.firstJobAt) livePipeline.firstJobAt = submittedAt;
@@ -6481,6 +6597,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
       full: auditMode.full,
       pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0)
     });
+    pruneTimedSamples(hotJobSubmitSamples, submittedAt - STATS_WINDOW_MS);
     scanCapturedAt.set(message.id, sourceCapturedAt);
     if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
       lastDecodeSubmittedSourceSequence = sourceSequence;
@@ -7000,6 +7117,7 @@ async function captureFrame(source) {
   }
   captureTimes.push(now);
   workerLoadSamples.push({ at: now, busy: pool.busyCount, size: pool.size });
+  pruneTimedSamples(workerLoadSamples, now - STATS_WINDOW_MS);
   totalCaptures++;
   if (optimizerPipelineActive) {
     captureOptimizerOpticalSample(source);
@@ -7507,13 +7625,19 @@ async function captureFrame(source) {
   let batchRegions = adaptiveWeakSlots
     ? batchCandidates.filter((region) => shouldScheduleAdaptiveSlot(region, source.sequence, true))
     : batchCandidates;
+  // Pick the recovery probe from slots that survived adaptive weak-slot
+  // scheduling. Otherwise an omitted probe could cause every eligible risky
+  // slot to be skipped, leaving no CRC-backed path to notice recovery.
+  const temporalSchedule = !unlimitedTrackedScan && !autoOpticsMeasurementSlots?.size
+    ? temporalScheduleForSource(source.sequence, now, batchRegions)
+    : void 0;
   // If a just-completed tracked frame showed a narrow coherent temporal stripe,
   // avoid spending the immediately following source frame on those same slots.
   // With normal worker latency this often expires before scheduling and costs
   // nothing; on a fast worker it saves work while the stripe is still nearby.
   // The slot automatically re-enters on the next source frame after that.
   if (!unlimitedTrackedScan && !autoOpticsMeasurementSlots?.size)
-    batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence, now));
+    batchRegions = batchRegions.filter((region) => shouldScheduleTemporalBandSlot(region, source.sequence, now, temporalSchedule));
 
   // Weak-slot throttling is good when a few QRs are genuinely poor, but it can
   // self-lock a partially stale wall: stale geometry misses, becomes weak, then
@@ -7551,14 +7675,16 @@ async function captureFrame(source) {
       notePipelineEvent("coverage-repair-track", Number(repair.gridSlot) || 0);
     }
   }
-  batchRegions = selectTrackedRegionsForBudget(batchRegions, source.sequence, now);
+  batchRegions = selectTrackedRegionsForBudget(batchRegions, source.sequence, now, temporalSchedule);
   const batchTracks = batchRegions.map((region) => ({
     id: region.id,
     slot: region.gridSlot,
     misses: region.consecutiveMisses,
     quad: region.quad,
     dim: region.dim,
-    crc32: Boolean(region.crc32)
+    crc32: Boolean(region.crc32),
+    temporalProbe: temporalSchedule?.probeSlot === Number(region.gridSlot),
+    temporalRisk: temporalSchedule?.risks?.[Number(region.gridSlot)]
   }));
   const lockedLayout = lastGridSnapshot == null ? void 0 : lastGridSnapshot.layout;
 // Production keeps one decode job per camera frame. The worker already sees a
@@ -8265,9 +8391,7 @@ function finishPlainQr(text) {
   showSnippet(text);
 }
 function liveGoodputKbs(now) {
-  while (usefulFrameTimes.length && usefulFrameTimes[0] <= now - STATS_WINDOW_MS) {
-    usefulFrameTimes.shift();
-  }
+  pruneTimestampSamples(usefulFrameTimes, now - STATS_WINDOW_MS);
   if (!decoder || !usefulFrameTimes.length) return 0;
   return usefulFrameTimes.length * decoder.blockLen / expectedCodingOverhead() / 1024 / (STATS_WINDOW_MS / 1e3);
 }
@@ -9362,17 +9486,15 @@ function updateStats(forceDiagnostics = false) {
     lastDiagnosticsPaintAt = now;
     renderFocusDiagnostics();
   }
-  const prune = (a) => {
-    while (a.length > 0 && a[0] < now - STATS_WINDOW_MS) a.shift();
-  };
-  prune(captureTimes);
-  prune(qrReadTimes);
-  prune(poolBusyTimes);
-  prune(scanCompletionTimes);
-  prune(decodeFrameTimes);
-  prune(uniqueQrTimes);
-  prune(duplicateQrTimes);
-  prune(usefulFrameTimes);
+  const cutoff = now - STATS_WINDOW_MS;
+  pruneTimestampSamples(captureTimes, cutoff);
+  pruneTimestampSamples(qrReadTimes, cutoff);
+  pruneTimestampSamples(poolBusyTimes, cutoff);
+  pruneTimestampSamples(scanCompletionTimes, cutoff);
+  pruneTimestampSamples(decodeFrameTimes, cutoff);
+  pruneTimestampSamples(uniqueQrTimes, cutoff);
+  pruneTimestampSamples(duplicateQrTimes, cutoff);
+  pruneTimestampSamples(usefulFrameTimes, cutoff);
   const perSecond = (a) => a.length / (STATS_WINDOW_MS / 1e3);
   const cameraRate = perSecond(captureTimes);
   const completionRate = perSecond(scanCompletionTimes);

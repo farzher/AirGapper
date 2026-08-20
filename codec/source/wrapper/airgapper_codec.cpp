@@ -724,10 +724,6 @@ struct TurboFrameTransform
     }
 
     TurboFrameTransform(const GuidedTurboTrack& cache, const AirGapperGuidedTrack& track)
-        : perspective(
-            QuadrilateralF{cache.seedQuad[0], cache.seedQuad[1], cache.seedQuad[2], cache.seedQuad[3]},
-            QuadrilateralF{PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
-                           PointF{track.x2, track.y2}, PointF{track.x3, track.y3}})
     {
         const std::array<PointF, 4> current{
             PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
@@ -774,6 +770,16 @@ struct TurboFrameTransform
                 const float affineTolerance = std::clamp(module * 0.18f, 0.30f, 0.75f);
                 affineOnly = affineError <= affineTolerance;
             }
+        }
+
+        // Translation and affine motion never consult the homography. Delay its
+        // convexity checks, inverses and matrix products until perspective is
+        // actually needed; steady dense walls avoid one construction per QR.
+        if (!translationOnly && !affineOnly) {
+            perspective = PerspectiveTransform(
+                QuadrilateralF{cache.seedQuad[0], cache.seedQuad[1], cache.seedQuad[2], cache.seedQuad[3]},
+                QuadrilateralF{PointF{track.x0, track.y0}, PointF{track.x1, track.y1},
+                               PointF{track.x2, track.y2}, PointF{track.x3, track.y3}});
         }
 
         // A true handheld projective warp is smooth. Preserve the calibrated
@@ -1353,6 +1359,13 @@ static GuidedStableRsGate& guidedDenseStableRsGate(int id, int dimension)
     return gate;
 }
 
+static void resetGuidedDenseStableRsGate(int id, int dimension)
+{
+    auto& gate = guidedDenseStableRsGate(id, dimension);
+    gate = {};
+    gate.dimension = dimension;
+}
+
 // Below ~2 px/module, a handheld phase/pose can make cached Stable-RS much
 // more expensive than going directly to current-frame sparse Guided recovery.
 // Keep Stable-RS while it earns wins, but if a recent 8-attempt per-slot window falls
@@ -1654,8 +1667,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
     };
 
     ByteArray raw(totalCodewords);
-    ByteArray ambiguityScore(totalCodewords);
-    std::fill(ambiguityScore.begin(), ambiguityScore.end(), uint8_t(255));
+    ByteArray ambiguityScore;
     bool erasureSampling = false;
     int ambiguousCount = 0;
     int firstParityCodeword = 0;
@@ -1668,6 +1680,10 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
         auto& noRsGate = guidedStableNoRsGate();
         const bool tryNoRsFirst = guidedTryNoRsFirst(noRsGate);
         erasureSampling = !tryNoRsFirst && !centerOnly && moduleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+        if (erasureSampling) {
+            ambiguityScore.resize(totalCodewords);
+            std::fill(ambiguityScore.begin(), ambiguityScore.end(), uint8_t(255));
+        }
         ByteArray progressiveData;
         if (tryNoRsFirst)
             progressiveData.resize(dataPlan.dataCodewords);
@@ -1683,7 +1699,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
                 return {};
             }
             raw[codeword] = value;
-            if (minMargin <= GUIDED_TURBO_AMBIGUOUS) {
+            if (erasureSampling && minMargin <= GUIDED_TURBO_AMBIGUOUS) {
                 ambiguityScore[codeword] = minMargin;
                 ++ambiguousCount;
             }
@@ -1721,7 +1737,7 @@ static DecoderResult decodeTurboStableRS(const GuidedTurboTrack& cache,
             return {};
         }
         raw[codeword] = value;
-        if (minMargin <= GUIDED_TURBO_AMBIGUOUS) {
+        if (erasureSampling && minMargin <= GUIDED_TURBO_AMBIGUOUS) {
             ambiguityScore[codeword] = minMargin;
             ++ambiguousCount;
         }
@@ -2576,9 +2592,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                             ++metrics->successful;
                             ++metrics->sparseProfileSuccesses;
                             decodedTrack = true;
-                            if (mapOut && !sparseMap.empty())
+                            if (mapOut && !sparseMap.empty()) {
                                 seedGuidedTurboQuad(track.id, track.dimension, absoluteFastQuad,
                                                     std::move(sparseMap), true);
+                                resetGuidedDenseStableRsGate(track.id, track.dimension);
+                                deferredStableGateFailure[trackIndex] = 0;
+                            }
                         }
                     }
                 }
@@ -2606,6 +2625,8 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                                                 PointF{float(binX), float(binY)});
                         seedGuidedTurboQuad(track.id, track.dimension, absolutePositionQuad(sparse.position()),
                                             std::move(sparseMap), true);
+                        resetGuidedDenseStableRsGate(track.id, track.dimension);
+                        deferredStableGateFailure[trackIndex] = 0;
                     }
                 }
 

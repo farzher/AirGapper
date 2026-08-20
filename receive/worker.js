@@ -322,9 +322,39 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const minSpan = Math.max(80, medianEdge * 1.25);
     const need = Math.max(2, Math.ceil(wallMotionSamples.length * 0.6));
     let best = null;
-    // Pair-seeded RANSAC is tiny here (<=32 tracks) and prevents one local
-    // fallback residual from rotating the whole lattice.
-    for (let i = 0; i < wallMotionSamples.length; i++) {
+    // Healthy dense pages are overwhelmingly coherent. Accept their single
+    // all-sample fit in O(n); reserve pair-seeded RANSAC for actual outliers.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const item of wallMotionSamples) {
+      minX = Math.min(minX, item.x);
+      minY = Math.min(minY, item.y);
+      maxX = Math.max(maxX, item.x);
+      maxY = Math.max(maxY, item.y);
+    }
+    if (Math.max(maxX - minX, maxY - minY) >= minSpan) {
+      const allMotion = refit(wallMotionSamples);
+      const allScale = Math.hypot(allMotion.a, allMotion.b);
+      const allRotation = Math.abs(Math.atan2(allMotion.b, allMotion.a));
+      let allSquared = 0, allMaxResidual = 0, allMaxShift = 0;
+      for (const item of wallMotionSamples) {
+        const residual = residualFor(allMotion, item);
+        const px = allMotion.a * item.x - allMotion.b * item.y + allMotion.tx;
+        const py = allMotion.b * item.x + allMotion.a * item.y + allMotion.ty;
+        allSquared += residual * residual;
+        allMaxResidual = Math.max(allMaxResidual, residual);
+        allMaxShift = Math.max(allMaxShift, Math.hypot(px - item.x, py - item.y));
+      }
+      if (allScale >= 0.975 && allScale <= 1.025 && allRotation <= 0.035 &&
+          allMaxResidual <= 1.05 && allMaxShift <= 5.1) {
+        best = {
+          inliers: wallMotionSamples,
+          rms: Math.sqrt(allSquared / wallMotionSamples.length)
+        };
+      }
+    }
+    // Pair-seeded RANSAC prevents one local fallback residual from rotating the
+    // whole lattice when the linear fast path found a real outlier.
+    for (let i = 0; !best && i < wallMotionSamples.length; i++) {
       for (let j = i + 1; j < wallMotionSamples.length; j++) {
         const p = wallMotionSamples[i], q = wallMotionSamples[j];
         const ux = q.x - p.x, uy = q.y - p.y;
@@ -609,7 +639,7 @@ function projectedNeighbor(q, dx, dy, stride) {
 
 const REPEAT_SIGNATURE_X = 8;
 const REPEAT_SIGNATURE_Y = 6;
-const REPEAT_SIGNATURE_TRACKS = 3;
+const REPEAT_SIGNATURE_INTERIOR_TRACKS = 3;
 const REPEAT_SIGNATURE_MAX_BITS = 6;
 
 function repeatPageSignature(heap, yPtr, width, height, stride, ox, oy, tracks) {
@@ -618,11 +648,15 @@ function repeatPageSignature(heap, yPtr, width, height, stride, ox, oy, tracks) 
     .filter((track) => validQuad(track.quad) && Number.isFinite(track.dim) && track.dim >= 21)
     .sort((a, b) => (a.slot ?? a.id ?? 0) - (b.slot ?? b.id ?? 0));
   if (ordered.length < 2) return null;
-  const pickIndices = [];
-  for (let i = 1; i <= REPEAT_SIGNATURE_TRACKS; i++) {
-    const index = Math.round((ordered.length - 1) * i / (REPEAT_SIGNATURE_TRACKS + 1));
+  // Include both spatial extremes as well as interior quantiles. On a 7x4 wall
+  // the former three quantiles all missed at least one edge row, allowing a
+  // rolling transition there to masquerade as a whole-page duplicate.
+  const pickIndices = [0, ordered.length - 1];
+  for (let i = 1; i <= REPEAT_SIGNATURE_INTERIOR_TRACKS; i++) {
+    const index = Math.round((ordered.length - 1) * i / (REPEAT_SIGNATURE_INTERIOR_TRACKS + 1));
     if (!pickIndices.includes(index)) pickIndices.push(index);
   }
+  pickIndices.sort((a, b) => a - b);
   const selected = pickIndices.map((index) => ordered[index]).filter(Boolean);
   if (selected.length < 2) return null;
 
@@ -774,7 +808,7 @@ ctx.onmessage = async (e) => {
     const ph = h;
     // Adjacent-camera duplicates are expensive because the 30 fps receiver can
     // photograph one 20-ish fps sender page twice. After the Y plane copy, a
-    // 144-bit signature costs only a handful of reads from known QR interiors.
+    // 240-bit signature costs only a handful of reads from known QR interiors.
     // Publish it immediately so the next worker can compare against it. Only a
     // near-identical whole-page match exits early; rolling transitions keep
     // decoding because their signature changes substantially.
