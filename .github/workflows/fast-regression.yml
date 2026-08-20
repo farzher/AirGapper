@@ -92,6 +92,7 @@ jobs:
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
+        if: always()
         run: |
           set -euo pipefail
           cd android
