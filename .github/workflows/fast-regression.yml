@@ -29,52 +29,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: fast-regression-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  repair-camera-v2:
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2') || (github.event_name == 'pull_request' && github.head_ref == 'feature/apk-camera-v2')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feature/apk-camera-v2
-          fetch-depth: 1
-      - name: Repair bounded native-v2 receiver block
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('receive/main.js')
-          text = path.read_text()
-          start_marker = 'function nativeV2PreviewBounds(quad) {\\n'
-          end_marker = 'async function startNativeReceiver(startAttempt, transportReady) {'
-          if start_marker not in text:
-              print('native-v2 receiver block already repaired')
-          else:
-              start = text.index(start_marker)
-              end = text.index(end_marker, start)
-              repaired = text[start:end].replace('\\n', '\n')
-              path.write_text(text[:start] + repaired + text[end:])
-          PY
-
-          git config user.name "AirGapper Build"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add receive/main.js
-          if git diff --cached --quiet; then
-            echo "receiver is already repaired"
-            exit 0
-          fi
-          git commit -m "fix Camera2 native receiver integration"
-          git push origin HEAD:feature/apk-camera-v2
-
   regression:
-    if: github.ref != 'refs/heads/feature/apk-camera-v2' && github.head_ref != 'feature/apk-camera-v2'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -102,9 +64,17 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check JavaScript syntax
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < main.js
+          node --input-type=module --check < receive/main.js
+          node --input-type=module --check < shared/native-camera-v2.js
+
       - name: Run grid regression
         run: |
           node benchmark/grid-lattice-regression.mjs
+          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
 
       - name: Install browser benchmark dependency
