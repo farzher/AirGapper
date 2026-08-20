@@ -1179,7 +1179,13 @@ ctx.onmessage = async (e) => {
             appendResults(readFull(true, maxSymbols, false), false);
           }
         };
-        if (fullMode === "thorough") {
+        if (fullMode === "hunt") {
+          readFullAttempts++;
+          appendResults(readFull(true, 8, true), true);
+        } else if (fullMode === "sighting") {
+          readFullAttempts++;
+          appendResults(readFull(true, 1, true), true);
+        } else if (fullMode === "thorough") {
           readFullAttempts++;
           appendResults(readFull(true, 16, false), false);
           if (symbols.length === 0) {
