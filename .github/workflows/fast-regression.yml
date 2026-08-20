@@ -12,7 +12,6 @@ on:
       - index.html
       - sw.js
       - benchmark/**
-      - .github/patch-native-crc-parser.py
       - .github/workflows/fast-regression.yml
   pull_request:
     branches: [master]
@@ -30,7 +29,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: fast-regression-${{ github.ref }}
@@ -44,22 +43,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Apply CRC-stripped native parser fix
-        if: github.event_name == 'push' && github.ref_name == 'feature/apk-camera-v2'
-        run: |
-          set -euo pipefail
-          python3 .github/patch-native-crc-parser.py
-          if git diff --quiet -- shared/protocol.js receive/worker.js; then
-            exit 0
-          fi
-          node --input-type=module --check < shared/protocol.js
-          node --input-type=module --check < receive/worker.js
-          git config user.name "AirGapper Agent"
-          git config user.email "actions@github.com"
-          git add -- shared/protocol.js receive/worker.js
-          git commit -m "fix CRC-stripped native frame parsing"
-          git push origin HEAD:feature/apk-camera-v2
 
       - name: Cache codec toolchain
         uses: actions/cache@v4
