@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: fast-regression-${{ github.ref }}
@@ -43,25 +43,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          ref: fix/native-v2-preview
-
-      - name: Apply native-v2 preview patch
-        if: ${{ hashFiles('.github/patch-native-v2-preview.py') != '' }}
-        run: |
-          set -euo pipefail
-          python3 .github/patch-native-v2-preview.py
-          git config user.name "AirGapper Build"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
-            android/app/src/main/java/com/airgapper/app/NativeCameraV2Bridge.java \
-            shared/native-camera-v2.js \
-            receive/main.js \
-            benchmark/native-camera-v2-bridge-smoke.mjs
-          git diff --cached --check
-          git status --short
-          git commit -m "fix native-v2 preview transport"
-          git push origin HEAD:fix/native-v2-preview
-          echo "PATCH_OK=1" >> "$GITHUB_ENV"
 
       - name: Cache codec toolchain
         uses: actions/cache@v4
@@ -108,10 +89,11 @@ jobs:
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-y8-worker-smoke.mjs
           node benchmark/native-camera-bridge-smoke.mjs
+          node benchmark/native-camera-v2-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
-        if: ${{ always() && env.PATCH_OK == '1' }}
+        if: always()
         run: |
           set -euo pipefail
           cd android
