@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
 
     private WebView webView;
     private NativeCameraBridge nativeCameraBridge;
+    private NativeCameraV2Bridge nativeCameraV2Bridge;
     private PermissionRequest cameraRequest;
     private ValueCallback<Uri[]> fileCallback;
     private View fullscreenView;
@@ -81,6 +82,7 @@ public final class MainActivity extends Activity {
 
         webView.addJavascriptInterface(new AndroidBridge(), "AirGapperAndroid");
         nativeCameraBridge = new NativeCameraBridge(this, webView);
+        nativeCameraV2Bridge = new NativeCameraV2Bridge(this, webView);
         webView.setWebViewClient(new LocalWebViewClient());
         installServiceWorkerAssetClient();
         webView.setWebChromeClient(new AppWebChromeClient());
@@ -235,6 +237,7 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (nativeCameraV2Bridge != null && nativeCameraV2Bridge.onRequestPermissionsResult(requestCode, results)) return;
         if (nativeCameraBridge != null && nativeCameraBridge.onRequestPermissionsResult(requestCode, results)) return;
         if (requestCode != CAMERA_REQUEST) return;
         boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
@@ -406,6 +409,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (nativeCameraV2Bridge != null) nativeCameraV2Bridge.stop();
         if (nativeCameraBridge != null) nativeCameraBridge.stop();
         webView.evaluateJavascript(
                 "window.airgapperSuspend && window.airgapperSuspend()",
@@ -424,6 +428,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (nativeCameraV2Bridge != null) {
+            nativeCameraV2Bridge.close();
+            nativeCameraV2Bridge = null;
+        }
         if (nativeCameraBridge != null) {
             nativeCameraBridge.close();
             nativeCameraBridge = null;

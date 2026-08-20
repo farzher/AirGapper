@@ -196,6 +196,7 @@ final class NativeCameraV2Bridge {
     private long lastSettingsEventNs;
     private long lastPreviewNs;
     private long lastSensorTimestampNs;
+    private long lastFrameEventTimestampNs;
     private double measuredFrameDurationNs;
     private double measuredFps;
     private boolean pixelStrideWarningSent;
@@ -502,6 +503,7 @@ final class NativeCameraV2Bridge {
             activeFacing = facingName(chars.get(CameraCharacteristics.LENS_FACING));
             activeSettingsEpoch = 1;
             lastSensorTimestampNs = 0;
+            lastFrameEventTimestampNs = 0;
             measuredFrameDurationNs = 0;
             measuredFps = 0;
             lastPreviewNs = 0;
@@ -715,6 +717,7 @@ final class NativeCameraV2Bridge {
                 Object tag = request.getTag();
                 metadata.settingsEpoch = tag instanceof Integer ? (Integer) tag : activeSettingsEpoch;
                 synchronized (metadataByTimestamp) { metadataByTimestamp.put(timestamp, metadata); }
+                maybePostFrameEvent(metadata);
             }
             if (comp != null && activeCharacteristics != null) {
                 Rational step = activeCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
@@ -728,6 +731,32 @@ final class NativeCameraV2Bridge {
             }
         }
     };
+
+    private void maybePostFrameEvent(FrameMetadata metadata) {
+        if (!running || metadata == null || metadata.timestampNs <= 0) return;
+        long interval = Math.max(1L, Math.round(1_000_000_000.0 / Math.max(1, activeDecodeFps)));
+        if (lastFrameEventTimestampNs > 0 &&
+                metadata.timestampNs - lastFrameEventTimestampNs < Math.round(interval * 0.80)) return;
+        lastFrameEventTimestampNs = metadata.timestampNs;
+        try {
+            JSONObject event = new JSONObject();
+            event.put("event", "frame");
+            event.put("width", activeWidth); event.put("height", activeHeight);
+            event.put("frameNumber", metadata.frameNumber);
+            event.put("timestampNs", metadata.timestampNs);
+            event.put("exposureTimeNs", metadata.exposureNs);
+            event.put("frameDurationNs", metadata.frameDurationNs);
+            event.put("rollingShutterSkewNs", metadata.rollingShutterSkewNs);
+            if (Float.isFinite(metadata.focusDistance)) event.put("focusDistance", metadata.focusDistance);
+            event.put("iso", metadata.iso);
+            event.put("settingsEpoch", metadata.settingsEpoch);
+            event.put("orientation", activeSensorOrientation);
+            event.put("sensorFps", activeSensorFps);
+            event.put("measuredFps", measuredFps);
+            event.put("settings", currentSettingsJson());
+            postString(event.toString());
+        } catch (Exception ignored) {}
+    }
 
     private void onImageAvailable(ImageReader reader, long generation) {
         Image image = null;
