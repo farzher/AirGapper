@@ -69,8 +69,8 @@ jobs:
       - name: Verify packaged app and signer
         run: |
           set -euo pipefail
-          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.353'
-          unzip -p AirGapper.apk assets/main.js | grep -q 'APP_BUILD = "v0.5.353"'
+          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.354'
+          unzip -p AirGapper.apk assets/main.js | grep -q 'APP_BUILD = "v0.5.354"'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'
           unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.js'
@@ -87,7 +87,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AirGapper-v0.5.353
+          name: AirGapper-v0.5.354
           path: AirGapper.apk
           if-no-files-found: error
           retention-days: 30
@@ -108,5 +108,5 @@ jobs:
             echo "AirGapper.apk is already current"
             exit 0
           fi
-          git commit -m "build AirGapper.apk v0.5.353"
+          git commit -m "build AirGapper.apk v0.5.354"
           git push origin HEAD:master
