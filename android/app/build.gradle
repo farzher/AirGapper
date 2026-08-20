@@ -14,8 +14,8 @@ android {
         applicationId "com.airgapper.app"
         minSdk 23
         targetSdk 29
-        versionCode 356
-        versionName "0.5.356"
+        versionCode 357
+        versionName "0.5.357"
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
         }
@@ -33,72 +33,40 @@ android {
     }
 
     buildTypes {
-        release {
-            if (hasReleaseSigning) {
-                signingConfig signingConfigs.release
-            }
+        debug {
             minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            if (hasReleaseSigning) signingConfig signingConfigs.release
         }
     }
 
-    lint {
-        disable "ExpiredTargetSdkVersion"
-    }
-
-    buildFeatures {
-        buildConfig true
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-
-    sourceSets {
-        main.assets.srcDir("$buildDir/generated/webAssets")
+    applicationVariants.all { variant ->
+        if (variant.buildType.name == "release" && gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }) {
+            if (!hasReleaseSigning) {
+                throw new GradleException("Release signing requires AIRGAPPER_RELEASE_KEYSTORE and AIRGAPPER_RELEASE_PASSWORD")
+            }
+        }
     }
 }
 
 dependencies {
-    implementation "androidx.webkit:webkit:1.15.0"
+    implementation 'androidx.webkit:webkit:1.15.0'
 }
 
-gradle.taskGraph.whenReady { graph ->
-    def releaseBuild = graph.allTasks.any { task ->
-        task.name == "assembleRelease" || task.name == "packageRelease" || task.name == "bundleRelease"
+tasks.register("syncWebApp", Copy) {
+    from(rootProject.projectDir.parentFile.parentFile) {
+        exclude ".git/**"
+        exclude ".github/**"
+        exclude "android/**"
+        exclude "node_modules/**"
+        exclude "AirGapper.apk"
+        exclude "*.jks"
+        exclude "*.keystore"
+        exclude "*.p12"
     }
-    if (releaseBuild && !hasReleaseSigning) {
-        throw new GradleException("Release signing requires AIRGAPPER_RELEASE_KEYSTORE and AIRGAPPER_RELEASE_PASSWORD")
-    }
+    into(layout.projectDirectory.dir("src/main/assets"))
 }
 
-def syncWebApp = tasks.register("syncWebApp", Copy) {
-    from(rootProject.file("../")) {
-        include "index.html"
-        include "manifest.webmanifest"
-        include "sw.js"
-        include "icon-*.png"
-        include "main.js"
-        include "send/**"
-        include "receive/**"
-        include "shared/**"
-        include "vendor/qrcode.js"
-        include "vendor/raptorq/raptorq.js"
-        include "vendor/raptorq/raptorq_bg.wasm"
-        include "codec/airgapper_codec.js"
-        include "codec/airgapper_codec.wasm"
-        include "codec/scalar/airgapper_codec.js"
-        include "codec/scalar/airgapper_codec.wasm"
-    }
-    into(layout.buildDirectory.dir("generated/webAssets"))
-    doLast {
-        def app = layout.buildDirectory.file("generated/webAssets/index.html").get().asFile
-        app.setText(app.getText("UTF-8").replace(
-                "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
-                "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'"), "UTF-8")
-    }
-}
-
-tasks.named("preBuild").configure {
-    dependsOn(syncWebApp)
-}
+preBuild.dependsOn syncWebApp
