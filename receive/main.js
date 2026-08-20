@@ -5589,7 +5589,7 @@ async function startNativeReceiver(startAttempt, transportReady) {
   const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);
   if (!camera || !selectedMode) {
     pool.resize(0);
-    offerRetry("Native Camera2: no supported YUV camera mode found");
+    offerRetry("Native Camera2: no supported native camera mode found");
     return;
   }
   requestedWidth = selectedMode.width;
@@ -5621,9 +5621,14 @@ async function startNativeReceiver(startAttempt, transportReady) {
   } catch (error) {
     setNativeCameraFrameHandler();
     void stopNativeCamera();
-    if (startAttempt !== cameraStartGen || receiverPaused) return;
+    const message = error instanceof Error ? error.message : String(error);
+    // Android may pause the Activity while its runtime camera-permission sheet
+    // is on top. The native lifecycle deliberately cancels that pending open;
+    // resume immediately starts a fresh request, so cancellation is not a
+    // user-visible camera failure.
+    if (message === "Camera start cancelled" || startAttempt !== cameraStartGen || receiverPaused) return;
     pool.resize(0);
-    offerRetry(`Native Camera2: ${error instanceof Error ? error.message : String(error)}`);
+    offerRetry(`Native Camera2: ${message}`);
     return;
   }
   if (transportError) {

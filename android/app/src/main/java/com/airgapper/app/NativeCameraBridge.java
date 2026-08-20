@@ -191,14 +191,19 @@ final class NativeCameraBridge {
             Set<String> sizeKeys = new HashSet<>();
             if (yuvSizes != null) for (Size size : yuvSizes) sizeKeys.add(size.getWidth() + "x" + size.getHeight());
             if (gpuSizes != null) for (Size size : gpuSizes) sizeKeys.add(size.getWidth() + "x" + size.getHeight());
-            String[] orderedKeys = sizeKeys.stream().filter(STANDARD_SIZES::contains).toArray(String[]::new);
+            String[] orderedKeys = sizeKeys.toArray(new String[0]);
             Arrays.sort(orderedKeys, Comparator.comparingLong(NativeCameraBridge::sizeArea));
             for (String sizeKey : orderedKeys) {
+                long area = sizeArea(sizeKey);
+                if (area < 640L * 480L || area > 4096L * 2160L) continue;
                 Size yuvSize = findSize(yuvSizes, sizeKey);
                 Size gpuSize = findSize(gpuSizes, sizeKey);
                 long yuvDuration = yuvSize == null ? Long.MAX_VALUE : map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, yuvSize);
                 long gpuDuration = gpuSize == null ? Long.MAX_VALUE : map.getOutputMinFrameDuration(SurfaceTexture.class, gpuSize);
                 for (int fps : TEST_FPS) {
+                    // Keep the 30 fps menu compact, but never hide a usable native
+                    // 60 fps mode merely because it is not in our old browser-size list.
+                    if (fps != 60 && !STANDARD_SIZES.contains(sizeKey)) continue;
                     Range<Integer> range = chooseFpsRange(ranges, fps);
                     if (range == null) continue;
                     String pipeline = null;
