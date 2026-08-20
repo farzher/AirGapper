@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/**
-      - .github/**
+      - .github/workflows/fast-regression.yml
   pull_request:
     branches: [master]
     paths:
@@ -25,7 +25,7 @@ on:
       - index.html
       - sw.js
       - benchmark/**
-      - .github/**
+      - .github/workflows/fast-regression.yml
   workflow_dispatch:
 
 permissions:
@@ -36,62 +36,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apply-native-camera-v353:
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-v353') ||
-      (github.event_name == 'pull_request' && github.head_ref == 'fix/native-camera-v353')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fix/native-camera-v353
-          fetch-depth: 1
-      - name: Apply native camera patch
-        run: |
-          set -euo pipefail
-          if ! grep -q 'APP_BUILD = "v0.5.353"' main.js; then
-            python3 .github/patch-native-camera-v353.py
-          fi
-          if ! grep -q 'shared/native-camera.js has already ACKed ownership' receive/main.js; then
-            python3 .github/patch-native-camera-v353-followup.py
-          fi
-          if ! grep -q 'AutoOptics can still read' android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java; then
-            python3 .github/patch-native-camera-v353-manual60.py
-          fi
-          git config user.name "AirGapper Build"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add android/app/build.gradle \
-                  android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java \
-                  shared/native-camera.js receive/main.js send/main.js \
-                  index.html main.js sw.js
-          git diff --cached --check
-          if git diff --cached --quiet; then
-            echo 'native Camera2 v0.5.353 product patch already applied'
-            exit 0
-          fi
-          git commit -m "guard AutoOptics on manual 60fps Camera2 modes"
-          git push origin HEAD:fix/native-camera-v353
-
   regression:
-    needs: [apply-native-camera-v353]
-    if: always() && (needs.apply-native-camera-v353.result == 'success' || needs.apply-native-camera-v353.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ (github.head_ref == 'fix/native-camera-v353' || github.ref == 'refs/heads/fix/native-camera-v353') && 'fix/native-camera-v353' || github.sha }}
           fetch-depth: 1
-
-      - name: Build Android app
-        run: |
-          set -euo pipefail
-          cd android
-          ./gradlew assembleDebug
 
       - name: Cache codec toolchain
         uses: actions/cache@v4
@@ -127,4 +78,11 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-y8-worker-smoke.mjs
+          node benchmark/native-camera-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
+
+      - name: Build Android app
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug
