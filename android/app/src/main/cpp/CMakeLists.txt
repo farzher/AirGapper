@@ -26,7 +26,6 @@ FetchContent_Declare(
     zxing
     GIT_REPOSITORY https://github.com/zxing-cpp/zxing-cpp.git
     GIT_TAG 3e09874a9ca7c191d67101f302a1f53c71a118cc
-    GIT_SHALLOW TRUE
     SOURCE_SUBDIR core
 )
 FetchContent_MakeAvailable(zxing)
