@@ -40,15 +40,15 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import {
-  ackNativeCameraFrame,
   listNativeCameras,
   nativeCameraAvailable,
+  nativeCameraTrack,
   setNativeCameraFrameHandler,
   startNativeCamera,
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.352";
+const RECEIVER_RUNTIME_BUILD = "v0.5.353";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -241,8 +241,8 @@ let requestedFps = 60;
 const nativeCamera2 = isAndroidApp() && nativeCameraAvailable();
 const nativeStreamShim = Object.freeze({
   __airgapperNativeCamera: true,
-  getTracks: () => [],
-  getVideoTracks: () => []
+  getTracks: () => nativeCameraTrack() ? [nativeCameraTrack()] : [],
+  getVideoTracks: () => nativeCameraTrack() ? [nativeCameraTrack()] : []
 });
 let nativeCameraCatalog;
 let nativeCameraInfo;
@@ -674,8 +674,9 @@ function browserModeSuffix(key) {
 }
 function nativeModeLabel(mode) {
   const path = mode.pipeline === "gpu" ? " · GPU" : "";
-  if (mode.fixedFps) return `${formatCameraMode(mode.width, mode.height, mode.fps)}${path}`;
-  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}${path}`;
+  const control = mode.fpsControl === "manual" ? " · manual sensor" : "";
+  if (mode.fixedFps) return `${formatCameraMode(mode.width, mode.height, mode.fps)}${path}${control}`;
+  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}${path}${control}`;
 }
 function nativePreviewRotation(info = nativeCameraInfo ?? selectedNativeCamera()) {
   if (!info) return 0;
@@ -5231,7 +5232,7 @@ function renderFocusDiagnostics() {
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
     : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
   const sourceLine = nativeCameraInfo
-    ? `Camera2 ${nativeCameraInfo.cameraId} · ${nativeCameraInfo.pipeline === "gpu" ? "PRIVATE→GPU Y8" : "YUV"} ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${framePumpMode} · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
+    ? `Camera2 ${nativeCameraInfo.cameraId} · ${nativeCameraInfo.pipeline === "gpu" ? "PRIVATE→GPU Y8" : "YUV"} ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · ${nativeCameraInfo.fpsControl === "manual" ? "manual sensor FPS" : `AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"}`} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${framePumpMode} · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
     : sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
@@ -5566,8 +5567,7 @@ function nativeSourceFrame(buffer, width, height, gen) {
     presentationTimeMs: callbackTime,
     expectedDisplayTimeMs: callbackTime,
     nativeY: new Uint8Array(buffer),
-    nativeBuffer: buffer,
-    nativeAck: ackNativeCameraFrame
+    nativeBuffer: buffer
   }, gen);
 }
 async function startNativeReceiver(startAttempt, transportReady) {
@@ -5614,7 +5614,8 @@ async function startNativeReceiver(startAttempt, transportReady) {
         width: requestedWidth,
         height: requestedHeight,
         fps: requestedFps,
-        pipeline: selectedMode.pipeline
+        pipeline: selectedMode.pipeline,
+        fpsControl: selectedMode.fpsControl
       }),
       transportReady
     ]);
@@ -5647,6 +5648,12 @@ async function startNativeReceiver(startAttempt, transportReady) {
   stream = nativeStreamShim;
   nativeCameraInfo = started;
   nativeCameraRunning = true;
+  const nativeTrack = nativeCameraTrack();
+  if (nativeTrack) {
+    populateBrowserCapabilities(nativeTrack);
+    attachCameraController(nativeTrack);
+    if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native camera started");
+  }
   syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
   setNativeCameraFrameHandler((buffer) => nativeSourceFrame(buffer, started.width ?? requestedWidth, started.height ?? requestedHeight, futureGen));
   preview.classList.remove("camera-loading");
