@@ -56,12 +56,13 @@ jobs:
             exit 0
           fi
           python3 .github/patch-native-camera-runtime.py
+          git checkout -- .github/workflows/build-apk.yml
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java \
                   android/app/src/main/java/com/airgapper/app/NativeGpuCameraReader.java \
                   android/app/build.gradle shared/native-camera.js receive/main.js \
-                  index.html main.js send/main.js sw.js .github/workflows/build-apk.yml
+                  index.html main.js send/main.js sw.js
           git diff --cached --check
           git commit -m "fix native Camera2 runtime and add 60fps GPU path"
           git push origin HEAD:fix/native-camera-runtime
