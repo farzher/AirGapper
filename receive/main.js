@@ -5782,6 +5782,11 @@ async function startNativeV2Receiver(startAttempt, transportReady) {
   video.srcObject = null; video.hidden = true;
   if (nativePreview) nativePreview.hidden = false;
   const futureGen = captureGen + 1;
+  // Install preview delivery before Camera2 starts. Some devices begin producing
+  // frames immediately after session configuration, before the start reply has
+  // crossed back into WebView. Dropping those first packets made a healthy
+  // native session look like a black/blank camera.
+  setNativeCameraV2PreviewHandler(drawNativeV2Preview);
   let started, transportError;
   try {
     [started, transportError] = await Promise.all([
@@ -5793,6 +5798,7 @@ async function startNativeV2Receiver(startAttempt, transportReady) {
       transportReady
     ]);
   } catch (error) {
+    setNativeCameraV2PreviewHandler();
     void stopNativeCameraV2();
     if (startAttempt !== cameraStartGen || receiverPaused) return;
     pool.resize(0);
@@ -5800,11 +5806,16 @@ async function startNativeV2Receiver(startAttempt, transportReady) {
     return;
   }
   if (transportError) {
+    setNativeCameraV2PreviewHandler();
     void stopNativeCameraV2(); pool.resize(0);
     offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
     return;
   }
-  if (startAttempt !== cameraStartGen || receiverPaused) { void stopNativeCameraV2(); return; }
+  if (startAttempt !== cameraStartGen || receiverPaused) {
+    setNativeCameraV2PreviewHandler();
+    void stopNativeCameraV2();
+    return;
+  }
   stream = nativeStreamShim;
   nativeCameraInfo = { ...started, nativeDecode: true };
   nativeCameraV2Running = true; nativeCameraRunning = false; nativeV2ActiveJob = void 0;
@@ -5816,7 +5827,6 @@ async function startNativeV2Receiver(startAttempt, transportReady) {
     if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native NDK camera started");
   }
   syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
-  setNativeCameraV2PreviewHandler(drawNativeV2Preview);
   setNativeCameraV2ResultHandler(completeNativeV2Job);
   setNativeCameraV2FrameHandler((frame) => nativeV2SourceFrame(frame, futureGen));
   preview.classList.remove("camera-loading"); setStatus("");

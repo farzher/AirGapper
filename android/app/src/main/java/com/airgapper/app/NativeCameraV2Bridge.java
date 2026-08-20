@@ -29,6 +29,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.util.Base64;
 import android.util.Range;
 import android.util.Rational;
 import android.util.Size;
@@ -75,6 +76,7 @@ final class NativeCameraV2Bridge {
     private static final int PREVIEW_MAGIC = 0x32565041; // APV2
     private static final int PREVIEW_HEADER_BYTES = 28;
     private static final long PREVIEW_INTERVAL_NS = 200_000_000L;
+    private static final long BINARY_ACK_GRACE_NS = 350_000_000L;
 
     private static final class FrameMetadata {
         long frameNumber;
@@ -156,6 +158,9 @@ final class NativeCameraV2Bridge {
     private final Object planLock = new Object();
 
     private volatile JavaScriptReplyProxy replyProxy;
+    private volatile boolean binaryTransportAcked;
+    private volatile boolean binaryFallbackActive;
+    private volatile long firstBinaryPostNs;
     private volatile boolean running;
     private volatile boolean decodeBusy;
     private DecodePlan pendingPlan;
@@ -236,6 +241,7 @@ final class NativeCameraV2Bridge {
                 case "stop": stopRequested(command.optInt("requestId")); break;
                 case "apply": applyRequested(command); break;
                 case "plan": setDecodePlan(DecodePlan.parse(command.optJSONObject("plan"))); break;
+                case "binaryAck": binaryTransportAcked = true; binaryFallbackActive = false; break;
                 default: replyError(command.optInt("requestId"), "Unknown Camera2 v2 command: " + op); break;
             }
         } catch (Exception error) {
@@ -1065,8 +1071,32 @@ final class NativeCameraV2Bridge {
         activity.runOnUiThread(() -> {
             JavaScriptReplyProxy proxy = replyProxy;
             if (proxy == null) return;
-            try { proxy.postMessage(bytes); } catch (Exception ignored) {}
+            long now = System.nanoTime();
+            if (!binaryTransportAcked && firstBinaryPostNs > 0 && now - firstBinaryPostNs >= BINARY_ACK_GRACE_NS)
+                binaryFallbackActive = true;
+            if (binaryFallbackActive && !binaryTransportAcked) {
+                postBinaryFallback(proxy, bytes);
+                return;
+            }
+            try {
+                proxy.postMessage(bytes);
+                if (firstBinaryPostNs == 0) firstBinaryPostNs = now;
+            } catch (Exception error) {
+                binaryFallbackActive = true;
+                postBinaryFallback(proxy, bytes);
+            }
         });
+    }
+
+    private void postBinaryFallback(JavaScriptReplyProxy proxy, byte[] bytes) {
+        try {
+            JSONObject value = new JSONObject();
+            value.put("event", "binaryFallback");
+            value.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+            proxy.postMessage(value.toString());
+        } catch (Exception error) {
+            postEvent("decodeError", "Camera2 v2 binary bridge failed: " + message(error));
+        }
     }
 
     private void postString(String text) {

@@ -6,6 +6,7 @@ let frameHandler;
 let resultHandler;
 let previewHandler;
 const pending = new Map();
+let binaryAckSent = false;
 
 const RESULT_MAGIC = 0x32444741; // AGD2
 const RESULT_HEADER_BYTES = 104;
@@ -248,30 +249,59 @@ function parseBinary(buffer) {
   return null;
 }
 
+function dispatchBinary(buffer) {
+  const packet = parseBinary(buffer);
+  if (!packet) return false;
+  if (packet.type === "preview") {
+    try { previewHandler?.(packet); } catch (error) { console.error("Native camera v2 preview handler failed", error); }
+  } else {
+    activeTrack?._update({
+      exposureTime: packet.exposureTimeNs > 0 ? packet.exposureTimeNs / 100000 : undefined,
+      iso: packet.iso > 0 ? packet.iso : undefined,
+      focusDistance: packet.focusDistance,
+      settingsEpoch: packet.settingsEpoch
+    });
+    try { resultHandler?.(packet); } catch (error) { console.error("Native camera v2 result handler failed", error); }
+  }
+  return true;
+}
+
+function acknowledgeBinaryTransport() {
+  if (binaryAckSent) return;
+  binaryAckSent = true;
+  try { endpoint.postMessage(JSON.stringify({ op: "binaryAck" })); } catch {}
+}
+
+function base64ArrayBuffer(value) {
+  const raw = atob(String(value || ""));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes.buffer;
+}
+
 function install() {
   if (installed || !endpoint?.postMessage) return Boolean(endpoint?.postMessage);
   installed = true;
   endpoint.onmessage = (event) => {
     const data = event?.data;
-    if (data instanceof ArrayBuffer) {
-      const packet = parseBinary(data);
-      if (!packet) return;
-      if (packet.type === "preview") {
-        try { previewHandler?.(packet); } catch (error) { console.error("Native camera v2 preview handler failed", error); }
-      } else {
-        activeTrack?._update({
-          exposureTime: packet.exposureTimeNs > 0 ? packet.exposureTimeNs / 100000 : undefined,
-          iso: packet.iso > 0 ? packet.iso : undefined,
-          focusDistance: packet.focusDistance,
-          settingsEpoch: packet.settingsEpoch
-        });
-        try { resultHandler?.(packet); } catch (error) { console.error("Native camera v2 result handler failed", error); }
-      }
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      const buffer = data instanceof ArrayBuffer
+        ? data
+        : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      if (dispatchBinary(buffer)) acknowledgeBinaryTransport();
       return;
     }
     if (typeof data !== "string") return;
     let message;
     try { message = JSON.parse(data); } catch { return; }
+    if (message?.event === "binaryFallback") {
+      try {
+        if (!dispatchBinary(base64ArrayBuffer(message.data))) console.warn("Native camera v2 fallback packet was invalid");
+      } catch (error) {
+        console.warn("Native camera v2 fallback packet failed", error);
+      }
+      return;
+    }
     if (message?.event === "settings") {
       activeTrack?._update(message.settings);
       return;
