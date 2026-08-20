@@ -40,6 +40,7 @@ import {
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 import {
+  ackNativeCameraFrame,
   listNativeCameras,
   nativeCameraAvailable,
   nativeCameraTrack,
@@ -5548,10 +5549,9 @@ function drawNativePreview(source) {
   nativePreviewCtx.putImageData(rgba, 0, 0);
 }
 function nativeSourceFrame(buffer, width, height, gen) {
-  if (!nativeCameraRunning || done || gen !== captureGen) {
-    ackNativeCameraFrame();
-    return;
-  }
+  // shared/native-camera.js has already ACKed ownership of every delivered
+  // ArrayBuffer. Only the one explicit ACK after startup seeds the first frame.
+  if (!nativeCameraRunning || done || gen !== captureGen) return;
   const callbackTime = performance.now();
   const sequence = benchmarkRecordingSequence++;
   latestSourceFrameSequence = sequence;
