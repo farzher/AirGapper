@@ -12,7 +12,7 @@ on:
       - index.html
       - sw.js
       - benchmark/**
-      - .github/workflows/fast-regression.yml
+      - .github/**
   pull_request:
     branches: [master]
     paths:
@@ -36,13 +36,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  regression:
+  apply-native-camera-runtime:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: fix/native-camera-runtime
           fetch-depth: 1
+      - name: Apply runtime patch
+        run: |
+          set -euo pipefail
+          if grep -q 'APP_BUILD = "v0.5.352"' main.js; then
+            echo 'native runtime patch already applied'
+            exit 0
+          fi
+          python3 .github/patch-native-camera-runtime.py
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android/app/src/main/java/com/airgapper/app/NativeCameraBridge.java \
+                  android/app/src/main/java/com/airgapper/app/NativeGpuCameraReader.java \
+                  android/app/build.gradle shared/native-camera.js receive/main.js \
+                  index.html main.js send/main.js sw.js .github/workflows/build-apk.yml
+          git diff --cached --check
+          git commit -m "fix native Camera2 runtime and add 60fps GPU path"
+          git push origin HEAD:fix/native-camera-runtime
+
+  regression:
+    needs: [apply-native-camera-runtime]
+    if: always() && (needs.apply-native-camera-runtime.result == 'success' || needs.apply-native-camera-runtime.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref == 'refs/heads/fix/native-camera-runtime' && 'fix/native-camera-runtime' || github.sha }}
+          fetch-depth: 1
+
+      - name: Build Android app
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew assembleDebug
 
       - name: Cache codec toolchain
         uses: actions/cache@v4
@@ -79,9 +118,3 @@ jobs:
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-y8-worker-smoke.mjs
           node benchmark/corpus-suite.mjs
-
-      - name: Build Android app
-        run: |
-          set -euo pipefail
-          cd android
-          ./gradlew assembleDebug
