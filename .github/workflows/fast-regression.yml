@@ -43,6 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          ref: fix/native-v2-preview
 
       - name: Apply native-v2 preview patch
         if: ${{ hashFiles('.github/patch-native-v2-preview.py') != '' }}
