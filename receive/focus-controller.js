@@ -29,11 +29,6 @@ const CAMERA_TUNING = {
   optimizeLossRatio: 0.88
 };
 const AUTO_QR_EV_BIAS = -0.8;
-const AUTO_QR_EV_COOLDOWN_MS = 3e3;
-const AUTO_QR_WHITE_LOW = 145;
-const AUTO_QR_WHITE_HIGH = 238;
-const AUTO_QR_BLACK_HIGH = 105;
-const AUTO_QR_SEPARATION_LOW = 50;
 class FocusController {
   constructor(apply, changed, strategy = "auto", manualDistance, calibrationMode = "auto", currentScanId = () => 0) {
     this.apply = apply;
@@ -59,10 +54,6 @@ class FocusController {
     this.baselineExposure = undefined;
     this.baselineIso = undefined;
     this.autoExposureCompensation = undefined;
-    this.lastAutoExposureTrimAt = -Infinity;
-    this.autoExposureTrimRunning = false;
-    this.autoExposureTrimDirection = 0;
-    this.autoExposureTrimConfirmations = 0;
     this.requestedExposure = undefined;
     this.requestedIso = undefined;
     this.focusProbes = 0;
@@ -198,10 +189,6 @@ class FocusController {
     this.committedIso = void 0;
     this.committedExposureCompensation = void 0;
     this.autoExposureCompensation = void 0;
-    this.lastAutoExposureTrimAt = -Infinity;
-    this.autoExposureTrimRunning = false;
-    this.autoExposureTrimDirection = 0;
-    this.autoExposureTrimConfirmations = 0;
     if (this.strategy === "auto") {
       this.transition("SEEKING", "camera track changed; hardware AF acquisition retries armed until QR decode");
       void this.configureInitialHardwareFocusOnce().then(() => this.enterAutomaticExposureState("camera opened", this.generation, false));
@@ -1119,46 +1106,6 @@ class FocusController {
     this.stableSince = observation.at;
     if (this.initialLockMs === void 0) this.initialLockMs = performance.now() - this.attachedAt;
     this.changed();
-  }
-  async maybeTrimAutomaticExposure(metrics, now) {
-    var _a, _b, _c;
-    if (this.autoExposureTrimRunning || this.isOptimizing() || this.strategy !== "auto" || this.state !== "LOCKED" || !this.track || this.track.readyState !== "live") return;
-    const range = this.caps.exposureCompensation;
-    if (!range || range.min > 0 || range.max < 0 || metrics.confidence < 0.82 || metrics.focusScore < 0.42 || metrics.banding > 0.45) return;
-    const settings = this.settings();
-    if (settings.exposureMode === "manual") return;
-    const tooBright = metrics.whiteLevel > AUTO_QR_WHITE_HIGH || metrics.blackLevel > AUTO_QR_BLACK_HIGH && metrics.separation >= AUTO_QR_SEPARATION_LOW;
-    const tooDark = !tooBright && (metrics.whiteLevel < AUTO_QR_WHITE_LOW || metrics.separation < AUTO_QR_SEPARATION_LOW);
-    const direction = tooBright ? -1 : tooDark ? 1 : 0;
-    if (direction === 0) {
-      this.autoExposureTrimDirection = 0;
-      this.autoExposureTrimConfirmations = 0;
-      return;
-    }
-    if (direction !== this.autoExposureTrimDirection) {
-      this.autoExposureTrimDirection = direction;
-      this.autoExposureTrimConfirmations = 1;
-      return;
-    }
-    this.autoExposureTrimConfirmations++;
-    if (this.autoExposureTrimConfirmations < 2 || now - this.lastAutoExposureTrimAt < AUTO_QR_EV_COOLDOWN_MS) return;
-    const current = this.quantize(Math.min(0, (_b = (_a = settings.exposureCompensation) != null ? _a : this.autoExposureCompensation) != null ? _b : AUTO_QR_EV_BIAS), range);
-    const step = Math.max((_c = range.step) != null ? _c : 0, 0.25);
-    const next = direction < 0 ? this.quantize(Math.max(range.min, current - step), range) : this.quantize(Math.min(0, current + step), range);
-    if (Math.abs(next - current) < 1e-6) return;
-    this.autoExposureTrimRunning = true;
-    this.lastAutoExposureTrimAt = now;
-    this.autoExposureTrimConfirmations = 0;
-    try {
-      const accepted = await this.apply(this.track, { exposureCompensation: next });
-      if (accepted) {
-        this.autoExposureCompensation = next;
-        this.committedExposureCompensation = next;
-        this.lastReason = `hardware AE QR bias ${next > 0 ? "+" : ""}${Number(next.toFixed(2))} EV`;
-      }
-    } finally {
-      this.autoExposureTrimRunning = false;
-    }
   }
   async enterAutomaticExposureState(reason, generation = this.generation, resetExposure = false, restoreExposure = false) {
     const track = this.track;

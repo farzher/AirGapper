@@ -98,8 +98,9 @@ final class NativeCameraBridge {
     private CameraCaptureSession captureSession;
     private ImageReader imageReader;
     private NativeGpuCameraReader gpuReader;
+    private byte[] yuvFrame;
     private Surface captureSurface;
-    private long cameraGeneration;
+    private volatile long cameraGeneration;
     private String activeCameraId = "";
     private int activeWidth;
     private int activeHeight;
@@ -401,6 +402,7 @@ final class NativeCameraBridge {
             lastReportedAeState = -1;
 
             if (gpu) {
+                yuvFrame = null;
                 gpuReader = new NativeGpuCameraReader(cameraHandler, new NativeGpuCameraReader.Sink() {
                     @Override
                     public boolean takeFrameCredit() {
@@ -413,21 +415,23 @@ final class NativeCameraBridge {
                     public void onFrame(byte[] bytes, long timestampNs) {
                         FrameMetadata metadata = metadataByTimestamp.remove(timestampNs);
                         if (metadata == null) {
-                            frameCredit = true;
+                            if (generation == cameraGeneration) frameCredit = true;
                             return;
                         }
-                        sendFrame(packFrame(bytes, width, height, width, metadata, 1));
+                        writeFrameHeader(bytes, width, height, width, metadata, 1);
+                        sendFrame(bytes, generation);
                     }
 
                     @Override
                     public void onError(String message) {
-                        frameCredit = true;
+                        if (generation == cameraGeneration) frameCredit = true;
                     }
                 });
-                captureSurface = gpuReader.open(width, height);
+                captureSurface = gpuReader.open(width, height, FRAME_HEADER_BYTES);
             } else {
+                yuvFrame = new byte[FRAME_HEADER_BYTES + width * height];
                 imageReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2);
-                imageReader.setOnImageAvailableListener(this::onImageAvailable, cameraHandler);
+                imageReader.setOnImageAvailableListener(reader -> onImageAvailable(reader, generation), cameraHandler);
                 captureSurface = imageReader.getSurface();
             }
             cameraManager.openCamera(cameraId, new CameraDevice.StateCallback() {
@@ -875,18 +879,18 @@ final class NativeCameraBridge {
         return false;
     }
 
-    private void onImageAvailable(ImageReader reader) {
+    private void onImageAvailable(ImageReader reader, long generation) {
         Image image = null;
         try {
             image = reader.acquireLatestImage();
-            if (image == null || !running || !frameCredit) return;
+            if (image == null || generation != cameraGeneration || !running || !frameCredit) return;
             FrameMetadata metadata = metadataByTimestamp.remove(image.getTimestamp());
             if (metadata == null) return;
             byte[] frame = copyFrame(image, metadata);
             frameCredit = false;
-            sendFrame(frame);
+            sendFrame(frame, generation);
         } catch (Exception ignored) {
-            frameCredit = true;
+            if (generation == cameraGeneration) frameCredit = true;
         } finally {
             if (image != null) image.close();
         }
@@ -900,7 +904,11 @@ final class NativeCameraBridge {
         int rowStride = plane.getRowStride();
         int pixelStride = plane.getPixelStride();
         int base = source.position();
-        byte[] output = new byte[FRAME_HEADER_BYTES + width * height];
+        byte[] output = yuvFrame;
+        if (output == null || output.length != FRAME_HEADER_BYTES + width * height) {
+            output = new byte[FRAME_HEADER_BYTES + width * height];
+            yuvFrame = output;
+        }
         writeFrameHeader(output, width, height, width, metadata, 0);
         if (pixelStride == 1 && rowStride == width) {
             ByteBuffer copy = source.duplicate();
@@ -919,13 +927,6 @@ final class NativeCameraBridge {
                 for (int x = 0; x < width; x++) output[outBase + x] = source.get(rowBase + x * pixelStride);
             }
         }
-        return output;
-    }
-
-    private byte[] packFrame(byte[] y, int width, int height, int stride, FrameMetadata metadata, int pipeline) {
-        byte[] output = new byte[FRAME_HEADER_BYTES + y.length];
-        writeFrameHeader(output, width, height, stride, metadata, pipeline);
-        System.arraycopy(y, 0, output, FRAME_HEADER_BYTES, y.length);
         return output;
     }
 
@@ -952,8 +953,9 @@ final class NativeCameraBridge {
         header.putInt(pipeline);
     }
 
-    private void sendFrame(byte[] bytes) {
+    private void sendFrame(byte[] bytes, long generation) {
         activity.runOnUiThread(() -> {
+            if (generation != cameraGeneration) return;
             JavaScriptReplyProxy proxy = replyProxy;
             if (!running || proxy == null) {
                 frameCredit = true;
@@ -962,7 +964,7 @@ final class NativeCameraBridge {
             try {
                 proxy.postMessage(bytes);
             } catch (Exception ignored) {
-                frameCredit = true;
+                if (generation == cameraGeneration) frameCredit = true;
             }
         });
     }
@@ -1009,6 +1011,7 @@ final class NativeCameraBridge {
         } catch (Exception ignored) {
         }
         imageReader = null;
+        yuvFrame = null;
         try {
             if (gpuReader != null) gpuReader.close();
         } catch (Exception ignored) {

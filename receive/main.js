@@ -54,7 +54,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.355";
+const RECEIVER_RUNTIME_BUILD = "v0.5.356";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -303,6 +303,7 @@ let nativeCameraInfo;
 let nativeCameraRunning = false;
 let nativeCameraUnsupportedReason = "";
 let nativePreviewLastAt = -Infinity;
+let nativePreviewImage;
 const AUTO_QR_EV_BIAS = -0.75;
 const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
@@ -1074,7 +1075,7 @@ let benchmarkCorpus;
 let fastRegressionCameraFrames;
 let benchmarkPendingBlob;
 let benchmarkRecorder;
-let benchmarkRecordingSequence = 0;
+let sourceFrameSequence = 0;
 let benchmarkTraces = [];
 const benchmarkJobFrames = /* @__PURE__ */ new Map();
 let benchmarkResult;
@@ -1213,6 +1214,7 @@ function drainPendingGridLane(workerSlot) {
     pending.direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID",
     void 0,
     pending.sourceSequence,
+    pending.sourceCapturedAt,
     pending.regions,
     0,
     void 0,
@@ -1583,7 +1585,8 @@ function resetTemporalBandModel() {
   temporalBandAvoidUntil.fill(0);
 }
 function updateTemporalBandModel(missPoints, hitPoints, sourceSequence, now) {
-  if (missPoints.length < 2 || hitPoints.length < 2 || !Number.isFinite(sourceSequence)) return false;
+  if (missPoints.length < 2 || hitPoints.length < 2 || !Number.isFinite(sourceSequence) ||
+      sourceSequence < Math.max(temporalBandModel.sourceSequence, temporalBandLastSource)) return false;
   const meanX = missPoints.reduce((sum, point) => sum + point.x, 0) / missPoints.length;
   const meanY = missPoints.reduce((sum, point) => sum + point.y, 0) / missPoints.length;
   let xx = 0, xy = 0, yy = 0;
@@ -1801,12 +1804,12 @@ function slotSchedulingYield(region, now, sourceSequence = temporalBandLastSourc
   if ((region.consecutiveMisses || 0) > 0) estimate *= Math.max(0.35, 1 - Math.min(5, region.consecutiveMisses) * 0.10);
   return Math.max(0.01, Math.min(1, estimate));
 }
-function temporalBandMissSlots(auditMode, completion) {
+function temporalBandMissSlots(auditMode, completion, ignoredMisses = new Set()) {
   const layout = lastGridSnapshot?.layout;
   const sourceSequence = Number(auditMode?.sourceSequence);
   if (!layout || auditMode?.full || auditMode?.autoOpticsProbe || !Number.isFinite(sourceSequence)) return new Set();
   const submitted = [...new Set((auditMode.trackSlots ?? []).map(Number).filter((slot) =>
-    Number.isInteger(slot) && slot >= 0 && slot < layout.cols * layout.rows
+    Number.isInteger(slot) && slot >= 0 && slot < layout.cols * layout.rows && !ignoredMisses.has(slot)
   ))];
   if (submitted.length < TEMPORAL_BAND_MIN_TRACKS) return new Set();
   const output = new Set((completion.symbols ?? []).map((symbol) => Number(symbol.header?.slotIndex)).filter(Number.isInteger));
@@ -2903,7 +2906,6 @@ function estimateSenderFrameRate(now = receiverNow()) {
   return { fps: snapped ? nearest : raw, raw, samples: estimates.length, snapped };
 }
 function noteDecodeCompleted(id, completion) {
-  var _a;
   const auditMode = hotPathJobMode.get(id);
   if (!replayRunning && livePipeline.startedAt && auditMode) {
     const latencyMs = Math.max(0, Number(completion.latencyMs) || 0);
@@ -3076,9 +3078,9 @@ function noteDecodeCompleted(id, completion) {
   }
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
-  if (fullJob?.acquisition && completion.symbolCount === 0 && completion.sightings?.length) {
-    const sightedAt = receiverNow();
-    for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, sightedAt, false);
+  const capturedAt = scanCapturedAt.get(id) ?? receiverNow();
+  if (fullJob?.acquisition && !gridLattice.active && completion.symbolCount === 0 && completion.sightings?.length) {
+    for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, capturedAt, false);
     acquisitionSightings += Math.min(3, completion.sightings.length);
     notePipelineEvent("acquisition-finder-sighting", completion.sightings.length);
   }
@@ -3087,10 +3089,10 @@ function noteDecodeCompleted(id, completion) {
   // coherent positional evidence to recenter the stored lattice instead of
   // throwing it away and waiting for a lucky full payload decode.
   if (fullJob?.reacquire && completion.symbolCount === 0 && completion.sightings?.length) {
-    const nudged = gridLattice.nudgeFromSightings(completion.sightings, receiverNow());
+    const nudged = gridLattice.nudgeFromSightings(completion.sightings, capturedAt);
     if (nudged) {
       geometrySightingNudges++;
-      syncGrid(nudged, receiverNow());
+      syncGrid(nudged, capturedAt);
       notePipelineEvent("sighting-lattice-nudge", geometrySightingNudges);
       lastRecoveryReason = `finder sightings recentered locked lattice (${geometrySightingNudges})`;
     }
@@ -3201,7 +3203,14 @@ function noteDecodeCompleted(id, completion) {
   cropAttempts.delete(id);
   optimizerAttributionComplete(id);
   if (!attempts || completion.repeatSkipped) return;
-  const temporalMisses = !auditMode?.autoOpticsProbe ? temporalBandMissSlots(auditMode, completion) : new Set();
+  const completedSlots = new Set((completion.symbols ?? []).map((symbol) => Number(symbol.header?.slotIndex)).filter(Number.isInteger));
+  const staleMissSlots = new Set();
+  for (const attempt of attempts) {
+    const region = attempt.region;
+    const slot = Number(region.gridSlot);
+    if (Number.isInteger(slot) && !completedSlots.has(slot) && id < (region.lastHitScanId ?? -1)) staleMissSlots.add(slot);
+  }
+  const temporalMisses = !auditMode?.autoOpticsProbe ? temporalBandMissSlots(auditMode, completion, staleMissSlots) : new Set();
   for (const attempt of attempts) {
     const region = attempt.region;
     region.decodeAttempts++;
@@ -3212,7 +3221,8 @@ function noteDecodeCompleted(id, completion) {
       if (region.gridSlot !== void 0 && Number.isInteger(decodedSlot)) return decodedSlot === region.gridSlot;
       return Boolean(symbol.box && regionAt(symbol.box) === region);
     });
-    if (!auditMode?.autoOpticsProbe) {
+    const staleMiss = !hit && id < (region.lastHitScanId ?? -1);
+    if (!auditMode?.autoOpticsProbe && !staleMiss) {
       const temporalBandMiss = !hit && temporalMisses.has(Number(region.gridSlot));
       if (region.gridSlot !== void 0) noteSlotFastMetric(region.gridSlot, hit);
       // A coherent rolling-shutter seam is an erasure of this camera frame,
@@ -3222,7 +3232,7 @@ function noteDecodeCompleted(id, completion) {
       if (!temporalBandMiss) {
         if (region.gridSlot !== void 0) noteSlotMetric(region.gridSlot, hit);
         region.decodeConfidence = region.decodeConfidence * 0.82 + Number(hit) * 0.18;
-        if (!hit && ((_a = region.lastHitScanId) != null ? _a : -1) <= id) {
+        if (!hit) {
           region.consecutiveMisses++;
           if (region.consecutiveMisses >= 3) region.decoded = false;
           if (region.consecutiveMisses >= 5 && region.gridSlot !== void 0) {
@@ -5260,13 +5270,14 @@ function stopNativeReceiverSource() {
     nativePreview.hidden = true;
     nativePreview.width = 0;
     nativePreview.height = 0;
+    nativePreviewImage = void 0;
   }
 }
 function drawNativePreview(source) {
   if (!nativePreviewCtx || !source.nativeY || !source.width || !source.height) return;
   const now = performance.now();
-  if (pool.size && pool.busyCount >= Math.max(1, pool.size - 1)) return;
-  if (now - nativePreviewLastAt < 160) return;
+  const busy = pool.size && pool.busyCount >= Math.max(1, pool.size - 1);
+  if (now - nativePreviewLastAt < (busy ? 320 : 160)) return;
   nativePreviewLastAt = now;
   const rotation = nativePreviewRotation();
   const rotated = rotation === 90 || rotation === 270;
@@ -5277,8 +5288,10 @@ function drawNativePreview(source) {
   if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
     nativePreview.width = outWidth;
     nativePreview.height = outHeight;
+    nativePreviewImage = void 0;
   }
-  const rgba = nativePreviewCtx.createImageData(outWidth, outHeight);
+  const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);
+  nativePreviewImage = rgba;
   for (let y = 0; y < outHeight; y++) {
     const dy = Math.min(displayHeight - 1, Math.floor((y + 0.5) * displayHeight / outHeight));
     for (let x = 0; x < outWidth; x++) {
@@ -5303,7 +5316,7 @@ function nativeSourceFrame(frame, gen) {
   // actually produced these pixels rather than a main-thread apply timestamp.
   if (!nativeCameraRunning || done || gen !== captureGen || !frame) return;
   const callbackTime = performance.now();
-  const sequence = benchmarkRecordingSequence++;
+  const sequence = sourceFrameSequence++;
   latestSourceFrameSequence = sequence;
   latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);
   if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
@@ -5881,7 +5894,7 @@ function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
   const height = videoFrame
     ? videoFrame.displayHeight || videoFrame.visibleRect?.height || videoFrame.codedHeight || video.videoHeight || 0
     : video.videoHeight || 0;
-  const sequence = benchmarkRecordingSequence++;
+  const sequence = sourceFrameSequence++;
   latestSourceFrameSequence = sequence;
   return {
     sequence,
@@ -6380,7 +6393,7 @@ function readBoundedVideoCrop(source, x, y, w, h) {
   }
   return ctx.getImageData(0, 0, w, h);
 }
-function submitReceiverJob(message, transfer, kind, trace, sourceSequence, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
+function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourceCapturedAt, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   if (message.strictHotPath === void 0) message.strictHotPath = strictHotPathActive();
   if (message.strictHotPath && !gridLattice.locked && !message.full) {
     notePipelineEvent("strict-prelock-job-rejected");
@@ -6468,7 +6481,7 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
       full: auditMode.full,
       pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0)
     });
-    scanCapturedAt.set(message.id, submittedAt);
+    scanCapturedAt.set(message.id, sourceCapturedAt);
     if (sourceSequence !== lastDecodeSubmittedSourceSequence) {
       lastDecodeSubmittedSourceSequence = sourceSequence;
       decodeFrameTimes.push(submittedAt);
@@ -6860,6 +6873,7 @@ function captureOptimizerProbe(source, trace) {
       "FULL FRAME",
       trace,
       source.sequence,
+      source.callbackTimeMs,
       [],
       1,
       source.opticsEpoch
@@ -6922,6 +6936,7 @@ function captureOptimizerProbe(source, trace) {
     "SHARED TRACKED BATCH CROP",
     trace,
     source.sequence,
+    source.callbackTimeMs,
     [],
     targets.length,
     source.opticsEpoch
@@ -7432,7 +7447,8 @@ async function captureFrame(source) {
         [directFull.frame],
         "DIRECT RECOVERY Y8",
         trace,
-        source.sequence
+        source.sequence,
+        source.callbackTimeMs
       )) directFull.frame.close?.();
       if (trace) trace.stateAfter = gridLattice.state;
       activeBenchmarkFrame = void 0;
@@ -7462,7 +7478,8 @@ async function captureFrame(source) {
       [img.data.buffer],
       "FULL FRAME",
       trace,
-      source.sequence
+      source.sequence,
+      source.callbackTimeMs
     )) {
       if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
     } else if ((pendingScanCapture == null ? void 0 : pendingScanCapture.id) === void 0) {
@@ -7624,6 +7641,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
         trace,
         source.sequence,
+        source.callbackTimeMs,
         group.regions,
         0,
         void 0,
@@ -7679,6 +7697,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
           tracks: batchTracks,
           regions: batchRegions,
           sourceSequence: source.sequence,
+          sourceCapturedAt: source.callbackTimeMs,
           laneCount: 1,
           strictHotPath: false
         });
@@ -7714,6 +7733,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
           sharedDirect ? sharedDirect.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
           trace,
           source.sequence,
+          source.callbackTimeMs,
           batchRegions
         )) {
           sharedDirect?.frame.close?.();
@@ -7735,6 +7755,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         "SHARED TRACKED BATCH CROP",
         trace,
         source.sequence,
+        source.callbackTimeMs,
         batchRegions
       )) {
         cropAttempts.set(id, batchRegions.map((region) => ({ region, quad: region.quad })));
@@ -7814,6 +7835,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       direct ? "Y8 INDIVIDUAL TRACKED" : "INDIVIDUAL TRACKED CROP",
       trace,
       source.sequence,
+      source.callbackTimeMs,
       [r]
     )) {
       direct?.frame.close();
@@ -8624,7 +8646,6 @@ recordCorpusBtn.addEventListener("click", () => {
     return;
   }
   const version = (_c = (_b = (_a = document.querySelector(".app-version")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.replace(/^v/, "")) != null ? _c : "unknown";
-  benchmarkRecordingSequence = 0;
   benchmarkRecorder = new AgcapRecorder(3e3, {
     width: video.videoWidth,
     height: video.videoHeight,

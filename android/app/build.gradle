@@ -14,8 +14,8 @@ android {
         applicationId "com.airgapper.app"
         minSdk 23
         targetSdk 29
-        versionCode 355
-        versionName "0.5.355"
+        versionCode 356
+        versionName "0.5.356"
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
         }

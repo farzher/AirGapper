@@ -335,7 +335,7 @@ class GridLattice {
     this.transition(anyMissing ? "PARTIAL_LOSS" : "TRACK", anyMissing ? "one or more predicted slots missing" : "all predicted slots healthy", now);
   }
   nudgeFromSightings(sightings, at = this.lastHitAt) {
-    if (!this.locked || !this.candidate || !Array.isArray(sightings) || !sightings.length) return null;
+    if (!this.locked || !this.candidate || at < this.lastHitAt || !Array.isArray(sightings) || !sightings.length) return null;
     const snapshot = this.snapshot();
     if (!snapshot) return null;
     const validBox = (box) => box && [box.x, box.y, box.w, box.h].every(Number.isFinite) &&

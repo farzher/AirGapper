@@ -63,7 +63,9 @@ final class NativeGpuCameraReader implements AutoCloseable {
     private int samplerLocation;
     private int width;
     private int height;
+    private int outputOffset;
     private ByteBuffer readback;
+    private byte[] output;
     private boolean closed = true;
 
     NativeGpuCameraReader(Handler handler, Sink sink) {
@@ -74,10 +76,11 @@ final class NativeGpuCameraReader implements AutoCloseable {
         quad.put(QUAD).position(0);
     }
 
-    Surface open(int width, int height) {
+    Surface open(int width, int height, int outputOffset) {
         close();
         this.width = width;
         this.height = height;
+        this.outputOffset = Math.max(0, outputOffset);
         initEgl();
         initGl();
         surfaceTexture = new SurfaceTexture(cameraTexture);
@@ -123,6 +126,7 @@ final class NativeGpuCameraReader implements AutoCloseable {
     }
 
     private void initGl() {
+        GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 1);
         int[] ids = new int[1];
         GLES20.glGenTextures(1, ids, 0);
         cameraTexture = ids[0];
@@ -158,6 +162,7 @@ final class NativeGpuCameraReader implements AutoCloseable {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_DITHER);
         readback = ByteBuffer.allocateDirect(width * height).order(ByteOrder.nativeOrder());
+        output = new byte[outputOffset + width * height];
     }
 
     private static int compileShader(int type, String source) {
@@ -217,9 +222,8 @@ final class NativeGpuCameraReader implements AutoCloseable {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             readback.clear();
             GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RED, GLES20.GL_UNSIGNED_BYTE, readback);
-            byte[] output = new byte[width * height];
             readback.position(0);
-            readback.get(output);
+            readback.get(output, outputOffset, width * height);
             sink.onFrame(output, timestampNs);
         } catch (Exception error) {
             sink.onError(error.getMessage() == null ? error.toString() : error.getMessage());
@@ -253,6 +257,7 @@ final class NativeGpuCameraReader implements AutoCloseable {
         outputTexture = 0;
         program = 0;
         readback = null;
+        output = null;
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             try { EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT); } catch (Exception ignored) {}
             if (eglSurface != EGL14.EGL_NO_SURFACE) try { EGL14.eglDestroySurface(eglDisplay, eglSurface); } catch (Exception ignored) {}

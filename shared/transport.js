@@ -51,6 +51,7 @@ class TransportEncoder {
     this.k = undefined;
     this.mode = undefined;
     this.byteBlocks = undefined;
+    this.mdsCache = undefined;
     this.raptor = undefined;
     this.mode = mode;
     const actualSourceLen = mode === "raptorq" ? blockLen - RAPTOR_PACKET_ID_BYTES : blockLen;
@@ -63,10 +64,18 @@ class TransportEncoder {
       this.raptor = null;
       this.byteBlocks.set(payload);
     }
+    this.mdsCache = this.mode === "mds" ? new Array(MDS_SYMBOLS) : null;
   }
   encode(esi) {
     if (this.raptor) return this.raptor.repair(esi);
-    const coefficients = mdsCoefficients(this.k, esi);
+    const id = esi % MDS_SYMBOLS;
+    if (id < this.k) {
+      const offset = id * this.blockLen;
+      return this.byteBlocks.subarray(offset, offset + this.blockLen);
+    }
+    const cached = this.mdsCache && this.mdsCache[id];
+    if (cached) return cached;
+    const coefficients = mdsCoefficients(this.k, id);
     const out = new Uint8Array(this.blockLen);
     for (let block = 0; block < this.k; block++) {
       const factor = coefficients[block];
@@ -74,11 +83,13 @@ class TransportEncoder {
       const offset = block * this.blockLen;
       addScaled(out, this.byteBlocks.subarray(offset, offset + this.blockLen), factor);
     }
+    if (this.mdsCache) this.mdsCache[id] = out;
     return out;
   }
   free() {
     var _a;
     (_a = this.raptor) == null ? void 0 : _a.free();
+    this.mdsCache = null;
   }
 }
 class TransportDecoder {
