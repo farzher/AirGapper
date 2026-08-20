@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   apply-camera-v2:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/feature/apk-camera-v2') || (github.event_name == 'pull_request' && github.head_ref == 'feature/apk-camera-v2')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
