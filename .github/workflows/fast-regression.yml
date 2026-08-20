@@ -48,6 +48,7 @@ jobs:
       - name: Apply integration and restore permanent workflow
         run: |
           set -euo pipefail
+          sed -i "/replace_all(r, 'if ((source.videoFrame || source.nativeY) && !source.image)'/d" .github/apply-apk-camera-v2-integration.py
           python3 .github/apply-apk-camera-v2-integration.py
           rm -f .github/apply-apk-camera-v2-integration.py .github/workflows/apply-apk-camera-v2.yml
           git fetch origin master --depth=1
