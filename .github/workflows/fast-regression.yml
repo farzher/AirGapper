@@ -53,7 +53,7 @@ jobs:
           path = Path('receive/main.js')
           text = path.read_text()
           start_marker = 'function nativeV2PreviewBounds(quad) {\\n'
-          end_marker = '   // Y8 share this ArrayBuffer'
+          end_marker = 'async function startNativeReceiver(startAttempt, transportReady) {'
           start = text.index(start_marker)
           end = text.index(end_marker, start)
           repaired = text[start:end].replace('\\n', '\n')
