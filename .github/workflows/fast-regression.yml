@@ -56,8 +56,7 @@ jobs:
             android/app/src/main/java/com/airgapper/app/NativeCameraV2Bridge.java \
             shared/native-camera-v2.js \
             receive/main.js \
-            benchmark/native-camera-v2-bridge-smoke.mjs \
-            .github/workflows/fast-regression.yml
+            benchmark/native-camera-v2-bridge-smoke.mjs
           git diff --cached --check
           git status --short
           git commit -m "fix native-v2 preview transport"
