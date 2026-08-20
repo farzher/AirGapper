@@ -25,7 +25,7 @@ on:
       - index.html
       - sw.js
       - benchmark/**
-      - .github/workflows/fast-regression.yml
+      - .github/**
   workflow_dispatch:
 
 permissions:
@@ -37,7 +37,9 @@ concurrency:
 
 jobs:
   apply-native-camera-v353:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-v353'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/fix/native-camera-v353') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'fix/native-camera-v353')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -74,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref == 'refs/heads/fix/native-camera-v353' && 'fix/native-camera-v353' || github.sha }}
+          ref: ${{ (github.head_ref == 'fix/native-camera-v353' || github.ref == 'refs/heads/fix/native-camera-v353') && 'fix/native-camera-v353' || github.sha }}
           fetch-depth: 1
 
       - name: Build Android app
