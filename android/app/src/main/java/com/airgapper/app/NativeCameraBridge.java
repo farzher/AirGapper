@@ -7,6 +7,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -16,6 +17,7 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -39,10 +41,13 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -63,6 +68,21 @@ final class NativeCameraBridge {
     private static final Set<String> STANDARD_SIZES = new HashSet<>(Arrays.asList(
             "640x480", "960x720", "1280x720", "1280x960", "1920x1080",
             "2560x1440", "3840x2160"));
+    private static final int FRAME_MAGIC = 0x32594741;
+    private static final int FRAME_HEADER_BYTES = 88;
+
+    private static final class FrameMetadata {
+        long frameNumber;
+        long timestampNs;
+        long exposureNs;
+        long frameDurationNs;
+        long rollingShutterSkewNs;
+        float focusDistance = Float.NaN;
+        int iso;
+        int afState = -1;
+        int aeState = -1;
+        int settingsEpoch;
+    }
 
     private final Activity activity;
     private final CameraManager cameraManager;
@@ -100,6 +120,15 @@ final class NativeCameraBridge {
     private Integer currentIso;
     private double currentExposureCompensationEv;
     private long lastSettingsEventNs;
+    private int activeSettingsEpoch = 1;
+    private int lastReportedAfState = -1;
+    private int lastReportedAeState = -1;
+    private final LinkedHashMap<Long, FrameMetadata> metadataByTimestamp = new LinkedHashMap<Long, FrameMetadata>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<Long, FrameMetadata> eldest) {
+            return size() > 12;
+        }
+    };
 
     NativeCameraBridge(Activity activity, WebView webView) {
         this.activity = activity;
@@ -366,6 +395,10 @@ final class NativeCameraBridge {
             activeSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
             activeFacing = facingName(chars.get(CameraCharacteristics.LENS_FACING));
             frameCredit = false;
+            metadataByTimestamp.clear();
+            activeSettingsEpoch = 1;
+            lastReportedAfState = -1;
+            lastReportedAeState = -1;
 
             if (gpu) {
                 gpuReader = new NativeGpuCameraReader(cameraHandler, new NativeGpuCameraReader.Sink() {
@@ -377,8 +410,13 @@ final class NativeCameraBridge {
                     }
 
                     @Override
-                    public void onFrame(byte[] bytes) {
-                        sendFrame(bytes);
+                    public void onFrame(byte[] bytes, long timestampNs) {
+                        FrameMetadata metadata = metadataByTimestamp.remove(timestampNs);
+                        if (metadata == null) {
+                            frameCredit = true;
+                            return;
+                        }
+                        sendFrame(packFrame(bytes, width, height, width, metadata, 1));
                     }
 
                     @Override
@@ -436,6 +474,17 @@ final class NativeCameraBridge {
             activeBuilder = builder;
             builder.addTarget(target);
             builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
+            int[] videoStabilization = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
+            if (contains(videoStabilization, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF))
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+            int[] opticalStabilization = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
+            if (contains(opticalStabilization, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF))
+                builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF);
+            int[] edgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
+            if (contains(edgeModes, CaptureRequest.EDGE_MODE_FAST)) builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_FAST);
+            int[] noiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
+            if (contains(noiseModes, CaptureRequest.NOISE_REDUCTION_MODE_FAST))
+                builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST);
             if ("manual".equals(activeFpsControl)) {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
                 Range<Long> exposureRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
@@ -467,6 +516,7 @@ final class NativeCameraBridge {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
                 currentFocusMode = "manual";
             }
+            builder.setTag(activeSettingsEpoch);
             CaptureRequest request = builder.build();
 
             CameraCaptureSession.StateCallback callback = new CameraCaptureSession.StateCallback() {
@@ -545,20 +595,42 @@ final class NativeCameraBridge {
             Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
             Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
             Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
-            Integer af = result.get(CaptureResult.CONTROL_AF_MODE);
-            Integer ae = result.get(CaptureResult.CONTROL_AE_MODE);
+            Integer afMode = result.get(CaptureResult.CONTROL_AF_MODE);
+            Integer aeMode = result.get(CaptureResult.CONTROL_AE_MODE);
+            Integer afState = result.get(CaptureResult.CONTROL_AF_STATE);
+            Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
             Integer comp = result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION);
+            Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+            Long frameDuration = result.get(CaptureResult.SENSOR_FRAME_DURATION);
+            Long rollingSkew = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW);
             if (exposure != null) currentExposureTimeNs = exposure;
             if (iso != null) currentIso = iso;
             if (focus != null) currentFocusDistance = focus;
-            if (af != null) currentFocusMode = focusModeName(af);
-            if (ae != null) currentExposureMode = ae == CaptureRequest.CONTROL_AE_MODE_OFF ? "manual" : "continuous";
+            if (afMode != null) currentFocusMode = focusModeName(afMode);
+            if (aeMode != null) currentExposureMode = aeMode == CaptureRequest.CONTROL_AE_MODE_OFF ? "manual" : "continuous";
+            if (afState != null) lastReportedAfState = afState;
+            if (aeState != null) lastReportedAeState = aeState;
+            if (timestamp != null) {
+                FrameMetadata metadata = new FrameMetadata();
+                metadata.frameNumber = result.getFrameNumber();
+                metadata.timestampNs = timestamp;
+                metadata.exposureNs = exposure == null ? 0 : exposure;
+                metadata.frameDurationNs = frameDuration == null ? 0 : frameDuration;
+                metadata.rollingShutterSkewNs = rollingSkew == null ? 0 : rollingSkew;
+                metadata.focusDistance = focus == null ? Float.NaN : focus;
+                metadata.iso = iso == null ? 0 : iso;
+                metadata.afState = afState == null ? -1 : afState;
+                metadata.aeState = aeState == null ? -1 : aeState;
+                Object tag = request.getTag();
+                metadata.settingsEpoch = tag instanceof Integer ? (Integer) tag : activeSettingsEpoch;
+                metadataByTimestamp.put(timestamp, metadata);
+            }
             if (comp != null && activeCharacteristics != null) {
                 Rational step = activeCharacteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
                 currentExposureCompensationEv = comp * (step == null ? 1.0 : step.doubleValue());
             }
             long now = System.nanoTime();
-            if (now - lastSettingsEventNs >= 200_000_000L) {
+            if (now - lastSettingsEventNs >= 1_000_000_000L) {
                 lastSettingsEventNs = now;
                 try {
                     JSONObject event = new JSONObject();
@@ -603,7 +675,10 @@ final class NativeCameraBridge {
             caps.put("focusDistance", new JSONObject().put("min", 0).put("max", minFocus).put("step", Math.max(0.001, minFocus / 200.0)));
         }
         caps.put("focusMode", focusModes);
-        caps.put("pointsOfInterest", false);
+        Integer maxAfRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+        Integer maxAeRegions = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+        caps.put("pointsOfInterest", (maxAfRegions != null && maxAfRegions > 0) ||
+                (maxAeRegions != null && maxAeRegions > 0));
 
         JSONArray exposureModes = new JSONArray();
         exposureModes.put("continuous");
@@ -642,6 +717,9 @@ final class NativeCameraBridge {
         if (currentExposureTimeNs != null) settings.put("exposureTime", currentExposureTimeNs / 100_000.0);
         if (currentIso != null) settings.put("iso", currentIso);
         settings.put("exposureCompensation", currentExposureCompensationEv);
+        settings.put("afState", lastReportedAfState);
+        settings.put("aeState", lastReportedAeState);
+        settings.put("settingsEpoch", activeSettingsEpoch);
         return settings;
     }
 
@@ -656,6 +734,7 @@ final class NativeCameraBridge {
                 CaptureRequest.Builder builder = activeBuilder;
 
                 boolean triggerSingleAf = false;
+                if (patch.has("pointsOfInterest")) applyMeteringRegions(builder, patch.optJSONArray("pointsOfInterest"));
                 if (patch.has("focusMode")) {
                     String mode = patch.optString("focusMode", "continuous");
                     int[] af = activeCharacteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
@@ -744,6 +823,8 @@ final class NativeCameraBridge {
                     }
                 }
 
+                activeSettingsEpoch++;
+                builder.setTag(activeSettingsEpoch);
                 if (triggerSingleAf) {
                     captureSession.capture(builder.build(), captureCallback, cameraHandler);
                     builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
@@ -759,6 +840,35 @@ final class NativeCameraBridge {
         });
     }
 
+    private void applyMeteringRegions(CaptureRequest.Builder builder, JSONArray points) throws Exception {
+        if (points == null || points.length() == 0 || activeCharacteristics == null) return;
+        JSONObject point = points.optJSONObject(0);
+        if (point == null) return;
+        double nx = Math.max(0, Math.min(1, point.optDouble("x", 0.5)));
+        double ny = Math.max(0, Math.min(1, point.optDouble("y", 0.5)));
+        Rect active = activeCharacteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        Rect crop = builder.get(CaptureRequest.SCALER_CROP_REGION);
+        Rect bounds = crop != null ? crop : active;
+        if (bounds == null || bounds.width() <= 0 || bounds.height() <= 0) return;
+
+        // Decoder geometry is expressed in the unrotated Camera2 output buffer,
+        // which shares sensor active-array axes. Preview rotation is visual only.
+        int cx = bounds.left + (int) Math.round(nx * bounds.width());
+        int cy = bounds.top + (int) Math.round(ny * bounds.height());
+        int half = Math.max(24, Math.min(bounds.width(), bounds.height()) / 12);
+        int left = Math.max(bounds.left, cx - half);
+        int top = Math.max(bounds.top, cy - half);
+        int right = Math.min(bounds.right, cx + half);
+        int bottom = Math.min(bounds.bottom, cy + half);
+        MeteringRectangle region = new MeteringRectangle(
+                new Rect(left, top, Math.max(left + 1, right), Math.max(top + 1, bottom)),
+                MeteringRectangle.METERING_WEIGHT_MAX);
+        Integer maxAf = activeCharacteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+        Integer maxAe = activeCharacteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+        if (maxAf != null && maxAf > 0) builder.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{region});
+        if (maxAe != null && maxAe > 0) builder.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[]{region});
+    }
+
     private static boolean contains(int[] values, int wanted) {
         if (values == null) return false;
         for (int value : values) if (value == wanted) return true;
@@ -770,9 +880,11 @@ final class NativeCameraBridge {
         try {
             image = reader.acquireLatestImage();
             if (image == null || !running || !frameCredit) return;
-            byte[] y = copyTightY(image);
+            FrameMetadata metadata = metadataByTimestamp.remove(image.getTimestamp());
+            if (metadata == null) return;
+            byte[] frame = copyFrame(image, metadata);
             frameCredit = false;
-            sendFrame(y);
+            sendFrame(frame);
         } catch (Exception ignored) {
             frameCredit = true;
         } finally {
@@ -780,7 +892,7 @@ final class NativeCameraBridge {
         }
     }
 
-    private static byte[] copyTightY(Image image) {
+    private byte[] copyFrame(Image image, FrameMetadata metadata) {
         int width = image.getWidth();
         int height = image.getHeight();
         Image.Plane plane = image.getPlanes()[0];
@@ -788,21 +900,56 @@ final class NativeCameraBridge {
         int rowStride = plane.getRowStride();
         int pixelStride = plane.getPixelStride();
         int base = source.position();
-        byte[] output = new byte[width * height];
-        if (pixelStride == 1) {
+        byte[] output = new byte[FRAME_HEADER_BYTES + width * height];
+        writeFrameHeader(output, width, height, width, metadata, 0);
+        if (pixelStride == 1 && rowStride == width) {
+            ByteBuffer copy = source.duplicate();
+            copy.position(base);
+            copy.get(output, FRAME_HEADER_BYTES, width * height);
+        } else if (pixelStride == 1) {
             ByteBuffer copy = source.duplicate();
             for (int row = 0; row < height; row++) {
                 copy.position(base + row * rowStride);
-                copy.get(output, row * width, width);
+                copy.get(output, FRAME_HEADER_BYTES + row * width, width);
             }
         } else {
             for (int row = 0; row < height; row++) {
                 int rowBase = base + row * rowStride;
-                int outBase = row * width;
+                int outBase = FRAME_HEADER_BYTES + row * width;
                 for (int x = 0; x < width; x++) output[outBase + x] = source.get(rowBase + x * pixelStride);
             }
         }
         return output;
+    }
+
+    private byte[] packFrame(byte[] y, int width, int height, int stride, FrameMetadata metadata, int pipeline) {
+        byte[] output = new byte[FRAME_HEADER_BYTES + y.length];
+        writeFrameHeader(output, width, height, stride, metadata, pipeline);
+        System.arraycopy(y, 0, output, FRAME_HEADER_BYTES, y.length);
+        return output;
+    }
+
+    private void writeFrameHeader(byte[] output, int width, int height, int stride,
+                                  FrameMetadata metadata, int pipeline) {
+        ByteBuffer header = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN);
+        header.putInt(FRAME_MAGIC);
+        header.putShort((short) FRAME_HEADER_BYTES);
+        header.putShort((short) 1);
+        header.putInt(width);
+        header.putInt(height);
+        header.putInt(stride);
+        header.putInt(activeSensorOrientation);
+        header.putLong(metadata.frameNumber);
+        header.putLong(metadata.timestampNs);
+        header.putLong(metadata.exposureNs);
+        header.putLong(metadata.frameDurationNs);
+        header.putLong(metadata.rollingShutterSkewNs);
+        header.putFloat(metadata.focusDistance);
+        header.putInt(metadata.iso);
+        header.putInt(metadata.afState);
+        header.putInt(metadata.aeState);
+        header.putInt(metadata.settingsEpoch);
+        header.putInt(pipeline);
     }
 
     private void sendFrame(byte[] bytes) {
@@ -877,6 +1024,9 @@ final class NativeCameraBridge {
         currentExposureTimeNs = null;
         currentIso = null;
         lastSettingsEventNs = 0;
+        lastReportedAfState = -1;
+        lastReportedAeState = -1;
+        metadataByTimestamp.clear();
     }
 
     void close() {

@@ -34,8 +34,7 @@ import { StaticQrOpticsAnalyzer } from "./qr-optics.js";
 import {
   acquisitionRacePolicy,
   automaticOpticsHoldThreshold,
-  legacyTemporalRiskWeight,
-  temporalHardSkip
+  legacyTemporalRiskWeight
 } from "./performance-policy.js";
 import {
   copyTextOnAndroid,
@@ -55,7 +54,7 @@ import {
   stopNativeCamera
 } from "../shared/native-camera.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.354";
+const RECEIVER_RUNTIME_BUILD = "v0.5.355";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -160,14 +159,62 @@ function createDecodeWorker() {
 }
 document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
 const hardwareThreadCount = Math.max(1, navigator.hardwareConcurrency || 2);
-const autoWorkerCount = Math.max(1, Math.min(7, hardwareThreadCount - 1));
+const autoWorkerMax = Math.max(1, Math.min(5, hardwareThreadCount - 1));
+let autoWorkerTarget = Math.min(autoWorkerMax, hardwareThreadCount <= 2 ? 1 : 2);
+let autoWorkerPressureSince = 0;
+let autoWorkerHeadroomSince = 0;
+let autoWorkerLastUpdate = -Infinity;
+const autoWorkerLatencies = [];
 const autoWorkerOption = decodeWorkers.querySelector('option[value="auto"]');
-autoWorkerOption.textContent = `Auto (${autoWorkerCount})`;
+function syncAutoWorkerLabel() {
+  autoWorkerOption.textContent = `Auto (${autoWorkerTarget})`;
+}
+syncAutoWorkerLabel();
 for (let count = 1; count <= hardwareThreadCount; count++) {
   decodeWorkers.add(new Option(String(count), String(count)));
 }
 function selectedWorkerCount() {
-  return decodeWorkers.value === "auto" ? autoWorkerCount : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerCount));
+  return decodeWorkers.value === "auto" ? autoWorkerTarget : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerTarget));
+}
+function updateAutoWorkerController(completion) {
+  if (decodeWorkers.value !== "auto" || replayRunning || !stream || done) return;
+  const latency = Number(completion?.latencyMs);
+  if (Number.isFinite(latency) && latency > 0 && latency < 10e3) {
+    autoWorkerLatencies.push(latency);
+    if (autoWorkerLatencies.length > 40) autoWorkerLatencies.shift();
+  }
+  const now = receiverNow();
+  if (now - autoWorkerLastUpdate < 750 || autoWorkerLatencies.length < 5) return;
+  autoWorkerLastUpdate = now;
+  const sorted = [...autoWorkerLatencies].sort((a, b) => a - b);
+  const p50 = sorted[Math.floor(sorted.length * 0.5)];
+  const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+  const sourceFps = Math.max(8, captureTimes.reduce((count, at) => count + Number(at > now - 1000), 0));
+  const demand = Math.max(1, Math.min(autoWorkerMax, Math.ceil(sourceFps * p50 / 1000) + 1));
+  const pressured = recentTrackPressure(now) || p95 > Math.max(180, 2000 / sourceFps);
+  // A healthy optical HOLD also freezes the warm worker set. Grow only when
+  // sustained saturation itself explains lost throughput; never churn caches
+  // merely because a good scan has headroom.
+  if (autoOpticsControllerState === "HOLD" && !pressured) return;
+  if (pressured && demand > autoWorkerTarget) {
+    if (!autoWorkerPressureSince) autoWorkerPressureSince = now;
+    autoWorkerHeadroomSince = 0;
+    if (now - autoWorkerPressureSince >= 1200) {
+      autoWorkerTarget = Math.min(autoWorkerMax, autoWorkerTarget + 1, demand);
+      autoWorkerPressureSince = now;
+      pool.resize(autoWorkerTarget);
+      syncAutoWorkerLabel();
+    }
+  } else {
+    autoWorkerPressureSince = 0;
+    if (!autoWorkerHeadroomSince) autoWorkerHeadroomSince = now;
+    if (demand < autoWorkerTarget && now - autoWorkerHeadroomSince >= 10e3 && pool.busyCount === 0) {
+      autoWorkerTarget = Math.max(1, autoWorkerTarget - 1, demand);
+      pool.resize(autoWorkerTarget);
+      syncAutoWorkerLabel();
+      autoWorkerHeadroomSince = now;
+    }
+  }
 }
 const TRACKS_PER_FRAME_KEY = "airgapper:tracks-per-frame:v1";
 function tracksPerFrameMode() {
@@ -266,7 +313,6 @@ const AUTO_OPTICS_RECENT_DECODE_MS = 900;
 const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
 const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
 const AUTO_OPTICS_MAX_SHORT_EXPOSURE = 35; // 3.5 ms; exposureTime uses 0.1 ms units
-const AUTO_OPTICS_FALLBACK_EXPOSURE = 50; // one 5 ms escape hatch for genuinely dark scenes
 // After the motion-safe shutter handoff, tune gain against the decoder itself.
 // Hardware AE is inconsistent on an animated emissive QR wall: the same phone
 // has chosen 10 ms / ISO 100 and 10 ms / ISO 200 on adjacent runs, while the
@@ -277,18 +323,8 @@ const AUTO_OPTICS_GAIN_MIN_ATTEMPTS = 20;
 // AirGapper is looking at an emissive black/white modem, not making a pleasing
 // photograph. Prefer less light when two candidates decode essentially alike.
 const AUTO_OPTICS_MEMORY_MIN_YIELD = 0.55;
-const AUTO_OPTICS_GAIN_MAX_PROBES = 8;
-const AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT = 0.08;
-const AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO = 0.72;
-const AUTO_OPTICS_CONTROL_RETRY_MS = 850;
 const AUTO_OPTICS_COHORT_MAX_SLOTS = 12;
 const AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT = 2;
-const AUTO_OPTICS_HEALTHY_YIELD = 0.50;
-const AUTO_OPTICS_HEALTHY_TAIL_YIELD = 0.20;
-const AUTO_OPTICS_REUSABLE_YIELD = 0.60;
-const AUTO_OPTICS_REUSABLE_TAIL_YIELD = 0.35;
-const AUTO_OPTICS_UNHEALTHY_RETRY_MS = 3000;
-const AUTO_OPTICS_NEAR_BEST_YIELD_DELTA = 0.03;
 const AUTO_OPTICS_POSE_STABLE_MS = 300;
 const AUTO_OPTICS_POSE_WAIT_MS = 700;
 const AUTO_OPTICS_POSE_MAX_CENTER_DRIFT = 0.035;
@@ -297,10 +333,6 @@ const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // multiple visible slots makes Auto Optics impossible on a true 1x1 sender.
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 850;
-const AUTO_OPTICS_ACQUIRE_SCAN_MAX_EXPOSURE = 100; // 10 ms, exposureTime is 100 us units
-const AUTO_OPTICS_HISTORY_KEY = "airgapper:auto-optics-learning:v5";
-const AUTO_OPTICS_HISTORY_LIMIT = 32;
-const AUTO_OPTICS_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS = 5 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v5";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
@@ -313,13 +345,11 @@ const AUTO_OPTICS_MEMORY_BOOT_MAX_MS = 650;
 const AUTO_OPTICS_COLLAPSE_YIELD = 0.12;
 const AUTO_OPTICS_COLLAPSE_RETRY_MS = 1500;
 const AUTO_OPTICS_HOLD_SAMPLE_MS = 700;
-const AUTO_OPTICS_HOLD_COLLAPSE_MS = 1400;
+const AUTO_OPTICS_HOLD_COLLAPSE_MS = 2500;
 const AUTO_OPTICS_HOLD_MIN_ATTEMPTS = 40;
-const AUTO_OPTICS_LOST_RECALIBRATE_MS = 1200;
 // Once a startup winner is found, never poke the camera periodically. Hold it
 // until live per-QR yield falls far enough below that measured winner to prove
 // the scene/optics changed, then recalibrate from neutral hardware AE.
-const AUTO_OPTICS_HOLD_DEGRADE_RATIO = 0.70;
 const AUTO_OPTICS_BASELINE_SAMPLE_MS = 320;
 const AUTO_OPTICS_CANDIDATE_SAMPLE_MS = 280;
 const AUTO_OPTICS_HEALTHY_HOLD_YIELD = 0.82;
@@ -330,6 +360,7 @@ const AUTO_OPTICS_AE_RESCUE_RETRY_MS = 3000;
 const AUTO_OPTICS_SHORT_EXPOSURE_TRIGGER = 55; // 5.5 ms
 let autoOpticsTuneSummary = "";
 let autoOpticsRuntimeState = "ae";
+let autoOpticsControllerState = "ACQUIRE";
 let autoOpticsMutationRunning = false;
 let autoOpticsLockSince = 0;
 let autoOpticsRetryAt = 0;
@@ -1203,7 +1234,10 @@ const pool = new DecodeWorkerPool(
     if (!gridLattice.active) noteRegion(sighting, receiverNow(), false);
   },
   () => void 0,
-  (id, completion) => noteDecodeCompleted(id, completion),
+  (id, completion) => {
+    noteDecodeCompleted(id, completion);
+    updateAutoWorkerController(completion);
+  },
   (slot) => drainPendingGridLane(slot),
   ({ sourceSequence, signature }) => {
     const sequence = Number(sourceSequence);
@@ -1365,6 +1399,8 @@ let temporalPredictionSafeMisses = 0;
 const GUIDED_REPAIR_PRESSURE_LIMIT = 1;
 const temporalBandModel = {
   axis: "",
+  normalX: 0,
+  normalY: 1,
   position: 0,
   velocity: 0,
   width: 1,
@@ -1504,9 +1540,15 @@ function resetSlotSchedulingHistory(slot, now = receiverNow()) {
 }
 function noteSlotDecoded(slot) {
   const index = Number(slot);
-  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT || !slotAdaptiveWeak[index]) return;
+  if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return;
+  // A CRC-valid probe is authoritative: immediately remove every temporal and
+  // weak-slot fence so the scheduler cannot preserve a stale blind spot.
+  temporalBandAvoidUntil[index] = 0;
+  temporalBandSkipThroughSource[index] = -1;
   slotAdaptiveWeak[index] = 0;
   slotQualityScores[index] = Math.max(slotQualityScores[index], SLOT_WEAK_RECOVERY_SCORE);
+  slotFastYield[index] = Math.max(slotFastYield[index], 0.85);
+  resetGuidedFallbackSlot(index);
 }
 function noteSlotMetric(slot, hit) {
   const index = Number(slot);
@@ -1528,6 +1570,8 @@ function noteSlotMetric(slot, hit) {
 }
 function resetTemporalBandModel() {
   temporalBandModel.axis = "";
+  temporalBandModel.normalX = 0;
+  temporalBandModel.normalY = 1;
   temporalBandModel.position = 0;
   temporalBandModel.velocity = 0;
   temporalBandModel.width = 1;
@@ -1538,35 +1582,48 @@ function resetTemporalBandModel() {
   temporalBandModel.detections = 0;
   temporalBandAvoidUntil.fill(0);
 }
-function circularBandDelta(next, previous, span) {
-  if (!(span > 1)) return next - previous;
-  let delta = next - previous;
-  const half = span / 2;
-  while (delta > half) delta -= span;
-  while (delta < -half) delta += span;
-  return delta;
-}
-function updateTemporalBandModel(axis, indices, span, sourceSequence, now) {
-  if (!indices.length || !(span > 0) || !Number.isFinite(sourceSequence)) return;
-  const position = indices.reduce((sum, value) => sum + value, 0) / indices.length;
-  const width = Math.max(1, indices[indices.length - 1] - indices[0] + 1);
-  const sameAxis = temporalBandModel.axis === axis && temporalBandModel.span === span &&
-    temporalBandModel.sourceSequence >= 0 && sourceSequence > temporalBandModel.sourceSequence;
-  let velocity = 0;
-  if (sameAxis) {
-    const frames = Math.max(1, sourceSequence - temporalBandModel.sourceSequence);
-    const observed = circularBandDelta(position, temporalBandModel.position, span) / frames;
-    velocity = temporalBandModel.velocity * 0.58 + observed * 0.42;
+function updateTemporalBandModel(missPoints, hitPoints, sourceSequence, now) {
+  if (missPoints.length < 2 || hitPoints.length < 2 || !Number.isFinite(sourceSequence)) return false;
+  const meanX = missPoints.reduce((sum, point) => sum + point.x, 0) / missPoints.length;
+  const meanY = missPoints.reduce((sum, point) => sum + point.y, 0) / missPoints.length;
+  let xx = 0, xy = 0, yy = 0;
+  for (const point of missPoints) {
+    const dx = point.x - meanX, dy = point.y - meanY;
+    xx += dx * dx; xy += dx * dy; yy += dy * dy;
   }
-  temporalBandModel.axis = axis;
+  const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+  let normalX = -Math.sin(angle), normalY = Math.cos(angle);
+  if (temporalBandModel.axis && normalX * temporalBandModel.normalX + normalY * temporalBandModel.normalY < 0) {
+    normalX = -normalX; normalY = -normalY;
+  }
+  const project = (point) => point.x * normalX + point.y * normalY;
+  const missProjection = missPoints.map(project);
+  const position = missProjection.reduce((sum, value) => sum + value, 0) / missProjection.length;
+  const spread = Math.sqrt(missProjection.reduce((sum, value) => sum + (value - position) ** 2, 0) / missProjection.length);
+  const typicalEdge = missPoints.reduce((sum, point) => sum + point.edge, 0) / missPoints.length;
+  const width = Math.max(typicalEdge * 0.7, spread * 2.8);
+  const outsideHits = hitPoints.reduce((count, point) => count + Number(Math.abs(project(point) - position) > width), 0);
+  if (spread > typicalEdge * 0.75 || outsideHits < Math.ceil(hitPoints.length * 0.6)) return false;
+  const sameDirection = temporalBandModel.axis &&
+    normalX * temporalBandModel.normalX + normalY * temporalBandModel.normalY > 0.9 &&
+    sourceSequence > temporalBandModel.sourceSequence;
+  let velocity = 0;
+  if (sameDirection) {
+    const frames = Math.max(1, sourceSequence - temporalBandModel.sourceSequence);
+    velocity = temporalBandModel.velocity * 0.58 + (position - temporalBandModel.position) / frames * 0.42;
+  }
+  temporalBandModel.axis = Math.abs(normalY) >= Math.abs(normalX) ? "r" : "c";
+  temporalBandModel.normalX = normalX;
+  temporalBandModel.normalY = normalY;
   temporalBandModel.position = position;
-  temporalBandModel.velocity = Math.max(-2.5, Math.min(2.5, velocity));
-  temporalBandModel.width = temporalBandModel.width * (sameAxis ? 0.65 : 0) + width * (sameAxis ? 0.35 : 1);
-  temporalBandModel.span = span;
+  temporalBandModel.velocity = Math.max(-typicalEdge * 2.5, Math.min(typicalEdge * 2.5, velocity));
+  temporalBandModel.width = sameDirection ? temporalBandModel.width * 0.65 + width * 0.35 : width;
+  temporalBandModel.span = Math.abs(normalX) * receiverFrameWidth + Math.abs(normalY) * receiverFrameHeight;
   temporalBandModel.sourceSequence = Math.trunc(sourceSequence);
   temporalBandModel.updatedAt = now;
-  temporalBandModel.confidence = Math.min(0.96, sameAxis ? temporalBandModel.confidence * 0.72 + 0.28 : 0.58);
+  temporalBandModel.confidence = Math.min(0.96, sameDirection ? temporalBandModel.confidence * 0.72 + 0.28 : 0.58);
   temporalBandModel.detections++;
+  return true;
 }
 function predictedTemporalBand(sourceSequence, now = receiverNow()) {
   if (!temporalBandModel.axis || !(temporalBandModel.span > 0)) return null;
@@ -1575,16 +1632,16 @@ function predictedTemporalBand(sourceSequence, now = receiverNow()) {
   const frames = Number.isFinite(sourceSequence) && temporalBandModel.sourceSequence >= 0
     ? Math.max(0, Math.min(8, sourceSequence - temporalBandModel.sourceSequence))
     : 0;
-  const span = temporalBandModel.span;
-  let position = temporalBandModel.position + temporalBandModel.velocity * frames;
-  if (span > 1) position = ((position % span) + span) % span;
   const confidence = temporalBandModel.confidence * Math.exp(-age / 700) * Math.exp(-Math.max(0, frames - 2) * 0.16);
   return {
     axis: temporalBandModel.axis,
-    position,
+    normalX: temporalBandModel.normalX,
+    normalY: temporalBandModel.normalY,
+    position: temporalBandModel.position + temporalBandModel.velocity * frames,
     velocity: temporalBandModel.velocity,
-    width: temporalBandModel.width + Math.min(1.5, Math.abs(temporalBandModel.velocity) * Math.max(0, frames) * 0.45),
-    span, confidence
+    width: temporalBandModel.width + Math.min(temporalBandModel.width, Math.abs(temporalBandModel.velocity) * frames * 0.45),
+    span: temporalBandModel.span,
+    confidence
   };
 }
 function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
@@ -1592,16 +1649,15 @@ function temporalBandRiskForSlot(slot, sourceSequence, now = receiverNow()) {
   if (!Number.isInteger(index) || index < 0 || index >= SLOT_METRIC_COUNT) return 0;
   const legacyRisk = temporalBandAvoidUntil[index] > now ? 0.98 : 0;
   const model = predictedTemporalBand(sourceSequence, now);
-  const layout = lastGridSnapshot?.layout;
-  if (!model || !layout || model.confidence < 0.08) return legacyRisk;
-  const coordinate = model.axis === "c" ? index % layout.cols : Math.floor(index / layout.cols);
-  let distance = Math.abs(coordinate - model.position);
-  if (model.span > 1) distance = Math.min(distance, model.span - distance);
-  const radius = Math.max(0.6, model.width * 0.58 + 0.35);
-  const modeled = model.confidence * Math.exp(-0.5 * (distance / radius) ** 2);
-  // A confident moving seam supersedes the old per-slot timer. As soon as the
-  // predicted band moves away, that QR re-enters instead of remaining poisoned
-  // for half a second by a historical miss.
+  const region = regions.find((item) => Number(item.gridSlot) === index);
+  const quad = region?.quad;
+  if (!model || !quad || model.confidence < 0.08) return legacyRisk;
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  const centerX = points.reduce((sum, point) => sum + point.x, 0) / 4;
+  const centerY = points.reduce((sum, point) => sum + point.y, 0) / 4;
+  const coordinate = centerX * model.normalX + centerY * model.normalY;
+  const radius = Math.max(4, model.width * 0.62);
+  const modeled = model.confidence * Math.exp(-0.5 * ((coordinate - model.position) / radius) ** 2);
   const fallback = legacyRisk * legacyTemporalRiskWeight(model.confidence);
   return Math.max(fallback, Math.min(1, modeled));
 }
@@ -1758,20 +1814,29 @@ function temporalBandMissSlots(auditMode, completion) {
   const misses = submitted.filter((slot) => !output.has(slot));
   if (hits.length < TEMPORAL_BAND_MIN_HITS || misses.length < TEMPORAL_BAND_MIN_MISSES || misses.length > submitted.length * 0.45) return new Set();
 
-  const uniqueSorted = (values) => [...new Set(values)].sort((a, b) => a - b);
-  const adjacent = (values) => values.length > 0 && values.length <= 2 && values[values.length - 1] - values[0] <= 1;
-  const missCols = uniqueSorted(misses.map((slot) => slot % layout.cols));
-  const missRows = uniqueSorted(misses.map((slot) => Math.floor(slot / layout.cols)));
-  const colSet = new Set(missCols);
-  const rowSet = new Set(missRows);
-  const columnBand = adjacent(missCols) && hits.some((slot) => !colSet.has(slot % layout.cols));
-  const rowBand = adjacent(missRows) && hits.some((slot) => !rowSet.has(Math.floor(slot / layout.cols)));
-  if (!columnBand && !rowBand) return new Set();
-  const useColumn = columnBand && (!rowBand || missCols.length <= missRows.length);
-  const bandIndices = useColumn ? missCols : missRows;
-  const bandSpan = useColumn ? layout.cols : layout.rows;
-  const key = `${useColumn ? "c" : "r"}:${bandIndices.join(",")}`;
-
+  const pointFor = (slot) => {
+    const region = regions.find((item) => Number(item.gridSlot) === slot);
+    const quad = region?.quad;
+    if (!quad) return null;
+    const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+    if (points.some((point) => !point || !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+    const edge = points.reduce((sum, point, index) => {
+      const next = points[(index + 1) % 4];
+      return sum + Math.hypot(next.x - point.x, next.y - point.y);
+    }, 0) / 4;
+    return {
+      x: points.reduce((sum, point) => sum + point.x, 0) / 4,
+      y: points.reduce((sum, point) => sum + point.y, 0) / 4,
+      edge
+    };
+  };
+  const missPoints = misses.map(pointFor).filter(Boolean);
+  const hitPoints = hits.map(pointFor).filter(Boolean);
+  const bandNow = receiverNow();
+  if (!updateTemporalBandModel(missPoints, hitPoints, sourceSequence, bandNow)) return new Set();
+  if (auditMode.rollingShutterSkewNs > 0)
+    temporalBandModel.confidence = Math.min(0.98, temporalBandModel.confidence + 0.04);
+  const key = `${temporalBandModel.axis}:${Math.round(temporalBandModel.position / Math.max(8, temporalBandModel.width))}`;
   if (sourceSequence >= temporalBandLastSource) {
     if (key === temporalBandLastKey && sourceSequence - temporalBandLastSource <= 2) temporalBandRepeat++;
     else temporalBandRepeat = 1;
@@ -1784,8 +1849,6 @@ function temporalBandMissSlots(auditMode, completion) {
   // short-term evidence that CPU should prefer the other rows/columns.
   const transientBand = temporalBandRepeat <= TEMPORAL_BAND_MAX_REPEAT;
   temporalBandDetections++;
-  const bandNow = receiverNow();
-  updateTemporalBandModel(useColumn ? "c" : "r", bandIndices, bandSpan, sourceSequence, bandNow);
   const avoidUntil = bandNow + TEMPORAL_BAND_AVOID_MS;
   for (const slot of misses) {
     temporalBandAvoidUntil[slot] = Math.max(temporalBandAvoidUntil[slot], avoidUntil);
@@ -1803,15 +1866,21 @@ function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNo
   const slot = Number(region.gridSlot);
   const sequence = Number(sourceSequence);
   if (!Number.isInteger(slot) || slot < 0 || slot >= SLOT_METRIC_COUNT || !Number.isFinite(sequence)) return true;
-  const explicitSkip = sequence <= temporalBandSkipThroughSource[slot];
+  if (autoOpticsMeasurementSlots?.size) return true;
   const model = predictedTemporalBand(sequence, now);
   const risk = temporalBandRiskForSlot(slot, sequence, now);
-  if (!temporalHardSkip({
-    explicitSkip,
-    risk,
-    confidence: model?.confidence ?? 0,
-    measurement: Boolean(autoOpticsMeasurementSlots?.size)
-  })) return true;
+  const precision = temporalPredictionRiskAttempts >= 12
+    ? temporalPredictionRiskMisses / temporalPredictionRiskAttempts
+    : 0;
+  const visible = regions.filter((item) => item.gridSlot !== void 0 && item.slotState !== "OFFSCREEN");
+  const cleanCount = visible.reduce((count, item) =>
+    count + Number(temporalBandRiskForSlot(item.gridSlot, sequence, now) < 0.34), 0);
+  const risky = visible.filter((item) => temporalBandRiskForSlot(item.gridSlot, sequence, now) >= 0.65)
+    .sort((a, b) => Number(a.gridSlot) - Number(b.gridSlot));
+  const probe = risky.length ? risky[Math.abs(Math.trunc(sequence)) % risky.length] : void 0;
+  const hardSkip = Boolean(model && model.confidence >= 0.72 && risk >= 0.65 &&
+    precision >= 0.70 && cleanCount >= 4 && Number(probe?.gridSlot) !== slot);
+  if (!hardSkip) return true;
   temporalBandSkippedTracks++;
   trackBudgetTemporalAvoided++;
   return false;
@@ -1896,13 +1965,22 @@ function estimatedAutoTrackBudget(candidates, now) {
   return autoTrackBudgetTarget;
 }
 function selectTrackedRegionsForBudget(candidates, sourceSequence, now) {
+  const codecLimit = 32;
   if (candidates.length <= 1 || autoOpticsMeasurementSlots?.size || strictHotPathActive() || unlimitedTracksPerFrame()) {
     lastTrackBudgetCandidates = candidates.length;
-    lastTrackBudgetSelected = candidates.length;
-    return candidates;
+    if (candidates.length <= codecLimit) {
+      lastTrackBudgetSelected = candidates.length;
+      return candidates;
+    }
+    const start = Math.abs(Math.trunc(Number(sourceSequence) || 0)) % candidates.length;
+    const rotated = [];
+    for (let i = 0; i < codecLimit; i++) rotated.push(candidates[(start + i) % candidates.length]);
+    lastTrackBudgetSelected = rotated.length;
+    return rotated;
   }
   const manualLimit = selectedTracksPerFrameLimit();
   const budget = Math.max(1, Math.min(
+    codecLimit,
     candidates.length,
     Number.isFinite(manualLimit) ? manualLimit : estimatedAutoTrackBudget(candidates, now)
   ));
@@ -2185,6 +2263,7 @@ let optimizerPipelineActive = false;
 let optimizerTransition;
 let activeOptimizerEpoch;
 let latestSourceFrameSequence = -1;
+let latestNativeSettingsEpoch = 0;
 let optimizeMeasureToken = 0;
 let optimizerFixedTargets = [];
 let optimizerDiscoveryMode = false;
@@ -3020,6 +3099,15 @@ function noteDecodeCompleted(id, completion) {
   scanCapturedAt.delete(id);
   scanCompletionTimes.push(receiverNow());
   focusController.noteDecoderCompletion(id);
+  const codecOptical = completion.guidedMetrics?.optical;
+  if (codecOptical && !autoOpticsMutationRunning) {
+    const geometry = focusGeometry();
+    if (geometry) {
+      const opticalNow = receiverNow();
+      const captureFps = captureTimes.reduce((count, at) => count + Number(at > opticalNow - STATS_WINDOW_MS), 0);
+      focusController.observe(id, geometry, codecOptical, Math.max(1, expectedRegions), opticalNow, captureFps);
+    }
+  }
   if (completion.directFrameFailed) {
     notePipelineEvent("direct-frame-drop");
     finishScanCapture(id, completion);
@@ -3515,6 +3603,7 @@ async function applyExposureSetting(track) {
 }
 function resetAutomaticOpticsRuntime() {
   autoOpticsRuntimeState = "ae";
+  autoOpticsControllerState = "ACQUIRE";
   autoOpticsMutationRunning = false;
   autoOpticsLockSince = 0;
   autoOpticsRetryAt = 0;
@@ -3620,68 +3709,13 @@ async function waitForStableAutoOpticsPose(track, timeoutMs = AUTO_OPTICS_POSE_W
 }
 function autoOpticsMemoryKey(track) {
   const settings = track?.getSettings?.() ?? {};
-  return String(settings.deviceId || track?.label || settings.facingMode || "default");
-}
-function autoOpticsHistoryConfigKey(exposure, iso) {
-  return `${Number(exposure).toFixed(2)}/${Number(iso).toFixed(1)}`;
-}
-function readAutomaticOpticsHistory(track) {
-  try {
-    const all = JSON.parse(localStorage.getItem(AUTO_OPTICS_HISTORY_KEY) || "{}");
-    const raw = Array.isArray(all[autoOpticsMemoryKey(track)]) ? all[autoOpticsMemoryKey(track)] : [];
-    const now = Date.now();
-    const groups = new Map();
-    for (const item of raw) {
-      if (!item || !Number.isFinite(item.exposure) || !Number.isFinite(item.iso) || item.exposure <= 0 || item.iso <= 0) continue;
-      if (now - Number(item.at || 0) > AUTO_OPTICS_HISTORY_MAX_AGE_MS) continue;
-      const key = autoOpticsHistoryConfigKey(item.exposure, item.iso);
-      const group = groups.get(key) || [];
-      group.push(item);
-      groups.set(key, group);
-    }
-    const candidates = [];
-    for (const group of groups.values()) {
-      group.sort((a, b) => Number(b.at || 0) - Number(a.at || 0));
-      const latest = group[0];
-      if (Number(latest.validDecodes || 0) <= 0 && now - Number(latest.at || 0) < AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS) continue;
-      const good = group.find((item) => Number(item.validDecodes || 0) > 0 || Number(item.rate || 0) > 0);
-      if (good) candidates.push(good);
-    }
-    const priority = (item) => {
-      const age = Math.max(0, now - Number(item.at || 0));
-      const freshness = Math.exp(-age / (6 * 60 * 60 * 1000));
-      return freshness * (1 + Math.min(4, Number(item.rate || 0) / 20) + Math.min(2, Number(item.yieldRate || 0) * 2));
-    };
-    candidates.sort((a, b) => priority(b) - priority(a));
-    return candidates;
-  } catch {
-    return [];
-  }
-}
-function bestAutomaticOpticsHistory(track) {
-  return readAutomaticOpticsHistory(track)[0];
-}
-function rememberAutomaticOpticsHistory(track, exposure, iso, performance) {
-  if (!Number.isFinite(exposure) || !Number.isFinite(iso) || exposure <= 0 || iso <= 0 || !performance) return;
-  try {
-    const all = JSON.parse(localStorage.getItem(AUTO_OPTICS_HISTORY_KEY) || "{}");
-    const key = autoOpticsMemoryKey(track);
-    const raw = Array.isArray(all[key]) ? all[key] : [];
-    raw.unshift({
-      exposure,
-      iso,
-      rate: Number(performance.validDecodesPerSecond || 0),
-      yieldRate: Number(performance.perQrAttemptSuccessRate || 0),
-      validDecodes: Number(performance.validDecodes || 0),
-      qrAttempts: Number(performance.qrAttempts || 0),
-      sourceFrames: Number(performance.sourceFrames || 0),
-      at: Date.now()
-    });
-    all[key] = raw.slice(0, AUTO_OPTICS_HISTORY_LIMIT);
-    const deviceEntries = Object.entries(all).slice(-8);
-    localStorage.setItem(AUTO_OPTICS_HISTORY_KEY, JSON.stringify(Object.fromEntries(deviceEntries)));
-  } catch {
-  }
+  return [
+    settings.deviceId || track?.label || settings.facingMode || "default",
+    `${settings.width || 0}x${settings.height || 0}`,
+    Math.round(Number(settings.frameRate) || 0),
+    settings.pipeline || (nativeCameraRunning ? "camera2" : "browser"),
+    settings.sensorMode || settings.sensorOrientation || "default"
+  ].join("|");
 }
 function readAutomaticOpticsMemory(track) {
   try {
@@ -3705,24 +3739,10 @@ function usableAutomaticOpticsMemory(track) {
   // high-confidence cold-start treatment because they lack an AE-relative scale.
   return saved;
 }
-function loadAutomaticOpticsMemory(track, exposure, isoRange, cap, aeProduct) {
-  const saved = usableAutomaticOpticsMemory(track);
-  if (!saved) return void 0;
-  const scale = Number(saved.lightScale);
-  const adjusted = Number.isFinite(scale) && Number.isFinite(aeProduct) && aeProduct > 0
-    ? aeProduct * scale / Math.max(1e-6, exposure)
-    : saved.iso * saved.exposure / Math.max(1e-6, exposure);
-  return quantizeCameraRange(Math.min(cap, Math.max(isoRange.min, adjusted)), isoRange);
-}
 function automaticOpticsMemoryHealthy(saved) {
   const minimumYield = saved?.confirmed === true ? AUTO_OPTICS_MEMORY_MIN_YIELD : 0.35;
   return Boolean(saved && Number(saved.yieldRate) >= minimumYield &&
     Number.isFinite(saved.exposure) && saved.exposure > 0 && Number.isFinite(saved.iso) && saved.iso > 0);
-}
-function cameraSettingNear(value, target, range) {
-  if (!Number.isFinite(value) || !Number.isFinite(target)) return false;
-  const step = Number(range?.step) || 0;
-  return Math.abs(value - target) <= Math.max(step * 0.75, Math.abs(target) * 0.02, 1e-6);
 }
 function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
   const aeProduct = baseline.exposure * baseline.iso;
@@ -3921,7 +3941,7 @@ async function abandonAutomaticOpticsStartupMemory(track, reason = "startup winn
     autoOpticsMutationRunning = false;
   }
 }
-function rememberAutomaticOptics(track, exposure, iso, score = 0, yieldRate = 0, aeProduct = 0) {
+function rememberAutomaticOptics(track, exposure, iso, score = 0, yieldRate = 0, aeProduct = 0, tailYield = 0) {
   if (!Number.isFinite(exposure) || !Number.isFinite(iso) || exposure <= 0 || iso <= 0) return;
   const lightScale = Number.isFinite(aeProduct) && aeProduct > 0 ? exposure * iso / aeProduct : void 0;
   try {
@@ -3931,8 +3951,12 @@ function rememberAutomaticOptics(track, exposure, iso, score = 0, yieldRate = 0,
       iso,
       score: Number.isFinite(score) ? score : 0,
       yieldRate: Number.isFinite(yieldRate) ? yieldRate : 0,
+      tailYield: Number.isFinite(tailYield) ? tailYield : 0,
+      confidence: Math.max(0, Math.min(1, Number(score) || 0)),
+      aeProduct: Number.isFinite(aeProduct) ? aeProduct : 0,
+      invalidations: 0,
       confirmed: true,
-      controller: 294,
+      controller: 355,
       ...(Number.isFinite(lightScale) ? { lightScale } : {}),
       at: Date.now()
     };
@@ -3948,6 +3972,7 @@ function forgetAutomaticOptics(track) {
     const saved = all[key];
     if (!saved || typeof saved !== "object") return;
     saved.invalidatedAt = Date.now();
+    saved.invalidations = Math.max(0, Number(saved.invalidations) || 0) + 1;
     all[key] = saved;
     localStorage.setItem(AUTO_OPTICS_MEMORY_KEY, JSON.stringify(all));
   } catch {
@@ -3963,6 +3988,7 @@ function autoOpticsPipelineSnapshot() {
 }
 async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held optics collapsed") {
   if (autoOpticsMutationRunning || !automaticOptics || !automaticOpticsSessionAlive(track)) return;
+  autoOpticsControllerState = "RECOVER";
   autoOpticsMutationRunning = true;
   try {
     // Roll back to the camera's own meter, not another guessed manual candidate.
@@ -3991,10 +4017,12 @@ async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held 
 }
 async function waitForFreshAutoOpticsFrames(track, afterSequence, frames = CAMERA_TUNING.exposureDiscardFrames, timeoutMs = 420) {
   const target = afterSequence + Math.max(1, frames);
+  const requestedEpoch = Number(track?.getSettings?.().settingsEpoch) || 0;
   const started = performance.now();
   while (performance.now() - started < timeoutMs) {
     if (!automaticOpticsSessionAlive(track)) return false;
-    if (latestSourceFrameSequence >= target) return true;
+    const epochActive = !nativeCameraRunning || !requestedEpoch || latestNativeSettingsEpoch >= requestedEpoch;
+    if (epochActive && latestSourceFrameSequence >= target) return true;
     await new Promise((resolve) => setTimeout(resolve, 12));
   }
   return false;
@@ -4159,249 +4187,6 @@ async function measureAutomaticIsoCandidate(track, exposure, requestedIso, isoRa
   if (!sample) return null;
   return { ...sample, iso: actualIso, requestedIso: iso, exposure: actualExposure, firstSequence };
 }
-function describeAutoIsoProbe(probe) {
-  if (!probe) return "—";
-  if (probe.unstable) return `${Math.round(probe.iso)}:moved`;
-  if (!probe.valid) return `${Math.round(probe.iso)}:insufficient`;
-  const tail = Number.isFinite(probe.tailYield) ? ` p25 ${(probe.tailYield * 100).toFixed(0)}%` : "";
-  return `${Math.round(probe.iso)}:${(probe.yieldRate * 100).toFixed(0)}%${tail}`;
-}
-async function tuneAutomaticQrIso(track, exposure, seedIso, isoRange, maxAutoIso, rememberedIso) {
-  if (!automaticOpticsSessionAlive(track)) return { iso: seedIso, probes: [] };
-  autoOpticsRuntimeState = "tuning";
-  const cap = Math.max(isoRange.min, Math.min(isoRange.max, maxAutoIso));
-  const clampIso = (value) => quantizeCameraRange(Math.max(isoRange.min, Math.min(cap, value)), isoRange);
-  const seed = clampIso(seedIso);
-  const remembered = Number.isFinite(rememberedIso) ? clampIso(rememberedIso) : void 0;
-  const manualHint = Number.isFinite(preferredIso)
-    ? clampIso(Number.isFinite(preferredExposureTime) && preferredExposureTime > 0
-      ? preferredIso * preferredExposureTime / Math.max(1e-6, exposure)
-      : preferredIso)
-    : void 0;
-  const probes = [];
-  const measured = new Map();
-  let invalidatedByMotion = false;
-
-  const probe = async (candidate, label, options = {}) => {
-    const requested = clampIso(candidate);
-    const key = String(requested);
-    if (!options.confirm && measured.has(key)) return measured.get(key);
-    if (!options.confirm && measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES) return null;
-    autoOpticsTuneSummary = `global gain · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(requested)}`;
-    const result = await measureAutomaticIsoCandidate(track, exposure, requested, isoRange, options);
-    if (result?.unstable) invalidatedByMotion = true;
-    if (result && !options.confirm) {
-      measured.set(key, result);
-      probes.push(result);
-    }
-    return result;
-  };
-  const mergeMap = (a, b) => {
-    const merged = new Map();
-    for (const [key, value] of a ?? []) merged.set(key, (merged.get(key) || 0) + Number(value || 0));
-    for (const [key, value] of b ?? []) merged.set(key, (merged.get(key) || 0) + Number(value || 0));
-    return merged;
-  };
-  const combine = (a, b) => {
-    if (!a?.valid) return b;
-    if (!b?.valid) return a;
-    const slotAttempts = mergeMap(a.slotAttempts, b.slotAttempts);
-    const slotOutputs = mergeMap(a.slotOutputs, b.slotOutputs);
-    const evidence = {
-      outputs: a.outputs + b.outputs,
-      attempts: a.attempts + b.attempts,
-      slotAttempts,
-      slotOutputs
-    };
-    const scored = scoreAutomaticOpticsEvidence(evidence);
-    return {
-      ...b,
-      requestedIso: a.requestedIso,
-      outputs: scored.outputs,
-      attempts: scored.attempts,
-      jobs: a.jobs + b.jobs,
-      yieldRate: scored.meanYield,
-      rate: (a.rate + b.rate) / 2,
-      score: scored.score,
-      cohortSize: scored.size,
-      cohortCoverage: scored.coverage,
-      breadth: scored.breadth,
-      tailYield: scored.tailYield,
-      minSlotAttempts: scored.minAttempts,
-      slotAttempts,
-      slotOutputs,
-      valid: true
-    };
-  };
-  const controlStable = (a, b) => {
-    if (!a?.valid || !b?.valid) return false;
-    const yieldDrift = Math.abs(a.yieldRate - b.yieldRate);
-    const highScore = Math.max(a.score, b.score);
-    const lowScore = Math.min(a.score, b.score);
-    const scoreRatio = highScore > 0 ? lowScore / highScore : 1;
-    return yieldDrift <= AUTO_OPTICS_CONTROL_MAX_YIELD_DRIFT &&
-      scoreRatio >= AUTO_OPTICS_CONTROL_MIN_SCORE_RATIO;
-  };
-  const tailFor = (item) => Number.isFinite(item?.tailYield) ? item.tailYield : Number(item?.yieldRate) || 0;
-  const coverageFor = (item) => Number.isFinite(item?.cohortCoverage) ? item.cohortCoverage : 1;
-  const breadthFor = (item) => Number.isFinite(item?.breadth) ? item.breadth : Number(item?.yieldRate > 0);
-  const quality = (item) => {
-    if (!item?.valid) return -Infinity;
-    return coverageFor(item) * (
-      0.70 * item.yieldRate +
-      0.20 * tailFor(item) +
-      0.10 * breadthFor(item)
-    );
-  };
-  const healthy = (item) => Boolean(item?.valid && coverageFor(item) >= 0.95 &&
-    item.yieldRate >= AUTO_OPTICS_HEALTHY_YIELD &&
-    ((item.cohortSize || 0) <= 2 || tailFor(item) >= AUTO_OPTICS_HEALTHY_TAIL_YIELD));
-  const reusable = (item) => Boolean(healthy(item) &&
-    item.yieldRate >= AUTO_OPTICS_REUSABLE_YIELD &&
-    ((item.cohortSize || 0) <= 2 || tailFor(item) >= AUTO_OPTICS_REUSABLE_TAIL_YIELD));
-  const better = (candidate, winner) => {
-    if (!candidate?.valid) return false;
-    if (!winner?.valid) return true;
-    const cq = quality(candidate), wq = quality(winner);
-    if (cq > wq + 0.01) return true;
-    if (wq > cq + 0.01) return false;
-    if (candidate.yieldRate > winner.yieldRate + 0.015) return true;
-    if (winner.yieldRate > candidate.yieldRate + 0.015) return false;
-    if (tailFor(candidate) > tailFor(winner) + 0.03) return true;
-    if (tailFor(winner) > tailFor(candidate) + 0.03) return false;
-    return Number(candidate.requestedIso) < Number(winner.requestedIso);
-  };
-  const bestOf = (items) => items.filter((item) => item?.valid)
-    .reduce((winner, item) => better(item, winner) ? item : winner, null);
-  const moved = (fallbackIso = seed) => ({
-    iso: fallbackIso,
-    probes,
-    deferred: true,
-    retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-    deferredReason: "global gain sweep invalidated by movement · holding current short shutter"
-  });
-  const confirmCandidate = async (candidate, label = "confirm") => {
-    if (!candidate?.valid) return null;
-    const confirmation = await probe(candidate.requestedIso, label, { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
-    if (!confirmation || confirmation.unstable || !confirmation.valid) return null;
-    if (confirmation.yieldRate < Math.max(AUTO_OPTICS_COLLAPSE_YIELD, candidate.yieldRate - 0.12) ||
-        quality(confirmation) < quality(candidate) - 0.14) return null;
-    return combine(candidate, confirmation);
-  };
-
-  for (const [hint, label] of [[remembered, "memory"], [manualHint, "manual hint"]]) {
-    if (!Number.isFinite(hint)) continue;
-    const first = await probe(hint, label);
-    if (!automaticOpticsSessionAlive(track)) return { iso: hint, probes };
-    if (invalidatedByMotion) return moved(hint);
-    if (!healthy(first)) continue;
-    const confirmed = await confirmCandidate(first, `${label} confirm`);
-    if (!automaticOpticsSessionAlive(track)) return { iso: hint, probes };
-    if (invalidatedByMotion) return moved(hint);
-    if (confirmed && healthy(confirmed)) {
-      autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · ${formatExposureMs(exposure)} · ${label} ISO ${Math.round(confirmed.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}%`;
-      return { iso: confirmed.iso, probes, best: confirmed, healthy: true, reusable: reusable(confirmed) };
-    }
-  }
-
-  // Global log-space sweep. Crucially, low gain is not allowed to stop brighter
-  // exploration. A flat bad basin at 100/200 must still cross 400/800-class ISO.
-  const baseline = await probe(seed, "sweep 1x");
-  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
-  if (invalidatedByMotion) return moved(seed);
-  for (const [factor, label] of [[2, "sweep 2x"], [4, "sweep 4x"], [8, "sweep 8x"]]) {
-    const candidate = Math.min(cap, seed * factor);
-    if (candidate <= seed * 1.01) continue;
-    await probe(candidate, label);
-    if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
-    if (invalidatedByMotion) return moved(seed);
-  }
-  if (seed > isoRange.min * 1.35 && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES)
-    await probe(seed / 2, "sweep 0.5x");
-  if (cap > seed * 1.01 && measured.size < AUTO_OPTICS_GAIN_MAX_PROBES)
-    await probe(cap, "sweep ceiling");
-  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
-  if (invalidatedByMotion) return moved(seed);
-
-  const control = await probe(seed, "control", { confirm: true, sampleMs: AUTO_OPTICS_GAIN_SAMPLE_MS });
-  if (!automaticOpticsSessionAlive(track)) return { iso: seed, probes };
-  if (!control || control.unstable || !control.valid || invalidatedByMotion) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global control invalidated · retry`;
-    return moved(seed);
-  }
-  if (baseline?.valid && !controlStable(baseline, control)) {
-    const drift = Math.abs(baseline.yieldRate - control.yieldRate);
-    return {
-      iso: seed,
-      probes,
-      deferred: true,
-      retryMs: AUTO_OPTICS_CONTROL_RETRY_MS,
-      deferredReason: `global base control drifted ${(drift * 100).toFixed(0)} points · retry after TRACK settles`
-    };
-  }
-  const baselineReference = combine(baseline, control);
-  let decisionCandidates = [
-    baselineReference,
-    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(seed))
-  ].filter((item) => item?.valid);
-  let coarseBest = bestOf(decisionCandidates);
-  if (!coarseBest) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global sweep produced no complete same-slot evidence`;
-    return { iso: seed, probes, deferred: true, retryMs: AUTO_OPTICS_CONTROL_RETRY_MS };
-  }
-
-  for (const [candidate, label] of [
-    [coarseBest.requestedIso / Math.SQRT2, "refine darker"],
-    [coarseBest.requestedIso * Math.SQRT2, "refine brighter"]
-  ]) {
-    if (measured.size >= AUTO_OPTICS_GAIN_MAX_PROBES) break;
-    const clamped = clampIso(candidate);
-    if (Math.abs(clamped - coarseBest.requestedIso) <= Math.max(1, coarseBest.requestedIso * 0.03)) continue;
-    await probe(clamped, label);
-    if (!automaticOpticsSessionAlive(track)) return { iso: coarseBest.requestedIso, probes };
-    if (invalidatedByMotion) return moved(coarseBest.requestedIso);
-  }
-  decisionCandidates = [
-    baselineReference,
-    ...probes.filter((item) => item?.valid && String(item.requestedIso) !== String(seed))
-  ].filter((item) => item?.valid);
-  const best = bestOf(decisionCandidates) ?? coarseBest;
-  if (best.yieldRate < AUTO_OPTICS_COLLAPSE_YIELD) {
-    autoOpticsTuneSummary = `cohort ${best.cohortSize || 0} · ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} · all gain regions collapsed`;
-    return { iso: best.requestedIso, probes, best, collapsed: true };
-  }
-
-  const bestQuality = quality(best);
-  const nearBest = decisionCandidates.filter((item) =>
-    quality(item) >= bestQuality - 0.025 &&
-    item.yieldRate >= best.yieldRate - AUTO_OPTICS_NEAR_BEST_YIELD_DELTA &&
-    tailFor(item) >= tailFor(best) - 0.08
-  ).sort((a, b) => a.requestedIso - b.requestedIso);
-  const selected = nearBest[0] ?? best;
-  const selectedIsSeed = String(selected.requestedIso) === String(seed);
-  const confirmed = selectedIsSeed
-    ? baselineReference
-    : await confirmCandidate(selected);
-  if (!confirmed) {
-    autoOpticsTuneSummary = `${formatExposureMs(exposure)} · global winner confirmation disagreed · retry`;
-    return { iso: selected.requestedIso, probes, deferred: true, retryMs: AUTO_OPTICS_CONTROL_RETRY_MS };
-  }
-
-  const isHealthy = healthy(confirmed);
-  const canReuse = reusable(confirmed);
-  autoOpticsTuneSummary = `cohort ${confirmed.cohortSize || 0} · global ${formatExposureMs(exposure)} · ${probes.map(describeAutoIsoProbe).join(" · ")} → ISO ${Math.round(confirmed.iso)} · confirmed ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}%`;
-  if (!isHealthy) {
-    return {
-      iso: confirmed.iso,
-      probes,
-      best: confirmed,
-      deferred: true,
-      retryMs: AUTO_OPTICS_UNHEALTHY_RETRY_MS,
-      deferredReason: `global sweep best ISO ${Math.round(confirmed.iso)} only ${Math.round(confirmed.yieldRate * 100)}% p25 ${Math.round(tailFor(confirmed) * 100)}% · temporary, not remembered`
-    };
-  }
-  return { iso: confirmed.iso, probes, best: confirmed, healthy: true, reusable: canReuse };
-}
 async function settleAutomaticQrOptics(track, now) {
   if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
   const caps = track.getCapabilities?.() ?? {};
@@ -4427,6 +4212,7 @@ async function settleAutomaticQrOptics(track, now) {
 
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "settling";
+  autoOpticsControllerState = "LEARN";
   notePipelineEvent("auto-optics-freeze-ae");
   try {
     // Android's recommended AE->manual handoff: copy the values which just
@@ -4451,6 +4237,7 @@ async function settleAutomaticQrOptics(track, now) {
     const cohortSize = beginAutomaticOpticsMeasurementCohort();
     if (!cohortSize) {
       autoOpticsRuntimeState = "manual";
+      autoOpticsControllerState = "HOLD";
       autoOpticsHeldYield = 0.5;
       autoOpticsRetryAt = Infinity;
       autoOpticsHoldSample = autoOpticsPipelineSnapshot();
@@ -4463,6 +4250,7 @@ async function settleAutomaticQrOptics(track, now) {
     );
     if (!baseline || baseline.unstable || !baseline.valid) {
       autoOpticsRuntimeState = "manual";
+      autoOpticsControllerState = "HOLD";
       autoOpticsHeldYield = Math.max(0.35, Number(baseline?.yieldRate) || 0);
       autoOpticsRetryAt = Infinity;
       autoOpticsHoldSample = autoOpticsPipelineSnapshot();
@@ -4527,13 +4315,15 @@ async function settleAutomaticQrOptics(track, now) {
     });
     if (!automaticOpticsSessionAlive(track)) return;
     autoOpticsRuntimeState = "manual";
+    autoOpticsControllerState = "HOLD";
     autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || Number(baseline.yieldRate) || 0.5);
     autoOpticsHoldSample = autoOpticsPipelineSnapshot();
     autoOpticsHoldCollapseSince = 0;
     autoOpticsRetryAt = Infinity;
     autoOpticsAeBaseline = { exposure: frozenExposure, iso: frozenIso, at: receiverNow(), neutral: false };
     if (autoOpticsHeldYield >= AUTO_OPTICS_MEMORY_MIN_YIELD)
-      rememberAutomaticOptics(track, winnerExposure, winnerIso, Number(best.score) || 0, autoOpticsHeldYield, frozenExposure * frozenIso);
+      rememberAutomaticOptics(track, winnerExposure, winnerIso, Number(best.score) || 0,
+        autoOpticsHeldYield, frozenExposure * frozenIso, Number(best.tailYield) || 0);
     autoOpticsTuneSummary = `${best.label || "AE baseline"} · ${formatExposureMs(winnerExposure)} · ISO ${Math.round(winnerIso)} · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%${temporalDominant ? " · temporal seam present; no brightness chase" : ""}`;
     focusController.adoptAutomaticCameraState("bounded QR-proven automatic optics converged; sensor values are now held for the session");
     notePipelineEvent("auto-optics-converged", Math.round(autoOpticsHeldYield * 100));
@@ -4541,88 +4331,6 @@ async function settleAutomaticQrOptics(track, now) {
     autoOpticsMeasurementSlots = void 0;
     autoOpticsMutationRunning = false;
   }
-}
-async function releaseAutomaticQrOptics(track, now) {
-  // Kept for explicit/session-level resets only. Normal target loss must not
-  // bounce the camera back into continuous AE.
-  if (autoOpticsMutationRunning || !automaticOptics) return;
-  autoOpticsMutationRunning = true;
-  autoOpticsRuntimeState = "settling";
-  holdDecoderForCameraMutation("automatic optics session reset", 280);
-  try {
-    autoOpticsRetryAt = 0;
-    autoOpticsHeldYield = 0;
-    autoOpticsAeBaseline = void 0;
-    await applyExposureSetting(track);
-    autoOpticsRuntimeState = "ae";
-    autoOpticsLockSince = 0;
-    focusController.adoptAutomaticCameraState("hardware AE restored for new optics session");
-  } finally {
-    autoOpticsMutationRunning = false;
-  }
-}
-function buildAutomaticOpticsAcquisitionCandidates(track, aeBaseline, exposureRange, isoRange, fps) {
-  const seed = automaticShortShutterSeed(aeBaseline, exposureRange, isoRange, fps);
-  const current = track.getSettings();
-  const currentKey = Number.isFinite(current.exposureTime) && Number.isFinite(current.iso)
-    ? autoOpticsHistoryConfigKey(current.exposureTime, current.iso)
-    : "";
-  const candidates = [];
-  const seen = new Set();
-  const add = (exposureRaw, isoRaw, label, allowCurrent = false) => {
-    const exposure = quantizeCameraRange(exposureRaw, exposureRange);
-    const iso = quantizeCameraRange(isoRaw, isoRange);
-    const key = autoOpticsHistoryConfigKey(exposure, iso);
-    if (seen.has(key) || !allowCurrent && key === currentKey) return;
-    seen.add(key);
-    candidates.push({ exposure, iso, label });
-  };
-
-  const memory = usableAutomaticOpticsMemory(track);
-  if (memory) add(memory.exposure, memory.iso, "recent winner");
-  for (const item of readAutomaticOpticsHistory(track).slice(0, 2))
-    add(item.exposure, item.iso, "learned");
-  add(seed.exposure, seed.iso / Math.SQRT2, "darker");
-  const fasterExposure = quantizeCameraRange(Math.max(exposureRange.min, seed.exposure / Math.SQRT2), exposureRange);
-  add(fasterExposure, seed.targetProduct / Math.max(exposureRange.min, fasterExposure), "faster");
-  add(seed.exposure, seed.iso * Math.SQRT2, "brighter");
-  add(seed.exposure, seed.iso * 2, "bright rescue 2x");
-  add(seed.exposure, seed.iso * 4, "bright rescue 4x");
-  add(seed.exposure, seed.iso * 8, "bright rescue 8x");
-  const lowLightExposure = quantizeCameraRange(
-    Math.min(exposureRange.max, AUTO_OPTICS_FALLBACK_EXPOSURE, 1e4 / fps * 0.18),
-    exposureRange
-  );
-  if (lowLightExposure > seed.exposure * 1.08)
-    add(lowLightExposure, seed.targetProduct / Math.max(exposureRange.min, lowLightExposure), "low-light");
-  add(aeBaseline.exposure, aeBaseline.iso, "hardware AE", true);
-  return candidates;
-}
-async function measureAutomaticAcquisitionCandidate(track, candidate, index, total) {
-  const id = `AUTO-RACE-${index + 1}`;
-  autoOpticsTuneSummary = `race ${index + 1}/${total} · ${candidate.label} · ${formatExposureMs(candidate.exposure)} · ISO ${Math.round(candidate.iso)}`;
-  optimizerEpochHooks.transition({ candidateId: id, requestedExposure: candidate.exposure, requestedIso: candidate.iso });
-  const accepted = await applyCameraConstraint(track, {
-    exposureMode: "manual",
-    exposureTime: candidate.exposure,
-    iso: candidate.iso
-  });
-  if (!accepted || !automaticOpticsSessionAlive(track)) return null;
-  const actual = track.getSettings();
-  if (!Number.isFinite(actual.exposureTime) || !Number.isFinite(actual.iso)) return null;
-  const epoch = await optimizerEpochHooks.open({
-    candidateId: id,
-    requestedExposure: candidate.exposure,
-    requestedIso: candidate.iso,
-    actualExposure: actual.exposureTime,
-    actualIso: actual.iso
-  });
-  if (epoch === void 0 || !automaticOpticsSessionAlive(track)) return null;
-  const sample = await measureReceivePerformance("race", epoch);
-  optimizerEpochHooks.close(epoch);
-  const performance = await sample.result;
-  rememberAutomaticOpticsHistory(track, actual.exposureTime, actual.iso, performance);
-  return { candidate, exposure: actual.exposureTime, iso: actual.iso, performance };
 }
 async function applyAutomaticAeCompensation(track, requestedEv, label) {
   const caps = track.getCapabilities?.() ?? {};
@@ -4700,7 +4408,6 @@ function maintainAutomaticQrOptics(now) {
 
   if (autoOpticsRuntimeState === "manual") {
     const poseUsable = gridLattice.locked && autoOpticsPoseUsable(autoOpticsPoseSnapshot());
-    const decodeSilenceMs = lastStreamDecodeAt ? Math.max(0, now - lastStreamDecodeAt) : Infinity;
     const temporal = predictedTemporalBand(latestSourceFrameSequence + 1, now);
     const temporalCoverage = temporal?.span ? temporal.width / temporal.span : 0;
     // A narrow rolling-shutter seam is normal and is now filtered before QR CPU.
@@ -4708,18 +4415,11 @@ function maintainAutomaticQrOptics(now) {
     // measurement; otherwise a permanent small seam would freeze learning forever.
     const temporalDominant = Boolean(temporal && temporal.confidence >= 0.72 && temporalCoverage >= 0.42);
     if (!poseUsable) {
+      // Losing a page, moving the camera, or seeing too little of the wall is
+      // not optical evidence. HOLD keeps its verified rollback point and makes
+      // no camera mutation until stable decoder-backed measurements return.
       autoOpticsHoldSample = void 0;
-      if (decoderFreshnessHoldActive || temporalDominant || decodeSilenceMs < AUTO_OPTICS_LOST_RECALIBRATE_MS) {
-        autoOpticsHoldCollapseSince = 0;
-        return;
-      }
-      if (!autoOpticsHoldCollapseSince) {
-        autoOpticsHoldCollapseSince = now;
-        autoOpticsTuneSummary = `held winner lost QR · proving scene change`;
-        return;
-      }
-      if (now - autoOpticsHoldCollapseSince >= 450)
-        void recoverCollapsedAutomaticOptics(track, 0, "held optics lost QR lock");
+      autoOpticsHoldCollapseSince = 0;
       return;
     }
     if (!autoOpticsHoldSample || now - autoOpticsHoldSample.at < AUTO_OPTICS_HOLD_SAMPLE_MS) return;
@@ -4738,7 +4438,7 @@ function maintainAutomaticQrOptics(now) {
       return;
     }
     // Camera motion and a wall-wide temporal failure are not exposure evidence.
-    if (temporalDominant || decoderFreshnessHoldActive) {
+    if (temporalDominant || decoderFreshnessHoldActive || recentTrackPressure(now)) {
       autoOpticsHoldCollapseSince = 0;
       return;
     }
@@ -4763,6 +4463,7 @@ function maintainAutomaticQrOptics(now) {
     if (gridLattice.locked && recentDecode) {
       const saved = autoOpticsMemoryBoot;
       autoOpticsRuntimeState = "manual";
+      autoOpticsControllerState = "HOLD";
       autoOpticsHeldYield = Math.max(AUTO_OPTICS_MEMORY_MIN_YIELD, Math.min(1, Number(saved?.yieldRate) || 0.75));
       autoOpticsHoldSample = autoOpticsPipelineSnapshot();
       autoOpticsHoldCollapseSince = 0;
@@ -5309,7 +5010,7 @@ function renderFocusDiagnostics() {
     `Focus    committed ${(_h = diagnostic.committedFocusMode) != null ? _h : "—"}/${(_i = diagnostic.committedFocusDistance) != null ? _i : "—"}`,
     `Exposure committed ${formatExposureMs(diagnostic.committedExposureTime)} · requested ${formatExposureMs(diagnostic.candidateExposureTime)} · actual ${formatExposureMs(diagnostic.actualExposure)} · EV ${(_j = diagnostic.actualExposureCompensation) != null ? _j : "—"}`,
     `ISO      committed ${(_k = diagnostic.committedIso) != null ? _k : "—"} · requested ${(_l = diagnostic.candidateIso) != null ? _l : "—"} · actual ${(_m = diagnostic.actualIso) != null ? _m : "—"}`,
-    `AutoOptics ${automaticOptics ? `${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · validating recent winner" : autoOpticsRuntimeState === "seed" ? " · short-shutter bootstrap" : autoOpticsRuntimeState === "rescue" ? " · acquisition AE bias" : autoOpticsRuntimeState === "ae" ? " · hardware AE" : autoOpticsRuntimeState === "tuning" ? " · bounded local bracket" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
+    `AutoOptics ${automaticOptics ? `${autoOpticsControllerState} · ${autoOpticsRuntimeState}${autoOpticsRuntimeState === "manual" ? ` · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%` : autoOpticsRuntimeState === "memory" ? " · validating recent winner" : autoOpticsRuntimeState === "seed" ? " · short-shutter bootstrap" : autoOpticsRuntimeState === "rescue" ? " · acquisition AE bias" : autoOpticsRuntimeState === "ae" ? " · hardware AE" : autoOpticsRuntimeState === "tuning" ? " · bounded local bracket" : ""}${autoOpticsTuneSummary ? ` · ${autoOpticsTuneSummary}` : ""}` : "off"}`,
     optical ? `Static   focus ${optical.focusScore.toFixed(2)} · separation ${optical.separation.toFixed(0)} · noise ${optical.noise.toFixed(1)} · banding ${optical.banding.toFixed(2)} · temporal ${optical.temporalContamination.toFixed(1)} · geometry ${diagnostic.geometryStable ? "stable" : "moving"}` : "Static   waiting for QR",
     `Payload  valid ${diagnostic.validDecodesInGeneration} · completions ${diagnostic.decoderCompletionsInGeneration} · silence ${(diagnostic.decodeSilenceMs / 1e3).toFixed(1)}s · decode gap ${(_o = (_n = diagnostic.recentInterdecodeMs) == null ? void 0 : _n.toFixed(0)) != null ? _o : "—"}ms · completion gap ${(_q = (_p = diagnostic.recentCompletionMs) == null ? void 0 : _p.toFixed(0)) != null ? _q : "—"}ms`,
     `Recovery probes ${geometryRecoveryProbes} · breadth ${geometryBreadthRecoveryProbes} · repair tracks ${geometryCoverageRepairTracks} · temporal bands ${temporalBandDetections}/${temporalBandSkippedTracks} skips · assist ${geometryRecoveryAssistUntil > perfNow ? `${Math.max(0, geometryRecoveryAssistUntil - perfNow).toFixed(0)}ms` : "no"} · motion ${geometryMotionNudges}/${geometryMotionPixels.toFixed(0)}px · similarity ${geometrySimilarityNudges} · sighting nudges ${geometrySightingNudges} · slot self-heals ${geometrySlotCorrectionResets} · resets ${geometryRecoveryResets} · worker restarts ${recoveryWorkerRestarts} · aborted ${recoveryAbortedJobs} jobs/${(recoveryAbortedWorkerMs / 1e3).toFixed(1)} worker-s · hold ${decoderFreshnessHoldActive ? `${Math.max(0, decoderFreshnessHoldUntil - perfNow).toFixed(0)}ms` : "no"} · lattice ${gridLattice.state}${gridLattice.active ? "/active" : "/acquiring"} · mode ${frameModeSync ? `syncing ${frameModeSync.width}×${frameModeSync.height}` : "synced"} · mode drops ${frameModeMismatchDrops} · sync timeouts ${frameModeSyncTimeouts} · ${lastRecoveryReason}`,
@@ -5564,13 +5265,14 @@ function stopNativeReceiverSource() {
 function drawNativePreview(source) {
   if (!nativePreviewCtx || !source.nativeY || !source.width || !source.height) return;
   const now = performance.now();
-  if (now - nativePreviewLastAt < 80) return;
+  if (pool.size && pool.busyCount >= Math.max(1, pool.size - 1)) return;
+  if (now - nativePreviewLastAt < 160) return;
   nativePreviewLastAt = now;
   const rotation = nativePreviewRotation();
   const rotated = rotation === 90 || rotation === 270;
   const displayWidth = rotated ? source.height : source.width;
   const displayHeight = rotated ? source.width : source.height;
-  const outWidth = Math.min(480, displayWidth);
+  const outWidth = Math.min(320, displayWidth);
   const outHeight = Math.max(1, Math.round(displayHeight * outWidth / displayWidth));
   if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
     nativePreview.width = outWidth;
@@ -5585,7 +5287,7 @@ function drawNativePreview(source) {
       if (rotation === 90) { sx = dy; sy = source.height - 1 - dx; }
       else if (rotation === 180) { sx = source.width - 1 - dx; sy = source.height - 1 - dy; }
       else if (rotation === 270) { sx = source.width - 1 - dy; sy = dx; }
-      const luma = source.nativeY[sy * source.width + sx];
+      const luma = source.nativeY[sy * (source.nativeStride || source.width) + sx];
       const at = (y * outWidth + x) * 4;
       rgba.data[at] = luma;
       rgba.data[at + 1] = luma;
@@ -5595,26 +5297,33 @@ function drawNativePreview(source) {
   }
   nativePreviewCtx.putImageData(rgba, 0, 0);
 }
-function nativeSourceFrame(buffer, width, height, gen) {
-  // shared/native-camera.js has already ACKed ownership of every delivered
-  // ArrayBuffer. Only the one explicit ACK after startup seeds the first frame.
-  if (!nativeCameraRunning || done || gen !== captureGen) return;
+function nativeSourceFrame(frame, gen) {
+  // shared/native-camera.js has already ACKed ownership. Camera2 metadata and
+  // Y8 share this ArrayBuffer, so candidate fencing uses the capture epoch that
+  // actually produced these pixels rather than a main-thread apply timestamp.
+  if (!nativeCameraRunning || done || gen !== captureGen || !frame) return;
   const callbackTime = performance.now();
   const sequence = benchmarkRecordingSequence++;
   latestSourceFrameSequence = sequence;
+  latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);
   if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
   framePumpProcessorTotal++;
   processSourceFrame({
     sequence,
-    opticsEpoch: void 0,
-    width,
-    height,
+    cameraSequence: frame.sequence,
+    cameraSettingsEpoch: frame.settingsEpoch,
+    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,
+    width: frame.width,
+    height: frame.height,
     callbackTimeMs: callbackTime,
-    mediaTimeMs: callbackTime,
+    mediaTimeMs: frame.timestampNs > 0 ? frame.timestampNs / 1e6 : callbackTime,
     presentationTimeMs: callbackTime,
     expectedDisplayTimeMs: callbackTime,
-    nativeY: new Uint8Array(buffer),
-    nativeBuffer: buffer
+    cameraMetadata: frame,
+    nativeY: new Uint8Array(frame.buffer, frame.yOffset, frame.stride * frame.height),
+    nativeBuffer: frame.buffer,
+    nativeYOffset: frame.yOffset,
+    nativeStride: frame.stride
   }, gen);
 }
 async function startNativeReceiver(startAttempt, transportReady) {
@@ -5695,6 +5404,7 @@ async function startNativeReceiver(startAttempt, transportReady) {
   stream = nativeStreamShim;
   nativeCameraInfo = started;
   nativeCameraRunning = true;
+  latestNativeSettingsEpoch = 0;
   const nativeTrack = nativeCameraTrack();
   if (nativeTrack) {
     populateBrowserCapabilities(nativeTrack);
@@ -5702,7 +5412,7 @@ async function startNativeReceiver(startAttempt, transportReady) {
     if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native camera started");
   }
   syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
-  setNativeCameraFrameHandler((buffer) => nativeSourceFrame(buffer, started.width ?? requestedWidth, started.height ?? requestedHeight, futureGen));
+  setNativeCameraFrameHandler((frame) => nativeSourceFrame(frame, futureGen));
   preview.classList.remove("camera-loading");
   setStatus("");
   cameraStartedTs = receiverNow();
@@ -6702,6 +6412,10 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, track
     guidedStage,
     kind,
     sourceSequence: Number(sourceSequence),
+    cameraTimestampNs: Number(message.cameraTimestampNs),
+    rollingShutterSkewNs: Number(message.rollingShutterSkewNs),
+    cameraOrientation: Number(message.cameraOrientation),
+    cameraSettingsEpoch: Number(message.cameraSettingsEpoch),
     trackSlots: Array.isArray(message.tracks)
       ? message.tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger)
       : []
@@ -6939,9 +6653,13 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
       ox: cropX, oy: cropY,
       tracks,
       pixelFormat: "y8",
-      yOffset: cropY * source.width + cropX,
-      yStride: source.width,
-      payloadBytes: source.nativeBuffer.byteLength
+      yOffset: (source.nativeYOffset || 0) + cropY * (source.nativeStride || source.width) + cropX,
+      yStride: source.nativeStride || source.width,
+      payloadBytes: source.nativeBuffer.byteLength,
+      cameraTimestampNs: source.cameraMetadata?.timestampNs,
+      rollingShutterSkewNs: source.cameraMetadata?.rollingShutterSkewNs,
+      cameraOrientation: source.cameraMetadata?.orientation,
+      cameraSettingsEpoch: source.cameraSettingsEpoch
     };
   }
   // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
@@ -7005,10 +6723,6 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
       scaleY: direct.scaleY
     }
   };
-}
-function cloneDirectDecodeFrame(source) {
-  if (optimizerPipelineActive || source.image || opticalSampleDue(source) || typeof VideoFrame !== "function") return null;
-  return cloneVideoFrame(source, false);
 }
 function acquisitionSeedWindow(index, width, height) {
   // 3x3 overlapping windows work for both portrait 3xN and landscape Nx3 QR
@@ -7232,11 +6946,11 @@ async function captureFrame(source) {
   }
   if (source.nativeY) drawNativePreview(source);
   const now = receiverNow();
-  if (!source.nativeY) {
-    void maintainManualOptics(now);
-    maintainAcquisitionAutofocus(now);
-    maintainAutomaticQrOptics(now);
-  }
+  // Camera2 tracks expose the same constraint surface as browser tracks. Auto
+  // Optics is source-agnostic; HOLD remains mutation-free on both paths.
+  void maintainManualOptics(now);
+  maintainAcquisitionAutofocus(now);
+  maintainAutomaticQrOptics(now);
   const trace = replayRunning ? {
     sequence: source.sequence,
     timestampMs: now,
@@ -7707,6 +7421,10 @@ async function captureFrame(source) {
           yOffset: directFull.yOffset,
           yStride: directFull.yStride,
           payloadBytes: directFull.payloadBytes,
+          cameraTimestampNs: directFull.cameraTimestampNs,
+          rollingShutterSkewNs: directFull.rollingShutterSkewNs,
+          cameraOrientation: directFull.cameraOrientation,
+          cameraSettingsEpoch: directFull.cameraSettingsEpoch,
           outputMap: directFull.outputMap,
           tracks: directFull.tracks,
           acquisitionMode
@@ -7986,7 +7704,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         activeDecodeBudget = batchTracks.length;
         const id2 = frameId++;
         const sharedMessage = sharedDirect
-          ? { id: id2, videoFrame: sharedDirect.frame, cropX: sharedDirect.cropX, cropY: sharedDirect.cropY, w: sharedDirect.w, h: sharedDirect.h, ox: sharedDirect.ox, oy: sharedDirect.oy, full: false, tracks: sharedDirect.tracks, pixelFormat: sharedDirect.pixelFormat, yOffset: sharedDirect.yOffset, yStride: sharedDirect.yStride, payloadBytes: sharedDirect.payloadBytes, outputMap: sharedDirect.outputMap, strictHotPath: strictHotPathActive() }
+          ? { id: id2, videoFrame: sharedDirect.frame, cropX: sharedDirect.cropX, cropY: sharedDirect.cropY, w: sharedDirect.w, h: sharedDirect.h, ox: sharedDirect.ox, oy: sharedDirect.oy, full: false, tracks: sharedDirect.tracks, pixelFormat: sharedDirect.pixelFormat, yOffset: sharedDirect.yOffset, yStride: sharedDirect.yStride, payloadBytes: sharedDirect.payloadBytes, cameraTimestampNs: sharedDirect.cameraTimestampNs, rollingShutterSkewNs: sharedDirect.rollingShutterSkewNs, cameraOrientation: sharedDirect.cameraOrientation, cameraSettingsEpoch: sharedDirect.cameraSettingsEpoch, outputMap: sharedDirect.outputMap, strictHotPath: strictHotPathActive() }
           : { id: id2, buf: shared.data.buffer, w, h, ox: x, oy: y, full: false, tracks: batchTracks, strictHotPath: strictHotPathActive() };
         const sharedTransfer = sharedDirect ? [sharedDirect.frame] : [shared.data.buffer];
         cropAttempts.set(id2, batchRegions.map((region) => ({ region, quad: region.quad })));
@@ -8087,7 +7805,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     const id = frameId++;
     cropAttempts.set(id, [{ region: r, quad: r.quad }]);
     const message = direct
-      ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: "y8", yOffset: direct.yOffset, yStride: direct.yStride, payloadBytes: direct.payloadBytes, outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
+      ? { id, videoFrame: direct.frame, cropX: direct.cropX, cropY: direct.cropY, w: direct.w, h: direct.h, ox: direct.ox, oy: direct.oy, full: false, tracks: direct.tracks, pixelFormat: "y8", yOffset: direct.yOffset, yStride: direct.yStride, payloadBytes: direct.payloadBytes, cameraTimestampNs: direct.cameraTimestampNs, rollingShutterSkewNs: direct.rollingShutterSkewNs, cameraOrientation: direct.cameraOrientation, cameraSettingsEpoch: direct.cameraSettingsEpoch, outputMap: direct.outputMap, strictHotPath: strictHotPathActive() }
       : { id, buf: img.data.buffer, w, h, ox: x, oy: y, full: false, tracks: [individualTrack], strictHotPath: strictHotPathActive() };
     const transfer = direct ? [direct.frame] : [img.data.buffer];
     if (!submitReceiverJob(
@@ -8188,7 +7906,13 @@ function onDecoded(bytes, box, info) {
   if (done) return;
   if (!replayRunning && livePipeline.startedAt && !livePipeline.firstQrAt) livePipeline.firstQrAt = decodedAt;
   qrReadTimes.push(decodedAt);
-  const parsed = info?.verifiedPayload && info.header ? { header: info.header, block: bytes.subarray(frameHeaderLength(info.header.mode, info.header.extendedGrid)) } : parseFrame(bytes);
+  const parsed = info?.verifiedPayload && info.header ? {
+    header: info.header,
+    block: bytes.subarray(
+      frameHeaderLength(info.header.mode, info.header.extendedGrid),
+      frameHeaderLength(info.header.mode, info.header.extendedGrid) + info.header.blockLen
+    )
+  } : parseFrame(bytes);
   if (!parsed) {
     noteScanOutcome(info == null ? void 0 : info.scanId, "rejected");
     if (decoder) return;

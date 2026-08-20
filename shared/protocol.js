@@ -267,12 +267,13 @@ function packFrame(h, block) {
   return out;
 }
 function parseFrameBody(bytes, hasCrc) {
+  const crcBytes = hasCrc === false ? 0 : FRAME_CRC_LEN;
   const magic = bytes[0] ?? -1;
   const mode = modeForMagic(magic);
   if (!mode) return null;
   const extendedGrid = extendedGridForMagic(magic);
   const headerLen = frameHeaderLength(mode, extendedGrid);
-  if (bytes.length < headerLen + 1 + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
+  if (bytes.length < headerLen + 1 + crcBytes) return null;
   let bit = 8;
   let seq = 0;
   let layoutId = 0;
@@ -336,8 +337,8 @@ function parseFrameBody(bytes, hasCrc) {
     }
   }
   const packetLength = headerLen + blockLen;
-  if (bytes.length !== packetLength + (hasCrc ? FRAME_CRC_LEN : 0)) return null;
-  if (hasCrc) {
+  if (bytes.length !== packetLength + crcBytes) return null;
+  if (hasCrc === true) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (view.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
   }
@@ -359,8 +360,8 @@ function parseFrameBody(bytes, hasCrc) {
 function parseFrame(bytes) {
   return parseFrameBody(bytes, true);
 }
-function parseVerifiedFramePayload(bytes) {
-  return parseFrameBody(bytes, false);
+function parseVerifiedFrame(bytes) {
+  return parseFrameBody(bytes, "verified");
 }
 function streamIdentity(h) {
   return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}`;
@@ -411,7 +412,7 @@ export {
   packFile,
   packFrame,
   parseFrame,
-  parseVerifiedFramePayload,
+  parseVerifiedFrame,
   splitmix32,
   streamIdentity,
   unpackFile,

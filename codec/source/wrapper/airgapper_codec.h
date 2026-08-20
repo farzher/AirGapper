@@ -87,6 +87,9 @@ struct AirGapperGuidedMetrics {
 	uint32_t erasureRepairAttemptMask;
 	uint32_t erasureRepairSuccessMask;
 	uint32_t erasureRepairSuppressedMask;
+	uint32_t finderLevelTracks;
+	uint32_t finderLevelMatches;
+	uint32_t finderLevelSeparation;
 };
 
 struct AirGapperBatchMetrics {

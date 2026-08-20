@@ -964,7 +964,9 @@ class FocusController {
       } else {
         this.lastReason = decodeFresh ? "real decoder progress; camera held" : metrics.focusScore >= CAMERA_TUNING.focusExcellent && metrics.exposureScore >= CAMERA_TUNING.exposureExcellent ? "decoder silent with excellent static optics; camera held" : "decoder silence below recovery threshold";
       }
-      void this.maybeTrimAutomaticExposure(metrics, now);
+      // HOLD is a hard mutation boundary. Exposure/focus recovery is owned by
+      // the sustained decoder-backed Auto Optics state machine, never by one
+      // optical sample.
       this.changed();
       return;
     }
@@ -1275,9 +1277,14 @@ class FocusController {
         if (!this.current(generation)) return;
         if (accepted) {
           const immediate = this.settings();
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          const waitStarted = performance.now();
+          let actual = immediate;
+          while (this.current(generation) && performance.now() - waitStarted < 700) {
+            actual = this.settings();
+            if ([2, 4, 5, 6].includes(Number(actual.afState))) break;
+            await new Promise((resolve) => setTimeout(resolve, 24));
+          }
           if (!this.current(generation)) return;
-          const actual = this.settings();
           const verified = immediate.focusMode === "single-shot" || actual.focusMode === "single-shot";
           if (verified) {
             this.seekingAfVerified++;

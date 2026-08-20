@@ -31,7 +31,10 @@ const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
 // Sender FPS is always the user's requested presentation rate. Auto Grid may
 // choose QR count/size, but never silently changes the requested FPS.
 const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
-const AUTO_GRID_MAX_CODES = 128;
+// Receiver production scheduling keeps one <=32-track warm batch. Larger
+// walls remain available as explicit layouts, but Auto optimizes for what an
+// older offline phone can economically decode.
+const AUTO_GRID_MAX_CODES = 32;
 // This is intentionally relaxed for the >32-slot experiment. At 360 Hz and
 // 30 sender fps it permits roughly 96 independently changing QR slots.
 const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 8;
@@ -48,7 +51,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.354";
+const SEND_RUNTIME_BUILD = "v0.5.355";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";

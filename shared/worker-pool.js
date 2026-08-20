@@ -1,4 +1,11 @@
-const WORKER_JOB_TIMEOUT_MS = 12e3;
+const TRACKED_JOB_TIMEOUT_MS = 2200;
+const RECOVERY_JOB_TIMEOUT_MS = 6500;
+const ACQUISITION_JOB_TIMEOUT_MS = 9000;
+
+function workerJobTimeout(message) {
+  if (!message?.full) return TRACKED_JOB_TIMEOUT_MS;
+  return message.acquisitionMode === "thorough" ? ACQUISITION_JOB_TIMEOUT_MS : RECOVERY_JOB_TIMEOUT_MS;
+}
 class DecodeWorkerPool {
   constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable, onFrameSignature) {
     this.create = create;
@@ -209,6 +216,7 @@ class DecodeWorkerPool {
     try {
       if (message && typeof message === "object") message.sentAt = performance.now();
       this.workers[slot].postMessage(message, transfer);
+      const timeoutMs = workerJobTimeout(message);
       this.jobTimers[slot] = setTimeout(() => {
         var _a2, _b2;
         const activeId = this.activeIds[slot];
@@ -234,7 +242,7 @@ class DecodeWorkerPool {
           targetedAttempts: 0,
           targetedPixels: 0,
           targetedSuccesses: 0,
-          latencyMs: WORKER_JOB_TIMEOUT_MS,
+          latencyMs: timeoutMs,
           symbols: [],
           sightings: [],
           error: "Decode worker timed out"
@@ -243,7 +251,7 @@ class DecodeWorkerPool {
         const replacement = this.create();
         this.workers[slot] = replacement;
         this.configureWorker(slot, replacement);
-      }, WORKER_JOB_TIMEOUT_MS);
+      }, timeoutMs);
       return true;
     } catch (error) {
       const full = (_a = this.activeFull[slot]) != null ? _a : false;

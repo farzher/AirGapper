@@ -19,16 +19,16 @@ import java.nio.FloatBuffer;
 final class NativeGpuCameraReader implements AutoCloseable {
     interface Sink {
         boolean takeFrameCredit();
-        void onFrame(byte[] bytes);
+        void onFrame(byte[] bytes, long timestampNs);
         void onError(String message);
     }
 
     private static final int EGL_OPENGL_ES3_BIT_KHR = 0x40;
     private static final float[] QUAD = {
-            -1f, -1f, 0f, 0f,
-             1f, -1f, 1f, 0f,
-            -1f,  1f, 0f, 1f,
-             1f,  1f, 1f, 1f
+            -1f, -1f, 0f, 1f,
+             1f, -1f, 1f, 1f,
+            -1f,  1f, 0f, 0f,
+             1f,  1f, 1f, 0f
     };
     private static final String VERTEX =
             "attribute vec2 aPosition;\n" +
@@ -60,6 +60,7 @@ final class NativeGpuCameraReader implements AutoCloseable {
     private int positionLocation;
     private int texCoordLocation;
     private int matrixLocation;
+    private int samplerLocation;
     private int width;
     private int height;
     private ByteBuffer readback;
@@ -150,6 +151,12 @@ final class NativeGpuCameraReader implements AutoCloseable {
         positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
         texCoordLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
         matrixLocation = GLES20.glGetUniformLocation(program, "uTexMatrix");
+        samplerLocation = GLES20.glGetUniformLocation(program, "uCamera");
+        GLES20.glUseProgram(program);
+        GLES20.glUniform1i(samplerLocation, 0);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_DITHER);
         readback = ByteBuffer.allocateDirect(width * height).order(ByteOrder.nativeOrder());
     }
 
@@ -192,14 +199,14 @@ final class NativeGpuCameraReader implements AutoCloseable {
             makeCurrent();
             surfaceTexture.updateTexImage();
             if (!sink.takeFrameCredit()) return;
+            final long timestampNs = surfaceTexture.getTimestamp();
             surfaceTexture.getTransformMatrix(textureMatrix);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
             GLES20.glViewport(0, 0, width, height);
             GLES20.glUseProgram(program);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTexture);
-            int sampler = GLES20.glGetUniformLocation(program, "uCamera");
-            GLES20.glUniform1i(sampler, 0);
+            GLES20.glUniform1i(samplerLocation, 0);
             GLES20.glUniformMatrix4fv(matrixLocation, 1, false, textureMatrix, 0);
             quad.position(0);
             GLES20.glEnableVertexAttribArray(positionLocation);
@@ -211,11 +218,9 @@ final class NativeGpuCameraReader implements AutoCloseable {
             readback.clear();
             GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RED, GLES20.GL_UNSIGNED_BYTE, readback);
             byte[] output = new byte[width * height];
-            for (int row = 0; row < height; row++) {
-                readback.position((height - 1 - row) * width);
-                readback.get(output, row * width, width);
-            }
-            sink.onFrame(output);
+            readback.position(0);
+            readback.get(output);
+            sink.onFrame(output, timestampNs);
         } catch (Exception error) {
             sink.onError(error.getMessage() == null ? error.toString() : error.getMessage());
         }

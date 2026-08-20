@@ -1,4 +1,4 @@
-import { parseFrame, parseVerifiedFramePayload } from "../shared/protocol.js";
+import { parseFrame, parseVerifiedFrame } from "../shared/protocol.js";
 import { gridLayoutById } from "../shared/grid-layout.js";
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 const ready = import(scalarCodec ? "../codec/scalar/airgapper_codec.js" : "../codec/airgapper_codec.js").then(({ default: AirGapperCodec }) => AirGapperCodec());
@@ -48,7 +48,7 @@ const NATIVE_TRACK_OK = 1;
 const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
-const GUIDED_METRICS_BYTES = 208;
+const GUIDED_METRICS_BYTES = 216;
 const GUIDED_OUTPUT_BYTES = 512 * 1024;
 let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
@@ -139,8 +139,36 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     erasureRepairCodewords: metricsView.getUint32(188, true),
     erasureRepairAttemptMask: metricsView.getUint32(192, true),
     erasureRepairSuccessMask: metricsView.getUint32(196, true),
-    erasureRepairSuppressedMask: metricsView.getUint32(200, true)
+    erasureRepairSuppressedMask: metricsView.getUint32(200, true),
+    finderLevelTracks: metricsView.getUint32(204, true),
+    finderLevelMatches: metricsView.getUint32(208, true),
+    finderLevelSeparation: metricsView.getUint32(212, true)
   };
+  if (metrics.finderLevelTracks) {
+    const finderConfidence = Math.max(0, Math.min(1,
+      metrics.finderLevelMatches / (metrics.finderLevelTracks * 147)));
+    const separation = metrics.finderLevelSeparation / metrics.finderLevelTracks;
+    const correctionBurden = Math.min(1, (
+      metrics.sparseRsFallbacks + metrics.erasureRsAttempts + metrics.erasureRepairCodewords / 256
+    ) / Math.max(1, metrics.tracks));
+    metrics.optical = {
+      confidence: finderConfidence,
+      focusScore: Math.max(0, Math.min(1, (finderConfidence - 0.72) / 0.25)) *
+        Math.max(0, Math.min(1, (separation - 20) / 70)) * (1 - correctionBurden * 0.45),
+      exposureScore: Math.max(0, Math.min(1, (separation - 24) / 92)) * finderConfidence,
+      transitionWidthModules: 1 - finderConfidence,
+      blackLevel: 0,
+      whiteLevel: separation,
+      separation,
+      noise: correctionBurden * Math.max(18, separation * 0.3),
+      clipping: 0,
+      banding: 0,
+      temporalContamination: 0,
+      tiles: metrics.finderLevelTracks,
+      sampledModules: metrics.finderLevelTracks * 147,
+      correctionBurden
+    };
+  }
   const moduleSizes = tracks.map((track) => quadModuleSize(track.quad, track.dim)).filter((value) => value > 0 && Number.isFinite(value));
   if (moduleSizes.length) {
     metrics.moduleSizeMin = Math.min(...moduleSizes);
@@ -160,6 +188,8 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   const trackBySlot = new Map(tracks.map((track) => [Number(track.slot ?? track.id), track]));
   const trackIndexBySlot = new Map(tracks.map((track, index) => [Number(track.slot ?? track.id), index]));
   const wallMotionSamples = [];
+  const pendingSymbols = [];
+  let outputEnd = 0;
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
     const status = view.getInt32(base + 4, true);
@@ -168,8 +198,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const outputLength = view.getInt32(base + 12, true);
     const modules = view.getInt32(base + 16, true);
     if (outputOffset < 0 || outputLength <= 0 || outputOffset + outputLength > GUIDED_OUTPUT_BYTES) continue;
-    const bytes = zx.HEAPU8.slice(guidedOutputPtr + outputOffset, guidedOutputPtr + outputOffset + outputLength);
-    const packet = parseFrame(bytes);
+    const bytes = zx.HEAPU8.subarray(guidedOutputPtr + outputOffset, guidedOutputPtr + outputOffset + outputLength);
+    // Guided accepts only after C++ has checked the AirGapper CRC. Parse the
+    // verified payload without hashing it again in JavaScript.
+    const packet = parseVerifiedFrame(bytes);
     const slot = packet?.header.slotIndex;
     if (!packet || !Number.isInteger(slot) || slot < 0) continue;
     if (expectedSlots.size && !expectedSlots.has(slot) || decodedSlots.has(slot)) continue;
@@ -208,16 +240,29 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
         wallMotionSamples.push({ dx, dy, x, y, edge, slot, measured: geometryMeasured });
       }
     }
-    symbols.push({
-      bytes,
+    outputEnd = Math.max(outputEnd, outputOffset + outputLength);
+    pendingSymbols.push({
+      outputOffset,
+      outputLength,
       box: boundsOf(quad, ox, oy),
       quad: outputQuad,
       modules,
       tracked: true,
       geometryMeasured,
       decodePath,
+      crc32: true,
+      verifiedPayload: true,
       header: packet.header
     });
+  }
+  const output = outputEnd ? zx.HEAPU8.slice(guidedOutputPtr, guidedOutputPtr + outputEnd) : new Uint8Array(0);
+  for (const pending of pendingSymbols) symbols.push({
+    ...pending,
+    bytes: output.subarray(pending.outputOffset, pending.outputOffset + pending.outputLength)
+  });
+  for (const symbol of symbols) {
+    delete symbol.outputOffset;
+    delete symbol.outputLength;
   }
   // Full independently measured finder geometry remains absolute authority.
   // Otherwise the Turbo/Stable-RS CRC oracle gives us something almost as
@@ -357,7 +402,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     if (wallMotion)
       for (const symbol of symbols) symbol.wallMotion = wallMotion;
   }
-  return { symbols, metrics };
+  return { symbols, metrics, outputBuffer: output.buffer };
 }
 function ensureNativeBatch(zx) {
   if (!nativeBatchHandle) nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
@@ -503,7 +548,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const slot = mapped.nativeSlot;
     if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
     const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
-    const packet = mapped.input.crc32 ? parseVerifiedFramePayload(rawView) : parseFrame(rawView);
+    const packet = mapped.input.crc32 ? parseVerifiedFrame(rawView) : parseFrame(rawView);
     if (!packet || mapped.input.slot !== void 0 && packet.header.slotIndex !== mapped.input.slot) {
       if (slot >= 0) nativeRefresh.add(slot);
       continue;
@@ -668,16 +713,31 @@ ctx.onmessage = async (e) => {
     const zx = await ready;
     let ptr;
     if (usedNativeYBuffer) {
-      const byteLength = Math.min(
-        ownedVideoFrame.byteLength,
-        payloadBytes || inputOffset + Math.max(0, h - 1) * inputStride + w
-      );
-      pixels = new Uint8Array(ownedVideoFrame, 0, byteLength);
-      ptr = inputBuffer(zx, pixels.byteLength);
-      if (!ptr) throw new Error("Could not allocate WASM native Y input buffer");
-      zx.HEAPU8.set(pixels, ptr);
-      decodePixelFormat = "y8";
       if (inputStride < w) throw new Error("Native camera Y stride is invalid");
+      const available = Math.min(ownedVideoFrame.byteLength, payloadBytes || ownedVideoFrame.byteLength);
+      const requiredEnd = inputOffset + Math.max(0, h - 1) * inputStride + w;
+      if (inputOffset < 0 || requiredEnd > available) throw new Error("Native camera Y crop is out of range");
+      const packedBytes = w * h;
+      const packCrop = h > 0 && packedBytes < available * 0.72;
+      const copyStarted = performance.now();
+      if (packCrop) {
+        ptr = inputBuffer(zx, packedBytes);
+        if (!ptr) throw new Error("Could not allocate WASM native Y crop");
+        const source = new Uint8Array(ownedVideoFrame);
+        for (let row = 0; row < h; row++) {
+          const start = inputOffset + row * inputStride;
+          zx.HEAPU8.set(source.subarray(start, start + w), ptr + row * w);
+        }
+        inputOffset = 0;
+        inputStride = w;
+      } else {
+        pixels = new Uint8Array(ownedVideoFrame, 0, requiredEnd);
+        ptr = inputBuffer(zx, pixels.byteLength);
+        if (!ptr) throw new Error("Could not allocate WASM native Y input buffer");
+        zx.HEAPU8.set(pixels, ptr);
+      }
+      frameCopyMs = performance.now() - copyStarted;
+      decodePixelFormat = "y8";
       ownedVideoFrame = null;
     } else if (ownedVideoFrame) {
       const rect = { x: cropX, y: cropY, width: w, height: h };
@@ -916,7 +976,7 @@ ctx.onmessage = async (e) => {
         );
         if (guided) symbols.push(...guided.symbols);
         mapOutputToDisplay();
-        ctx.postMessage({
+        const reply = {
           id,
           symbols,
           sightings,
@@ -939,7 +999,9 @@ ctx.onmessage = async (e) => {
               : "y8-guided",
           guidedError: guided?.error,
           latencyMs: performance.now() - startedAt
-        });
+        };
+        const transfer = guided?.outputBuffer && symbols.length ? [guided.outputBuffer] : [];
+        ctx.postMessage(reply, transfer);
         return;
       }
       readFullAttempts++;

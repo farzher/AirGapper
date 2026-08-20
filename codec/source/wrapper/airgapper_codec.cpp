@@ -70,8 +70,8 @@ static_assert(sizeof(AirGapperGuidedTrack) == 40,
               "AirGapperGuidedTrack JS ABI must use 40-byte records");
 static_assert(sizeof(AirGapperGuidedResult) == 52,
               "AirGapperGuidedResult JS ABI must use 52-byte records");
-static_assert(sizeof(AirGapperGuidedMetrics) == 208,
-              "AirGapperGuidedMetrics JS ABI must allocate 208 bytes");
+static_assert(sizeof(AirGapperGuidedMetrics) == 216,
+              "AirGapperGuidedMetrics JS ABI must allocate 216 bytes");
 static_assert(offsetof(AirGapperGuidedMetrics, turboAttempts) == 124,
               "AirGapperGuidedMetrics turboAttempts JS offset changed");
 static_assert(offsetof(AirGapperGuidedMetrics, turboSuccesses) == 140,
@@ -2002,6 +2002,20 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
         std::vector<uint8_t> deferredStableGateFailure(trackCount, 0);
         int repairTracksSpent = 0;
         constexpr int GUIDED_MAX_REPAIR_TRACKS_PER_BATCH = 2;
+        std::vector<std::optional<TurboFrameTransform>> frameTransforms(trackCount);
+        std::vector<std::optional<TurboLevels>> frameLevels(trackCount);
+        auto transformFor = [&](int index, const GuidedTurboTrack& cache) -> const TurboFrameTransform& {
+            auto& value = frameTransforms[index];
+            if (!value) value.emplace(cache, tracks[index]);
+            return *value;
+        };
+        auto levelsFor = [&](int index, const GuidedTurboTrack& cache,
+                             const TurboFrameTransform& transform, float dx, float dy) -> const TurboLevels& {
+            auto& value = frameLevels[index];
+            if (!value) value = turboReadLevels(cache, tracks[index], transform,
+                                                yPlane, width, height, stride, dx, dy);
+            return *value;
+        };
 
         auto commitTurbo = [&](int trackIndex, const DecoderResult& decoded, float correctionX, float correctionY) {
             if (!decoded.isValid() || decoded.content().bytes.empty() || !hasValidCRC32(decoded.content().bytes))
@@ -2074,7 +2088,7 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             auto& referenceGate = guidedDenseStableRsGate(referenceId, tracks[i].dimension);
             if (guidedModuleSize(tracks[i]) <= GUIDED_STABLE_ADAPT_MAX_MODULE && referenceGate.suppressed)
                 continue;
-            const auto frameTransform = turboFrameTransform(*cache, tracks[i]);
+            const auto& frameTransform = transformFor(i, *cache);
             if (!frameTransform.isValid())
                 continue;
             ++wallReferenceTries;
@@ -2096,6 +2110,12 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             else if (frameTransform.affineOnly) ++metrics->affineWarpTracks;
             else if (frameTransform.perspectiveMesh) ++metrics->perspectiveMeshWarpTracks;
             else ++metrics->perspectiveWarpTracks;
+        };
+        auto noteFinderLevels = [&](const TurboLevels& levels) {
+            if (!levels.ok) return;
+            ++metrics->finderLevelTracks;
+            metrics->finderLevelMatches += uint32_t(std::max(0, levels.matches));
+            metrics->finderLevelSeparation += uint32_t(std::max(0, levels.separation));
         };
 
         for (int i = 0; i < trackCount; ++i) {
@@ -2127,13 +2147,13 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
             bool stableRsAttempted = false;
 
             if (directMode) {
-                const auto frameTransform = turboFrameTransform(*cache, track);
+                const auto& frameTransform = transformFor(i, *cache);
                 if (frameTransform.isValid()) {
                     noteWarpMode(frameTransform);
                     const float dx = wallCorrectionX;
                     const float dy = wallCorrectionY;
-                    const auto levels = turboReadLevels(*cache, track, frameTransform,
-                                                        yPlane, width, height, stride, dx, dy);
+                    const auto& levels = levelsFor(i, *cache, frameTransform, dx, dy);
+                    noteFinderLevels(levels);
                     if (levels.ok) {
                         directAttempted = true;
                         ++metrics->sampleAttempts;
@@ -2159,18 +2179,21 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                 auto& stableRsGate = guidedDenseStableRsGate(track.id, track.dimension);
                 const bool stableProbeAllowed = guidedTryDenseStableRs(stableRsGate, stableModuleSize);
                 if (stableProbeAllowed) {
-                    const auto frameTransform = turboFrameTransform(*cache, track);
+                    const auto& frameTransform = transformFor(i, *cache);
                     if (!frameTransform.isValid()) {
                         stableNeedsRefresh = true;
                     } else {
                         noteWarpMode(frameTransform);
                         const float dx = wallCorrectionX;
                         const float dy = wallCorrectionY;
-                        const auto levels = turboReadLevels(*cache, track, frameTransform,
-                                                            yPlane, width, height, stride, dx, dy);
+                        const auto& levels = levelsFor(i, *cache, frameTransform, dx, dy);
+                        noteFinderLevels(levels);
                         const bool centerOnlyRs = frameTransform.translationOnly &&
                             stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
-                        const bool progressiveRs = stableModuleSize < GUIDED_TURBO_NEAREST_MIN_MODULE;
+                        // Stable-RS owns the complete progressive attempt. It
+                        // samples data codewords once, tries CRC-only decode,
+                        // then samples parity only if RS is needed.
+                        const bool progressiveRs = true;
 
                         // Keep the existing shared-wall correction as the primary
                         // path. Only on a dense cached miss, refine this QR's finder
@@ -2230,23 +2253,6 @@ extern "C" int decodeGuidedBatchY(const uint8_t* yPlane, int width, int height, 
                                 metrics->erasureRepairSuppressedMask |= trackBit;
                             }
                         } else {
-                            const bool stableDirectEligible = !cache->cooldown &&
-                                stableModuleSize >= GUIDED_TURBO_NEAREST_MIN_MODULE &&
-                                cache->stableSuccesses >= 2;
-                            if (stableDirectEligible) {
-                                directAttempted = true;
-                                ++metrics->sampleAttempts;
-                                ++metrics->sparseNoRsAttempts;
-                                auto decoded = decodeTurboDataOnly(*cache, track, frameTransform,
-                                                                   yPlane, width, height, stride,
-                                                                   dx, dy, levels, *metrics);
-                                directSuccess = commitTurbo(i, decoded, wallCorrectionX, wallCorrectionY);
-                                success = directSuccess;
-                                if (directSuccess)
-                                    ++metrics->sparseNoRsSuccesses;
-                                else if (allowExpensiveRepair)
-                                    cache->cooldown = std::max<uint8_t>(cache->cooldown, 2);
-                            }
                             if (!success) {
                                 stableRsAttempted = true;
                                 ++metrics->sampleAttempts;
