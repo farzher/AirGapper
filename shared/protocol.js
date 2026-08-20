@@ -360,8 +360,8 @@ function parseFrameBody(bytes, hasCrc) {
 function parseFrame(bytes) {
   return parseFrameBody(bytes, true);
 }
-function parseVerifiedFrame(bytes) {
-  return parseFrameBody(bytes, "verified");
+function parseVerifiedFrame(bytes, hasCrc = true) {
+  return parseFrameBody(bytes, hasCrc ? "verified" : false);
 }
 function streamIdentity(h) {
   return `${h.payloadId}:${h.mode}:${h.k}:${h.blockLen}:${h.totalLen}`;

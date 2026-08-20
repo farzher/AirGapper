@@ -584,7 +584,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const slot = mapped.nativeSlot;
     if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
     const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
-    const packet = mapped.input.crc32 ? parseVerifiedFrame(rawView) : parseFrame(rawView);
+    const packet = mapped.input.crc32 ? parseVerifiedFrame(rawView, false) : parseFrame(rawView);
     if (!packet) {
       if (slot >= 0) nativeRefresh.add(slot);
       continue;
