@@ -36,14 +36,22 @@ const track = {
   }
 };
 
-// Establish a manual candidate, then prove it with a verified QR. 50 units == 5 ms.
-await applyAdvancedConstraint(track, {
+// Establish a manual candidate. 50 units == 5 ms.
+const provenSetting = {
   exposureMode: "manual",
   exposureTime: 50,
   iso: 166
-});
+};
+await applyAdvancedConstraint(track, provenSetting);
 assert.equal(cameraWrites, 1);
 assert.equal(settings.exposureMode, "manual");
+
+// Reasserting exactly the same exposure state must not touch the camera HAL.
+await applyAdvancedConstraint(track, provenSetting);
+assert.equal(cameraWrites, 1, "identical exposure/ISO writes should be deduplicated");
+assert.equal(recoveryDiagnostics().suppressedExposureWrites, 1);
+
+// Only a verified QR promotes the current manual state to the recovery prior.
 const controller = new FocusController(async () => true, () => {});
 controller.track = track;
 controller.noteValidDecode(0);
@@ -58,7 +66,7 @@ assert.equal(cameraWrites, 1, "pose recovery must not surrender a QR-proven manu
 assert.equal(settings.exposureMode, "manual");
 assert.equal(settings.exposureTime, 50);
 assert.equal(settings.iso, 166);
-assert.equal(recoveryDiagnostics().suppressedExposureWrites, 1);
+assert.equal(recoveryDiagnostics().suppressedExposureWrites, 2);
 
 class FakeWorker {
   terminateCount = 0;
