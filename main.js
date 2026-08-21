@@ -191,7 +191,7 @@ function liveReceiveTrack() {
   return source.getVideoTracks().find((track) => track.readyState === "live") || null;
 }
 function recycleReceiveCamera() {
-  if (!receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
+  if (!isIOS || !receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
   // pauseReceiver() preserves transport progress/decoder state but clears a
   // dead MediaStream and in-flight frame work. Resuming then opens a fresh
   // camera stream, which is what iPadOS needs after killing a background track.
@@ -202,7 +202,8 @@ function recycleReceiveCamera() {
     }
   });
 }
-function scheduleReceiveHealthCheck(delay = 700, attempt = 0) {
+function scheduleReceiveHealthCheck(delay = 1200, attempt = 0) {
+  if (!isIOS) return;
   const token = ++receiveHealthToken;
   setTimeout(() => {
     if (token !== receiveHealthToken || !receiveNeedsCamera() || document.visibilityState !== "visible") return;
@@ -238,13 +239,14 @@ window.airgapperSuspend = () => {
 };
 function resumeActiveView() {
   if (document.visibilityState !== "visible" || cameraRequestPending()) return;
+  const wasSuspended = suspended;
   if (suspended) {
     suspended = false;
     window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
   } else if (receiveNeedsCamera()) {
     window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   }
-  if (receiveNeedsCamera()) scheduleReceiveHealthCheck(suspended ? 1200 : 700);
+  if (receiveNeedsCamera()) scheduleReceiveHealthCheck(wasSuspended ? 1500 : 1200);
 }
 document.addEventListener("visibilitychange", () => {
   var _a2;
