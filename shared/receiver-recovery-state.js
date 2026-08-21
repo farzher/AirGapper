@@ -1,4 +1,5 @@
 const manualExposureByTrack = new WeakMap();
+let diagnosticTrack;
 let poseRecoveryActive = false;
 let poseRecoveryReason = "";
 let poseRecoveryGeneration = 0;
@@ -22,12 +23,20 @@ function endPoseRecovery() {
   poseRecoveryReason = "";
 }
 
+function beginTrackDiagnostics(track) {
+  if (!track || diagnosticTrack === track) return;
+  diagnosticTrack = track;
+  suppressedExposureWrites = 0;
+  suppressedWorkerRestarts = 0;
+}
+
 function rememberManualExposure(track, settings = track?.getSettings?.()) {
   if (!track || !settings) return false;
   const exposure = Number(settings.exposureTime);
   const iso = Number(settings.iso);
   const mode = settings.exposureMode;
   if (mode !== "manual" || !(exposure > 0) || !(iso > 0)) return false;
+  beginTrackDiagnostics(track);
   manualExposureByTrack.set(track, { exposure, iso, at: performance.now() });
   return true;
 }
@@ -60,6 +69,7 @@ function recoveryDiagnostics() {
 
 export {
   beginPoseRecovery,
+  beginTrackDiagnostics,
   endPoseRecovery,
   noteSuppressedExposureWrite,
   noteSuppressedWorkerRestart,
