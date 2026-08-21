@@ -1,0 +1,182 @@
+import { GridLattice } from "../receive/grid-lattice.js";
+import { DecodeWorkerPool } from "./worker-pool.js";
+import {
+  beginPoseRecovery,
+  endPoseRecovery,
+  noteSuppressedWorkerRestart,
+  poseRecoveryReasonEligible,
+  recoveryDiagnostics,
+  rememberManualExposure
+} from "./receiver-recovery-state.js";
+
+const SOFT_POSE_LOSS_MS = 450;
+const LONG_AE_EXPOSURE = 55; // 5.5 ms; browser exposureTime units are 0.1 ms.
+const MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms.
+const QR_LIGHT_SCALE = Math.pow(2, -0.75);
+let installed = false;
+let diagnosticObserver;
+let forcedShortShutterHandoffs = 0;
+const handedOffTracks = new WeakSet();
+
+function installLatticeRecoveryBridge() {
+  const originalReset = GridLattice.prototype.reset;
+  const originalReacquire = GridLattice.prototype.reacquire;
+  const originalInvalidatePose = GridLattice.prototype.invalidatePose;
+  const originalAccept = GridLattice.prototype.accept;
+  const originalNoteValidPacket = GridLattice.prototype.noteValidPacket;
+  const originalTick = GridLattice.prototype.tick;
+
+  GridLattice.prototype.reset = function(...args) {
+    endPoseRecovery();
+    return originalReset.apply(this, args);
+  };
+
+  GridLattice.prototype.reacquire = function(at, reason = "whole lattice invalidated") {
+    if (poseRecoveryReasonEligible(reason)) beginPoseRecovery(reason);
+    else endPoseRecovery();
+    return originalReacquire.call(this, at, reason);
+  };
+
+  GridLattice.prototype.invalidatePose = function(reason = "camera pose invalidated") {
+    if (poseRecoveryReasonEligible(reason)) beginPoseRecovery(reason);
+    return originalInvalidatePose.call(this, reason);
+  };
+
+  GridLattice.prototype.tick = function(now) {
+    const staleMs = this.candidate ? now - this.lastHitAt : 0;
+    const result = originalTick.call(this, now);
+    // Start protecting the sensor at soft loss, before the 850 ms AutoOptics
+    // fallback can hand a good short shutter back to photographic AE.
+    if (this.candidate && staleMs > SOFT_POSE_LOSS_MS && this.state === "PARTIAL_LOSS") {
+      beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
+    }
+    return result;
+  };
+
+  GridLattice.prototype.accept = function(...args) {
+    const result = originalAccept.apply(this, args);
+    if (result && this.locked && recoveryDiagnostics().active) endPoseRecovery();
+    return result;
+  };
+
+  GridLattice.prototype.noteValidPacket = function(...args) {
+    const accepted = originalNoteValidPacket.apply(this, args);
+    if (accepted && recoveryDiagnostics().active) endPoseRecovery();
+    return accepted;
+  };
+}
+
+function installWarmWorkerRecovery() {
+  const originalResize = DecodeWorkerPool.prototype.resize;
+  DecodeWorkerPool.prototype.resize = function(count) {
+    if (count === 0 && recoveryDiagnostics().active && this.workers.length) {
+      this.__airgapperWarmRecovery = true;
+      noteSuppressedWorkerRestart();
+      return;
+    }
+    if (count > 0 && this.__airgapperWarmRecovery) {
+      this.__airgapperWarmRecovery = false;
+      if (this.workers.length === count) return;
+    }
+    return originalResize.call(this, count);
+  };
+}
+
+function quantize(value, range) {
+  const clamped = Math.max(range.min, Math.min(range.max, value));
+  if (!range.step || range.step <= 0) return clamped;
+  return Math.max(range.min, Math.min(range.max,
+    range.min + Math.round((clamped - range.min) / range.step) * range.step
+  ));
+}
+
+async function handOffLongAe(track) {
+  if (!track || handedOffTracks.has(track) || track.readyState !== "live") return;
+  const settings = track.getSettings?.() ?? {};
+  const exposure = Number(settings.exposureTime);
+  const iso = Number(settings.iso);
+  if (settings.exposureMode !== "continuous" || !(exposure > LONG_AE_EXPOSURE) || !(iso > 0)) return;
+  const caps = track.getCapabilities?.() ?? {};
+  const exposureRange = caps.exposureTime;
+  const isoRange = caps.iso;
+  if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") || !exposureRange || !isoRange) return;
+
+  handedOffTracks.add(track);
+  try {
+    const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+    const targetProduct = exposure * iso * QR_LIGHT_SCALE;
+    const shortExposure = quantize(
+      Math.min(exposureRange.max, MOTION_SAFE_MAX_EXPOSURE, 1e4 / fps * 0.10),
+      exposureRange
+    );
+    const shortIso = quantize(
+      Math.max(isoRange.min, Math.min(isoRange.max, targetProduct / Math.max(exposureRange.min, shortExposure))),
+      isoRange
+    );
+    await track.applyConstraints({ advanced: [{
+      exposureMode: "manual",
+      exposureTime: shortExposure,
+      iso: shortIso
+    }] });
+    rememberManualExposure(track);
+    forcedShortShutterHandoffs++;
+  } catch {
+    handedOffTracks.delete(track);
+  }
+}
+
+function installDiagnosticPolicy() {
+  if (typeof document === "undefined") return;
+  const focus = document.getElementById("focus-diagnostics");
+  if (!focus) return;
+  let mutating = false;
+  const sync = () => {
+    if (mutating) return;
+    const original = focus.textContent || "";
+    const state = recoveryDiagnostics();
+    let next = original;
+    next = next.replace(/exposure writes (\d+)/, (_, raw) => {
+      const reported = Number(raw);
+      const applied = Math.max(0, reported - state.suppressedExposureWrites);
+      return `exposure writes ${applied}${state.suppressedExposureWrites ? ` · AE holds ${state.suppressedExposureWrites}` : ""}`;
+    });
+    next = next.replace(/worker restarts (\d+)/, (_, raw) => {
+      const reported = Number(raw);
+      const actual = Math.max(0, reported - state.suppressedWorkerRestarts);
+      return `worker restarts ${actual}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`;
+    });
+    if (forcedShortShutterHandoffs) {
+      next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · long-AE handoffs ${forcedShortShutterHandoffs}`);
+    }
+    if (next !== original) {
+      mutating = true;
+      focus.textContent = next;
+      mutating = false;
+    }
+
+    // QR proof is stronger than AE's photographic preference. If the receiver
+    // is LOCKED and AE is still using a long shutter, convert the live AE light
+    // product to a short manual shutter immediately; do not wait for a perfectly
+    // stationary geometry window first.
+    const locked = /State\s+LOCKED/.test(original);
+    const valid = /Payload\s+valid\s+([1-9]\d*)/.test(original);
+    if (locked && valid && !state.active) {
+      const source = document.getElementById("video")?.srcObject;
+      const track = source?.getVideoTracks?.().find((item) => item.readyState === "live");
+      if (track) void handOffLongAe(track);
+    }
+  };
+  diagnosticObserver = new MutationObserver(sync);
+  diagnosticObserver.observe(focus, { childList: true, characterData: true, subtree: true });
+  sync();
+}
+
+function installReceiverRecoveryPolicy() {
+  if (installed) return;
+  installed = true;
+  installLatticeRecoveryBridge();
+  installWarmWorkerRecovery();
+  installDiagnosticPolicy();
+}
+
+export { installReceiverRecoveryPolicy };
