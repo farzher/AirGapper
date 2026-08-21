@@ -81,6 +81,7 @@ jobs:
           # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
         run: npm install --no-save --package-lock=false playwright@1.55.0
