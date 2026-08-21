@@ -252,15 +252,30 @@ Java_com_airgapper_app_NativeDecoder_decodeFull(
 
     try {
         ImageView image(crop, w, h, ImageFormat::Lum, stride, 1);
-        auto options = ReaderOptions()
-                .formats(BarcodeFormat::QRCode)
-                .tryHarder(tryHarder == JNI_TRUE)
-                .tryRotate(false)
-                .tryInvert(false)
-                .tryDownscale(tryDownscale == JNI_TRUE)
-                .returnErrors(returnErrors == JNI_TRUE)
-                .maxNumberOfSymbols(std::max(1, static_cast<int>(maxSymbols)));
-        auto barcodes = ReadBarcodes(image, options);
+        const auto read = [&](bool downscale, bool errors) {
+            auto options = ReaderOptions()
+                    .formats(BarcodeFormat::QRCode)
+                    .tryHarder(tryHarder == JNI_TRUE)
+                    .tryRotate(false)
+                    .tryInvert(false)
+                    .tryDownscale(downscale)
+                    .returnErrors(errors)
+                    .maxNumberOfSymbols(std::max(1, static_cast<int>(maxSymbols)));
+            return ReadBarcodes(image, options);
+        };
+        auto barcodes = read(tryDownscale == JNI_TRUE, returnErrors == JNI_TRUE);
+        const auto validPayload = [](const auto& barcode) {
+            return barcode.isValid() && !barcode.bytes().empty();
+        };
+        // Match the browser acquisition path: dense full-resolution finder first,
+        // then immediately retry the scale pyramid when the dense pass yields no
+        // valid AirGapper QR. Native v2 previously omitted this retry entirely.
+        if (tryDownscale != JNI_TRUE && std::max(w, h) >= 900 &&
+                std::none_of(barcodes.begin(), barcodes.end(), validPayload)) {
+            auto fallback = read(true, false);
+            if (std::any_of(fallback.begin(), fallback.end(), validPayload))
+                barcodes = std::move(fallback);
+        }
 
         const int count = static_cast<int>(barcodes.size());
         int payloadBytes = 0;
