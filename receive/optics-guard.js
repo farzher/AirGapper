@@ -1,16 +1,17 @@
 import { parseAutoPhaseDiagnostics, recoveryHealth } from "./auto-phase-policy.js";
 
-const diagnostics = document.getElementById("focus-diagnostics");
-const opticsAuto = document.getElementById("camera-exposure-auto");
-const video = document.getElementById("video");
-const phaseRoot = document.getElementById("camera-phase-nudge");
+const hasDocument = typeof document !== "undefined";
+const diagnostics = hasDocument ? document.getElementById("focus-diagnostics") : null;
+const opticsAuto = hasDocument ? document.getElementById("camera-exposure-auto") : null;
+const video = hasDocument ? document.getElementById("video") : null;
+const phaseRoot = hasDocument ? document.getElementById("camera-phase-nudge") : null;
 
 const CONFIG = Object.freeze({
   aeGraceMs: 900,
   finderHoldMs: 700,
   unprovenBurstMs: 260,
   unprovenCooldownMs: 950,
-  trustedMs: 1400,
+  trustedMs: 650,
   experimentMs: 8000,
   experimentGoodMs: 350,
   closeRatio: 0.14
@@ -25,7 +26,7 @@ let originalApplyConstraints = null;
 let bypassDepth = 0;
 
 function nowMs() {
-  return performance.now();
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
 function scalar(value) {
@@ -107,10 +108,14 @@ function closeNumber(a, b, ratio = CONFIG.closeRatio) {
 
 function requestNearSnapshot(patch, snapshot) {
   if (!patch || !snapshot) return false;
+  if (patch.exposureMode !== undefined && snapshot.exposureMode && patch.exposureMode !== snapshot.exposureMode) return false;
   if (patch.exposureTime !== undefined && !closeNumber(patch.exposureTime, snapshot.exposureTime)) return false;
   if (patch.iso !== undefined && !closeNumber(patch.iso, snapshot.iso)) return false;
-  if (patch.exposureCompensation !== undefined && snapshot.exposureCompensation !== null &&
-      Math.abs(Number(patch.exposureCompensation) - snapshot.exposureCompensation) > 0.15) return false;
+  if (patch.exposureCompensation !== undefined) {
+    if (snapshot.exposureCompensation === null) {
+      if (Math.abs(Number(patch.exposureCompensation) || 0) > 0.05) return false;
+    } else if (Math.abs(Number(patch.exposureCompensation) - snapshot.exposureCompensation) > 0.15) return false;
+  }
   return true;
 }
 
@@ -122,10 +127,15 @@ function neutralAe(patch) {
   return patch.exposureMode === "continuous" || patch.exposureCompensation !== undefined;
 }
 
+function manualModeOnly(patch) {
+  return patch?.exposureMode === "manual" && patch.exposureTime === undefined &&
+    patch.iso === undefined && patch.exposureCompensation === undefined;
+}
+
 function manualFreezeNearCurrent(patch, current) {
   return patch?.exposureMode === "manual" &&
     (patch.exposureTime !== undefined || patch.iso !== undefined) &&
-    requestNearSnapshot(patch, current);
+    requestNearSnapshot(patch, { ...current, exposureMode: "manual" });
 }
 
 function autoOpticsEnabled() {
@@ -150,6 +160,11 @@ function updateStatus(state, detail = "") {
   statusEl.textContent = `Optics guard · ${state?.lastDecision || "idle"}${suffix}`;
 }
 
+function closeTrust(state) {
+  state.trustedUntil = 0;
+  state.trustedReason = "";
+}
+
 function protectCurrent(track, state, reason = "QR-proven lock") {
   const snapshot = sensorSnapshot(track);
   if (snapshot.exposureMode !== "manual" || !snapshot.exposureTime || !snapshot.iso) return false;
@@ -157,6 +172,7 @@ function protectCurrent(track, state, reason = "QR-proven lock") {
   state.qrProven = true;
   state.experiment = null;
   state.experimentGoodSince = 0;
+  closeTrust(state);
   state.lastDecision = reason;
   updateStatus(state);
   return true;
@@ -214,7 +230,8 @@ export function opticsGuardDecision({ state, patch, current, now, auto = true })
   }
 
   if (state.qrProven) {
-    if (manualFreezeNearCurrent(patch, current) || neutralAe(patch)) return { allow: true, reason: "freeze first QR" };
+    if (manualModeOnly(patch) || manualFreezeNearCurrent(patch, current) || neutralAe(patch))
+      return { allow: true, reason: "freeze first QR" };
     return { allow: false, reason: "protect first QR" };
   }
 
@@ -241,6 +258,7 @@ export function opticsGuardDecision({ state, patch, current, now, auto = true })
 async function restoreProtected(track, state) {
   if (!state.protected || state.restoring || !originalApplyConstraints || track.readyState !== "live") return false;
   state.restoring = true;
+  closeTrust(state);
   const snapshot = state.protected;
   try {
     bypassDepth++;
@@ -269,6 +287,7 @@ async function finishExperiment(track, state, good = healthGood(lastSample)) {
   if (!experiment) return;
   state.experiment = null;
   state.experimentGoodSince = 0;
+  closeTrust(state);
   if (good && protectCurrent(track, state, "recovery winner locked")) return;
   if (experiment.rollback) {
     state.protected = experiment.rollback;
@@ -352,7 +371,8 @@ function installApplyConstraintsGuard() {
     }
 
     const result = await native.call(this, constraints);
-    if (state.qrProven && !state.protected && manualFreezeNearCurrent(patch, current)) protectCurrent(this, state);
+    if (state.qrProven && !state.protected && (manualModeOnly(patch) || manualFreezeNearCurrent(patch, current)))
+      protectCurrent(this, state);
     return result;
   };
 
@@ -364,7 +384,24 @@ function installApplyConstraintsGuard() {
   }
 }
 
+function resetForFreshAutoRequest() {
+  const track = activeTrack();
+  if (!track) return;
+  const state = stateFor(track);
+  state.protected = null;
+  state.qrProven = false;
+  state.experiment = null;
+  state.experimentGoodSince = 0;
+  state.firstExposureAt = nowMs();
+  state.finderHoldUntil = 0;
+  state.burstUntil = 0;
+  state.nextBurstAt = state.firstExposureAt + CONFIG.aeGraceMs;
+  state.lastDecision = "fresh auto optics";
+  updateStatus(state, "hardware AE grace restarted");
+}
+
 function installTrustedUiHooks() {
+  if (!hasDocument) return;
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target.closest("#camera-exposure-pulse, #optics-optimize") : null;
     if (!target || !event.isTrusted) return;
@@ -378,7 +415,12 @@ function installTrustedUiHooks() {
   }, true);
   document.addEventListener("change", (event) => {
     if (!event.isTrusted || !(event.target instanceof Element)) return;
-    if (event.target.matches("#camera-exposure-auto, #camera-exposure, #camera-iso, #exposure-axis-toggle, #iso-axis-toggle")) allowUserOptics(2400);
+    if (event.target.matches("#camera-exposure-auto")) {
+      allowUserOptics(2400);
+      if (event.target.checked) resetForFreshAutoRequest();
+      return;
+    }
+    if (event.target.matches("#camera-exposure, #camera-iso, #exposure-axis-toggle, #iso-axis-toggle")) allowUserOptics(2400);
   }, true);
 }
 
