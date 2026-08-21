@@ -65,6 +65,7 @@ function stateFor(track) {
       protected: null,
       experiment: null,
       experimentGoodSince: 0,
+      manualFreezeUntil: 0,
       restoring: false,
       lastDecision: "idle"
     };
@@ -132,11 +133,10 @@ function manualModeOnly(patch) {
     patch.iso === undefined && patch.exposureCompensation === undefined;
 }
 
-function manualFreezeNearCurrent(patch, current) {
-  const manualContext = patch?.exposureMode === "manual" ||
-    (patch?.exposureMode === undefined && current?.exposureMode === "manual");
+function manualFreezeNearCurrent(patch, current, state, now) {
+  const manualContext = patch?.exposureMode === "manual" || current?.exposureMode === "manual" || state.manualFreezeUntil > now;
   return manualContext && (patch.exposureTime !== undefined || patch.iso !== undefined) &&
-    requestNearSnapshot(patch, { ...current, exposureMode: patch.exposureMode ?? current.exposureMode ?? "manual" });
+    requestNearSnapshot(patch, { ...current, exposureMode: patch.exposureMode ?? "manual" });
 }
 
 function autoOpticsEnabled() {
@@ -166,13 +166,16 @@ function closeTrust(state) {
   state.trustedReason = "";
 }
 
-function protectCurrent(track, state, reason = "QR-proven lock") {
+function protectCurrent(track, state, reason = "QR-proven lock", manualHint = false) {
   const snapshot = sensorSnapshot(track);
-  if (snapshot.exposureMode !== "manual" || !snapshot.exposureTime || !snapshot.iso) return false;
+  const manualEvidence = snapshot.exposureMode === "manual" || manualHint || state.manualFreezeUntil > nowMs() || lastSample?.opticsRuntime === "manual";
+  if (!manualEvidence || !snapshot.exposureTime || !snapshot.iso) return false;
+  snapshot.exposureMode = "manual";
   state.protected = snapshot;
   state.qrProven = true;
   state.experiment = null;
   state.experimentGoodSince = 0;
+  state.manualFreezeUntil = 0;
   closeTrust(state);
   state.lastDecision = reason;
   updateStatus(state);
@@ -203,11 +206,12 @@ function noteDiagnostics() {
   const good = healthGood(sample);
   if (good) {
     state.qrProven = true;
+    const manualHint = sample.opticsRuntime === "manual";
     if (state.experiment) {
       if (!state.experimentGoodSince) state.experimentGoodSince = sample.now;
-      if (sample.now - state.experimentGoodSince >= CONFIG.experimentGoodMs && protectCurrent(track, state, "recovery winner locked")) return;
+      if (sample.now - state.experimentGoodSince >= CONFIG.experimentGoodMs && protectCurrent(track, state, "recovery winner locked", manualHint)) return;
     } else if (!state.protected) {
-      protectCurrent(track, state);
+      protectCurrent(track, state, "QR-proven lock", manualHint);
     }
   } else {
     state.experimentGoodSince = 0;
@@ -231,7 +235,11 @@ export function opticsGuardDecision({ state, patch, current, now, auto = true })
   }
 
   if (state.qrProven) {
-    if (manualModeOnly(patch) || manualFreezeNearCurrent(patch, current) || neutralAe(patch))
+    if (manualModeOnly(patch)) {
+      state.manualFreezeUntil = now + 700;
+      return { allow: true, reason: "freeze first QR" };
+    }
+    if (manualFreezeNearCurrent(patch, current, state, now) || neutralAe(patch))
       return { allow: true, reason: "freeze first QR" };
     return { allow: false, reason: "protect first QR" };
   }
@@ -289,7 +297,7 @@ async function finishExperiment(track, state, good = healthGood(lastSample)) {
   state.experiment = null;
   state.experimentGoodSince = 0;
   closeTrust(state);
-  if (good && protectCurrent(track, state, "recovery winner locked")) return;
+  if (good && protectCurrent(track, state, "recovery winner locked", lastSample?.opticsRuntime === "manual")) return;
   if (experiment.rollback) {
     state.protected = experiment.rollback;
     await restoreProtected(track, state);
@@ -372,7 +380,8 @@ function installApplyConstraintsGuard() {
     }
 
     const result = await native.call(this, constraints);
-    if (state.qrProven && !state.protected && manualFreezeNearCurrent(patch, current)) protectCurrent(this, state);
+    if (state.qrProven && !state.protected && manualFreezeNearCurrent(patch, current, state, now))
+      protectCurrent(this, state, "QR-proven lock", true);
     return result;
   };
 
@@ -397,6 +406,7 @@ function resetForFreshAutoRequest() {
   state.qrProven = false;
   state.experiment = null;
   state.experimentGoodSince = 0;
+  state.manualFreezeUntil = 0;
   state.firstExposureAt = nowMs();
   state.finderHoldUntil = 0;
   state.burstUntil = 0;
