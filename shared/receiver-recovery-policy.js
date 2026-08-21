@@ -190,16 +190,16 @@ function installDiagnosticPolicy() {
     const track = currentBrowserTrack();
     const handoffs = track ? longAeHandoffCounts.get(track) ?? 0 : 0;
     let next = original;
-    next = next.replace(/exposure writes (\d+)/, (_, raw) => {
-      const reported = Number(raw);
-      const applied = Math.max(0, reported - state.suppressedExposureWrites);
-      return `exposure writes ${applied}${state.suppressedExposureWrites ? ` · AE holds ${state.suppressedExposureWrites}` : ""}`;
-    });
-    next = next.replace(/worker restarts (\d+)/, (_, raw) => {
-      const reported = Number(raw);
-      const actual = Math.max(0, reported - state.suppressedWorkerRestarts);
-      return `worker restarts ${actual}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`;
-    });
+    // Use distinct labels instead of repeatedly rewriting the numeric value;
+    // MutationObserver callbacks are asynchronous, so this transformation must
+    // be idempotent when it observes its own textContent update.
+    next = next.replace(/exposure writes (\d+)/, (_, raw) =>
+      `exposure requests ${raw}${state.suppressedExposureWrites ? ` · AE holds ${state.suppressedExposureWrites}` : ""}`
+    );
+    next = next.replace(/worker restarts (\d+)/, (_, raw) =>
+      `worker restart requests ${raw}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`
+    );
+    next = next.replace(/ · long-AE handoffs \d+/g, "");
     if (handoffs) {
       next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · long-AE handoffs ${handoffs}`);
     }
