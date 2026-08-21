@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { AutoPhasePolicy, parseAutoPhaseDiagnostics } from "../receive/auto-phase-policy.js";
 
 function diagnostics({
@@ -26,6 +27,29 @@ function diagnostics({
     `Acquire  ${acquiring ? `${raceMs}ms race` : "done"} · robust hunts 2 · sighting retries 1 · finder hints ${finderHints}`
   ].join("\n");
 }
+
+// The controller must observe the element that renderFocusDiagnostics() fills.
+// transport-diagnostics contains a different pipeline report and was the cause
+// of the v0.5.363 controller being permanently stuck at waiting-diagnostics.
+const autoPhaseSource = await readFile(new URL("../receive/auto-phase.js", import.meta.url), "utf8");
+assert.match(autoPhaseSource, /getElementById\("focus-diagnostics"\)/);
+assert.doesNotMatch(autoPhaseSource, /const diagnostics = document\.getElementById\("transport-diagnostics"\)/);
+
+// Keep the parser pinned to the real diagnostic shape reported by a device.
+const liveDiagnosticShape = `
+Capacity 1 decodable / 1 visible · 1.0 scheduled/frame × 28.0 fps = 28.0 QR/s · submitted 28.0 (100%) · completed 29.0
+Output   valid 21.0 · unique 21.0 · duplicate 0.0 QR/s · useful 60.1 KB/s
+Rolling  —
+AutoOptics HOLD · manual · hold 90% · remembered winner proven · 8.31 ms · ISO 262 · hold 90%
+Payload  valid 957 · completions 2337 · silence 0.1s · decode gap 34ms · completion gap 33ms
+Acquire  done · robust hunts 1 · sighting retries 1 · finder hints 4`;
+const liveParsed = parseAutoPhaseDiagnostics(liveDiagnosticShape);
+assert.ok(liveParsed, "real receiver diagnostics must be parseable by Auto Phase");
+assert.equal(liveParsed.visibleSlots, 1);
+assert.equal(liveParsed.completedRate, 29);
+assert.equal(liveParsed.validRate, 21);
+assert.equal(liveParsed.finderHints, 4);
+assert.equal(liveParsed.opticsController, "HOLD");
 
 const parsed = parseAutoPhaseDiagnostics(diagnostics({
   acquiring: false,
