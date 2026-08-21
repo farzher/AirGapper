@@ -1,8 +1,11 @@
+import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
 import {
   noteSuppressedExposureWrite,
   rememberManualExposure,
   shouldPreserveManualExposure
 } from "./receiver-recovery-state.js";
+
+installReceiverRecoveryPolicy();
 
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
