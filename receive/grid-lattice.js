@@ -1,6 +1,12 @@
 import { gridLayoutById } from "../shared/grid-layout.js";
-// Preserve a proven wall through short optical/display-phase miss bursts.
-const WHOLE_GRID_LOSS_MS = 3200;
+// Preserve a proven wall through short optical/display-phase miss bursts, but
+// never let a stale camera pose pin the receiver indefinitely. Global recovery
+// probes get a brief chance to re-anchor the wall before a hard reacquire.
+const WHOLE_GRID_SOFT_LOSS_MS = 450;
+const WHOLE_GRID_HARD_LOSS_MS = 900;
+const SLOT_CORRECTION_DROP_WINDOW_MS = 650;
+const SLOT_CORRECTION_DROP_HARD_LIMIT = 4;
+const SLOT_CORRECTION_DROP_MIN_SILENCE_MS = 180;
 // Geometry has two different lifetimes. Identity/lock evidence may survive a
 // brief miss, but quads used to aim the hot decoder must represent the camera
 // pose *now*. Keeping those concepts separate prevents repeatedly decoded easy
@@ -120,6 +126,15 @@ function distributedFitReady(layout, observations) {
   // or one column are still only a local/provisional geometric seed.
   return cols.size >= 2 && rows.size >= 2;
 }
+function monotonicNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+function orientationAngle() {
+  const modern = Number(globalThis.screen?.orientation?.angle);
+  if (Number.isFinite(modern)) return (modern % 360 + 360) % 360;
+  const legacy = Number(globalThis.orientation);
+  return Number.isFinite(legacy) ? (legacy % 360 + 360) % 360 : null;
+}
 class GridLattice {
   constructor(onTransition) {
     this.onTransition = onTransition;
@@ -131,6 +146,25 @@ class GridLattice {
     this.lastHitAt = 0;
     this.frameWidth = 1;
     this.frameHeight = 1;
+    this.pendingInvalidationReason = "";
+    this.slotCorrectionDropTimes = [];
+    this.orientationAngle = orientationAngle();
+    this.onOrientationChange = () => {
+      const next = orientationAngle();
+      if (next === null) {
+        if (this.locked) this.invalidatePose("screen orientation changed");
+        return;
+      }
+      if (this.orientationAngle === null) {
+        this.orientationAngle = next;
+        return;
+      }
+      if (next === this.orientationAngle) return;
+      this.orientationAngle = next;
+      if (this.locked) this.invalidatePose("screen orientation changed");
+    };
+    globalThis.screen?.orientation?.addEventListener?.("change", this.onOrientationChange);
+    globalThis.addEventListener?.("orientationchange", this.onOrientationChange);
   }
   transition(next, reason, at) {
     var _a;
@@ -152,6 +186,9 @@ class GridLattice {
     this.slotCorrections.clear();
     this.candidate = void 0;
     this.lastHitAt = 0;
+    this.pendingInvalidationReason = "";
+    this.slotCorrectionDropTimes = [];
+    this.orientationAngle = orientationAngle();
   }
   reacquire(at, reason = "whole lattice invalidated") {
     this.transition("REACQUIRE", reason, at);
@@ -159,6 +196,13 @@ class GridLattice {
     this.slotCorrections.clear();
     this.candidate = void 0;
     this.lastHitAt = at;
+    this.pendingInvalidationReason = "";
+    this.slotCorrectionDropTimes = [];
+  }
+  invalidatePose(reason = "camera pose invalidated") {
+    if (!this.candidate || !this.locked) return false;
+    this.pendingInvalidationReason = reason;
+    return true;
   }
   accept(detection, frameWidth, frameHeight) {
     var _a;
@@ -279,9 +323,15 @@ class GridLattice {
       dx, dy, maxShift: Math.hypot(dx, dy)
     }, at);
   }
-  dropSlotCorrection(slot) {
+  dropSlotCorrection(slot, at = monotonicNow()) {
     if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
     this.slotCorrections.delete(slot);
+    this.slotCorrectionDropTimes = this.slotCorrectionDropTimes.filter((seenAt) => at - seenAt <= SLOT_CORRECTION_DROP_WINDOW_MS);
+    this.slotCorrectionDropTimes.push(at);
+    if (this.locked && at - this.lastHitAt >= SLOT_CORRECTION_DROP_MIN_SILENCE_MS &&
+        this.slotCorrectionDropTimes.length >= SLOT_CORRECTION_DROP_HARD_LIMIT) {
+      this.invalidatePose("repeated slot geometry self-heals");
+    }
     return this.candidate ? this.snapshot() : null;
   }
   learnSlotCorrection(detection) {
@@ -319,15 +369,26 @@ class GridLattice {
     this.slotCorrections.set(detection.slotIndex, next);
   }
   tick(now) {
-    if (this.candidate && now - this.lastHitAt > WHOLE_GRID_LOSS_MS) {
-      // Never erase a CRC-proven wall merely because the camera moved away from
-      // its predicted quads. Keeping identity + homography lets bounded global
-      // recovery accept any later same-stream QR and re-anchor the whole wall
-      // from that QR's four measured corners. Session/camera changes still call
-      // reset/reacquire explicitly when the identity really must be discarded.
-      this.transition("PARTIAL_LOSS", "whole lattice stale; retaining proven wall for QR re-anchor", now);
+    if (this.candidate && this.pendingInvalidationReason) {
+      const reason = this.pendingInvalidationReason;
+      this.reacquire(now, reason);
+      return null;
     }
-    // Stale geometry remains a recovery prior, not an acquisition blocker.
+    if (this.candidate) {
+      const staleMs = now - this.lastHitAt;
+      if (staleMs > WHOLE_GRID_HARD_LOSS_MS) {
+        // Keep the stream identity, but discard pose/slot geometry so main.js
+        // can enter its existing fresh-acquisition path on this same frame.
+        this.reacquire(now, "whole lattice stale; hard geometry reacquire");
+        return null;
+      }
+      if (staleMs > WHOLE_GRID_SOFT_LOSS_MS) {
+        // Short miss bursts are still common around exposure/display seams.
+        // Retain the proven wall briefly so generic recovery probes can re-anchor
+        // it from one CRC-valid QR without waking full cold acquisition.
+        this.transition("PARTIAL_LOSS", "whole lattice stale; bounded QR re-anchor window", now);
+      }
+    }
     return this.candidate ? this.snapshot() : null;
   }
   noteMissing(anyMissing, now = this.lastHitAt) {
