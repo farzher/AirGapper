@@ -4,7 +4,11 @@ const phaseRoot = document.getElementById("camera-phase-nudge");
 const pulseInput = document.getElementById("camera-exposure-pulse-ms");
 const pulseButton = document.getElementById("camera-exposure-pulse");
 const pulseStatus = document.getElementById("camera-exposure-pulse-status");
-const diagnostics = document.getElementById("transport-diagnostics");
+// Health/seam/acquisition metrics are rendered by renderFocusDiagnostics().
+// transport-diagnostics is a different pipeline summary and does not contain
+// Capacity/Output/AutoOptics/Payload/Acquire, so observing it leaves the policy
+// permanently stuck at "waiting for receiver diagnostics".
+const diagnostics = document.getElementById("focus-diagnostics");
 
 if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElementById("camera-auto-phase")) {
   const auto = document.createElement("label");
