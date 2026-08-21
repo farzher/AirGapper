@@ -190,7 +190,7 @@ function installDiagnosticPolicy() {
     const handoffs = track ? longAeHandoffCounts.get(track) ?? 0 : 0;
     let next = original;
     next = next.replace(/exposure writes (\d+)/, (_, raw) =>
-      `exposure requests ${raw}${state.suppressedExposureWrites ? ` · AE holds ${state.suppressedExposureWrites}` : ""}`
+      `exposure requests ${raw}${state.suppressedExposureWrites ? ` · sensor holds ${state.suppressedExposureWrites}` : ""}`
     );
     next = next.replace(/worker restarts (\d+)/, (_, raw) =>
       `worker restart requests ${raw}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`
