@@ -12,11 +12,13 @@ import {
 const SOFT_POSE_LOSS_MS = 450;
 const LONG_AE_EXPOSURE = 55; // 5.5 ms; browser exposureTime units are 0.1 ms.
 const MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms.
+const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
 let diagnosticObserver;
-let forcedShortShutterHandoffs = 0;
-const handedOffTracks = new WeakSet();
+const lastLongAeHandoffAt = new WeakMap();
+const longAeHandoffCounts = new WeakMap();
+const longAeHandoffRunning = new WeakSet();
 
 function installLatticeRecoveryBridge() {
   const originalReset = GridLattice.prototype.reset;
@@ -91,7 +93,9 @@ function quantize(value, range) {
 }
 
 async function handOffLongAe(track) {
-  if (!track || handedOffTracks.has(track) || track.readyState !== "live") return;
+  if (!track || track.readyState !== "live" || longAeHandoffRunning.has(track)) return;
+  const now = performance.now();
+  if (now - (lastLongAeHandoffAt.get(track) ?? -Infinity) < LONG_AE_HANDOFF_COOLDOWN_MS) return;
   const settings = track.getSettings?.() ?? {};
   const exposure = Number(settings.exposureTime);
   const iso = Number(settings.iso);
@@ -101,7 +105,8 @@ async function handOffLongAe(track) {
   const isoRange = caps.iso;
   if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") || !exposureRange || !isoRange) return;
 
-  handedOffTracks.add(track);
+  longAeHandoffRunning.add(track);
+  lastLongAeHandoffAt.set(track, now);
   try {
     const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
     const targetProduct = exposure * iso * QR_LIGHT_SCALE;
@@ -119,10 +124,17 @@ async function handOffLongAe(track) {
       iso: shortIso
     }] });
     rememberManualExposure(track);
-    forcedShortShutterHandoffs++;
+    longAeHandoffCounts.set(track, (longAeHandoffCounts.get(track) ?? 0) + 1);
   } catch {
-    handedOffTracks.delete(track);
+    lastLongAeHandoffAt.delete(track);
+  } finally {
+    longAeHandoffRunning.delete(track);
   }
+}
+
+function currentBrowserTrack() {
+  const source = document.getElementById("video")?.srcObject;
+  return source?.getVideoTracks?.().find((item) => item.readyState === "live");
 }
 
 function installDiagnosticPolicy() {
@@ -134,6 +146,8 @@ function installDiagnosticPolicy() {
     if (mutating) return;
     const original = focus.textContent || "";
     const state = recoveryDiagnostics();
+    const track = currentBrowserTrack();
+    const handoffs = track ? longAeHandoffCounts.get(track) ?? 0 : 0;
     let next = original;
     next = next.replace(/exposure writes (\d+)/, (_, raw) => {
       const reported = Number(raw);
@@ -145,8 +159,8 @@ function installDiagnosticPolicy() {
       const actual = Math.max(0, reported - state.suppressedWorkerRestarts);
       return `worker restarts ${actual}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`;
     });
-    if (forcedShortShutterHandoffs) {
-      next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · long-AE handoffs ${forcedShortShutterHandoffs}`);
+    if (handoffs) {
+      next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · long-AE handoffs ${handoffs}`);
     }
     if (next !== original) {
       mutating = true;
@@ -160,11 +174,7 @@ function installDiagnosticPolicy() {
     // stationary geometry window first.
     const locked = /State\s+LOCKED/.test(original);
     const valid = /Payload\s+valid\s+([1-9]\d*)/.test(original);
-    if (locked && valid && !state.active) {
-      const source = document.getElementById("video")?.srcObject;
-      const track = source?.getVideoTracks?.().find((item) => item.readyState === "live");
-      if (track) void handOffLongAe(track);
-    }
+    if (locked && valid && !state.active && track) void handOffLongAe(track);
   };
   diagnosticObserver = new MutationObserver(sync);
   diagnosticObserver.observe(focus, { childList: true, characterData: true, subtree: true });
