@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { applyAdvancedConstraint } from "../shared/platform.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 import {
+  armWarmWorkerRestartSuppression,
   beginPoseRecovery,
   endPoseRecovery,
   recoveryDiagnostics
@@ -68,16 +69,21 @@ const pool = new DecodeWorkerPool(
 );
 pool.resize(2);
 assert.equal(pool.size, 2);
+
+// Soft pose loss protects exposure only. Worker teardown is suppressed exactly
+// once when the lattice escalates to hard REACQUIRE.
+assert.equal(armWarmWorkerRestartSuppression(), true);
 pool.resize(0);
-assert.equal(pool.size, 2, "geometry-only recovery must keep warm workers alive");
+assert.equal(pool.size, 2, "geometry-only hard reacquire must keep warm workers alive");
 pool.resize(2);
 assert.equal(pool.size, 2);
 assert.equal(created.reduce((sum, worker) => sum + worker.terminateCount, 0), 0);
 assert.equal(recoveryDiagnostics().suppressedWorkerRestarts, 1);
 
-endPoseRecovery();
+// The budget was consumed; an unrelated explicit resize(0) is not hidden.
 pool.resize(0);
-assert.equal(pool.size, 0, "ordinary explicit teardown must still terminate workers");
+assert.equal(pool.size, 0, "only the geometry-reacquire restart is suppressed");
 assert.equal(created.reduce((sum, worker) => sum + worker.terminateCount, 0), 2);
 
+endPoseRecovery();
 console.log("receiver recovery policy smoke: ok");
