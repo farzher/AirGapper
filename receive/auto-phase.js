@@ -155,8 +155,9 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
 
   const observer = new MutationObserver(queueConsider);
   observer.observe(diagnostics, { childList: true, characterData: true, subtree: true });
-  const timer = setInterval(queueConsider, 220);
-  window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+  // Background pages already throttle timers. Keep this alive for the lifetime
+  // of the page so iOS pagehide/pageshow does not permanently disable recovery.
+  setInterval(queueConsider, 220);
 
   // Manual developer actions are still experiments in the same control loop.
   // Account for them so Auto Recovery measures the new state before acting again.
