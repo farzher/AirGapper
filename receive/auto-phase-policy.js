@@ -162,20 +162,24 @@ export class AutoPhasePolicy {
     if (now < this.settleUntil) return this.hold("settling");
 
     const finderHints = finite(sample.finderHints);
-    if (finderHints > this.lastFinderHints) {
-      this.recentFinderUntil = now + this.config.finderRecentMs;
-      if (!this.finderFailureSince) this.finderFailureSince = now;
-    }
-    this.lastFinderHints = Math.max(this.lastFinderHints, finderHints);
-
     const acquisitionRestarted = sample.acquiring && (
-      this.lastAcquiring === false || sample.raceMs + 100 < this.lastRaceMs
+      this.lastAcquiring === false ||
+      sample.raceMs + 100 < this.lastRaceMs ||
+      finderHints < this.lastFinderHints
     );
     if (acquisitionRestarted) {
       this.recentFinderUntil = 0;
       this.finderFailureSince = 0;
       this.blindFailureSince = 0;
+      this.lastFinderHints = finderHints;
+    } else if (finderHints > this.lastFinderHints) {
+      this.recentFinderUntil = now + this.config.finderRecentMs;
+      if (!this.finderFailureSince) this.finderFailureSince = now;
+      this.lastFinderHints = finderHints;
+    } else {
+      this.lastFinderHints = finderHints;
     }
+
     this.lastAcquiring = Boolean(sample.acquiring);
     this.lastRaceMs = finite(sample.raceMs);
 
