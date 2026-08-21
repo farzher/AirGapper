@@ -13,6 +13,7 @@
     "./receive/agcap.js",
     "./receive/auto-phase.js",
     "./receive/auto-phase-policy.js",
+    "./receive/optics-guard.js",
     "./receive/focus-controller.js",
     "./receive/grid-lattice.js",
     "./receive/main.js",
