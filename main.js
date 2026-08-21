@@ -1,9 +1,14 @@
 import { isAndroid, isIOS } from "./shared/platform.js";
 import { isAndroidApp } from "./shared/android.js";
+import { APP_BUILD } from "./version.js";
+import { cameraRequestPending, installCameraStartGuard } from "./shared/camera-start-guard.js";
 import "./receive/phase-nudge.js";
 import "./receive/auto-phase.js";
 
-const APP_BUILD = "v0.5.361";
+installCameraStartGuard();
+window.AIRGAPPER_BUILD = APP_BUILD;
+document.querySelector(".app-version").textContent = APP_BUILD;
+
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -21,7 +26,6 @@ await Promise.all([
   import(`./receive/main.js?build=${APP_BUILD}`)
 ]);
 
-document.querySelector(".app-version").textContent = APP_BUILD;
 if (serviceWorkers) {
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
 }
@@ -177,12 +181,16 @@ window.addEventListener("popstate", () => {
 });
 let suspended = false;
 window.airgapperSuspend = () => {
+  // Safari/iPadOS can emit lifecycle transitions while its camera permission
+  // sheet is on top. Cancelling Receive here invalidates the pending request
+  // and can make the sheet disappear before the user can answer it.
+  if (cameraRequestPending()) return;
   if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
   suspended = true;
   window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 function resumeActiveView() {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible" || cameraRequestPending()) return;
   if (suspended) {
     suspended = false;
     window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
