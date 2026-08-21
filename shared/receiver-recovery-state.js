@@ -1,5 +1,6 @@
 const manualExposureByTrack = new WeakMap();
 let diagnosticTrack;
+let exposureProtectionEnabled = true;
 let poseRecoveryActive = false;
 let poseRecoveryReason = "";
 let poseRecoveryGeneration = 0;
@@ -9,6 +10,10 @@ let suppressedWorkerRestarts = 0;
 
 function poseRecoveryReasonEligible(reason = "") {
   return /whole lattice stale|screen orientation changed|repeated slot geometry self-heals|tracked geometry collapsed/i.test(String(reason));
+}
+
+function setExposureProtectionEnabled(enabled) {
+  exposureProtectionEnabled = Boolean(enabled);
 }
 
 function beginPoseRecovery(reason = "camera pose recovery") {
@@ -60,7 +65,7 @@ function rememberedManualExposure(track) {
 }
 
 function shouldPreserveManualExposure(track) {
-  return poseRecoveryActive && Boolean(rememberedManualExposure(track));
+  return exposureProtectionEnabled && poseRecoveryActive && Boolean(rememberedManualExposure(track));
 }
 
 function noteSuppressedExposureWrite() {
@@ -74,6 +79,7 @@ function noteSuppressedWorkerRestart() {
 function recoveryDiagnostics() {
   return {
     active: poseRecoveryActive,
+    exposureProtectionEnabled,
     reason: poseRecoveryReason,
     generation: poseRecoveryGeneration,
     warmWorkerRestartBudget,
@@ -94,5 +100,6 @@ export {
   recoveryDiagnostics,
   rememberManualExposure,
   rememberedManualExposure,
+  setExposureProtectionEnabled,
   shouldPreserveManualExposure
 };
