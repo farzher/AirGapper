@@ -10,7 +10,7 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     <button class="secondary-button" id="camera-phase-earlier" type="button" title="Move camera phase earlier">−</button>
     <button class="secondary-button" id="camera-phase-later" type="button" title="Move camera phase later">+</button>
     <button class="secondary-button" id="camera-phase-reset" type="button">Zero</button>
-    <span id="camera-phase-status" role="status">Phase 0.00 ms</span>
+    <span id="camera-phase-status" role="status">Phase request 0.00 ms</span>
   `;
 
   const strictControl = document.getElementById("strict-hot-path-control");
@@ -124,8 +124,8 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     }
 
     const periodMs = 1000 / steadyFps;
-    const maxStep = Math.min(8, periodMs * 0.45);
-    const requestedDelta = Math.max(-maxStep, Math.min(maxStep, deltaMs));
+    const maxNudge = periodMs * 0.49;
+    const requestedDelta = Math.max(-maxNudge, Math.min(maxNudge, deltaMs));
     const range = frameRateRange(track);
     let appliedDelta = requestedDelta;
     let temporaryFps = 1000 / (periodMs + appliedDelta);
@@ -179,7 +179,7 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     const gapText = Number.isFinite(gap) ? ` · observed ${gap.toFixed(2)} ms` : "";
     const wrapText = wrapped ? ` · wrapped via +${appliedDelta.toFixed(2)} ms stall` : "";
     const softText = temporaryMode === "ideal" ? " · ideal only" : "";
-    status.textContent = `Phase ${requestedPhaseMs >= 0 ? "+" : ""}${requestedPhaseMs.toFixed(2)} ms · one-shot ${actualText} fps${gapText}${wrapText}${softText} · restored ${steadyFps.toFixed(2)}`;
+    status.textContent = `Phase request ${requestedPhaseMs >= 0 ? "+" : ""}${requestedPhaseMs.toFixed(2)} ms · one-shot ${actualText} fps${gapText}${wrapText}${softText} · restored ${steadyFps.toFixed(2)}`;
   }
 
   function stepMs() {
