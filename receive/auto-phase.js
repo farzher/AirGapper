@@ -1,6 +1,9 @@
+import { AutoPhasePolicy, parseAutoPhaseDiagnostics } from "./auto-phase-policy.js";
+
 const phaseRoot = document.getElementById("camera-phase-nudge");
 const pulseInput = document.getElementById("camera-exposure-pulse-ms");
 const pulseButton = document.getElementById("camera-exposure-pulse");
+const pulseStatus = document.getElementById("camera-exposure-pulse-status");
 const diagnostics = document.getElementById("transport-diagnostics");
 
 if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElementById("camera-auto-phase")) {
@@ -10,201 +13,118 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
   const autoStatus = document.createElement("span");
   autoStatus.id = "camera-auto-phase-status";
   autoStatus.setAttribute("role", "status");
-  autoStatus.textContent = "Off";
+  autoStatus.textContent = "Off · 0 auto pulses";
   phaseRoot.append(auto, autoStatus);
 
   const toggle = auto.querySelector("input");
-
-  // Tracking mode: only pulse when the receiver has a confident destructive
-  // seam model. The seam detector itself is 2D; row/col is just its dominant
-  // orientation label in the diagnostics.
-  const CONFIDENCE_MIN = 0.62;
-  const REQUIRED_SIGHTINGS = 2;
-  const PULSE_COOLDOWN_MS = 1800;
-  const MAX_PULSES_PER_WINDOW = 6;
-  const PULSE_WINDOW_MS = 20000;
-
-  // Acquisition mode: when there is no decodable QR and no fresh finder hint,
-  // blindly step sensor phase. At 30 fps a >33.3 ms exposure pulse should move
-  // phase, so six bounded attempts are enough to explore roughly one cycle even
-  // when the exact physical step differs by device.
-  const ACQUIRE_INITIAL_WAIT_MS = 700;
-  const ACQUIRE_PULSE_COOLDOWN_MS = 800;
-  const ACQUIRE_FINDER_HOLD_MS = 1200;
-  const ACQUIRE_MAX_PULSES = 6;
-
+  const policy = new AutoPhasePolicy();
   let enabled = false;
-  let consecutiveSightings = 0;
-  let lastPulseAt = -Infinity;
-  let pulseWindowStartedAt = 0;
-  let pulsesInWindow = 0;
   let observerQueued = false;
-
-  let acquisitionPulses = 0;
-  let lastAcquisitionPulseAt = -Infinity;
-  let lastAcquisitionRaceMs = 0;
-  let wasAcquiring = false;
-  let lastFinderHints = 0;
-  let lastFinderHintAt = -Infinity;
-
-  function diagnosticText() {
-    return diagnostics.textContent || "";
-  }
-
-  function parseRollingModel(text = diagnosticText()) {
-    if (/Rolling\s+—/.test(text)) return null;
-    const match = /Rolling\s+(row|col)\s+([-+]?\d+(?:\.\d+)?)\/([-+]?\d+(?:\.\d+)?)\s+·\s+width\s+([-+]?\d+(?:\.\d+)?)\s+·\s+velocity\s+([-+]?\d+(?:\.\d+)?)\s+slots\/frame\s+·\s+confidence\s+(\d+)%/.exec(text);
-    if (!match) return null;
-    return {
-      axis: match[1],
-      position: Number(match[2]),
-      span: Number(match[3]),
-      width: Number(match[4]),
-      velocity: Number(match[5]),
-      confidence: Number(match[6]) / 100
-    };
-  }
-
-  function parseAcquisitionState(text = diagnosticText()) {
-    const acquire = /Acquire\s+(done|(\d+)ms race)[^\n]*finder hints\s+(\d+)/.exec(text);
-    if (!acquire) return null;
-    const payload = /Payload\s+valid\s+(\d+)/.exec(text);
-    return {
-      acquiring: acquire[1] !== "done",
-      raceMs: Number(acquire[2]) || 0,
-      finderHints: Number(acquire[3]) || 0,
-      validDecodes: Number(payload?.[1]) || 0
-    };
-  }
+  let autoPulseDispatch = false;
+  let lastSample;
 
   function pulseMs() {
     const value = Number(pulseInput.value);
     return Number.isFinite(value) ? Math.max(1, Math.min(1000, value)) : 40;
   }
 
-  function resetWindow(now) {
-    if (!pulseWindowStartedAt || now - pulseWindowStartedAt >= PULSE_WINDOW_MS) {
-      pulseWindowStartedAt = now;
-      pulsesInWindow = 0;
+  function diagnosticText() {
+    return diagnostics.textContent || "";
+  }
+
+  function percent(value) {
+    return value === null || value === undefined || !Number.isFinite(Number(value))
+      ? "—"
+      : `${Math.round(Number(value) * 100)}%`;
+  }
+
+  function visibleLabel(sample) {
+    if (sample.acquiring) {
+      return sample.finderHints > 0 ? `${sample.finderHints} finder hints` : "no finder yet";
+    }
+    return `${sample.visibleSlots || 0} visible`;
+  }
+
+  function rateLabel(sample) {
+    if (sample.acquiring) return `${sample.validRate.toFixed(1)} QR/s`;
+    return `${sample.validRate.toFixed(1)}/${sample.completedRate.toFixed(1)} QR/s · ${percent(sample.successRatio)}`;
+  }
+
+  function statusFor(decision, sample) {
+    const pulseCount = `${policy.pulseCount()}/6`;
+    switch (decision.reason) {
+      case "off": return `Off · ${pulseCount} auto pulses`;
+      case "waiting-diagnostics": return "Watching · waiting for receiver diagnostics";
+      case "arming": return `Watching · arming · ${visibleLabel(sample)}`;
+      case "settling": return `Settling after phase pulse · ${pulseCount}`;
+      case "backoff": return `Backoff · ${pulseCount} pulses · rechecking shortly`;
+      case "acquire-valid": return `Acquire hold · QR decoded · ${rateLabel(sample)}`;
+      case "acquire-race": return `Acquire · full finder/optics race · ${sample.raceMs.toFixed(0)} ms`;
+      case "finder-no-decode": return `Acquire · QR structure visible, not decoding · ${visibleLabel(sample)}`;
+      case "optics-visible": return `Acquire · QR structure visible · waiting for AutoOptics ${sample.opticsRuntime || sample.opticsController}`;
+      case "optics-blind": return `Acquire · nothing visible · AutoOptics ${sample.opticsRuntime || sample.opticsController} searching first`;
+      case "blind-acquisition": return `Acquire · nothing visible · phase search ready · ${pulseCount}`;
+      case "no-visible-slots": return "Hold · proven grid is offscreen";
+      case "healthy": return `Hold · healthy · ${visibleLabel(sample)} · ${rateLabel(sample)}`;
+      case "optics-tracking": return `Poor scan · waiting for AutoOptics ${sample.opticsRuntime || sample.opticsController}`;
+      case "seam-degraded": return `Degraded · seam ${Math.round((sample.seam?.confidence || 0) * 100)}% · ${rateLabel(sample)}`;
+      case "decode-silence": return `Degraded · ${(sample.decodeSilenceMs / 1000).toFixed(1)}s without QR · ${visibleLabel(sample)}`;
+      case "low-decode-yield": return `Degraded · ${visibleLabel(sample)} · ${rateLabel(sample)}`;
+      default: return `Watching · ${visibleLabel(sample)} · ${rateLabel(sample)}`;
     }
   }
 
-  function noteAcquisitionState(state, now) {
-    const restarted = state.acquiring && (!wasAcquiring || state.raceMs + 100 < lastAcquisitionRaceMs);
-    if (restarted) {
-      acquisitionPulses = 0;
-      lastAcquisitionPulseAt = -Infinity;
-      lastFinderHints = state.finderHints;
-      lastFinderHintAt = state.finderHints > 0 ? now : -Infinity;
-    } else if (state.finderHints > lastFinderHints) {
-      lastFinderHintAt = now;
-      lastFinderHints = state.finderHints;
-    }
-
-    wasAcquiring = state.acquiring;
-    lastAcquisitionRaceMs = state.raceMs;
-  }
-
-  function considerAcquisition(state, now) {
-    noteAcquisitionState(state, now);
-    if (!state.acquiring) return false;
-
-    consecutiveSightings = 0;
-
-    if (state.validDecodes > 0) {
-      autoStatus.textContent = "Acquire hold · QR decoded";
-      return true;
-    }
-
-    const finderAge = now - lastFinderHintAt;
-    if (Number.isFinite(finderAge) && finderAge < ACQUIRE_FINDER_HOLD_MS) {
-      autoStatus.textContent = `Acquire hold · fresh finder hint · ${Math.max(0, ACQUIRE_FINDER_HOLD_MS - finderAge).toFixed(0)} ms`;
-      return true;
-    }
-
-    if (state.raceMs < ACQUIRE_INITIAL_WAIT_MS) {
-      autoStatus.textContent = `Acquire · settling ${state.raceMs.toFixed(0)} ms`;
-      return true;
-    }
-
-    if (acquisitionPulses >= ACQUIRE_MAX_PULSES) {
-      autoStatus.textContent = `Acquire backoff · phase sweep complete (${ACQUIRE_MAX_PULSES})`;
-      return true;
-    }
-
-    if (now - lastAcquisitionPulseAt < ACQUIRE_PULSE_COOLDOWN_MS) {
-      autoStatus.textContent = `Acquire settling · phase ${acquisitionPulses}/${ACQUIRE_MAX_PULSES}`;
-      return true;
-    }
-
+  function fireAutoPulse(decision, sample, now) {
+    // Re-check the DOM state at the exact actuation point. Programmatic exposure
+    // pulses are impossible while the checkbox is off, even if a queued
+    // diagnostics observer was created before the user toggled it.
+    if (!enabled || !toggle.checked) return;
     if (pulseButton.disabled) {
-      autoStatus.textContent = "Acquire · waiting for camera controls";
-      return true;
+      autoStatus.textContent = `Waiting for camera controls · ${statusFor(decision, sample)}`;
+      return;
     }
 
-    acquisitionPulses++;
-    lastAcquisitionPulseAt = now;
-    autoStatus.textContent = `Acquire sweep ${acquisitionPulses}/${ACQUIRE_MAX_PULSES} · ${pulseMs().toFixed(1)} ms`;
-    pulseButton.click();
-    return true;
+    const beforeDisabled = pulseButton.disabled;
+    autoPulseDispatch = true;
+    try {
+      pulseButton.click();
+    } finally {
+      autoPulseDispatch = false;
+    }
+
+    // phase-nudge.js disables the button synchronously once a real manual
+    // exposure pulse starts. If the camera does not expose manual exposure,
+    // don't count a fake phase attempt toward the search budget.
+    if (!beforeDisabled && pulseButton.disabled) {
+      policy.notePulse(now);
+      const reason = decision.reason === "finder-no-decode" ? "visible QR, no decode"
+        : decision.reason === "blind-acquisition" ? "blind acquisition"
+        : decision.reason === "seam-degraded" ? "destructive seam"
+        : decision.reason === "decode-silence" ? "decode silence"
+        : "low decode yield";
+      autoStatus.textContent = `Pulse ${policy.pulseCount()}/6 · ${pulseMs().toFixed(1)} ms · ${reason}`;
+    } else {
+      autoStatus.textContent = pulseStatus?.textContent || "Exposure pulse unavailable";
+    }
   }
 
   function considerPulse() {
     observerQueued = false;
-    if (!enabled) return;
-
-    const now = performance.now();
-    const text = diagnosticText();
-    const acquisition = parseAcquisitionState(text);
-    if (acquisition && considerAcquisition(acquisition, now)) return;
-
-    // Once acquisition has finished, the existing seam-aware controller takes
-    // over. A missing model here means there is no known destructive band.
-    const model = parseRollingModel(text);
-    if (!model) {
-      consecutiveSightings = 0;
-      if (now - lastPulseAt >= PULSE_COOLDOWN_MS)
-        autoStatus.textContent = "Hold · no destructive seam";
+    if (!enabled || !toggle.checked) return;
+    const sample = parseAutoPhaseDiagnostics(diagnosticText());
+    if (!sample) {
+      autoStatus.textContent = "Watching · waiting for receiver diagnostics";
       return;
     }
-
-    if (model.confidence < CONFIDENCE_MIN) {
-      consecutiveSightings = 0;
-      autoStatus.textContent = `Watching · ${Math.round(model.confidence * 100)}% confidence`;
-      return;
-    }
-
-    consecutiveSightings++;
-    if (consecutiveSightings < REQUIRED_SIGHTINGS) {
-      autoStatus.textContent = `Confirming ${model.axis} seam · ${Math.round(model.confidence * 100)}%`;
-      return;
-    }
-
-    if (now - lastPulseAt < PULSE_COOLDOWN_MS) {
-      autoStatus.textContent = `Settling · ${model.axis} ${model.position.toFixed(0)}/${model.span.toFixed(0)}`;
-      return;
-    }
-
-    resetWindow(now);
-    if (pulsesInWindow >= MAX_PULSES_PER_WINDOW) {
-      autoStatus.textContent = "Backoff · seam persisted after 6 pulses";
-      return;
-    }
-
-    if (pulseButton.disabled) {
-      autoStatus.textContent = "Waiting for camera controls";
-      return;
-    }
-
-    pulsesInWindow++;
-    lastPulseAt = now;
-    consecutiveSightings = 0;
-    autoStatus.textContent = `Pulse ${pulsesInWindow} · ${pulseMs().toFixed(1)} ms · ${model.axis} ${model.position.toFixed(0)}/${model.span.toFixed(0)} · ${Math.round(model.confidence * 100)}%`;
-    pulseButton.click();
+    sample.now = performance.now();
+    lastSample = sample;
+    const decision = policy.observe(sample);
+    if (decision.kind === "pulse") fireAutoPulse(decision, sample, sample.now);
+    else autoStatus.textContent = statusFor(decision, sample);
   }
 
   function queueConsider() {
-    if (!enabled || observerQueued) return;
+    if (!enabled || !toggle.checked || observerQueued) return;
     observerQueued = true;
     queueMicrotask(considerPulse);
   }
@@ -212,23 +132,32 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
   const observer = new MutationObserver(queueConsider);
   observer.observe(diagnostics, { childList: true, characterData: true, subtree: true });
 
+  // A manual Pulse while Auto is enabled also changes phase. Account for it so
+  // the controller waits for fresh evidence instead of immediately pulsing again.
+  pulseButton.addEventListener("click", () => {
+    if (!enabled || !toggle.checked || autoPulseDispatch) return;
+    queueMicrotask(() => {
+      if (pulseButton.disabled) {
+        policy.notePulse(performance.now());
+        autoStatus.textContent = `Manual pulse · settling · ${policy.pulseCount()}/6`;
+      }
+    });
+  });
+
   toggle.addEventListener("change", () => {
     enabled = toggle.checked;
-    consecutiveSightings = 0;
-    lastPulseAt = -Infinity;
-    pulseWindowStartedAt = performance.now();
-    pulsesInWindow = 0;
-    acquisitionPulses = 0;
-    lastAcquisitionPulseAt = -Infinity;
-    lastAcquisitionRaceMs = 0;
-    wasAcquiring = false;
-    lastFinderHints = 0;
-    lastFinderHintAt = -Infinity;
-    autoStatus.textContent = enabled ? `Watching · ${pulseMs().toFixed(1)} ms pulses` : "Off";
+    policy.setEnabled(enabled, performance.now());
+    observerQueued = false;
+    autoStatus.textContent = enabled
+      ? `Watching decode health · ${pulseMs().toFixed(1)} ms pulses`
+      : "Off · 0 auto pulses";
     if (enabled) queueConsider();
   });
 
   pulseInput.addEventListener("change", () => {
-    if (enabled) autoStatus.textContent = `Watching · ${pulseMs().toFixed(1)} ms pulses`;
+    if (enabled) {
+      const suffix = lastSample ? ` · ${visibleLabel(lastSample)}` : "";
+      autoStatus.textContent = `Watching decode health · ${pulseMs().toFixed(1)} ms pulses${suffix}`;
+    }
   });
 }

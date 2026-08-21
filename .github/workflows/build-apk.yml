@@ -9,6 +9,7 @@ on:
       - receive/**
       - send/**
       - shared/**
+      - version.js
       - main.js
       - index.html
       - manifest.webmanifest
@@ -31,6 +32,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Read app version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^export const APP_VERSION = "\([^"]*\)";$/\1/p' version.js | head -1)"
+          test -n "$VERSION" || { echo "::error::Could not read APP_VERSION from version.js"; exit 1; }
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_BUILD=v$VERSION" >> "$GITHUB_ENV"
+          echo "build=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
         with:
@@ -69,8 +80,9 @@ jobs:
       - name: Verify packaged app and signer
         run: |
           set -euo pipefail
-          unzip -p AirGapper.apk assets/index.html | grep -q 'v0.5.361'
-          unzip -p AirGapper.apk assets/main.js | grep -q 'APP_BUILD = "v0.5.361"'
+          unzip -p AirGapper.apk assets/version.js | grep -Fq "APP_VERSION = \"$APP_VERSION\""
+          unzip -p AirGapper.apk assets/main.js | grep -Fq 'from "./version.js"'
+          unzip -l AirGapper.apk | grep -q 'assets/shared/camera-start-guard.js'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'
           unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.js'
@@ -87,7 +99,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AirGapper-v0.5.361
+          name: AirGapper-${{ steps.version.outputs.build }}
           path: AirGapper.apk
           if-no-files-found: error
           retention-days: 30
@@ -108,5 +120,5 @@ jobs:
             echo "AirGapper.apk is already current"
             exit 0
           fi
-          git commit -m "build AirGapper.apk v0.5.361"
+          git commit -m "build AirGapper.apk $APP_BUILD"
           git push origin HEAD:master

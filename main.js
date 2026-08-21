@@ -1,9 +1,14 @@
 import { isAndroid, isIOS } from "./shared/platform.js";
 import { isAndroidApp } from "./shared/android.js";
+import { APP_BUILD } from "./version.js";
+import { cameraRequestPending, installCameraStartGuard } from "./shared/camera-start-guard.js";
 import "./receive/phase-nudge.js";
 import "./receive/auto-phase.js";
 
-const APP_BUILD = "v0.5.361";
+installCameraStartGuard();
+window.AIRGAPPER_BUILD = APP_BUILD;
+document.querySelector(".app-version").textContent = APP_BUILD;
+
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 
@@ -21,7 +26,6 @@ await Promise.all([
   import(`./receive/main.js?build=${APP_BUILD}`)
 ]);
 
-document.querySelector(".app-version").textContent = APP_BUILD;
 if (serviceWorkers) {
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
 }
@@ -103,6 +107,7 @@ const views = {
   send: document.getElementById("sendView"),
   receive: document.getElementById("receiveView")
 };
+const receiveVideo = document.getElementById("video");
 let active = "home";
 function historyView() {
   var _a2;
@@ -176,19 +181,72 @@ window.addEventListener("popstate", () => {
   return showView((_a2 = historyView()) != null ? _a2 : "home", "none");
 });
 let suspended = false;
+let receiveHealthToken = 0;
+function receiveNeedsCamera() {
+  return active === "receive" && !document.body.classList.contains("receive-complete");
+}
+function liveReceiveTrack() {
+  const source = receiveVideo?.srcObject;
+  if (!source || typeof source.getVideoTracks !== "function") return null;
+  return source.getVideoTracks().find((track) => track.readyState === "live") || null;
+}
+function recycleReceiveCamera() {
+  if (!isIOS || !receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
+  // pauseReceiver() preserves transport progress/decoder state but clears a
+  // dead MediaStream and in-flight frame work. Resuming then opens a fresh
+  // camera stream, which is what iPadOS needs after killing a background track.
+  window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
+  queueMicrotask(() => {
+    if (receiveNeedsCamera() && document.visibilityState === "visible" && !cameraRequestPending()) {
+      window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
+    }
+  });
+}
+function scheduleReceiveHealthCheck(delay = 1200, attempt = 0) {
+  if (!isIOS) return;
+  const token = ++receiveHealthToken;
+  setTimeout(() => {
+    if (token !== receiveHealthToken || !receiveNeedsCamera() || document.visibilityState !== "visible") return;
+    if (cameraRequestPending()) {
+      if (attempt < 8) scheduleReceiveHealthCheck(400, attempt + 1);
+      return;
+    }
+    const track = liveReceiveTrack();
+    if (!track) {
+      recycleReceiveCamera();
+      return;
+    }
+    const initialTime = Number(receiveVideo.currentTime) || 0;
+    setTimeout(() => {
+      if (token !== receiveHealthToken || !receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
+      const currentTrack = liveReceiveTrack();
+      const ready = Boolean(currentTrack) && receiveVideo.readyState >= 2 && receiveVideo.videoWidth > 0 && receiveVideo.videoHeight > 0;
+      const advanced = (Number(receiveVideo.currentTime) || 0) > initialTime + 0.03;
+      if (!ready || !advanced) recycleReceiveCamera();
+      else if (receiveVideo.paused) void receiveVideo.play().catch(() => recycleReceiveCamera());
+    }, 650);
+  }, delay);
+}
 window.airgapperSuspend = () => {
+  // Safari/iPadOS can emit lifecycle transitions while its camera permission
+  // sheet is on top. Cancelling Receive here invalidates the pending request
+  // and can make the sheet disappear before the user can answer it.
+  if (cameraRequestPending()) return;
+  receiveHealthToken++;
   if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
   suspended = true;
   window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 function resumeActiveView() {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible" || cameraRequestPending()) return;
+  const wasSuspended = suspended;
   if (suspended) {
     suspended = false;
     window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
-  } else if (active === "receive" && !document.body.classList.contains("receive-complete")) {
+  } else if (receiveNeedsCamera()) {
     window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
   }
+  if (receiveNeedsCamera()) scheduleReceiveHealthCheck(wasSuspended ? 1500 : 1200);
 }
 document.addEventListener("visibilitychange", () => {
   var _a2;
@@ -196,6 +254,7 @@ document.addEventListener("visibilitychange", () => {
   else resumeActiveView();
 });
 window.addEventListener("pageshow", resumeActiveView);
+window.addEventListener("focus", resumeActiveView);
 window.airgapperResume = resumeActiveView;
 window.airgapperHandleBack = () => {
   const inspectorClose = document.querySelector(".media-inspector-close");

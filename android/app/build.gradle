@@ -6,6 +6,22 @@ def releaseKeystore = System.getenv("AIRGAPPER_RELEASE_KEYSTORE")
 def releasePassword = System.getenv("AIRGAPPER_RELEASE_PASSWORD")
 def hasReleaseSigning = releaseKeystore && releasePassword
 
+def versionSource = rootProject.file("../version.js").getText("UTF-8")
+def versionMatch = versionSource =~ /APP_VERSION\s*=\s*"([^"]+)"/
+if (!versionMatch.find()) throw new GradleException("version.js must export APP_VERSION")
+def appVersion = versionMatch.group(1)
+def appVersionParts = appVersion.tokenize(".")
+if (appVersionParts.size() != 3 || !appVersionParts.every { it ==~ /\d+/ }) {
+    throw new GradleException("APP_VERSION must be numeric semver, got ${appVersion}")
+}
+def versionMajor = appVersionParts[0].toInteger()
+def versionMinor = appVersionParts[1].toInteger()
+def versionPatch = appVersionParts[2].toInteger()
+if (versionMinor >= 100 || versionPatch >= 10000) {
+    throw new GradleException("APP_VERSION exceeds Android versionCode allocation: ${appVersion}")
+}
+def appVersionCode = versionMajor * 1000000 + versionMinor * 10000 + versionPatch
+
 android {
     namespace "com.airgapper.app"
     compileSdk 35
@@ -14,8 +30,8 @@ android {
         applicationId "com.airgapper.app"
         minSdk 23
         targetSdk 29
-        versionCode 361
-        versionName "0.5.361"
+        versionCode appVersionCode
+        versionName appVersion
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
         }
@@ -89,6 +105,7 @@ def syncWebApp = tasks.register("syncWebApp", Copy) {
         include "index.html"
         include "manifest.webmanifest"
         include "sw.js"
+        include "version.js"
         include "icon-*.png"
         include "main.js"
         include "send/**"
