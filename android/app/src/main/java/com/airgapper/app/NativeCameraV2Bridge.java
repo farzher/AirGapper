@@ -75,7 +75,8 @@ final class NativeCameraV2Bridge {
             "2560x1440", "3840x2160"));
     private static final int PREVIEW_MAGIC = 0x32565041; // APV2
     private static final int PREVIEW_HEADER_BYTES = 28;
-    private static final long PREVIEW_INTERVAL_NS = 200_000_000L;
+    private static final long PREVIEW_INTERVAL_NS = 33_333_333L;
+    private static final long PREVIEW_FALLBACK_INTERVAL_NS = 100_000_000L;
     private static final long BINARY_ACK_GRACE_NS = 350_000_000L;
 
     private static final class FrameMetadata {
@@ -779,7 +780,7 @@ final class NativeCameraV2Bridge {
             FrameMetadata metadata = metadataForTimestamp(image.getTimestamp());
             DecodePlan plan = claimPlan();
             if (plan == null) {
-                maybeSendPreview(buffer, offset, image.getWidth(), image.getHeight(), plane.getRowStride(), image.getTimestamp());
+                maybeSendYuvPreview(image);
                 return;
             }
             Image owned = image;
@@ -787,7 +788,7 @@ final class NativeCameraV2Bridge {
             decodeHandler.post(() -> {
                 try {
                     byte[] packet = decodePlan(plan, buffer, offset, owned.getWidth(), owned.getHeight(), plane.getRowStride(), metadata, 2);
-                    maybeSendPreview(buffer, offset, owned.getWidth(), owned.getHeight(), plane.getRowStride(), metadata.timestampNs);
+                    maybeSendYuvPreview(owned);
                     if (packet != null) postBinary(packet); else postEvent("decodeError", "Native YUV decode failed");
                 } catch (Exception error) { postEvent("decodeError", message(error)); }
                 finally { owned.close(); releaseDecode(); }
@@ -842,11 +843,63 @@ final class NativeCameraV2Bridge {
         return fallback;
     }
 
-    private boolean previewDue() { return System.nanoTime() - lastPreviewNs >= PREVIEW_INTERVAL_NS; }
+    private long previewIntervalNs() {
+        return binaryFallbackActive && !binaryTransportAcked ? PREVIEW_FALLBACK_INTERVAL_NS : PREVIEW_INTERVAL_NS;
+    }
+
+    private boolean previewDue() { return System.nanoTime() - lastPreviewNs >= previewIntervalNs(); }
+
+    private static void samplePreviewPlane(Image.Plane plane, int sourceWidth, int sourceHeight,
+                                           byte[] packet, int outputOffset, int outputWidth, int outputHeight) {
+        ByteBuffer buffer = plane.getBuffer().duplicate();
+        int base = buffer.position();
+        int limit = buffer.limit();
+        int rowStride = plane.getRowStride();
+        int pixelStride = plane.getPixelStride();
+        for (int y = 0; y < outputHeight; y++) {
+            int sy = Math.min(sourceHeight - 1, (int) ((y + 0.5f) * sourceHeight / outputHeight));
+            int row = base + sy * rowStride;
+            for (int x = 0; x < outputWidth; x++) {
+                int sx = Math.min(sourceWidth - 1, (int) ((x + 0.5f) * sourceWidth / outputWidth));
+                int at = row + sx * pixelStride;
+                packet[outputOffset + y * outputWidth + x] = at >= base && at < limit ? buffer.get(at) : 0;
+            }
+        }
+    }
+
+    private void maybeSendYuvPreview(Image image) {
+        long now = System.nanoTime();
+        if (image == null || now - lastPreviewNs < previewIntervalNs()) return;
+        Image.Plane[] planes = image.getPlanes();
+        if (planes == null || planes.length < 3 || image.getWidth() <= 0 || image.getHeight() <= 0) return;
+        int width = image.getWidth();
+        int height = image.getHeight();
+        int outWidth = Math.min(320, width);
+        int outHeight = Math.max(2, Math.round(height * (outWidth / (float) width)));
+        outWidth &= ~1;
+        outHeight &= ~1;
+        if (outWidth < 2 || outHeight < 2) return;
+        int chromaWidth = outWidth / 2;
+        int chromaHeight = outHeight / 2;
+        int yBytes = outWidth * outHeight;
+        int chromaBytes = chromaWidth * chromaHeight;
+        byte[] packet = new byte[PREVIEW_HEADER_BYTES + yBytes + chromaBytes * 2];
+        ByteBuffer header = ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN);
+        header.putInt(PREVIEW_MAGIC); header.putShort((short) PREVIEW_HEADER_BYTES); header.putShort((short) 2);
+        header.putInt(outWidth); header.putInt(outHeight); header.putInt(activeSensorOrientation);
+        header.putInt(width); header.putInt(height);
+        samplePreviewPlane(planes[0], width, height, packet, PREVIEW_HEADER_BYTES, outWidth, outHeight);
+        samplePreviewPlane(planes[1], (width + 1) / 2, (height + 1) / 2,
+                packet, PREVIEW_HEADER_BYTES + yBytes, chromaWidth, chromaHeight);
+        samplePreviewPlane(planes[2], (width + 1) / 2, (height + 1) / 2,
+                packet, PREVIEW_HEADER_BYTES + yBytes + chromaBytes, chromaWidth, chromaHeight);
+        lastPreviewNs = now;
+        postBinary(packet);
+    }
 
     private void maybeSendPreview(ByteBuffer plane, int offset, int width, int height, int stride, long timestampNs) {
         long now = System.nanoTime();
-        if (now - lastPreviewNs < PREVIEW_INTERVAL_NS || plane == null || width <= 0 || height <= 0) return;
+        if (now - lastPreviewNs < previewIntervalNs() || plane == null || width <= 0 || height <= 0) return;
         lastPreviewNs = now;
         int outWidth = Math.min(320, width);
         int outHeight = Math.max(1, Math.round(height * (outWidth / (float) width)));
