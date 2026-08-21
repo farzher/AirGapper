@@ -11,6 +11,9 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     <button class="secondary-button" id="camera-phase-later" type="button" title="Move camera phase later">+</button>
     <button class="secondary-button" id="camera-phase-reset" type="button">Zero</button>
     <span id="camera-phase-status" role="status">Phase request 0.00 ms</span>
+    <label><span>Exposure pulse</span><input id="camera-exposure-pulse-ms" type="number" min="1" max="1000" step="1" value="40" inputmode="decimal" aria-label="Exposure pulse duration in milliseconds" /></label>
+    <button class="secondary-button" id="camera-exposure-pulse" type="button">Pulse</button>
+    <span id="camera-exposure-pulse-status" role="status">40 ms sacrificial exposure</span>
   `;
 
   const strictControl = document.getElementById("strict-hot-path-control");
@@ -22,6 +25,9 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
   const laterBtn = document.getElementById("camera-phase-later");
   const resetBtn = document.getElementById("camera-phase-reset");
   const status = document.getElementById("camera-phase-status");
+  const exposurePulseInput = document.getElementById("camera-exposure-pulse-ms");
+  const exposurePulseBtn = document.getElementById("camera-exposure-pulse");
+  const exposurePulseStatus = document.getElementById("camera-exposure-pulse-status");
   let requestedPhaseMs = 0;
   let busy = false;
 
@@ -43,12 +49,30 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     }
   }
 
+  function exposureCapability(track) {
+    try {
+      const caps = track.getCapabilities?.() ?? {};
+      const range = caps.exposureTime;
+      const manual = Array.isArray(caps.exposureMode) && caps.exposureMode.includes("manual");
+      if (!manual || !range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return null;
+      return { min: Number(range.min), max: Number(range.max), step: Number(range.step) || 1 };
+    } catch {
+      return null;
+    }
+  }
+
+  // mediacapture-image defines exposureTime in 100 microsecond units.
+  const exposureUnitsToMs = (value) => Number(value) * 0.1;
+  const exposureMsToUnits = (value) => Number(value) * 10;
+
   function setBusy(value) {
     busy = value;
     earlierBtn.disabled = value;
     laterBtn.disabled = value;
     resetBtn.disabled = value;
     stepInput.disabled = value;
+    exposurePulseBtn.disabled = value;
+    exposurePulseInput.disabled = value;
   }
 
   function nextVideoFrame(timeoutMs = 750) {
@@ -182,6 +206,111 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     status.textContent = `Phase request ${requestedPhaseMs >= 0 ? "+" : ""}${requestedPhaseMs.toFixed(2)} ms · one-shot ${actualText} fps${gapText}${wrapText}${softText} · restored ${steadyFps.toFixed(2)}`;
   }
 
+  function exposurePulseMs() {
+    const value = Number(exposurePulseInput.value);
+    return Number.isFinite(value) ? Math.max(1, Math.min(1000, value)) : 40;
+  }
+
+  function pulseConstraints(originalConstraints, targetExposure) {
+    const originalAdvanced = Array.isArray(originalConstraints.advanced) ? originalConstraints.advanced : [];
+    const preservedAdvanced = originalAdvanced.map((set) => {
+      const copy = { ...set };
+      delete copy.exposureMode;
+      delete copy.exposureTime;
+      return copy;
+    }).filter((set) => Object.keys(set).length > 0);
+    return {
+      ...originalConstraints,
+      advanced: [...preservedAdvanced, { exposureMode: "manual", exposureTime: targetExposure }]
+    };
+  }
+
+  async function restoreExposure(track, originalConstraints, originalSettings) {
+    try {
+      await track.applyConstraints(originalConstraints);
+      return;
+    } catch {}
+
+    const mode = originalSettings.exposureMode;
+    const exposureTime = Number(originalSettings.exposureTime);
+    const fallback = {};
+    if (typeof mode === "string" && mode) fallback.exposureMode = mode;
+    if (mode === "manual" && Number.isFinite(exposureTime)) fallback.exposureTime = exposureTime;
+    if (!Object.keys(fallback).length) return;
+    await track.applyConstraints({ advanced: [fallback] });
+  }
+
+  async function pulseExposure() {
+    if (busy) return;
+    const track = activeBrowserTrack();
+    if (!track) {
+      exposurePulseStatus.textContent = "Exposure pulse: start the browser camera first";
+      return;
+    }
+
+    const capability = exposureCapability(track);
+    if (!capability) {
+      exposurePulseStatus.textContent = "Exposure pulse: manual exposureTime unsupported";
+      return;
+    }
+
+    const originalSettings = track.getSettings?.() ?? {};
+    const originalConstraints = track.getConstraints?.() ?? {};
+    const steadyFps = Number(originalSettings.frameRate);
+    const periodMs = Number.isFinite(steadyFps) && steadyFps > 0 ? 1000 / steadyFps : NaN;
+    const requestedMs = exposurePulseMs();
+    const requestedUnits = exposureMsToUnits(requestedMs);
+    const stepped = Math.round(requestedUnits / capability.step) * capability.step;
+    const targetUnits = Math.max(capability.min, Math.min(capability.max, stepped));
+    const targetMs = exposureUnitsToMs(targetUnits);
+    const minMs = exposureUnitsToMs(capability.min);
+    const maxMs = exposureUnitsToMs(capability.max);
+    exposurePulseInput.value = String(Number(targetMs.toFixed(2)));
+
+    const belowFramePeriod = Number.isFinite(periodMs) && targetMs <= periodMs;
+    setBusy(true);
+    exposurePulseStatus.textContent = `Exposure pulse: ${targetMs.toFixed(2)} ms${belowFramePeriod ? ` (≤ ${periodMs.toFixed(2)} ms frame period)` : ""}…`;
+
+    let before = null;
+    let during = null;
+    let pulseActual = NaN;
+    let pulseMode = "";
+    let restoreError = null;
+    try {
+      before = await nextVideoFrame();
+      if (track.readyState !== "live") throw new Error("camera stopped");
+      await track.applyConstraints(pulseConstraints(originalConstraints, targetUnits));
+      const pulseSettings = track.getSettings?.() ?? {};
+      pulseActual = Number(pulseSettings.exposureTime);
+      pulseMode = pulseSettings.exposureMode ?? "";
+      during = await nextVideoFrame(Math.max(1000, targetMs * 4));
+    } catch (error) {
+      exposurePulseStatus.textContent = `Exposure pulse failed: ${error?.message || error}`;
+      return;
+    } finally {
+      if (track.readyState === "live") {
+        try {
+          await restoreExposure(track, originalConstraints, originalSettings);
+        } catch (error) {
+          restoreError = error;
+        }
+      }
+      setBusy(false);
+    }
+
+    const restored = track.getSettings?.() ?? {};
+    const restoredExposure = Number(restored.exposureTime);
+    const actualMs = Number.isFinite(pulseActual) ? exposureUnitsToMs(pulseActual) : targetMs;
+    const restoredMs = Number.isFinite(restoredExposure) ? exposureUnitsToMs(restoredExposure) : NaN;
+    const gap = observedGapMs(before, during);
+    const gapText = Number.isFinite(gap) ? ` · observed frame gap ${gap.toFixed(2)} ms` : "";
+    const restoredText = `${restored.exposureMode ?? originalSettings.exposureMode ?? "?"}${Number.isFinite(restoredMs) ? ` ${restoredMs.toFixed(2)} ms` : ""}`;
+    const rangeText = `range ${minMs.toFixed(2)}–${maxMs.toFixed(2)} ms`;
+    const modeText = pulseMode ? ` · ${pulseMode}` : "";
+    const restoreText = restoreError ? ` · restore warning: ${restoreError?.message || restoreError}` : ` · restored ${restoredText}`;
+    exposurePulseStatus.textContent = `Exposure pulse ${actualMs.toFixed(2)} ms${modeText}${gapText} · ${rangeText}${restoreText}`;
+  }
+
   function stepMs() {
     const value = Number(stepInput.value);
     return Number.isFinite(value) ? Math.max(0.1, Math.min(8, value)) : 1;
@@ -193,4 +322,5 @@ if (devActions && video && !document.getElementById("camera-phase-nudge")) {
     if (Math.abs(requestedPhaseMs) < 0.0005) return;
     void nudgePhase(-requestedPhaseMs);
   });
+  exposurePulseBtn.addEventListener("click", () => void pulseExposure());
 }
