@@ -10,7 +10,8 @@ import {
   poseRecoveryReasonEligible,
   recoveryDiagnostics,
   rememberManualExposure,
-  rememberedManualExposure
+  rememberedManualExposure,
+  setExposureProtectionEnabled
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
@@ -99,6 +100,7 @@ function quantize(value, range) {
 }
 
 async function handOffLongAe(track) {
+  if (!recoveryDiagnostics().exposureProtectionEnabled) return;
   if (!track || track.readyState !== "live" || longAeHandoffRunning.has(track)) return;
   const now = performance.now();
   if (now - (lastLongAeHandoffAt.get(track) ?? -Infinity) < LONG_AE_HANDOFF_COOLDOWN_MS) return;
@@ -167,6 +169,15 @@ function currentBrowserTrack() {
   return source?.getVideoTracks?.().find((item) => item.readyState === "live");
 }
 
+function installAutomaticOpticsToggleBridge() {
+  if (typeof document === "undefined") return;
+  const toggle = document.getElementById("camera-exposure-auto");
+  if (!toggle) return;
+  const sync = () => setExposureProtectionEnabled(Boolean(toggle.checked));
+  toggle.addEventListener("change", sync);
+  sync();
+}
+
 function installDiagnosticPolicy() {
   if (typeof document === "undefined") return;
   const focus = document.getElementById("focus-diagnostics");
@@ -209,6 +220,7 @@ function installReceiverRecoveryPolicy() {
   installLatticeRecoveryBridge();
   installWarmWorkerRecovery();
   installVerifiedDecodeBridge();
+  installAutomaticOpticsToggleBridge();
   installDiagnosticPolicy();
 }
 
