@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { applyAdvancedConstraint } from "../shared/platform.js";
+import { FocusController } from "../receive/focus-controller.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 import {
   armWarmWorkerRestartSuppression,
@@ -12,7 +13,8 @@ const settings = {
   exposureMode: "continuous",
   exposureTime: 120,
   iso: 100,
-  exposureCompensation: 0
+  exposureCompensation: 0,
+  frameRate: 30
 };
 let cameraWrites = 0;
 const track = {
@@ -34,6 +36,7 @@ const track = {
   }
 };
 
+// Establish the QR-capable manual state. 50 units == 5 ms.
 await applyAdvancedConstraint(track, {
   exposureMode: "manual",
   exposureTime: 50,
@@ -84,6 +87,23 @@ assert.equal(recoveryDiagnostics().suppressedWorkerRestarts, 1);
 pool.resize(0);
 assert.equal(pool.size, 0, "only the geometry-reacquire restart is suppressed");
 assert.equal(created.reduce((sum, worker) => sum + worker.terminateCount, 0), 2);
-
 endPoseRecovery();
+
+// Reproduce the phone log: photographic AE drifts to 40 ms / ISO 166 after a
+// previously working 5 ms / ISO 166 state. A verified QR decode must restore
+// the QR-proven state instead of deriving brightness from the bad AE value.
+Object.assign(settings, {
+  exposureMode: "continuous",
+  exposureTime: 400,
+  iso: 166
+});
+const controller = new FocusController(async () => true, () => {});
+controller.track = track;
+controller.noteValidDecode(1);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(settings.exposureMode, "manual");
+assert.equal(settings.exposureTime, 50, "verified QR should restore the prior 5 ms exposure");
+assert.equal(settings.iso, 166, "verified QR should restore the prior QR-proven ISO");
+assert.equal(cameraWrites, 2, "long-AE escape should require exactly one sensor write");
+
 console.log("receiver recovery policy smoke: ok");
