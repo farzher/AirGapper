@@ -92,8 +92,10 @@ assert.equal(parsed.opticsBusy, false);
   assert.equal(decision.reason, "finder-no-decode");
 }
 
-// With nothing visible, let an active optics mutation finish first, then use a
-// blind phase step if acquisition still has no evidence.
+// With nothing visible, let an active optics mutation finish first. The blind
+// timer keeps running while optics works, so if optics still found nothing the
+// next actuator can be a phase step immediately rather than wasting another
+// full acquisition delay.
 {
   const policy = new AutoPhasePolicy();
   policy.setEnabled(true, 0);
@@ -112,8 +114,6 @@ assert.equal(parsed.opticsBusy, false);
     opticsRuntime: "ae"
   }));
   sample.now = 1900;
-  assert.equal(policy.observe(sample).kind, "hold");
-  sample = { ...sample, now: 2800 };
   const decision = policy.observe(sample);
   assert.equal(decision.kind, "pulse");
   assert.equal(decision.reason, "blind-acquisition");
