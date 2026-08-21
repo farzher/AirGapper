@@ -133,9 +133,10 @@ function manualModeOnly(patch) {
 }
 
 function manualFreezeNearCurrent(patch, current) {
-  return patch?.exposureMode === "manual" &&
-    (patch.exposureTime !== undefined || patch.iso !== undefined) &&
-    requestNearSnapshot(patch, { ...current, exposureMode: "manual" });
+  const manualContext = patch?.exposureMode === "manual" ||
+    (patch?.exposureMode === undefined && current?.exposureMode === "manual");
+  return manualContext && (patch.exposureTime !== undefined || patch.iso !== undefined) &&
+    requestNearSnapshot(patch, { ...current, exposureMode: patch.exposureMode ?? current.exposureMode ?? "manual" });
 }
 
 function autoOpticsEnabled() {
@@ -371,8 +372,7 @@ function installApplyConstraintsGuard() {
     }
 
     const result = await native.call(this, constraints);
-    if (state.qrProven && !state.protected && (manualModeOnly(patch) || manualFreezeNearCurrent(patch, current)))
-      protectCurrent(this, state);
+    if (state.qrProven && !state.protected && manualFreezeNearCurrent(patch, current)) protectCurrent(this, state);
     return result;
   };
 
@@ -380,7 +380,12 @@ function installApplyConstraintsGuard() {
     Object.defineProperty(proto, "applyConstraints", { configurable: true, writable: true, value: wrapped });
     Object.defineProperty(proto, marker, { configurable: true, value: true });
   } catch {
-    originalApplyConstraints = null;
+    try {
+      proto.applyConstraints = wrapped;
+      proto[marker] = true;
+    } catch {
+      originalApplyConstraints = null;
+    }
   }
 }
 
