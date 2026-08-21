@@ -1,5 +1,6 @@
 import { isAndroid, isIOS } from "./shared/platform.js";
 import { isAndroidApp } from "./shared/android.js";
+import "./receive/phase-nudge.js";
 
 const APP_BUILD = "v0.5.361";
 const serviceWorkers = navigator.serviceWorker;
