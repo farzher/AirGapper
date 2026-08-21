@@ -96,7 +96,7 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
       return;
     }
     const beforeDisabled = pulseButton.disabled;
-    allowPhasePulse(1600);
+    allowPhasePulse(650);
     autoDispatch = "phase";
     try {
       pulseButton.click();
