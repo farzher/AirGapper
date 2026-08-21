@@ -1,4 +1,5 @@
 import { AutoPhasePolicy, parseAutoPhaseDiagnostics } from "./auto-phase-policy.js";
+import { allowPhasePulse, beginOpticsExperiment } from "./optics-guard.js";
 
 const phaseRoot = document.getElementById("camera-phase-nudge");
 const pulseInput = document.getElementById("camera-exposure-pulse-ms");
@@ -95,6 +96,7 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
       return;
     }
     const beforeDisabled = pulseButton.disabled;
+    allowPhasePulse(1600);
     autoDispatch = "phase";
     try {
       pulseButton.click();
@@ -122,6 +124,7 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
       autoStatus.textContent = "RECOVER · optics recalibration unavailable";
       return;
     }
+    beginOpticsExperiment(8000);
     policy.noteActionStarted("optics", sample, sample.now);
     autoDispatch = "optics";
     try {
