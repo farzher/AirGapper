@@ -26,6 +26,25 @@ await Promise.all([
   import(`./receive/main.js?build=${APP_BUILD}`)
 ]);
 
+// receive/main.js historically carried its own diagnostic-only build constant.
+// Keep the copied/runtime diagnostics tied to the canonical version.js value so
+// a stale internal label can never make a new deployment look like an old one.
+const runtimeDiagnostics = document.getElementById("transport-diagnostics");
+function syncReceiverRuntimeBuild() {
+  if (!runtimeDiagnostics) return;
+  const text = runtimeDiagnostics.textContent || "";
+  const next = text.replace(/\bRuntime\s+v\d+\.\d+\.\d+\b/g, `Runtime ${APP_BUILD}`);
+  if (next !== text) runtimeDiagnostics.textContent = next;
+}
+if (runtimeDiagnostics) {
+  new MutationObserver(syncReceiverRuntimeBuild).observe(runtimeDiagnostics, {
+    childList: true,
+    characterData: true,
+    subtree: true
+  });
+  syncReceiverRuntimeBuild();
+}
+
 if (serviceWorkers) {
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
 }
