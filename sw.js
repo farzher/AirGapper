@@ -1,7 +1,10 @@
 (() => {
-  const CACHE = "airgapper-static-js-v361-phase3";
+  const build = new URL(self.location.href).searchParams.get("build") || "dev";
+  const cacheBuild = build.replace(/[^a-zA-Z0-9._-]/g, "-");
+  const CACHE = `airgapper-static-js-${cacheBuild}`;
   const PRECACHE = [
     "./main.js",
+    "./version.js",
     "./icon-192.png",
     "./icon-512-maskable.png",
     "./icon-512.png",
@@ -19,6 +22,7 @@
     "./send/main.js",
     "./send/render-worker.js",
     "./shared/android.js",
+    "./shared/camera-start-guard.js",
     "./shared/native-camera.js",
     "./shared/native-camera-v2.js",
     "./shared/coding-mode.js",
