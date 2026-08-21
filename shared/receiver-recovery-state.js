@@ -3,6 +3,7 @@ let diagnosticTrack;
 let poseRecoveryActive = false;
 let poseRecoveryReason = "";
 let poseRecoveryGeneration = 0;
+let warmWorkerRestartBudget = 0;
 let suppressedExposureWrites = 0;
 let suppressedWorkerRestarts = 0;
 
@@ -18,9 +19,22 @@ function beginPoseRecovery(reason = "camera pose recovery") {
   return true;
 }
 
+function armWarmWorkerRestartSuppression() {
+  if (!poseRecoveryActive) return false;
+  warmWorkerRestartBudget = Math.max(warmWorkerRestartBudget, 1);
+  return true;
+}
+
+function consumeWarmWorkerRestartSuppression() {
+  if (!poseRecoveryActive || warmWorkerRestartBudget <= 0) return false;
+  warmWorkerRestartBudget--;
+  return true;
+}
+
 function endPoseRecovery() {
   poseRecoveryActive = false;
   poseRecoveryReason = "";
+  warmWorkerRestartBudget = 0;
 }
 
 function beginTrackDiagnostics(track) {
@@ -62,14 +76,17 @@ function recoveryDiagnostics() {
     active: poseRecoveryActive,
     reason: poseRecoveryReason,
     generation: poseRecoveryGeneration,
+    warmWorkerRestartBudget,
     suppressedExposureWrites,
     suppressedWorkerRestarts
   };
 }
 
 export {
+  armWarmWorkerRestartSuppression,
   beginPoseRecovery,
   beginTrackDiagnostics,
+  consumeWarmWorkerRestartSuppression,
   endPoseRecovery,
   noteSuppressedExposureWrite,
   noteSuppressedWorkerRestart,
