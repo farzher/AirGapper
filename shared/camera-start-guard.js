@@ -2,8 +2,8 @@ import { isIOS } from "./platform.js";
 
 let installed = false;
 let pendingRequests = 0;
-let recentPermissionError;
-let recentPermissionErrorUntil = 0;
+let recentStartError;
+let recentStartErrorUntil = 0;
 
 export function cameraRequestPending() {
   return pendingRequests > 0;
@@ -34,6 +34,10 @@ export function softenIOSCameraConstraints(constraints) {
   };
 }
 
+function isConstraintFailure(error) {
+  return error?.name === "OverconstrainedError" || error?.name === "ConstraintNotSatisfiedError";
+}
+
 export function installCameraStartGuard() {
   if (installed) return;
   installed = true;
@@ -45,19 +49,20 @@ export function installCameraStartGuard() {
   const guardedGetUserMedia = async (constraints) => {
     const now = performance.now();
     // receive/main.js intentionally retries exact camera constraints with ideal
-    // constraints. Never turn a permission denial/dismissal into a second iOS
-    // permission sheet; allow a later explicit user retry normally.
-    if (isIOS && recentPermissionError && now < recentPermissionErrorUntil) {
-      throw recentPermissionError;
+    // constraints. On iOS, only a genuine constraint failure should be allowed
+    // to open that fallback request. Permission/lifecycle/device errors must
+    // surface once instead of immediately producing another system sheet.
+    if (isIOS && recentStartError && now < recentStartErrorUntil) {
+      throw recentStartError;
     }
 
     pendingRequests++;
     try {
       return await nativeGetUserMedia(softenIOSCameraConstraints(constraints));
     } catch (error) {
-      if (isIOS && error?.name === "NotAllowedError") {
-        recentPermissionError = error;
-        recentPermissionErrorUntil = performance.now() + 1200;
+      if (isIOS && !isConstraintFailure(error)) {
+        recentStartError = error;
+        recentStartErrorUntil = performance.now() + 1200;
       }
       throw error;
     } finally {
