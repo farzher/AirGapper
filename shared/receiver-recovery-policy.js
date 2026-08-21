@@ -1,17 +1,20 @@
 import { GridLattice } from "../receive/grid-lattice.js";
 import { DecodeWorkerPool } from "./worker-pool.js";
 import {
+  armWarmWorkerRestartSuppression,
   beginPoseRecovery,
+  consumeWarmWorkerRestartSuppression,
   endPoseRecovery,
   noteSuppressedWorkerRestart,
   poseRecoveryReasonEligible,
   recoveryDiagnostics,
-  rememberManualExposure
+  rememberManualExposure,
+  rememberedManualExposure
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
 const LONG_AE_EXPOSURE = 55; // 5.5 ms; browser exposureTime units are 0.1 ms.
-const MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms.
+const MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms when no prior QR-proven state exists.
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -34,8 +37,10 @@ function installLatticeRecoveryBridge() {
   };
 
   GridLattice.prototype.reacquire = function(at, reason = "whole lattice invalidated") {
-    if (poseRecoveryReasonEligible(reason)) beginPoseRecovery(reason);
-    else endPoseRecovery();
+    if (poseRecoveryReasonEligible(reason)) {
+      beginPoseRecovery(reason);
+      armWarmWorkerRestartSuppression();
+    } else endPoseRecovery();
     return originalReacquire.call(this, at, reason);
   };
 
@@ -71,7 +76,7 @@ function installLatticeRecoveryBridge() {
 function installWarmWorkerRecovery() {
   const originalResize = DecodeWorkerPool.prototype.resize;
   DecodeWorkerPool.prototype.resize = function(count) {
-    if (count === 0 && recoveryDiagnostics().active && this.workers.length) {
+    if (count === 0 && this.workers.length && consumeWarmWorkerRestartSuppression()) {
       this.__airgapperWarmRecovery = true;
       noteSuppressedWorkerRestart();
       return;
@@ -108,10 +113,19 @@ async function handOffLongAe(track) {
   longAeHandoffRunning.add(track);
   lastLongAeHandoffAt.set(track, now);
   try {
+    const prior = rememberedManualExposure(track);
     const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
-    const targetProduct = exposure * iso * QR_LIGHT_SCALE;
+    // If this track already decoded QR under a manual setting, that state is a
+    // much stronger prior than photographic AE. Restore its light product first.
+    // Only a track with no prior manual state derives brightness from AE.
+    const targetProduct = prior
+      ? prior.exposure * prior.iso
+      : exposure * iso * QR_LIGHT_SCALE;
+    const exposureCeiling = prior
+      ? Math.min(LONG_AE_EXPOSURE, prior.exposure)
+      : MOTION_SAFE_MAX_EXPOSURE;
     const shortExposure = quantize(
-      Math.min(exposureRange.max, MOTION_SAFE_MAX_EXPOSURE, 1e4 / fps * 0.10),
+      Math.min(exposureRange.max, exposureCeiling, 1e4 / fps * (prior ? 0.18 : 0.10)),
       exposureRange
     );
     const shortIso = quantize(
@@ -169,9 +183,8 @@ function installDiagnosticPolicy() {
     }
 
     // QR proof is stronger than AE's photographic preference. If the receiver
-    // is LOCKED and AE is still using a long shutter, convert the live AE light
-    // product to a short manual shutter immediately; do not wait for a perfectly
-    // stationary geometry window first.
+    // is LOCKED and AE is still using a long shutter, restore a known QR-working
+    // manual state (or derive a short fallback if none exists) immediately.
     const locked = /State\s+LOCKED/.test(original);
     const valid = /Payload\s+valid\s+([1-9]\d*)/.test(original);
     if (locked && valid && !state.active && track) void handOffLongAe(track);
