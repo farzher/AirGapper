@@ -3,167 +3,140 @@ import { readFile } from "node:fs/promises";
 import { AutoPhasePolicy, parseAutoPhaseDiagnostics } from "../receive/auto-phase-policy.js";
 
 function diagnostics({
-  acquiring = true,
+  acquiring = false,
   raceMs = 900,
   finderHints = 0,
-  visible = 0,
-  decodable = 0,
-  submitted = 0,
-  completed = 0,
-  validRate = 0,
-  validTotal = 0,
-  completions = 0,
-  silenceSeconds = 1.5,
-  opticsController = "ACQUIRE",
-  opticsRuntime = "ae",
-  rolling = "Rolling  —"
+  visible = 1,
+  decodable = 1,
+  submitted = 30,
+  completed = 30,
+  validRate = 21,
+  validTotal = 100,
+  completions = 120,
+  silenceSeconds = 0.1,
+  opticsController = "HOLD",
+  opticsRuntime = "manual"
 } = {}) {
   return [
     `Capacity ${decodable || "—"} decodable / ${visible || "—"} visible · 1.0 scheduled/frame × 30.0 fps = 30.0 QR/s · submitted ${submitted.toFixed(1)} (100%) · completed ${completed.toFixed(1)}`,
-    `Output   valid ${validRate.toFixed(1)} · unique 0.0 · duplicate 0.0 QR/s · useful 0.0 KB/s`,
-    rolling,
+    `Output   valid ${validRate.toFixed(1)} · unique ${validRate.toFixed(1)} · duplicate 0.0 QR/s · useful 0.0 KB/s`,
+    "Rolling  —",
     `AutoOptics ${opticsController === "OFF" ? "off" : `${opticsController} · ${opticsRuntime}`}`,
     `Payload  valid ${validTotal} · completions ${completions} · silence ${silenceSeconds.toFixed(1)}s · decode gap —ms · completion gap —ms`,
     `Acquire  ${acquiring ? `${raceMs}ms race` : "done"} · robust hunts 2 · sighting retries 1 · finder hints ${finderHints}`
   ].join("\n");
 }
 
-// The controller must observe the element that renderFocusDiagnostics() fills.
-// transport-diagnostics contains a different pipeline report and was the cause
-// of the v0.5.363 controller being permanently stuck at waiting-diagnostics.
-const autoPhaseSource = await readFile(new URL("../receive/auto-phase.js", import.meta.url), "utf8");
-assert.match(autoPhaseSource, /getElementById\("focus-diagnostics"\)/);
-assert.doesNotMatch(autoPhaseSource, /const diagnostics = document\.getElementById\("transport-diagnostics"\)/);
+function sample(options, now, extras = {}) {
+  return {
+    ...parseAutoPhaseDiagnostics(diagnostics(options)),
+    now,
+    opticsAllowed: extras.opticsAllowed ?? true,
+    phaseAvailable: extras.phaseAvailable ?? true
+  };
+}
 
-// Keep the parser pinned to the real diagnostic shape reported by a device.
-const liveDiagnosticShape = `
+const recoverySource = await readFile(new URL("../receive/auto-phase.js", import.meta.url), "utf8");
+assert.match(recoverySource, /getElementById\("focus-diagnostics"\)/);
+assert.match(recoverySource, /<span>Auto recovery<\/span>/);
+assert.match(recoverySource, /camera-exposure-auto/);
+assert.doesNotMatch(recoverySource, /const diagnostics = document\.getElementById\("transport-diagnostics"\)/);
+
+// Keep the parser pinned to the diagnostic shape reported by a real device.
+const live = parseAutoPhaseDiagnostics(`
 Capacity 1 decodable / 1 visible · 1.0 scheduled/frame × 28.0 fps = 28.0 QR/s · submitted 28.0 (100%) · completed 29.0
 Output   valid 21.0 · unique 21.0 · duplicate 0.0 QR/s · useful 60.1 KB/s
 Rolling  —
 AutoOptics HOLD · manual · hold 90% · remembered winner proven · 8.31 ms · ISO 262 · hold 90%
 Payload  valid 957 · completions 2337 · silence 0.1s · decode gap 34ms · completion gap 33ms
-Acquire  done · robust hunts 1 · sighting retries 1 · finder hints 4`;
-const liveParsed = parseAutoPhaseDiagnostics(liveDiagnosticShape);
-assert.ok(liveParsed, "real receiver diagnostics must be parseable by Auto Phase");
-assert.equal(liveParsed.visibleSlots, 1);
-assert.equal(liveParsed.completedRate, 29);
-assert.equal(liveParsed.validRate, 21);
-assert.equal(liveParsed.finderHints, 4);
-assert.equal(liveParsed.opticsController, "HOLD");
+Acquire  done · robust hunts 1 · sighting retries 1 · finder hints 4`);
+assert.ok(live);
+assert.equal(live.visibleSlots, 1);
+assert.equal(live.completedRate, 29);
+assert.equal(live.validRate, 21);
 
-const parsed = parseAutoPhaseDiagnostics(diagnostics({
-  acquiring: false,
-  visible: 2,
-  decodable: 2,
-  submitted: 60,
-  completed: 50,
-  validRate: 10,
-  silenceSeconds: 0.2,
-  opticsController: "HOLD",
-  opticsRuntime: "manual"
-}));
-assert.equal(parsed.visibleSlots, 2);
-assert.equal(parsed.completedRate, 50);
-assert.equal(parsed.validRate, 10);
-assert.equal(parsed.successRatio, 0.2);
-assert.equal(parsed.opticsBusy, false);
-
-// Disabled means no automatic phase actuation under any health condition.
+// Disabled means no camera mutation.
 {
   const policy = new AutoPhasePolicy();
-  const sample = parseAutoPhaseDiagnostics(diagnostics());
-  sample.now = 5000;
-  assert.equal(policy.observe(sample).kind, "hold");
-  assert.equal(policy.pulseCount(), 0);
+  assert.equal(policy.observe(sample({ validRate: 0, silenceSeconds: 2 }, 5000)).kind, "hold");
 }
 
-// One QR has no possible geometric seam model. Poor decode health alone must
-// still request a phase change.
+// Healthy decode yield is GOOD and freezes camera mutations.
 {
   const policy = new AutoPhasePolicy();
   policy.setEnabled(true, 0);
-  let sample = parseAutoPhaseDiagnostics(diagnostics({
-    acquiring: false,
-    visible: 1,
-    decodable: 1,
-    submitted: 30,
-    completed: 30,
-    validRate: 0,
-    silenceSeconds: 1.2,
-    opticsController: "HOLD",
-    opticsRuntime: "manual"
-  }));
-  sample.now = 800;
-  assert.equal(policy.observe(sample).kind, "hold");
-  sample = { ...sample, now: 1600 };
-  const decision = policy.observe(sample);
-  assert.equal(decision.kind, "pulse");
-  assert.equal(decision.reason, "decode-silence");
+  const decision = policy.observe(sample({ validRate: 21, completed: 29, silenceSeconds: 0.1 }, 1000));
+  assert.equal(decision.reason, "healthy");
+  assert.equal(decision.state, "GOOD");
 }
 
-// Repeated finder sightings must not postpone acquisition forever. Seeing QR
-// structure but decoding nothing is itself evidence worth trying another phase.
+// One QR needs no seam model: sustained zero output tries phase first.
 {
   const policy = new AutoPhasePolicy();
   policy.setEnabled(true, 0);
-  let sample = parseAutoPhaseDiagnostics(diagnostics({ finderHints: 1, raceMs: 800 }));
-  sample.now = 800;
-  assert.equal(policy.observe(sample).kind, "hold");
-  sample = parseAutoPhaseDiagnostics(diagnostics({ finderHints: 6, raceMs: 1600 }));
-  sample.now = 1600;
-  const decision = policy.observe(sample);
-  assert.equal(decision.kind, "pulse");
-  assert.equal(decision.reason, "finder-no-decode");
+  assert.equal(policy.observe(sample({ validRate: 0, completed: 30, silenceSeconds: 1.2 }, 700)).reason, "bad-dwell");
+  const decision = policy.observe(sample({ validRate: 0, completed: 30, silenceSeconds: 1.8 }, 1400));
+  assert.equal(decision.kind, "phase");
+  assert.equal(decision.state, "RECOVER");
 }
 
-// With nothing visible, let an active optics mutation finish first. The blind
-// timer keeps running while optics works, so if optics still found nothing the
-// next actuator can be a phase step immediately rather than wasting another
-// full acquisition delay.
+// Recovery judges the actual decoder result after a pulse and immediately stops if healthy.
+{
+  const policy = new AutoPhasePolicy({ phaseSettleMs: 100, phaseMeasureMs: 100 });
+  policy.setEnabled(true, 0);
+  let bad = sample({ validRate: 0, completed: 30, silenceSeconds: 1.5 }, 700);
+  policy.observe(bad);
+  bad = { ...bad, now: 1400 };
+  assert.equal(policy.observe(bad).kind, "phase");
+  policy.noteActionStarted("phase", bad, 1400);
+  const good = sample({ validRate: 24, completed: 30, silenceSeconds: 0.1 }, 1650);
+  const result = policy.observe(good);
+  assert.equal(result.reason, "action-recovered");
+  assert.equal(result.state, "GOOD");
+}
+
+// Finder structure but no decode points to phase before optics.
 {
   const policy = new AutoPhasePolicy();
   policy.setEnabled(true, 0);
-  let sample = parseAutoPhaseDiagnostics(diagnostics({
-    finderHints: 0,
-    raceMs: 900,
-    opticsController: "LEARN",
-    opticsRuntime: "settling"
-  }));
-  sample.now = 900;
-  assert.equal(policy.observe(sample).reason, "optics-blind");
-  sample = parseAutoPhaseDiagnostics(diagnostics({
-    finderHints: 0,
-    raceMs: 1900,
-    opticsController: "ACQUIRE",
-    opticsRuntime: "ae"
-  }));
-  sample.now = 1900;
-  const decision = policy.observe(sample);
-  assert.equal(decision.kind, "pulse");
-  assert.equal(decision.reason, "blind-acquisition");
+  policy.observe(sample({ acquiring: true, raceMs: 800, finderHints: 1, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 800));
+  const decision = policy.observe(sample({ acquiring: true, raceMs: 1500, finderHints: 4, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 1500));
+  assert.equal(decision.kind, "phase");
 }
 
-// Healthy decoding freezes phase and eventually clears the old pulse budget.
+// Totally blind acquisition lets auto optics take the first recovery attempt.
 {
   const policy = new AutoPhasePolicy();
   policy.setEnabled(true, 0);
-  policy.notePulse(700);
-  let sample = parseAutoPhaseDiagnostics(diagnostics({
-    acquiring: false,
-    visible: 2,
-    decodable: 2,
-    submitted: 60,
-    completed: 50,
-    validRate: 35,
-    silenceSeconds: 0.1,
-    opticsController: "HOLD",
-    opticsRuntime: "manual"
-  }));
-  sample.now = 1700;
-  assert.equal(policy.observe(sample).reason, "healthy");
-  sample = { ...sample, now: 4100 };
-  assert.equal(policy.observe(sample).reason, "healthy");
-  assert.equal(policy.pulseCount(), 0);
+  policy.observe(sample({ acquiring: true, raceMs: 800, finderHints: 0, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 800));
+  const decision = policy.observe(sample({ acquiring: true, raceMs: 1800, finderHints: 0, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 1800));
+  assert.equal(decision.kind, "optics");
 }
 
-console.log("auto-phase decode-health policy smoke passed");
+// Manual optics are genuinely off limits; the same blind case becomes phase-only.
+{
+  const policy = new AutoPhasePolicy();
+  policy.setEnabled(true, 0);
+  policy.observe(sample({ acquiring: true, raceMs: 800, finderHints: 0, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 800, { opticsAllowed: false }));
+  const decision = policy.observe(sample({ acquiring: true, raceMs: 1800, finderHints: 0, visible: 0, decodable: 0, submitted: 0, completed: 0, validRate: 0, silenceSeconds: 2 }, 1800, { opticsAllowed: false }));
+  assert.equal(decision.kind, "phase");
+}
+
+// Locked recovery explores phase first, then permits one optics recalibration.
+{
+  const policy = new AutoPhasePolicy({ phaseSettleMs: 0, phaseMeasureMs: 0, phaseBeforeOptics: 3 });
+  policy.setEnabled(true, 0);
+  let bad = sample({ validRate: 0, completed: 30, silenceSeconds: 2 }, 700);
+  policy.observe(bad);
+  bad = { ...bad, now: 1400 };
+  for (let i = 0; i < 3; i++) {
+    assert.equal(policy.observe(bad).kind, "phase");
+    policy.noteActionStarted("phase", bad, bad.now);
+    bad = { ...bad, now: bad.now + 200 };
+    policy.observe(bad);
+    bad = { ...bad, now: bad.now + 200 };
+  }
+  assert.equal(policy.observe(bad).kind, "optics");
+}
+
+console.log("simple camera recovery policy smoke passed");
