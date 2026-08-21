@@ -1,3 +1,4 @@
+import { FocusController } from "../receive/focus-controller.js";
 import { GridLattice } from "../receive/grid-lattice.js";
 import { DecodeWorkerPool } from "./worker-pool.js";
 import {
@@ -146,7 +147,22 @@ async function handOffLongAe(track) {
   }
 }
 
+function installVerifiedDecodeBridge() {
+  const originalNoteValidDecode = FocusController.prototype.noteValidDecode;
+  FocusController.prototype.noteValidDecode = function(...args) {
+    const result = originalNoteValidDecode.apply(this, args);
+    const track = this.track;
+    // Let the rest of the synchronous decode path update/re-anchor GridLattice
+    // first. The microtask then sees the final recovery state from this QR.
+    if (track) queueMicrotask(() => {
+      if (!recoveryDiagnostics().active) void handOffLongAe(track);
+    });
+    return result;
+  };
+}
+
 function currentBrowserTrack() {
+  if (typeof document === "undefined") return void 0;
   const source = document.getElementById("video")?.srcObject;
   return source?.getVideoTracks?.().find((item) => item.readyState === "live");
 }
@@ -181,13 +197,6 @@ function installDiagnosticPolicy() {
       focus.textContent = next;
       mutating = false;
     }
-
-    // QR proof is stronger than AE's photographic preference. If the receiver
-    // is LOCKED and AE is still using a long shutter, restore a known QR-working
-    // manual state (or derive a short fallback if none exists) immediately.
-    const locked = /State\s+LOCKED/.test(original);
-    const valid = /Payload\s+valid\s+([1-9]\d*)/.test(original);
-    if (locked && valid && !state.active && track) void handOffLongAe(track);
   };
   diagnosticObserver = new MutationObserver(sync);
   diagnosticObserver.observe(focus, { childList: true, characterData: true, subtree: true });
@@ -199,6 +208,7 @@ function installReceiverRecoveryPolicy() {
   installed = true;
   installLatticeRecoveryBridge();
   installWarmWorkerRecovery();
+  installVerifiedDecodeBridge();
   installDiagnosticPolicy();
 }
 
