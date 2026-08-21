@@ -36,7 +36,7 @@ const track = {
   }
 };
 
-// Establish the QR-capable manual state. 50 units == 5 ms.
+// Establish a manual candidate, then prove it with a verified QR. 50 units == 5 ms.
 await applyAdvancedConstraint(track, {
   exposureMode: "manual",
   exposureTime: 50,
@@ -44,13 +44,17 @@ await applyAdvancedConstraint(track, {
 });
 assert.equal(cameraWrites, 1);
 assert.equal(settings.exposureMode, "manual");
+const controller = new FocusController(async () => true, () => {});
+controller.track = track;
+controller.noteValidDecode(0);
+await new Promise((resolve) => setTimeout(resolve, 0));
 
 beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
 await applyAdvancedConstraint(track, {
   exposureMode: "continuous",
   exposureCompensation: 0
 });
-assert.equal(cameraWrites, 1, "pose recovery must not surrender a known manual exposure to AE");
+assert.equal(cameraWrites, 1, "pose recovery must not surrender a QR-proven manual exposure to AE");
 assert.equal(settings.exposureMode, "manual");
 assert.equal(settings.exposureTime, 50);
 assert.equal(settings.iso, 166);
@@ -90,15 +94,12 @@ assert.equal(created.reduce((sum, worker) => sum + worker.terminateCount, 0), 2)
 endPoseRecovery();
 
 // Reproduce the phone log: photographic AE drifts to 40 ms / ISO 166 after a
-// previously working 5 ms / ISO 166 state. A verified QR decode must restore
-// the QR-proven state instead of deriving brightness from the bad AE value.
+// verified 5 ms / ISO 166 state. The next verified QR restores that proven state.
 Object.assign(settings, {
   exposureMode: "continuous",
   exposureTime: 400,
   iso: 166
 });
-const controller = new FocusController(async () => true, () => {});
-controller.track = track;
 controller.noteValidDecode(1);
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(settings.exposureMode, "manual");
