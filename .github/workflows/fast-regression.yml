@@ -74,6 +74,7 @@ jobs:
           node --input-type=module --check < receive/main.js
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
+          node --input-type=module --check < receive/optics-guard.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
 
@@ -84,6 +85,7 @@ jobs:
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
           node benchmark/auto-phase-policy-smoke.mjs
+          node benchmark/optics-guard-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
