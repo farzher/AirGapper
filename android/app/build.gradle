@@ -14,7 +14,13 @@ def appVersionParts = appVersion.tokenize(".")
 if (appVersionParts.size() != 3 || !appVersionParts.every { it ==~ /\d+/ }) {
     throw new GradleException("APP_VERSION must be numeric semver, got ${appVersion}")
 }
-def appVersionCode = appVersionParts.last().toInteger()
+def versionMajor = appVersionParts[0].toInteger()
+def versionMinor = appVersionParts[1].toInteger()
+def versionPatch = appVersionParts[2].toInteger()
+if (versionMinor >= 100 || versionPatch >= 10000) {
+    throw new GradleException("APP_VERSION exceeds Android versionCode allocation: ${appVersion}")
+}
+def appVersionCode = versionMajor * 1000000 + versionMinor * 10000 + versionPatch
 
 android {
     namespace "com.airgapper.app"
