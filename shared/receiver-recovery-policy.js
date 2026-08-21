@@ -54,8 +54,6 @@ function installLatticeRecoveryBridge() {
   GridLattice.prototype.tick = function(now) {
     const staleMs = this.candidate ? now - this.lastHitAt : 0;
     const result = originalTick.call(this, now);
-    // Start protecting the sensor at soft loss, before the 850 ms AutoOptics
-    // fallback can hand a good short shutter back to photographic AE.
     if (this.candidate && staleMs > SOFT_POSE_LOSS_MS && this.state === "PARTIAL_LOSS") {
       beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
     }
@@ -118,9 +116,6 @@ async function handOffLongAe(track) {
   try {
     const prior = rememberedManualExposure(track);
     const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
-    // If this track already decoded QR under a manual setting, that state is a
-    // much stronger prior than photographic AE. Restore its light product first.
-    // Only a track with no prior manual state derives brightness from AE.
     const targetProduct = prior
       ? prior.exposure * prior.iso
       : exposure * iso * QR_LIGHT_SCALE;
@@ -140,7 +135,7 @@ async function handOffLongAe(track) {
       exposureTime: shortExposure,
       iso: shortIso
     }] });
-    rememberManualExposure(track);
+    // This handoff is only a candidate until another verified QR proves it.
     longAeHandoffCounts.set(track, (longAeHandoffCounts.get(track) ?? 0) + 1);
   } catch {
     lastLongAeHandoffAt.delete(track);
@@ -154,11 +149,15 @@ function installVerifiedDecodeBridge() {
   FocusController.prototype.noteValidDecode = function(...args) {
     const result = originalNoteValidDecode.apply(this, args);
     const track = this.track;
-    // Let the rest of the synchronous decode path update/re-anchor GridLattice
-    // first. The microtask then sees the final recovery state from this QR.
-    if (track) queueMicrotask(() => {
-      if (!recoveryDiagnostics().active) void handOffLongAe(track);
-    });
+    if (track) {
+      // Only a CRC-verified QR promotes the current manual sensor state to the
+      // recovery prior. Speculative manual probes are never remembered as good.
+      rememberManualExposure(track);
+      // Let the rest of this synchronous decode path re-anchor GridLattice first.
+      queueMicrotask(() => {
+        if (!recoveryDiagnostics().active) void handOffLongAe(track);
+      });
+    }
     return result;
   };
 }
@@ -190,9 +189,6 @@ function installDiagnosticPolicy() {
     const track = currentBrowserTrack();
     const handoffs = track ? longAeHandoffCounts.get(track) ?? 0 : 0;
     let next = original;
-    // Use distinct labels instead of repeatedly rewriting the numeric value;
-    // MutationObserver callbacks are asynchronous, so this transformation must
-    // be idempotent when it observes its own textContent update.
     next = next.replace(/exposure writes (\d+)/, (_, raw) =>
       `exposure requests ${raw}${state.suppressedExposureWrites ? ` · AE holds ${state.suppressedExposureWrites}` : ""}`
     );
