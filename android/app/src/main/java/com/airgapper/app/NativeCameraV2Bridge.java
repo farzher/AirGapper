@@ -76,7 +76,7 @@ final class NativeCameraV2Bridge {
     private static final int PREVIEW_MAGIC = 0x32565041; // APV2
     private static final int PREVIEW_HEADER_BYTES = 28;
     private static final long PREVIEW_INTERVAL_NS = 33_333_333L;
-    private static final long PREVIEW_FALLBACK_INTERVAL_NS = 100_000_000L;
+    private static final long PREVIEW_FALLBACK_INTERVAL_NS = 50_000_000L;
     private static final long BINARY_ACK_GRACE_NS = 350_000_000L;
 
     private static final class FrameMetadata {
@@ -778,17 +778,16 @@ final class NativeCameraV2Bridge {
             ByteBuffer buffer = plane.getBuffer().duplicate();
             int offset = buffer.position();
             FrameMetadata metadata = metadataForTimestamp(image.getTimestamp());
+            // Preview must never wait behind a QR decode. Sampling the tiny 240px
+            // YUV preview here keeps display cadence independent of full-scan cost.
+            maybeSendYuvPreview(image);
             DecodePlan plan = claimPlan();
-            if (plan == null) {
-                maybeSendYuvPreview(image);
-                return;
-            }
+            if (plan == null) return;
             Image owned = image;
             image = null;
             decodeHandler.post(() -> {
                 try {
                     byte[] packet = decodePlan(plan, buffer, offset, owned.getWidth(), owned.getHeight(), plane.getRowStride(), metadata, 2);
-                    maybeSendYuvPreview(owned);
                     if (packet != null) postBinary(packet); else postEvent("decodeError", "Native YUV decode failed");
                 } catch (Exception error) { postEvent("decodeError", message(error)); }
                 finally { owned.close(); releaseDecode(); }
@@ -874,7 +873,7 @@ final class NativeCameraV2Bridge {
         if (planes == null || planes.length < 3 || image.getWidth() <= 0 || image.getHeight() <= 0) return;
         int width = image.getWidth();
         int height = image.getHeight();
-        int outWidth = Math.min(320, width);
+        int outWidth = Math.min(240, width);
         int outHeight = Math.max(2, Math.round(height * (outWidth / (float) width)));
         outWidth &= ~1;
         outHeight &= ~1;
@@ -901,7 +900,7 @@ final class NativeCameraV2Bridge {
         long now = System.nanoTime();
         if (now - lastPreviewNs < previewIntervalNs() || plane == null || width <= 0 || height <= 0) return;
         lastPreviewNs = now;
-        int outWidth = Math.min(320, width);
+        int outWidth = Math.min(240, width);
         int outHeight = Math.max(1, Math.round(height * (outWidth / (float) width)));
         byte[] packet = new byte[PREVIEW_HEADER_BYTES + outWidth * outHeight];
         ByteBuffer header = ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN);
