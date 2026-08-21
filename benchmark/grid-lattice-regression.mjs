@@ -96,23 +96,54 @@ assert(snapshot, "measured geometry after a coherent frame nudge must remain usa
 assert.equal(lattice.locked, true);
 assert.equal(snapshot.distributedFit, true);
 
-// Close-up regression: decode silence must never erase a CRC-proven wall. The
-// old 3200 ms tick timeout forced REACQUIRE, which in turn woke expensive cold
-// acquisition and Auto Optics races. Retain the stale wall as PARTIAL_LOSS.
-snapshot = lattice.tick(12000);
-assert(snapshot, "a proven wall must survive long decoder silence");
-assert.equal(lattice.locked, true, "silence must keep the lattice locked for bounded recovery");
-assert.equal(lattice.active, true, "silence must not fall back to cold acquisition");
+// Short camera/display miss bursts keep the proven wall alive.
+snapshot = lattice.tick(1750);
+assert(snapshot, "a short miss should preserve the tracked wall");
+assert.equal(lattice.locked, true);
+assert.notEqual(lattice.state, "REACQUIRE");
+
+// Once silence exceeds the soft timeout, keep only a bounded re-anchor window.
+snapshot = lattice.tick(1960);
+assert(snapshot, "soft loss should retain geometry briefly for QR re-anchor");
+assert.equal(lattice.locked, true);
+assert.equal(lattice.active, true);
 assert.equal(lattice.state, "PARTIAL_LOSS");
 
-// One CRC-valid QR at a radically different camera pose has four measured
-// corners, enough to rebuild the full projective wall transform immediately.
-snapshot = lattice.accept(detection(10, 12020, { dx: -260, dy: 310, scale: 1.75 }), frameWidth, frameHeight);
-assert(snapshot, "one verified QR must re-anchor a stale wall");
+// A stale pose must never pin the receiver indefinitely. Hard loss preserves
+// stream identity but drops the old homography so main.js can enter fresh acquisition.
+snapshot = lattice.tick(2361);
+assert.equal(snapshot, null, "hard loss should discard stale pose geometry");
+assert.equal(lattice.state, "REACQUIRE");
+assert.equal(lattice.locked, false);
+assert.equal(lattice.active, false);
+
+// One CRC-valid QR at a radically different camera pose can immediately seed
+// the same transfer again after the hard geometry reset.
+snapshot = lattice.accept(detection(10, 2380, { dx: -260, dy: 310, scale: 1.75 }), frameWidth, frameHeight);
+assert(snapshot, "one verified QR must relock after hard geometry reacquire");
 assert.equal(lattice.locked, true);
-assert.equal(lattice.state, "TRACK");
+assert.equal(lattice.state, "GRID_LOCK");
 assert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");
-assert.equal(snapshot.fitSlots, 1, "stale old-pose anchors must be discarded on the new pose");
+assert.equal(snapshot.fitSlots, 1);
+
+// Explicit pose invalidation (used by orientation changes) must be consumed by
+// tick so the receiver's existing REACQUIRE branch observes the locked->reacquire edge.
+assert.equal(lattice.invalidatePose("screen orientation changed"), true);
+snapshot = lattice.tick(2390);
+assert.equal(snapshot, null);
+assert.equal(lattice.state, "REACQUIRE");
+
+// Repeated per-slot self-heals during decode silence are evidence that the global
+// pose is wrong, not six independent local calibration failures.
+const healing = new GridLattice();
+for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
+  assert(healing.accept(detection(slot, at), frameWidth, frameHeight));
+}
+for (const [slot, at] of [[0, 300], [1, 320], [4, 340], [5, 360]]) {
+  healing.dropSlotCorrection(slot, at);
+}
+assert.equal(healing.tick(370), null, "repeated geometry self-heals should arm hard reacquire");
+assert.equal(healing.state, "REACQUIRE");
 
 // Extended-grid regression: Auto can declare a wall above the old 32-slot
 // ceiling and the lattice must expose every physical slot.
