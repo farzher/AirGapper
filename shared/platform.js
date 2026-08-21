@@ -1,7 +1,6 @@
 import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
 import {
   noteSuppressedExposureWrite,
-  rememberManualExposure,
   shouldPreserveManualExposure
 } from "./receiver-recovery-state.js";
 
@@ -29,17 +28,14 @@ function probeCameraCapabilities(track) {
 }
 async function applyAdvancedConstraint(track, set) {
   // Camera movement invalidates coordinates, not a QR-proven sensor setting.
-  // During a lattice pose recovery, ignore attempts to surrender a known manual
-  // exposure back to photographic AE. Autofocus constraints remain untouched.
+  // During a lattice pose recovery, ignore attempts to surrender a verified
+  // manual exposure back to photographic AE. Autofocus remains untouched.
   if (set?.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
     noteSuppressedExposureWrite();
     return true;
   }
   try {
     await track.applyConstraints({ advanced: [set] });
-    if (set?.exposureMode === "manual" || set?.exposureTime !== void 0 || set?.iso !== void 0) {
-      rememberManualExposure(track);
-    }
     return true;
   } catch {
     return false;
