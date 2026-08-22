@@ -104,9 +104,12 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
+          # Fail fast on the experimental low-count sidecar before running the
+          # longer production replay. The native worker smoke stays here too so
+          # both worker entry points are checked against the same built codecs.
           node benchmark/native-y8-worker-smoke.mjs
           node benchmark/low-count-temporal-worker-smoke.mjs
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-camera-bridge-smoke.mjs
           node benchmark/native-camera-v2-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
