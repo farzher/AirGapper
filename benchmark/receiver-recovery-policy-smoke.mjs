@@ -151,7 +151,8 @@ assert.equal(ceilingSettings.iso, 166, "shorter shutter should preserve the QR-p
 assert.equal(ceilingWrites, 1, "QR shutter ceiling should require one deterministic sensor write");
 
 // v0.5.370 regression: a QR that succeeds under short hardware AE freezes that
-// exact actual exposure into manual once. Subsequent AE/EV churn is suppressed,
+// actual exposure into manual once. The fake camera has a 0.1 ms shutter step,
+// so 3.33 ms correctly quantizes to 3.30 ms. Subsequent AE/EV churn is suppressed,
 // but focus fields in a mixed request still pass through independently.
 const shortSettings = {
   focusMode: "continuous",
@@ -177,9 +178,9 @@ shortController.noteValidDecode(3);
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(shortWrites, 1, "short hardware AE should freeze into manual exactly once");
 assert.equal(shortSettings.exposureMode, "manual");
-assert.equal(shortSettings.exposureTime, 33.3);
+assert.equal(shortSettings.exposureTime, 33);
 assert.equal(shortSettings.iso, 148);
-assert.equal(shortController.committedExposureTime, 33.3, "controller must adopt the physical QR-proven shutter");
+assert.equal(shortController.committedExposureTime, 33, "controller must adopt the physical QR-proven shutter");
 assert.equal(shortController.committedIso, 148, "controller must adopt the physical QR-proven ISO");
 
 await applyAdvancedConstraint(shortTrack, {
@@ -206,7 +207,7 @@ assert.deepEqual(shortSettings.pointsOfInterest, [{ x: 0.5, y: 0.5 }]);
 const syntheticAt = 10_000;
 assert.equal(latchVerifiedExposure(shortTrack, {
   exposureMode: "manual",
-  exposureTime: 33.3,
+  exposureTime: 33,
   iso: 148
 }, syntheticAt), true);
 assert.equal(verifiedExposureLatchDecision(shortTrack, syntheticAt + 1_999).hold, true);
