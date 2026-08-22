@@ -22,8 +22,8 @@ try {
     const width = 768;
     const height = 768;
     const payloadId = 0x51a7c0de;
-    const blockLen = 2500;
-    const totalLen = 6000;
+    const blockLen = 1800;
+    const totalLen = 4000;
     const k = Math.ceil(totalLen / blockLen); // 3 => real MDS sender packets.
 
     function block(seed) {
