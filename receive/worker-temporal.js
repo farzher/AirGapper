@@ -145,6 +145,20 @@ async function copyTemporalY(frame, data) {
   return { buffer, yPtr: y.offset, stride: y.stride, width: w, height: h };
 }
 
+function hasUsefulTemporalHistory(tracks, sourceSequence) {
+  const currentSequence = Number(sourceSequence);
+  if (!Number.isInteger(currentSequence)) return false;
+  return tracks.some((track) => {
+    const slot = Number(track?.slot ?? track?.id);
+    const dim = Math.round(Number(track?.dim));
+    if (!Number.isInteger(slot) || !Number.isInteger(dim)) return false;
+    return (temporalStitcher.history.get(slot) ?? []).some((previous) => {
+      const delta = currentSequence - Number(previous?.sourceSequence);
+      return previous?.dim === dim && delta >= 1 && delta <= 2;
+    });
+  });
+}
+
 async function augmentLowCountResult(capture) {
   const { data, tracks, retainedFrame, final } = capture;
   if (!final) return null;
@@ -152,7 +166,12 @@ async function augmentLowCountResult(capture) {
   if (!copied) return final;
   const already = decodedSlots(final.message, tracks);
   const needsRecovery = already.size < tracks.length;
-  const zx = needsRecovery ? await temporalCodec() : null;
+  // The first low-count frame only needs to seed the tiny module-grid history.
+  // Do not instantiate a second WASM codec until there is actually an adjacent
+  // sample that can be stitched. This keeps lock-on cheap and avoids making a
+  // one-frame miss wait on an unnecessary codec startup.
+  const canStitch = needsRecovery && hasUsefulTemporalHistory(tracks, data.sourceSequence);
+  const zx = canStitch ? await temporalCodec() : null;
   const recovered = temporalStitcher.recover({
     heap: copied.buffer,
     yPtr: copied.yPtr,
