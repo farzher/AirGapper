@@ -1,26 +1,30 @@
 import { parseFrame } from "../shared/protocol.js";
-import { TemporalQrStitcher, temporalEnabledForCount } from "./temporal-qr-stitch.js";
+import {
+  PRIMARY_SEAMS,
+  SECONDARY_SEAMS,
+  TemporalQrStitcher,
+  sampleModuleGrid,
+  stitchModuleRows,
+  temporalEnabledForCount
+} from "./temporal-qr-stitch.js";
 
 const scope = self;
 const nativePostMessage = scope.postMessage.bind(scope);
 const temporalStitcher = new TemporalQrStitcher();
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 let activeCapture = null;
-let temporalCodecPromise;
-let syntheticPtr = 0;
-let syntheticCapacity = 0;
+let internalDecodeId = -1000000;
 
 function postNative(message, transfer) {
   if (transfer?.length) nativePostMessage(message, transfer);
   else nativePostMessage(message);
 }
 
-// Only low-count jobs with a successfully snapshotted Y plane are intercepted.
-// Search/acquisition and dense workers never instantiate this module at all, and
-// a low-count snapshot failure falls straight through to the production reply.
+// Only the explicitly specialized 1-2 QR worker uses this wrapper. Search,
+// acquisition and dense workers stay on the untouched production worker.js.
 scope.postMessage = (message, transfer) => {
   const capture = activeCapture;
-  if (capture?.retainedY && message?.id === capture.id && !message.preflight) {
+  if (capture?.holdFinal && message?.id === capture.id && !message.preflight) {
     capture.final = { message, transfer };
     return;
   }
@@ -30,67 +34,6 @@ scope.postMessage = (message, transfer) => {
 const productionWorkerUrl = scalarCodec ? "./worker.js?scalar=1" : "./worker.js";
 await import(productionWorkerUrl);
 const productionOnMessage = scope.onmessage;
-
-function temporalCodec() {
-  if (!temporalCodecPromise) {
-    temporalCodecPromise = import(scalarCodec ? "../codec/scalar/airgapper_codec.js" : "../codec/airgapper_codec.js")
-      .then(({ default: AirGapperCodec }) => AirGapperCodec());
-  }
-  return temporalCodecPromise;
-}
-
-function ensureSyntheticBuffer(zx, bytes) {
-  if (syntheticPtr && bytes <= syntheticCapacity) return syntheticPtr;
-  const next = zx._malloc(bytes);
-  if (!next) return 0;
-  if (syntheticPtr) zx._free(syntheticPtr);
-  syntheticPtr = next;
-  syntheticCapacity = bytes;
-  return syntheticPtr;
-}
-
-function renderSyntheticGrid(zx, grid, dim) {
-  const scale = 3;
-  const quietModules = 4;
-  const size = (dim + quietModules * 2) * scale;
-  const bytes = size * size;
-  const ptr = ensureSyntheticBuffer(zx, bytes);
-  if (!ptr) return null;
-  zx.HEAPU8.fill(255, ptr, ptr + bytes);
-  const quiet = quietModules * scale;
-  for (let my = 0; my < dim; my++) {
-    const sourceRow = my * dim;
-    const targetY = quiet + my * scale;
-    for (let mx = 0; mx < dim; mx++) {
-      const value = grid[sourceRow + mx];
-      const targetX = quiet + mx * scale;
-      for (let sy = 0; sy < scale; sy++) {
-        const row = ptr + (targetY + sy) * size + targetX;
-        zx.HEAPU8.fill(value, row, row + scale);
-      }
-    }
-  }
-  return { ptr, size };
-}
-
-function decodeSyntheticGrid(zx, grid, dim, expectedSlot) {
-  const synthetic = renderSyntheticGrid(zx, grid, dim);
-  if (!synthetic) return null;
-  const decoded = zx.readDenseY(synthetic.ptr, synthetic.size, synthetic.size, synthetic.size, 1);
-  try {
-    for (let i = 0; i < decoded.size(); i++) {
-      const result = decoded.get(i);
-      if (!result.valid || !result.bytes?.length) continue;
-      const bytes = Uint8Array.from(result.bytes);
-      const packet = parseFrame(bytes);
-      if (!packet || packet.header.slotIndex !== expectedSlot) continue;
-      return { bytes, header: packet.header, modules: result.modules || dim };
-    }
-  } finally {
-    decoded.delete();
-  }
-  return null;
-}
 
 function boundsOf(quad) {
   if (!quad) return null;
@@ -145,43 +88,179 @@ async function copyTemporalY(frame, data) {
   return { buffer, yPtr: y.offset, stride: y.stride, width: w, height: h };
 }
 
-function hasUsefulTemporalHistory(tracks, sourceSequence) {
-  const currentSequence = Number(sourceSequence);
-  if (!Number.isInteger(currentSequence)) return false;
-  return tracks.some((track) => {
+function quadDistanceFraction(a, b) {
+  if (!a || !b) return Infinity;
+  const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
+  if (!names.every((name) => Number.isFinite(a[name]?.x) && Number.isFinite(a[name]?.y) &&
+      Number.isFinite(b[name]?.x) && Number.isFinite(b[name]?.y))) return Infinity;
+  const edge = (q, p, r) => Math.hypot(q[p].x - q[r].x, q[p].y - q[r].y);
+  const scale = Math.max(1, Math.min(
+    edge(a, "topLeft", "topRight"),
+    edge(a, "topRight", "bottomRight"),
+    edge(a, "bottomRight", "bottomLeft"),
+    edge(a, "bottomLeft", "topLeft")
+  ));
+  const mean = names.reduce((sum, name) =>
+    sum + Math.hypot(a[name].x - b[name].x, a[name].y - b[name].y), 0) / names.length;
+  return mean / scale;
+}
+
+function renderSyntheticGrid(grid, dim) {
+  const scale = 3;
+  const quietModules = 4;
+  const quiet = quietModules * scale;
+  const qrPixels = dim * scale;
+  const size = qrPixels + quiet * 2;
+  const y = new Uint8Array(size * size);
+  y.fill(255);
+  for (let my = 0; my < dim; my++) {
+    const sourceRow = my * dim;
+    const targetY = quiet + my * scale;
+    for (let mx = 0; mx < dim; mx++) {
+      const value = grid[sourceRow + mx];
+      const targetX = quiet + mx * scale;
+      for (let sy = 0; sy < scale; sy++) {
+        y.fill(value, (targetY + sy) * size + targetX, (targetY + sy) * size + targetX + scale);
+      }
+    }
+  }
+  return {
+    buffer: y.buffer,
+    size,
+    quad: {
+      topLeft: { x: quiet, y: quiet },
+      topRight: { x: quiet + qrPixels, y: quiet },
+      bottomRight: { x: quiet + qrPixels, y: quiet + qrPixels },
+      bottomLeft: { x: quiet, y: quiet + qrPixels }
+    }
+  };
+}
+
+// Reuse worker.js's already-loaded production codec. Calling its handler on a
+// tiny synthetic Y8 QR avoids a second WASM instance entirely, and the normal
+// guided decoder + AirGapper CRC remain the acceptance oracle.
+async function decodeSyntheticGrid(grid, dim, expectedSlot) {
+  const synthetic = renderSyntheticGrid(grid, dim);
+  const id = internalDecodeId--;
+  const capture = { id, holdFinal: true, final: null };
+  const previousCapture = activeCapture;
+  activeCapture = capture;
+  try {
+    await productionOnMessage.call(scope, { data: {
+      id,
+      videoFrame: synthetic.buffer,
+      cropX: 0,
+      cropY: 0,
+      w: synthetic.size,
+      h: synthetic.size,
+      ox: 0,
+      oy: 0,
+      full: false,
+      tracks: [{ slot: expectedSlot, dim, quad: synthetic.quad }],
+      pixelFormat: "y8",
+      yOffset: 0,
+      yStride: synthetic.size,
+      payloadBytes: synthetic.buffer.byteLength,
+      sourceSequence: 0,
+      strictHotPath: true,
+      guidedDecode: true,
+      guidedFallbackMask: 0xffffffff,
+      guidedRepairMask: 0xffffffff,
+      repeatFilter: false,
+      isolated: true
+    } });
+  } catch {
+    return null;
+  } finally {
+    activeCapture = previousCapture;
+  }
+  const reply = capture.final?.message;
+  for (const symbol of reply?.symbols ?? []) {
+    const bytes = symbol?.bytes ? Uint8Array.from(symbol.bytes) : null;
+    if (!bytes?.length) continue;
+    let header = symbol.header;
+    if (!header) {
+      try { header = parseFrame(bytes)?.header; } catch {}
+    }
+    if (Number(header?.slotIndex) !== expectedSlot) continue;
+    return { bytes, header, modules: symbol.modules || dim };
+  }
+  return null;
+}
+
+async function recoverTemporal({ retainedY, data, tracks, already }) {
+  const metrics = {
+    attempts: 0,
+    hits: 0,
+    sampled: 0,
+    skipped: 0,
+    seam: void 0,
+    orientation: void 0,
+    sourceDelta: void 0
+  };
+  const symbols = [];
+  const currentSequence = Number(data.sourceSequence);
+  if (!Number.isInteger(currentSequence)) return { symbols, metrics };
+
+  for (const track of tracks) {
     const slot = Number(track?.slot ?? track?.id);
-    const dim = Math.round(Number(track?.dim));
-    if (!Number.isInteger(slot) || !Number.isInteger(dim)) return false;
-    return (temporalStitcher.history.get(slot) ?? []).some((previous) => {
-      const delta = currentSequence - Number(previous?.sourceSequence);
-      return previous?.dim === dim && delta >= 1 && delta <= 2;
-    });
-  });
+    if (!Number.isInteger(slot)) continue;
+    const current = sampleModuleGrid(
+      retainedY.buffer,
+      retainedY.yPtr,
+      retainedY.width,
+      retainedY.height,
+      retainedY.stride,
+      Number(data.ox) || 0,
+      Number(data.oy) || 0,
+      track,
+      currentSequence
+    );
+    if (!current) {
+      metrics.skipped++;
+      continue;
+    }
+    metrics.sampled++;
+    const prior = temporalStitcher.history.get(slot) ?? [];
+
+    if (!already.has(slot)) {
+      pairLoop:
+      for (const previous of prior) {
+        const delta = currentSequence - Number(previous.sourceSequence);
+        if (delta < 1 || delta > 2 || previous.dim !== current.dim) continue;
+        if (quadDistanceFraction(previous.quad, current.quad) > 0.08) continue;
+        const seams = delta === 1 ? PRIMARY_SEAMS : SECONDARY_SEAMS;
+        for (const fraction of seams) {
+          const seam = Math.max(1, Math.min(current.dim - 1, Math.round(current.dim * fraction)));
+          for (const orientation of ["current-top/previous-bottom", "previous-top/current-bottom"]) {
+            const grid = stitchModuleRows(previous, current, seam, orientation);
+            if (!grid) continue;
+            metrics.attempts++;
+            const decoded = await decodeSyntheticGrid(grid, current.dim, slot);
+            if (!decoded) continue;
+            metrics.hits++;
+            metrics.seam = seam;
+            metrics.orientation = orientation;
+            metrics.sourceDelta = delta;
+            symbols.push({ ...decoded, seam, orientation, sourceDelta: delta, slot, track });
+            break pairLoop;
+          }
+        }
+      }
+    }
+
+    const next = [current, ...prior.filter((item) => item.sourceSequence < currentSequence)].slice(0, 2);
+    temporalStitcher.history.set(slot, next);
+  }
+  return { symbols, metrics };
 }
 
 async function augmentLowCountResult(capture) {
   const { data, tracks, retainedY, final } = capture;
   if (!final || !retainedY) return final;
   const already = decodedSlots(final.message, tracks);
-  const needsRecovery = already.size < tracks.length;
-  // Always record the current physical module sample. The second codec is only
-  // loaded when an adjacent historical sample exists and ordinary QR decoding
-  // actually missed a low-count slot.
-  const canStitch = needsRecovery && hasUsefulTemporalHistory(tracks, data.sourceSequence);
-  const zx = canStitch ? await temporalCodec() : null;
-  const recovered = temporalStitcher.recover({
-    heap: retainedY.buffer,
-    yPtr: retainedY.yPtr,
-    width: retainedY.width,
-    height: retainedY.height,
-    stride: retainedY.stride,
-    ox: Number(data.ox) || 0,
-    oy: Number(data.oy) || 0,
-    tracks,
-    sourceSequence: data.sourceSequence,
-    decodedSlots: already,
-    decodeGrid: zx ? (grid, dim, slot) => decodeSyntheticGrid(zx, grid, dim, slot) : void 0
-  });
+  const recovered = await recoverTemporal({ retainedY, data, tracks, already });
+
   for (const symbol of recovered.symbols) {
     const quad = symbol.track.quad;
     final.message.symbols ??= [];
@@ -228,17 +307,20 @@ scope.onmessage = async (event) => {
   const lowCount = temporalEnabledForCount(tracks.length) && !data.full && data.pixelFormat === "y8";
   if (!lowCount && tracks.length > 2) temporalStitcher.reset();
 
-  // Snapshot low-count luminance immediately while the transferred VideoFrame
-  // is unquestionably live. copyTo is non-destructive, so production worker.js
-  // still receives and owns the original frame. Keeping only plain bytes avoids
-  // holding a cloned VideoFrame across WASM decode and eliminates camera-frame
-  // lifetime/GC stalls.
+  // Snapshot luminance before production owns/closes the transferred frame.
   let retainedY = null;
   if (lowCount) {
     try { retainedY = await copyTemporalY(data.videoFrame, data); } catch {}
   }
 
-  const capture = { id: data.id, data, tracks, retainedY, final: null };
+  const capture = {
+    id: data.id,
+    data,
+    tracks,
+    retainedY,
+    holdFinal: Boolean(retainedY),
+    final: null
+  };
   activeCapture = capture;
   try {
     await productionOnMessage.call(scope, event);
@@ -246,8 +328,7 @@ scope.onmessage = async (event) => {
     if (activeCapture === capture) activeCapture = null;
   }
 
-  // If the Y snapshot failed, the production final was never intercepted and
-  // has already gone to the main thread. Otherwise augment exactly that final.
+  // Snapshot failure means the ordinary production final already went out.
   if (!retainedY) return;
   try {
     const final = await augmentLowCountResult(capture);
