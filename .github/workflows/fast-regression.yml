@@ -75,6 +75,8 @@ jobs:
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
+          node --input-type=module --check < receive/temporal-qr-stitch.js
+          node --input-type=module --check < receive/worker-temporal.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
           node --input-type=module --check < shared/receiver-recovery-state.js
@@ -89,6 +91,8 @@ jobs:
           node benchmark/auto-phase-policy-smoke.mjs
           node benchmark/optics-guard-smoke.mjs
           node benchmark/receiver-recovery-policy-smoke.mjs
+          node benchmark/temporal-qr-stitch-smoke.mjs
+          node benchmark/low-count-recovery-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
