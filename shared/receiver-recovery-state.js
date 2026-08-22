@@ -9,7 +9,11 @@ let suppressedExposureWrites = 0;
 let suppressedWorkerRestarts = 0;
 
 function poseRecoveryReasonEligible(reason = "") {
-  return /whole lattice stale|screen orientation changed|repeated slot geometry self-heals|tracked geometry collapsed/i.test(String(reason));
+  // Slot-level self-heals are deliberately excluded: a bad local residual is
+  // never enough evidence to discard the whole wall. Hard recovery belongs to
+  // actual whole-wall silence, explicit orientation changes, or a true global
+  // tracked-geometry collapse.
+  return /whole lattice stale|screen orientation changed|tracked geometry collapsed/i.test(String(reason));
 }
 
 function setExposureProtectionEnabled(enabled) {
