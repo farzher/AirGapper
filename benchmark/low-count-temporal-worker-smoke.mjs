@@ -37,6 +37,9 @@ try {
     };
     worker.onmessage = (event) => {
       if (event.data?.id < 4101 || event.data?.id > 4102) return;
+      // Match DecodeWorkerPool: preflight carries only the cheap frame signature
+      // and does not free the worker or permit the next camera job yet.
+      if (event.data?.preflight) return;
       replies.push({ ...event.data, wallMs: performance.now() - started });
       if (replies.length === 1) {
         post(4102, 2, true);
