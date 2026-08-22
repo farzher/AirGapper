@@ -2,10 +2,13 @@ import { FocusController } from "../receive/focus-controller.js";
 import { GridLattice } from "../receive/grid-lattice.js";
 import { DecodeWorkerPool } from "./worker-pool.js";
 import {
+  VERIFIED_QR_MAX_EXPOSURE,
   armWarmWorkerRestartSuppression,
   beginPoseRecovery,
   consumeWarmWorkerRestartSuppression,
   endPoseRecovery,
+  latchVerifiedExposure,
+  noteExposureMotion,
   noteSuppressedWorkerRestart,
   poseRecoveryReasonEligible,
   recoveryDiagnostics,
@@ -15,7 +18,7 @@ import {
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
-const LONG_AE_EXPOSURE = 50; // 5.0 ms hard QR shutter ceiling; units are 0.1 ms.
+const LONG_AE_EXPOSURE = VERIFIED_QR_MAX_EXPOSURE;
 const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
@@ -24,6 +27,7 @@ let diagnosticObserver;
 const lastLongAeHandoffAt = new WeakMap();
 const longAeHandoffCounts = new WeakMap();
 const longAeHandoffRunning = new WeakSet();
+const verifiedFreezeRunning = new WeakSet();
 
 function installLatticeRecoveryBridge() {
   const originalReset = GridLattice.prototype.reset;
@@ -97,6 +101,66 @@ function quantize(value, range) {
   ));
 }
 
+async function freezeVerifiedShortExposure(controller, track) {
+  if (!recoveryDiagnostics().exposureProtectionEnabled) return false;
+  if (!track || track.readyState !== "live" || verifiedFreezeRunning.has(track)) return false;
+  const settings = track.getSettings?.() ?? {};
+  const exposure = Number(settings.exposureTime);
+  const iso = Number(settings.iso);
+  if (!(exposure > 0) || exposure > VERIFIED_QR_MAX_EXPOSURE || !(iso > 0)) return false;
+  const caps = track.getCapabilities?.() ?? {};
+  if (!Array.isArray(caps.exposureMode) || !caps.exposureMode.includes("manual") || !caps.exposureTime || !caps.iso) return false;
+
+  verifiedFreezeRunning.add(track);
+  try {
+    let actual = settings;
+    if (settings.exposureMode !== "manual") {
+      const frozenExposure = quantize(exposure, caps.exposureTime);
+      const frozenIso = quantize(iso, caps.iso);
+      await track.applyConstraints({ advanced: [{
+        exposureMode: "manual",
+        exposureTime: frozenExposure,
+        iso: frozenIso
+      }] });
+      actual = track.getSettings?.() ?? {
+        ...settings,
+        exposureMode: "manual",
+        exposureTime: frozenExposure,
+        iso: frozenIso
+      };
+    }
+    const finalExposure = Number(actual.exposureTime);
+    const finalIso = Number(actual.iso);
+    if (!(finalExposure > 0) || finalExposure > VERIFIED_QR_MAX_EXPOSURE || !(finalIso > 0)) return false;
+
+    // Some Android camera stacks accept manual exposure but omit/lag the mode
+    // field in getSettings(). The successful manual constraint plus unchanged
+    // short shutter/ISO is enough to treat this exact sensor state as proven.
+    const proven = {
+      ...actual,
+      exposureMode: "manual",
+      exposureTime: finalExposure,
+      iso: finalIso
+    };
+    rememberManualExposure(track, proven);
+    latchVerifiedExposure(track, proven);
+
+    // Synchronize the existing focus/optics controller with the physical camera.
+    // This removes the v0.5.369 split where diagnostics said committed 8.31 ms
+    // while the sensor was actually running a QR-proven 3.33 ms shutter.
+    controller?.commitSettings?.(proven);
+    if (controller) {
+      controller.optimizeLearnedExposure = finalExposure;
+      controller.optimizeLearnedIso = finalIso;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    verifiedFreezeRunning.delete(track);
+  }
+}
+
 async function handOffLongAe(track) {
   if (!recoveryDiagnostics().exposureProtectionEnabled) return;
   if (!track || track.readyState !== "live" || longAeHandoffRunning.has(track)) return;
@@ -144,18 +208,45 @@ async function handOffLongAe(track) {
   }
 }
 
+function geometryMoved(a, b) {
+  if (!a || !b) return false;
+  const center = Math.hypot(Number(a.x) - Number(b.x), Number(a.y) - Number(b.y));
+  const scaleA = Number(a.scale);
+  const scaleB = Number(b.scale);
+  const scale = scaleA > 0 && scaleB > 0 ? Math.abs(Math.log2(scaleA / scaleB)) : 0;
+  const perspective = Math.max(
+    Math.abs(Number(a.perspectiveX ?? 0) - Number(b.perspectiveX ?? 0)),
+    Math.abs(Number(a.perspectiveY ?? 0) - Number(b.perspectiveY ?? 0))
+  );
+  return center > 0.015 || scale > 0.04 || perspective > 0.04;
+}
+
+function installGeometryMotionBridge() {
+  const originalObserve = FocusController.prototype.observe;
+  FocusController.prototype.observe = function(id, geometry, ...args) {
+    const previous = this.latest?.geometry;
+    if (this.track && geometryMoved(geometry, previous)) noteExposureMotion(this.track);
+    return originalObserve.call(this, id, geometry, ...args);
+  };
+}
+
 function installVerifiedDecodeBridge() {
   const originalNoteValidDecode = FocusController.prototype.noteValidDecode;
   FocusController.prototype.noteValidDecode = function(...args) {
     const result = originalNoteValidDecode.apply(this, args);
     const track = this.track;
     if (track) {
-      // Only a CRC-verified QR promotes the current manual sensor state to the
-      // recovery prior. Speculative manual probes are never remembered as good.
+      // Preserve any already-manual QR-proven state as the fallback used by a
+      // later long-AE escape. Speculative manual probes still are not promoted.
       rememberManualExposure(track);
-      // Let the rest of this synchronous decode path re-anchor GridLattice first.
-      queueMicrotask(() => {
-        if (!recoveryDiagnostics().active) void handOffLongAe(track);
+      const controller = this;
+      // Let synchronous decode/lattice work finish, then make this verified QR
+      // authoritative for exposure. Short settings are frozen exactly; long
+      // settings get one deterministic short-shutter candidate for the NEXT QR
+      // to prove.
+      queueMicrotask(async () => {
+        if (await freezeVerifiedShortExposure(controller, track)) return;
+        if (!recoveryDiagnostics().active) await handOffLongAe(track);
       });
     }
     return result;
@@ -196,8 +287,16 @@ function installDiagnosticPolicy() {
       `worker restart requests ${raw}${state.suppressedWorkerRestarts ? ` · warm keeps ${state.suppressedWorkerRestarts}` : ""}`
     );
     next = next.replace(/ · long-AE handoffs \d+/g, "");
-    if (handoffs) {
-      next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · long-AE handoffs ${handoffs}`);
+    next = next.replace(/ · QR latch [^·\n]+/g, "");
+    next = next.replace(/ · exposure rescues \d+/g, "");
+    const annotations = [];
+    if (handoffs) annotations.push(`long-AE handoffs ${handoffs}`);
+    if (state.verifiedExposure) {
+      annotations.push(`QR latch ${(state.verifiedExposure.exposure / 10).toFixed(2)} ms/ISO ${Math.round(state.verifiedExposure.iso)}`);
+    }
+    if (state.exposureRescueCount) annotations.push(`exposure rescues ${state.exposureRescueCount}`);
+    if (annotations.length) {
+      next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · ${annotations.join(" · ")}`);
     }
     if (next !== original) {
       mutating = true;
@@ -215,6 +314,7 @@ function installReceiverRecoveryPolicy() {
   installed = true;
   installLatticeRecoveryBridge();
   installWarmWorkerRecovery();
+  installGeometryMotionBridge();
   installVerifiedDecodeBridge();
   installAutomaticOpticsToggleBridge();
   installDiagnosticPolicy();
