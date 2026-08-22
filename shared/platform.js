@@ -1,4 +1,5 @@
 import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
+import { installTemporalBackpressure } from "./temporal-backpressure.js";
 import {
   consumeExposureRescue,
   noteSuppressedExposureWrite,
@@ -7,6 +8,7 @@ import {
 } from "./receiver-recovery-state.js";
 
 installReceiverRecoveryPolicy();
+installTemporalBackpressure();
 
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
