@@ -50,7 +50,7 @@ try {
     }
 
     const packets = [packet(17, 0x11111111), packet(18, 0x22222222), packet(19, 0x33333333)];
-    const qrs = packets.map((bytes) => QRCode.create(bytes, { version: 40, errorCorrectionLevel: "L" }));
+    const qrs = packets.map((bytes) => QRCode.create([{ data: bytes, mode: "byte" }], { version: 40, errorCorrectionLevel: "L" }));
     if (!qrs.every((qr) => qr.modules.size === dim)) throw new Error("proof did not generate v40 QR matrices");
 
     const quad = {
