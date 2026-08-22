@@ -76,6 +76,7 @@ jobs:
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
           node --input-type=module --check < receive/temporal-qr-stitch.js
+          node --input-type=module --check < receive/temporal-fast-sampler.js
           node --input-type=module --check < receive/worker-temporal.js
           node --input-type=module --check < receive/worker-temporal-v2.js
           node --input-type=module --check < shared/camera-start-guard.js
@@ -108,6 +109,10 @@ jobs:
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/native-y8-worker-smoke.mjs
+          # This is the proof gate: two individually undecodable v40 rolling-
+          # shutter hybrids must reconstruct the exact middle AirGapper packet
+          # and pass its CRC before temporal recovery is allowed to ship.
+          node benchmark/temporal-cross-frame-proof.mjs
           node benchmark/temporal-backpressure-browser-smoke.mjs
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-camera-bridge-smoke.mjs
