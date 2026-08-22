@@ -23,7 +23,8 @@ try {
     const height = 768;
     const payloadId = 0x51a7c0de;
     const blockLen = 2500;
-    const totalLen = 6000; // k=3 => real MDS sender packets.
+    const totalLen = 6000;
+    const k = Math.ceil(totalLen / blockLen); // 3 => real MDS sender packets.
 
     function block(seed) {
       const out = new Uint8Array(blockLen);
@@ -38,6 +39,7 @@ try {
     function packet(seq, seed) {
       return packFrame({
         mode: "mds",
+        k,
         seq,
         layoutId: 0,
         slotIndex: 0,
@@ -123,7 +125,6 @@ try {
 
     const worker = new Worker(new URL("/receive/worker-temporal-v2.js", location.href), { type: "module" });
     let token = 0;
-    const replies = new Map();
     const waiters = new Map();
     worker.onerror = (event) => {
       for (const reject of waiters.values()) reject(new Error(event.message || "temporal proof worker failed"));
@@ -132,7 +133,6 @@ try {
     worker.onmessage = (event) => {
       const data = event.data;
       if (!data?.temporalV2) return;
-      replies.set(data.token, data);
       const waiter = waiters.get(data.token);
       if (waiter) { waiters.delete(data.token); waiter(data); }
     };
