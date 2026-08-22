@@ -117,4 +117,32 @@ assert.equal(settings.exposureTime, 50, "verified QR should restore the prior 5 
 assert.equal(settings.iso, 166, "verified QR should restore the prior QR-proven ISO");
 assert.equal(cameraWrites, 2, "long-AE escape should require exactly one sensor write");
 
+// A QR that succeeds at a long *manual* shutter is still temporally risky.
+// Clamp it once to 5 ms while preserving the proven exposure product with ISO.
+const ceilingSettings = {
+  exposureMode: "manual",
+  exposureTime: 83.1,
+  iso: 100,
+  exposureCompensation: 0,
+  frameRate: 30
+};
+let ceilingWrites = 0;
+const ceilingTrack = {
+  readyState: "live",
+  getCapabilities: track.getCapabilities,
+  getSettings() { return { ...ceilingSettings }; },
+  async applyConstraints({ advanced }) {
+    ceilingWrites++;
+    Object.assign(ceilingSettings, advanced[0]);
+  }
+};
+const ceilingController = new FocusController(async () => true, () => {});
+ceilingController.track = ceilingTrack;
+ceilingController.noteValidDecode(2);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(ceilingSettings.exposureMode, "manual");
+assert.equal(ceilingSettings.exposureTime, 50, "verified QR shutter must be capped at 5 ms");
+assert.equal(ceilingSettings.iso, 166, "shorter shutter should preserve the QR-proven light product with ISO");
+assert.equal(ceilingWrites, 1, "QR shutter ceiling should require one deterministic sensor write");
+
 console.log("receiver recovery policy smoke: ok");

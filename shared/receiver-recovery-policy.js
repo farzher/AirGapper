@@ -15,8 +15,8 @@ import {
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
-const LONG_AE_EXPOSURE = 55; // 5.5 ms; browser exposureTime units are 0.1 ms.
-const MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms when no prior QR-proven state exists.
+const LONG_AE_EXPOSURE = 50; // 5.0 ms hard QR shutter ceiling; units are 0.1 ms.
+const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -105,7 +105,7 @@ async function handOffLongAe(track) {
   const settings = track.getSettings?.() ?? {};
   const exposure = Number(settings.exposureTime);
   const iso = Number(settings.iso);
-  if (settings.exposureMode !== "continuous" || !(exposure > LONG_AE_EXPOSURE) || !(iso > 0)) return;
+  if (!(exposure > LONG_AE_EXPOSURE) || !(iso > 0)) return;
   const caps = track.getCapabilities?.() ?? {};
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
