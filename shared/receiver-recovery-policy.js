@@ -94,11 +94,6 @@ function installLatticeRecoveryBridge() {
   GridLattice.prototype.nudgeFromSightings = function(sightings, at = this.lastHitAt) {
     const result = originalNudgeFromSightings.call(this, sightings, at);
     const count = latticeSlotCount(this);
-    // With one QR there is no peer slot that can prove the wall stayed put.
-    // A conservative finder recenter is still strong evidence that the known QR
-    // remains in view, so let it extend pose lifetime without pretending a CRC
-    // packet was decoded. Two-QR mode requires both coherent sightings in the
-    // underlying lattice implementation before this result can be non-null.
     if (result && count >= 1 && count <= 2) lowCountFinderEvidenceAt.set(this, at);
     return result;
   };
@@ -114,12 +109,6 @@ function installLatticeRecoveryBridge() {
 
     if (lowCount && this.candidate && !this.pendingInvalidationReason &&
         staleMs > STOCK_HARD_POSE_LOSS_MS && hardEvidenceAge <= hardLimit) {
-      // GridLattice's stock 900 ms hard loss is correct for dense walls, where
-      // many peers disappearing together is strong pose evidence. For 1-2 QR it
-      // is often just a rolling/display seam. Temporarily present the original
-      // tick with a bounded stale age so it retains the proven quad in
-      // PARTIAL_LOSS; restore the true CRC time immediately afterward so no
-      // synthetic packet freshness leaks into other policies.
       const actualLastHitAt = this.lastHitAt;
       this.lastHitAt = now - (STOCK_HARD_POSE_LOSS_MS - 1);
       try {
@@ -157,20 +146,92 @@ function lowCountTemporalMessage(message) {
     Array.isArray(message.tracks) && message.tracks.length >= 1 && message.tracks.length <= 2);
 }
 
-function submitLowCountAtAffinity(pool, requestedSlot, message, transfer) {
-  let slot = Number(pool.__airgapperLowCountWorker);
-  if (!Number.isInteger(slot) || slot < 0 || slot >= pool.workers.length) {
-    slot = Number.isInteger(requestedSlot) && requestedSlot >= 0 && requestedSlot < pool.workers.length
-      ? requestedSlot
-      : pool.busy.indexOf(false);
-    if (slot < 0) return false;
-    pool.__airgapperLowCountWorker = slot;
+function supportsWasmSimd() {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
+      3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 15, 11
+    ]));
+  } catch {
+    return false;
   }
-  // Never migrate a low-count stream merely because its temporal worker is
-  // still finishing salvage. Dropping this disposable camera frame preserves
-  // adjacent-frame cache semantics; the normal ~15 ms one-QR path should have
-  // the affinity worker free well before the next ~33 ms frame.
+}
+
+function temporalUsesScalarCodec() {
+  try {
+    if (globalThis.window?.AirGapperAndroid?.is64BitProcess?.() === false) return true;
+  } catch {}
+  return !supportsWasmSimd();
+}
+
+function makeTemporalWorker(pool) {
+  // Unit tests and non-browser harnesses use the pool's fake factory. Production
+  // creates the temporal worker directly so the ordinary pool factory remains
+  // the untouched worker.js factory used by acquisition and dense decoding.
+  if (typeof globalThis.Worker !== "function" || typeof globalThis.location === "undefined") {
+    const worker = pool.create("temporal");
+    if (worker) worker.__airgapperTemporalWorker = true;
+    return worker;
+  }
+  const file = temporalUsesScalarCodec()
+    ? "../receive/worker-temporal.js?scalar=1"
+    : "../receive/worker-temporal.js";
+  const worker = new Worker(new URL(file, import.meta.url), { type: "module" });
+  worker.__airgapperTemporalWorker = true;
+  return worker;
+}
+
+function replaceIdleWorker(pool, slot, worker) {
+  if (!worker || !Number.isInteger(slot) || slot < 0 || slot >= pool.workers.length || pool.busy[slot]) return false;
+  clearTimeout(pool.jobTimers[slot]);
+  pool.jobTimers[slot] = void 0;
+  pool.activeIds[slot] = void 0;
+  pool.activeFull[slot] = false;
+  pool.activeMeta[slot] = null;
+  pool.workers[slot]?.terminate?.();
+  pool.workers[slot] = worker;
+  pool.busy[slot] = false;
+  pool.configureWorker(slot, worker);
+  return true;
+}
+
+function ensureTemporalWorker(pool, requestedSlot) {
+  let slot = Number(pool.__airgapperLowCountWorker);
+  if (Number.isInteger(slot) && slot >= 0 && slot < pool.workers.length) return slot;
+
+  slot = Number.isInteger(requestedSlot) && requestedSlot >= 0 && requestedSlot < pool.workers.length && !pool.busy[requestedSlot]
+    ? requestedSlot
+    : pool.busy.indexOf(false);
+  if (slot < 0) return -1;
+
+  const worker = makeTemporalWorker(pool);
+  if (!replaceIdleWorker(pool, slot, worker)) {
+    worker?.terminate?.();
+    return -1;
+  }
+  pool.__airgapperLowCountWorker = slot;
+  return slot;
+}
+
+function restoreTemporalWorker(pool) {
+  const slot = Number(pool.__airgapperLowCountWorker);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= pool.workers.length) {
+    pool.__airgapperLowCountWorker = void 0;
+    return true;
+  }
   if (pool.busy[slot]) return false;
+  const worker = pool.create();
+  if (!replaceIdleWorker(pool, slot, worker)) {
+    worker?.terminate?.();
+    return false;
+  }
+  pool.__airgapperLowCountWorker = void 0;
+  return true;
+}
+
+function submitLowCountAtAffinity(pool, requestedSlot, message, transfer) {
+  const slot = ensureTemporalWorker(pool, requestedSlot);
+  if (slot < 0 || pool.busy[slot]) return false;
   return pool.submitAtSlot(slot, message, transfer);
 }
 
@@ -209,19 +270,21 @@ function installWarmWorkerRecovery() {
 
   DecodeWorkerPool.prototype.submit = function(message, transfer) {
     if (lowCountTemporalMessage(message)) return submitLowCountAtAffinity(this, void 0, message, transfer);
-    // Keep full/acquisition work off the temporal-affinity worker when another
-    // decoder is free. That preserves its adjacent failed-frame cache without
-    // reducing dense-wall parallelism or acquisition coverage.
-    const affinity = Number(this.__airgapperLowCountWorker);
-    if (message?.full && Number.isInteger(affinity) && this.workers.length > 1) {
-      const alternate = this.busy.findIndex((busy, slot) => !busy && slot !== affinity);
-      if (alternate >= 0) return this.submitAtSlot(alternate, message, transfer);
+    // Any acquisition or dense tracked job restores the specialized slot to the
+    // ordinary production worker before scheduling. If the temporal slot is
+    // still busy, leave it alone and let the disposable new frame use another
+    // normal worker (or be dropped when none is free).
+    if (Number.isInteger(this.__airgapperLowCountWorker) && !this.busy[this.__airgapperLowCountWorker]) {
+      restoreTemporalWorker(this);
     }
     return originalSubmit.call(this, message, transfer);
   };
 
   DecodeWorkerPool.prototype.submitTo = function(slot, message, transfer) {
     if (lowCountTemporalMessage(message)) return submitLowCountAtAffinity(this, slot, message, transfer);
+    const temporalSlot = Number(this.__airgapperLowCountWorker);
+    if (Number.isInteger(temporalSlot) && !this.busy[temporalSlot]) restoreTemporalWorker(this);
+    if (slot === temporalSlot && this.busy[temporalSlot]) return false;
     return originalSubmitTo.call(this, slot, message, transfer);
   };
 
@@ -240,29 +303,6 @@ function installWarmWorkerRecovery() {
       this.__airgapperLowCountWorker = void 0;
     return result;
   };
-}
-
-function installLowCountWorkerRedirect() {
-  if (typeof globalThis.Worker !== "function" || typeof globalThis.location === "undefined") return;
-  if (globalThis.Worker.__airgapperTemporalWorker) return;
-  const NativeWorker = globalThis.Worker;
-  class AirGapperWorker extends NativeWorker {
-    constructor(url, options) {
-      let target = url;
-      try {
-        const parsed = url instanceof URL ? new URL(url.href) : new URL(String(url), globalThis.location.href);
-        if (/\/receive\/worker\.js$/.test(parsed.pathname)) {
-          const scalar = parsed.searchParams.has("scalar");
-          parsed.pathname = parsed.pathname.replace(/worker\.js$/, "worker-temporal.js");
-          parsed.search = scalar ? "?scalar=1" : "";
-          target = parsed;
-        }
-      } catch {}
-      super(target, options);
-    }
-  }
-  Object.defineProperty(AirGapperWorker, "__airgapperTemporalWorker", { value: true });
-  globalThis.Worker = AirGapperWorker;
 }
 
 function quantize(value, range) {
@@ -483,7 +523,6 @@ function installDiagnosticPolicy() {
 function installReceiverRecoveryPolicy() {
   if (installed) return;
   installed = true;
-  installLowCountWorkerRedirect();
   installLatticeRecoveryBridge();
   installWarmWorkerRecovery();
   installGeometryMotionBridge();
