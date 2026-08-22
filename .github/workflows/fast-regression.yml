@@ -77,10 +77,12 @@ jobs:
           node --input-type=module --check < receive/optics-guard.js
           node --input-type=module --check < receive/temporal-qr-stitch.js
           node --input-type=module --check < receive/worker-temporal.js
+          node --input-type=module --check < receive/worker-temporal-v2.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
           node --input-type=module --check < shared/receiver-recovery-state.js
           node --input-type=module --check < shared/receiver-recovery-policy.js
+          node --input-type=module --check < shared/temporal-backpressure.js
 
       - name: Run grid regression
         run: |
@@ -93,6 +95,7 @@ jobs:
           node benchmark/receiver-recovery-policy-smoke.mjs
           node benchmark/temporal-qr-stitch-smoke.mjs
           node benchmark/low-count-recovery-smoke.mjs
+          node benchmark/temporal-backpressure-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
@@ -104,11 +107,8 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          # Fail fast on the experimental low-count sidecar before running the
-          # longer production replay. The native worker smoke stays here too so
-          # both worker entry points are checked against the same built codecs.
           node benchmark/native-y8-worker-smoke.mjs
-          node benchmark/low-count-temporal-worker-smoke.mjs
+          node benchmark/temporal-backpressure-browser-smoke.mjs
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-camera-bridge-smoke.mjs
           node benchmark/native-camera-v2-bridge-smoke.mjs
