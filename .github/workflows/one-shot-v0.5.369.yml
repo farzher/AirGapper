@@ -1,0 +1,158 @@
+name: one-shot v0.5.369 patch
+
+on:
+  push:
+    branches: [fix/auto-optics-motion-recovery]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/auto-optics-motion-recovery
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply simple QR shutter and local recovery policy
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "receive/grid-lattice.js",
+              '''  dropSlotCorrection(slot, at = monotonicNow()) {
+              if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
+              this.slotCorrections.delete(slot);
+              this.slotCorrectionDropTimes = this.slotCorrectionDropTimes.filter((seenAt) => at - seenAt <= SLOT_CORRECTION_DROP_WINDOW_MS);
+              this.slotCorrectionDropTimes.push(at);
+              if (this.locked && at - this.lastHitAt >= SLOT_CORRECTION_DROP_MIN_SILENCE_MS &&
+                  this.slotCorrectionDropTimes.length >= SLOT_CORRECTION_DROP_HARD_LIMIT) {
+                this.invalidatePose("repeated slot geometry self-heals");
+              }
+              return this.candidate ? this.snapshot() : null;
+            }''',
+              '''  dropSlotCorrection(slot, at = monotonicNow()) {
+              if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
+              // A failed local residual is evidence about this slot, not the whole wall.
+              // Keep global geometry alive as long as any CRC-valid QR continues to refresh
+              // it; orientation invalidation and whole-wall silence own hard reacquisition.
+              this.slotCorrections.delete(slot);
+              return this.candidate ? this.snapshot() : null;
+            }'''
+          )
+
+          replace_once(
+              "benchmark/grid-lattice-regression.mjs",
+              '''// Repeated per-slot self-heals during decode silence are evidence that the global
+          // pose is wrong, not six independent local calibration failures.
+          const healing = new GridLattice();
+          for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
+            assert(healing.accept(detection(slot, at), frameWidth, frameHeight));
+          }
+          for (const [slot, at] of [[0, 300], [1, 320], [4, 340], [5, 360]]) {
+            healing.dropSlotCorrection(slot, at);
+          }
+          assert.equal(healing.tick(370), null, "repeated geometry self-heals should arm hard reacquire");
+          assert.equal(healing.state, "REACQUIRE");''',
+              '''// Repeated per-slot self-heals are local failures. They must not destroy a wall
+          // that still has a valid global pose; only whole-wall silence or explicit pose
+          // invalidation is allowed to hard-reacquire.
+          const healing = new GridLattice();
+          for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
+            assert(healing.accept(detection(slot, at), frameWidth, frameHeight));
+          }
+          for (const [slot, at] of [[0, 300], [1, 320], [4, 340], [5, 360]]) {
+            healing.dropSlotCorrection(slot, at);
+          }
+          assert(healing.tick(370), "local self-heals must keep the global wall alive");
+          assert.equal(healing.locked, true);
+          assert.notEqual(healing.state, "REACQUIRE");
+          assert.equal(healing.tick(961), null, "actual whole-wall silence must still hard-reacquire");
+          assert.equal(healing.state, "REACQUIRE");'''
+          )
+
+          replace_once(
+              "shared/receiver-recovery-policy.js",
+              'const LONG_AE_EXPOSURE = 55; // 5.5 ms; browser exposureTime units are 0.1 ms.\nconst MOTION_SAFE_MAX_EXPOSURE = 35; // 3.5 ms when no prior QR-proven state exists.',
+              'const LONG_AE_EXPOSURE = 50; // 5.0 ms hard QR shutter ceiling; units are 0.1 ms.\nconst MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.'
+          )
+          replace_once(
+              "shared/receiver-recovery-policy.js",
+              'if (settings.exposureMode !== "continuous" || !(exposure > LONG_AE_EXPOSURE) || !(iso > 0)) return;',
+              'if (!(exposure > LONG_AE_EXPOSURE) || !(iso > 0)) return;'
+          )
+
+          smoke = Path("benchmark/receiver-recovery-policy-smoke.mjs")
+          text = smoke.read_text()
+          marker = 'console.log("receiver recovery policy smoke: ok");\n'
+          if text.count(marker) != 1:
+              raise SystemExit("receiver recovery smoke marker mismatch")
+          extra = r'''
+          // A QR that succeeds at a long *manual* shutter is still temporally risky.
+          // Clamp it once to 5 ms while preserving the proven exposure product with ISO.
+          const ceilingSettings = {
+            exposureMode: "manual",
+            exposureTime: 83.1,
+            iso: 100,
+            exposureCompensation: 0,
+            frameRate: 30
+          };
+          let ceilingWrites = 0;
+          const ceilingTrack = {
+            readyState: "live",
+            getCapabilities: track.getCapabilities,
+            getSettings() { return { ...ceilingSettings }; },
+            async applyConstraints({ advanced }) {
+              ceilingWrites++;
+              Object.assign(ceilingSettings, advanced[0]);
+            }
+          };
+          const ceilingController = new FocusController(async () => true, () => {});
+          ceilingController.track = ceilingTrack;
+          ceilingController.noteValidDecode(2);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          assert.equal(ceilingSettings.exposureMode, "manual");
+          assert.equal(ceilingSettings.exposureTime, 50, "verified QR shutter must be capped at 5 ms");
+          assert.equal(ceilingSettings.iso, 166, "shorter shutter should preserve the QR-proven light product with ISO");
+          assert.equal(ceilingWrites, 1, "QR shutter ceiling should require one deterministic sensor write");
+
+          console.log("receiver recovery policy smoke: ok");
+          '''
+          smoke.write_text(text.replace(marker, extra.lstrip(), 1))
+
+          replace_once(
+              "version.js",
+              'export const APP_VERSION = "0.5.368";',
+              'export const APP_VERSION = "0.5.369";'
+          )
+          PY
+
+          node --input-type=module --check < receive/grid-lattice.js
+          node --input-type=module --check < shared/receiver-recovery-policy.js
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/receiver-recovery-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+
+          rm .github/workflows/one-shot-v0.5.369.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add receive/grid-lattice.js benchmark/grid-lattice-regression.mjs shared/receiver-recovery-policy.js benchmark/receiver-recovery-policy-smoke.mjs version.js .github/workflows/one-shot-v0.5.369.yml
+          git commit -m "v0.5.369: clamp QR shutter and keep local failures local"
+          git push origin HEAD:fix/auto-optics-motion-recovery
