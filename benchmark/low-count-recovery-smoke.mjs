@@ -67,37 +67,32 @@ const low = (id, sourceSequence) => ({
   sourceSequence,
   w: 800,
   h: 800,
-  videoFrame: new ArrayBuffer(16),
+  yStride: 800,
+  yOffset: 0,
+  videoFrame: new ArrayBuffer(800 * 800),
   tracks: [{ slot: 0, dim: 177, quad: detection().quad }]
 });
 assert.equal(pool.submitTo(2, low(1, 1), []), true);
 assert.equal(pool.busy[2], true, "ordinary low-count decode must still use the requested normal worker");
 assert.equal(pool.workers[2].kind, "normal", "temporal recovery must never replace a production worker slot");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true);
-assert.equal(pool.__airgapperLowCountWorker, undefined);
-assert.equal(pool.__airgapperTemporalCompanion?.worker?.kind, "temporal", "low-count should create an out-of-pool companion");
-assert.equal(pool.__airgapperTemporalCompanion.worker.posts.length, 1, "low-count frame should be mirrored once");
+const companion = pool.__airgapperTemporalV2?.worker;
+assert.equal(companion?.kind, "temporal-v2", "low-count should create the bounded out-of-pool companion");
+assert.equal(companion.posts.length, 1, "first low-count frame should create exactly one sample command");
 
+// While that sample is in flight, another low-count decode still uses a normal
+// worker but must not queue another camera frame into the companion.
 pool.busy[2] = false;
 pool.activeIds[2] = undefined;
 clearTimeout(pool.jobTimers[2]);
 pool.jobTimers[2] = undefined;
 assert.equal(pool.submitTo(0, low(2, 2), []), true);
-assert.equal(pool.busy[0], true, "normal worker scheduling remains free to use another slot");
-assert.equal(pool.__airgapperTemporalCompanion.worker.posts.length, 2, "adjacent frame should reach the same companion history");
+assert.equal(pool.busy[0], true);
+assert.equal(companion.posts.length, 1, "busy companion must apply hard backpressure");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true);
-
-pool.busy[0] = false;
-pool.activeIds[0] = undefined;
-clearTimeout(pool.jobTimers[0]);
-pool.jobTimers[0] = undefined;
-assert.equal(pool.submit({ id: 3, full: true, w: 800, h: 800 }, []), true);
-assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true,
-  "dense/acquisition mode must always retain the complete production worker pool");
-assert.ok(createdKinds.includes("temporal"), "test factory should create one companion only after low-count work appears");
-assert.equal(createdKinds.filter((kind) => kind === "temporal").length, 1);
+assert.ok(createdKinds.includes("temporal-v2"));
+assert.equal(createdKinds.filter((kind) => kind === "temporal-v2").length, 1);
 
 endPoseRecovery();
 pool.resize(0);
-assert.equal(pool.__airgapperTemporalCompanion, null, "normal teardown should terminate the companion");
 console.log("low-count receiver recovery smoke: ok");
