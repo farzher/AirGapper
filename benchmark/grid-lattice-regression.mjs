@@ -133,8 +133,9 @@ snapshot = lattice.tick(2390);
 assert.equal(snapshot, null);
 assert.equal(lattice.state, "REACQUIRE");
 
-// Repeated per-slot self-heals during decode silence are evidence that the global
-// pose is wrong, not six independent local calibration failures.
+// Repeated per-slot self-heals are local failures. They must not destroy a wall
+// that still has a valid global pose; only whole-wall silence or explicit pose
+// invalidation is allowed to hard-reacquire.
 const healing = new GridLattice();
 for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
   assert(healing.accept(detection(slot, at), frameWidth, frameHeight));
@@ -142,7 +143,10 @@ for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
 for (const [slot, at] of [[0, 300], [1, 320], [4, 340], [5, 360]]) {
   healing.dropSlotCorrection(slot, at);
 }
-assert.equal(healing.tick(370), null, "repeated geometry self-heals should arm hard reacquire");
+assert(healing.tick(370), "local self-heals must keep the global wall alive");
+assert.equal(healing.locked, true);
+assert.notEqual(healing.state, "REACQUIRE");
+assert.equal(healing.tick(961), null, "actual whole-wall silence must still hard-reacquire");
 assert.equal(healing.state, "REACQUIRE");
 
 // Extended-grid regression: Auto can declare a wall above the old 32-slot

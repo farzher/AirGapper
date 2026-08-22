@@ -325,13 +325,10 @@ class GridLattice {
   }
   dropSlotCorrection(slot, at = monotonicNow()) {
     if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
+    // A failed local residual is evidence about this slot, not the whole wall.
+    // Keep global geometry alive as long as any CRC-valid QR continues to refresh
+    // it; orientation invalidation and whole-wall silence own hard reacquisition.
     this.slotCorrections.delete(slot);
-    this.slotCorrectionDropTimes = this.slotCorrectionDropTimes.filter((seenAt) => at - seenAt <= SLOT_CORRECTION_DROP_WINDOW_MS);
-    this.slotCorrectionDropTimes.push(at);
-    if (this.locked && at - this.lastHitAt >= SLOT_CORRECTION_DROP_MIN_SILENCE_MS &&
-        this.slotCorrectionDropTimes.length >= SLOT_CORRECTION_DROP_HARD_LIMIT) {
-      this.invalidatePose("repeated slot geometry self-heals");
-    }
     return this.candidate ? this.snapshot() : null;
   }
   learnSlotCorrection(detection) {
