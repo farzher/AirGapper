@@ -155,8 +155,7 @@ function stitchModuleRows(previous, current, seamRow, orientation) {
   const dim = current.dim;
   const seam = Math.max(1, Math.min(dim - 1, Math.round(seamRow)));
   const output = new Uint8Array(current.modules.length);
-  const rowBytes = dim;
-  const split = seam * rowBytes;
+  const split = seam * dim;
   if (orientation === "current-top/previous-bottom") {
     output.set(current.modules.subarray(0, split), 0);
     output.set(previous.modules.subarray(split), split);
@@ -168,7 +167,7 @@ function stitchModuleRows(previous, current, seamRow, orientation) {
 }
 
 function tryTemporalPair(previous, current, decodeGrid, seamFractions = PRIMARY_SEAMS) {
-  if (!previous || !current || previous.dim !== current.dim || previous.slot !== current.slot) return { hit: null, attempts: 0 };
+  if (!previous || !current || previous.dim !== current.dim || previous.slot !== current.slot || typeof decodeGrid !== "function") return { hit: null, attempts: 0 };
   if (quadDistanceFraction(previous.quad, current.quad) > 0.08) return { hit: null, attempts: 0, skipped: "geometry moved" };
   const orientations = ["current-top/previous-bottom", "previous-top/current-bottom"];
   let attempts = 0;
@@ -211,17 +210,17 @@ class TemporalQrStitcher {
 
   recover({ heap, yPtr, width, height, stride, ox = 0, oy = 0, tracks, sourceSequence, decodedSlots = new Set(), decodeGrid }) {
     const metrics = { attempts: 0, hits: 0, sampled: 0, skipped: 0, seam: void 0, orientation: void 0, sourceDelta: void 0 };
-    if (!temporalEnabledForCount(tracks?.length) || typeof decodeGrid !== "function") {
+    if (!temporalEnabledForCount(tracks?.length)) {
       if ((tracks?.length ?? 0) > LOW_COUNT_TEMPORAL_MAX_QR) this.reset();
       return { symbols: [], metrics };
     }
-    this.clearSlots(decodedSlots);
     const symbols = [];
     const currentSequence = Number(sourceSequence);
+    const canDecode = typeof decodeGrid === "function";
     if (!Number.isInteger(currentSequence)) return { symbols, metrics };
     for (const track of tracks) {
       const slot = Number(track?.slot ?? track?.id);
-      if (!Number.isInteger(slot) || decodedSlots.has(slot)) continue;
+      if (!Number.isInteger(slot)) continue;
       const current = sampleModuleGrid(heap, yPtr, width, height, stride, ox, oy, track, currentSequence);
       if (!current) {
         metrics.skipped++;
@@ -229,20 +228,25 @@ class TemporalQrStitcher {
       }
       metrics.sampled++;
       const prior = this.history.get(slot) ?? [];
-      for (const previous of prior) {
-        const delta = currentSequence - previous.sourceSequence;
-        if (delta < 1 || delta > 2) continue;
-        const seams = delta === 1 ? PRIMARY_SEAMS : SECONDARY_SEAMS;
-        const result = tryTemporalPair(previous, current, decodeGrid, seams);
-        metrics.attempts += result.attempts;
-        if (!result.hit) continue;
-        metrics.hits++;
-        metrics.seam = result.hit.seam;
-        metrics.orientation = result.hit.orientation;
-        metrics.sourceDelta = result.hit.sourceDelta;
-        symbols.push({ ...result.hit, slot, track });
-        break;
+      if (!decodedSlots.has(slot) && canDecode) {
+        for (const previous of prior) {
+          const delta = currentSequence - previous.sourceSequence;
+          if (delta < 1 || delta > 2) continue;
+          const seams = delta === 1 ? PRIMARY_SEAMS : SECONDARY_SEAMS;
+          const result = tryTemporalPair(previous, current, decodeGrid, seams);
+          metrics.attempts += result.attempts;
+          if (!result.hit) continue;
+          metrics.hits++;
+          metrics.seam = result.hit.seam;
+          metrics.orientation = result.hit.orientation;
+          metrics.sourceDelta = result.hit.sourceDelta;
+          symbols.push({ ...result.hit, slot, track });
+          break;
+        }
       }
+      // Keep the last two physical camera samples whether or not ordinary QR
+      // decoding succeeded. A clean or RS-correctable previous frame can still
+      // contain the half needed to reconstruct the next rolling-shutter miss.
       const next = [current, ...prior.filter((item) => item.sourceSequence < currentSequence)].slice(0, TEMPORAL_HISTORY);
       this.history.set(slot, next);
     }
