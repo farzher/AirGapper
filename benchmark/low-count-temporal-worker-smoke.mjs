@@ -11,7 +11,10 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
+    // This smoke tests the specialized worker itself. The application must keep
+    // acquisition on worker.js and only instantiate worker-temporal.js after a
+    // 1-2 QR tracked layout has already been established.
+    const worker = new Worker(new URL("/receive/worker-temporal.js", location.href), { type: "module" });
     const width = 180;
     const height = 180;
     const scale = 6;
