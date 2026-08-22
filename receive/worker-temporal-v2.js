@@ -3,10 +3,10 @@ import {
   PRIMARY_SEAMS,
   SECONDARY_SEAMS,
   TemporalQrStitcher,
-  sampleModuleGrid,
   stitchModuleRows,
   temporalEnabledForCount
 } from "./temporal-qr-stitch.js";
+import { sampleModuleGridFast } from "./temporal-fast-sampler.js";
 
 const scope = self;
 const temporalStitcher = new TemporalQrStitcher();
@@ -140,11 +140,14 @@ function postReply(data, phase, symbols, metrics) {
 }
 
 async function sampleFrame(data) {
+  const started = performance.now();
   const metrics = {
     temporalStitchAttempts: 0,
     temporalStitchHits: 0,
     temporalStitchSampled: 0,
-    temporalStitchSkipped: 0
+    temporalStitchSkipped: 0,
+    temporalSampleMs: 0,
+    temporalCopyMs: 0
   };
   const tracks = Array.isArray(data?.tracks) ? data.tracks : [];
   if (!temporalEnabledForCount(tracks.length) || data.full || data.pixelFormat !== "y8") {
@@ -155,14 +158,17 @@ async function sampleFrame(data) {
   }
 
   let copied = null;
+  const copyStarted = performance.now();
   try {
     copied = await copyTemporalY(data.videoFrame, data);
   } finally {
     data.videoFrame?.close?.();
   }
+  metrics.temporalCopyMs = performance.now() - copyStarted;
   const currentSequence = Number(data.sourceSequence);
   if (!copied || !Number.isInteger(currentSequence)) {
     metrics.temporalStitchSkipped++;
+    metrics.temporalSampleMs = performance.now() - started;
     postReply(data, "sample", [], metrics);
     return;
   }
@@ -171,7 +177,7 @@ async function sampleFrame(data) {
   for (const track of tracks) {
     const slot = Number(track?.slot ?? track?.id);
     if (!Number.isInteger(slot)) continue;
-    const current = sampleModuleGrid(
+    const current = sampleModuleGridFast(
       copied.buffer,
       copied.yPtr,
       copied.width,
@@ -193,13 +199,15 @@ async function sampleFrame(data) {
       [current, ...prior.filter((item) => item.sourceSequence < currentSequence)].slice(0, 4));
   }
 
-  // Sampling must stay cheap and return immediately. Compile the seam decoder in
-  // the background after the first usable sample, but never await it here.
+  metrics.temporalSampleMs = performance.now() - started;
+  // Sampling must return before the next camera frame. Compile the seam decoder
+  // in the background after the first usable sample, but never await it here.
   postReply(data, "sample", [], metrics);
   if (sampledAny) temporalCodec().catch(() => {});
 }
 
 async function recoverFrame(data) {
+  const started = performance.now();
   const metrics = {
     temporalStitchAttempts: 0,
     temporalStitchHits: 0,
@@ -207,12 +215,14 @@ async function recoverFrame(data) {
     temporalStitchSkipped: 0,
     temporalStitchSeam: void 0,
     temporalStitchOrientation: void 0,
-    temporalStitchSourceDelta: void 0
+    temporalStitchSourceDelta: void 0,
+    temporalRecoverMs: 0
   };
   const symbols = [];
   const currentSequence = Number(data.sourceSequence);
   const missingSlots = new Set((data.missingSlots ?? []).map(Number).filter(Number.isInteger));
   if (!Number.isInteger(currentSequence) || !missingSlots.size) {
+    metrics.temporalRecoverMs = performance.now() - started;
     postReply(data, "recover", symbols, metrics);
     return;
   }
@@ -221,6 +231,7 @@ async function recoverFrame(data) {
   try { zx = await temporalCodec(); } catch {}
   if (!zx) {
     metrics.temporalStitchSkipped += missingSlots.size;
+    metrics.temporalRecoverMs = performance.now() - started;
     postReply(data, "recover", symbols, metrics);
     return;
   }
@@ -274,6 +285,7 @@ async function recoverFrame(data) {
     if (recovered) symbols.push(recovered);
   }
 
+  metrics.temporalRecoverMs = performance.now() - started;
   postReply(data, "recover", symbols, metrics);
 }
 
