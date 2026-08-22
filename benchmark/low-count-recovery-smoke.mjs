@@ -57,7 +57,7 @@ const pool = new DecodeWorkerPool((kind = "normal") => {
 }, () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
 pool.resize(3);
 assert.deepEqual(pool.workers.map((worker) => worker.kind), ["normal", "normal", "normal"],
-  "acquisition pool must start with untouched production workers");
+  "search/acquisition must start with untouched production workers only");
 
 const low = (id, sourceSequence) => ({
   id,
@@ -92,7 +92,7 @@ assert.equal(pool.submit({ id: 3, full: true, w: 800, h: 800 }, []), true);
 assert.equal(pool.__airgapperLowCountWorker, undefined, "full acquisition must release temporal affinity");
 assert.equal(pool.workers[2].kind, "normal", "full acquisition must restore the specialized slot to production worker.js");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true,
-  "dense/acquisition mode must recover the full normal worker pool");
+  "dense/acquisition mode must recover the complete production worker pool");
 assert.ok(createdKinds.includes("temporal"), "test factory should have created one temporal specialization");
 assert.equal(createdKinds.at(-1), "normal", "restoring acquisition should instantiate a normal worker");
 
