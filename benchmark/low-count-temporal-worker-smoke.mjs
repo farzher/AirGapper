@@ -25,10 +25,16 @@ try {
     };
     const replies = [];
     const started = performance.now();
-    const timeout = setTimeout(() => {
-      worker.terminate();
-      reject(new Error("low-count temporal worker smoke timed out"));
-    }, 15_000);
+    let phase = "frame 1 production/cache reply";
+    let timeout;
+    const armTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        worker.terminate();
+        reject(new Error(`low-count temporal worker timed out waiting for ${phase}`));
+      }, 8_000);
+    };
+    armTimeout();
 
     worker.onerror = (event) => {
       clearTimeout(timeout);
@@ -37,11 +43,11 @@ try {
     };
     worker.onmessage = (event) => {
       if (event.data?.id < 4101 || event.data?.id > 4102) return;
-      // Match DecodeWorkerPool: preflight carries only the cheap frame signature
-      // and does not free the worker or permit the next camera job yet.
       if (event.data?.preflight) return;
       replies.push({ ...event.data, wallMs: performance.now() - started });
       if (replies.length === 1) {
+        phase = "frame 2 temporal seam reply";
+        armTimeout();
         post(4102, 2, true);
         return;
       }
