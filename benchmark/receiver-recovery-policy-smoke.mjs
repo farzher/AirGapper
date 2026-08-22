@@ -66,7 +66,9 @@ assert.equal(cameraWrites, 1, "pose recovery must not surrender a QR-proven manu
 assert.equal(settings.exposureMode, "manual");
 assert.equal(settings.exposureTime, 50);
 assert.equal(settings.iso, 166);
-assert.equal(recoveryDiagnostics().suppressedExposureWrites, 2);
+// Promoting a new verified track state intentionally starts a fresh diagnostic
+// counter epoch, so only the pose-recovery suppression is counted here.
+assert.equal(recoveryDiagnostics().suppressedExposureWrites, 1);
 
 class FakeWorker {
   terminateCount = 0;
