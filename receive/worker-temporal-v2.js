@@ -126,7 +126,21 @@ function decodeSyntheticGrid(zx, grid, dim, expectedSlot) {
   return null;
 }
 
-function postReply(data, phase, symbols, metrics) {
+function transferableBuffers(symbols, samples) {
+  const seen = new Set();
+  const out = [];
+  for (const buffer of [
+    ...symbols.map((symbol) => symbol.bytes?.buffer),
+    ...samples.map((sample) => sample.modules?.buffer)
+  ]) {
+    if (!(buffer instanceof ArrayBuffer) || seen.has(buffer)) continue;
+    seen.add(buffer);
+    out.push(buffer);
+  }
+  return out;
+}
+
+function postReply(data, phase, symbols, metrics, samples = []) {
   scope.postMessage({
     temporalV2: true,
     phase,
@@ -135,8 +149,9 @@ function postReply(data, phase, symbols, metrics) {
     id: data.id,
     sourceSequence: data.sourceSequence,
     symbols,
+    samples,
     guidedMetrics: metrics
-  }, symbols.flatMap((symbol) => symbol.bytes?.buffer ? [symbol.bytes.buffer] : []));
+  }, transferableBuffers(symbols, samples));
 }
 
 async function sampleFrame(data) {
@@ -173,6 +188,7 @@ async function sampleFrame(data) {
     return;
   }
 
+  const replySamples = [];
   let sampledAny = false;
   for (const track of tracks) {
     const slot = Number(track?.slot ?? track?.id);
@@ -197,16 +213,56 @@ async function sampleFrame(data) {
     const prior = temporalStitcher.history.get(slot) ?? [];
     temporalStitcher.history.set(slot,
       [current, ...prior.filter((item) => item.sourceSequence < currentSequence)].slice(0, 4));
+    // Keep the worker-local matrix for backwards-compatible same-worker recovery,
+    // but return a tiny copy to the controller so production can recover on a
+    // separate worker without ever blocking the next camera-frame sample.
+    replySamples.push({
+      slot: current.slot,
+      dim: current.dim,
+      modules: current.modules.slice(),
+      quad: current.quad,
+      sourceSequence: current.sourceSequence,
+      separation: current.separation
+    });
   }
 
   metrics.temporalSampleMs = performance.now() - started;
-  // Sampling must return before the next camera frame. Compile the seam decoder
-  // in the background after the first usable sample, but never await it here.
-  postReply(data, "sample", [], metrics);
-  if (sampledAny) temporalCodec().catch(() => {});
+  postReply(data, "sample", [], metrics, replySamples);
+  if (sampledAny && !data.sampleOnly) temporalCodec().catch(() => {});
 }
 
-async function recoverFrame(data) {
+function seamRows(dim, delta, hint) {
+  const out = [];
+  const seen = new Set();
+  const add = (row) => {
+    const value = Math.max(1, Math.min(dim - 1, Math.round(Number(row))));
+    if (!Number.isFinite(value) || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  };
+  if (Number.isFinite(Number(hint?.seam))) {
+    const base = Number(hint.seam);
+    add(base);
+    const near = Math.max(1, Math.round(dim * 0.03));
+    const far = Math.max(2, Math.round(dim * 0.06));
+    add(base - near);
+    add(base + near);
+    add(base - far);
+    add(base + far);
+  }
+  for (const fraction of delta === 1 ? PRIMARY_SEAMS : SECONDARY_SEAMS) add(dim * fraction);
+  return out;
+}
+
+function orientationOrder(hint) {
+  const a = "current-top/previous-bottom";
+  const b = "previous-top/current-bottom";
+  if (hint?.orientation === a) return [a, b];
+  if (hint?.orientation === b) return [b, a];
+  return [a, b];
+}
+
+async function recoverPairs(data, pairs, phase = "recover-pairs") {
   const started = performance.now();
   const metrics = {
     temporalStitchAttempts: 0,
@@ -216,50 +272,45 @@ async function recoverFrame(data) {
     temporalStitchSeam: void 0,
     temporalStitchOrientation: void 0,
     temporalStitchSourceDelta: void 0,
-    temporalRecoverMs: 0
+    temporalRecoverMs: 0,
+    temporalHintFirst: 0
   };
   const symbols = [];
-  const currentSequence = Number(data.sourceSequence);
-  const missingSlots = new Set((data.missingSlots ?? []).map(Number).filter(Number.isInteger));
-  if (!Number.isInteger(currentSequence) || !missingSlots.size) {
-    metrics.temporalRecoverMs = performance.now() - started;
-    postReply(data, "recover", symbols, metrics);
-    return;
-  }
-
   let zx = null;
   try { zx = await temporalCodec(); } catch {}
   if (!zx) {
-    metrics.temporalStitchSkipped += missingSlots.size;
+    metrics.temporalStitchSkipped += pairs.length;
     metrics.temporalRecoverMs = performance.now() - started;
-    postReply(data, "recover", symbols, metrics);
+    postReply(data, phase, symbols, metrics);
     return;
   }
 
-  for (const slot of missingSlots) {
-    const history = temporalStitcher.history.get(slot) ?? [];
-    const current = history.find((item) => Number(item.sourceSequence) === currentSequence);
-    if (!current) {
+  for (const pair of pairs) {
+    const slot = Number(pair?.slot);
+    const current = pair?.current;
+    if (!Number.isInteger(slot) || !current?.modules || !Number.isInteger(Number(current.dim))) {
       metrics.temporalStitchSkipped++;
       continue;
     }
-    const previousSamples = history.filter((item) => {
-      const delta = currentSequence - Number(item.sourceSequence);
-      return delta >= 1 && delta <= 2 && item.dim === current.dim &&
-        quadDistanceFraction(item.quad, current.quad) <= 0.08;
-    });
+    const previousSamples = (pair.previousSamples ?? []).filter((previous) => {
+      const delta = Number(current.sourceSequence) - Number(previous?.sourceSequence);
+      return delta >= 1 && delta <= 2 && previous?.dim === current.dim &&
+        quadDistanceFraction(previous?.quad, current.quad) <= 0.08;
+    }).sort((a, b) => Number(b.sourceSequence) - Number(a.sourceSequence));
 
     let recovered = null;
     pairLoop:
     for (const previous of previousSamples) {
-      const delta = currentSequence - Number(previous.sourceSequence);
-      const seams = delta === 1 ? PRIMARY_SEAMS : SECONDARY_SEAMS;
-      for (const fraction of seams) {
-        const seam = Math.max(1, Math.min(current.dim - 1, Math.round(current.dim * fraction)));
-        for (const orientation of ["current-top/previous-bottom", "previous-top/current-bottom"]) {
+      const delta = Number(current.sourceSequence) - Number(previous.sourceSequence);
+      const rows = seamRows(current.dim, delta, pair.hint);
+      const orientations = orientationOrder(pair.hint);
+      for (const seam of rows) {
+        for (const orientation of orientations) {
           const grid = stitchModuleRows(previous, current, seam, orientation);
           if (!grid) continue;
           metrics.temporalStitchAttempts++;
+          if (metrics.temporalStitchAttempts === 1 && Number(pair.hint?.seam) === seam && pair.hint?.orientation === orientation)
+            metrics.temporalHintFirst = 1;
           const decoded = decodeSyntheticGrid(zx, grid, current.dim, slot);
           if (!decoded) continue;
           metrics.temporalStitchHits++;
@@ -276,7 +327,8 @@ async function recoverFrame(data) {
             crc32: true,
             verifiedPayload: true,
             temporalSeam: seam,
-            temporalOrientation: orientation
+            temporalOrientation: orientation,
+            temporalSourceDelta: delta
           };
           break pairLoop;
         }
@@ -286,7 +338,43 @@ async function recoverFrame(data) {
   }
 
   metrics.temporalRecoverMs = performance.now() - started;
-  postReply(data, "recover", symbols, metrics);
+  postReply(data, phase, symbols, metrics);
+}
+
+async function recoverFrame(data) {
+  const currentSequence = Number(data.sourceSequence);
+  const missingSlots = new Set((data.missingSlots ?? []).map(Number).filter(Number.isInteger));
+  const pairs = [];
+  if (Number.isInteger(currentSequence)) {
+    for (const slot of missingSlots) {
+      const history = temporalStitcher.history.get(slot) ?? [];
+      const current = history.find((item) => Number(item.sourceSequence) === currentSequence);
+      if (!current) continue;
+      pairs.push({
+        slot,
+        current,
+        previousSamples: history.filter((item) => {
+          const delta = currentSequence - Number(item.sourceSequence);
+          return delta >= 1 && delta <= 2;
+        }),
+        hint: data.hint
+      });
+    }
+  }
+  return recoverPairs(data, pairs, "recover");
+}
+
+async function warmCodec(data) {
+  const started = performance.now();
+  let ok = false;
+  try { ok = Boolean(await temporalCodec()); } catch {}
+  postReply(data, "warm", [], {
+    temporalStitchAttempts: 0,
+    temporalStitchHits: 0,
+    temporalStitchSampled: 0,
+    temporalStitchSkipped: ok ? 0 : 1,
+    temporalWarmMs: performance.now() - started
+  });
 }
 
 async function resetState(data) {
@@ -300,16 +388,26 @@ async function resetState(data) {
 }
 
 async function processMessage(data) {
+  if (data.action === "warm") return warmCodec(data);
   if (data.action === "reset") return resetState(data);
   if (data.action === "recover") return recoverFrame(data);
+  if (data.action === "recover-pairs") return recoverPairs(data, Array.isArray(data.pairs) ? data.pairs : []);
   return sampleFrame(data);
+}
+
+function phaseFor(data) {
+  if (data.action === "warm") return "warm";
+  if (data.action === "reset") return "reset";
+  if (data.action === "recover-pairs") return "recover-pairs";
+  if (data.action === "recover") return "recover";
+  return "sample";
 }
 
 scope.onmessage = (event) => {
   const data = event.data ?? {};
   if (processing) {
     data.videoFrame?.close?.();
-    postReply(data, data.action === "recover" ? "recover" : data.action === "reset" ? "reset" : "sample", [], {
+    postReply(data, phaseFor(data), [], {
       temporalStitchAttempts: 0,
       temporalStitchHits: 0,
       temporalStitchSampled: 0,
@@ -320,7 +418,7 @@ scope.onmessage = (event) => {
   processing = true;
   Promise.resolve(processMessage(data)).catch(() => {
     data.videoFrame?.close?.();
-    postReply(data, data.action === "recover" ? "recover" : data.action === "reset" ? "reset" : "sample", [], {
+    postReply(data, phaseFor(data), [], {
       temporalStitchAttempts: 0,
       temporalStitchHits: 0,
       temporalStitchSampled: 0,
