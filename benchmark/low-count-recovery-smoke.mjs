@@ -23,9 +23,6 @@ function detection(at = 100) {
   };
 }
 
-// Stock GridLattice hard-reacquires after 900 ms. The receiver policy should
-// retain a proven one-QR quad for several seconds because a single rolling seam
-// makes 100% of the wall disappear even when the camera never moved.
 const lattice = new GridLattice();
 assert.ok(lattice.accept(detection(), 800, 800));
 assert.equal(lattice.locked, true);
@@ -37,9 +34,6 @@ assert.equal(lattice.state, "REACQUIRE", "one-QR pose must still expire after a 
 assert.equal(lattice.candidate, undefined);
 endPoseRecovery();
 
-// Conservative finder evidence may extend that lifetime without pretending a
-// CRC packet was decoded. The sighting is shifted only two pixels, well inside
-// the existing rescue-nudge guard.
 const sighted = new GridLattice();
 assert.ok(sighted.accept(detection(), 800, 800));
 const sighting = [{ x: 102, y: 101, w: 400, h: 400 }];
@@ -49,11 +43,22 @@ assert.equal(sighted.state, "PARTIAL_LOSS");
 endPoseRecovery();
 
 class FakeWorker {
+  constructor(kind = "normal") {
+    this.kind = kind;
+    this.terminated = false;
+  }
   postMessage() {}
-  terminate() {}
+  terminate() { this.terminated = true; }
 }
-const pool = new DecodeWorkerPool(() => new FakeWorker(), () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
+const createdKinds = [];
+const pool = new DecodeWorkerPool((kind = "normal") => {
+  createdKinds.push(kind ?? "normal");
+  return new FakeWorker(kind ?? "normal");
+}, () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
 pool.resize(3);
+assert.deepEqual(pool.workers.map((worker) => worker.kind), ["normal", "normal", "normal"],
+  "acquisition pool must start with untouched production workers");
+
 const low = (id, sourceSequence) => ({
   id,
   full: false,
@@ -65,16 +70,18 @@ const low = (id, sourceSequence) => ({
 });
 assert.equal(pool.submitTo(2, low(1, 1), []), true);
 assert.equal(pool.busy[2], true);
-const affinity = pool.__airgapperLowCountWorker;
-assert.equal(affinity, 2);
-// Simulate completion without invoking the fake worker callback; the next job
-// asks for a different slot but must remain on the temporal-affinity worker.
+assert.equal(pool.__airgapperLowCountWorker, 2);
+assert.equal(pool.workers[2].kind, "temporal", "first 1-2 QR tracked job should specialize exactly one idle slot");
+assert.deepEqual(pool.workers.slice(0, 2).map((worker) => worker.kind), ["normal", "normal"]);
+
 pool.busy[2] = false;
 pool.activeIds[2] = undefined;
 clearTimeout(pool.jobTimers[2]);
 pool.jobTimers[2] = undefined;
+const sameTemporalWorker = pool.workers[2];
 assert.equal(pool.submitTo(0, low(2, 2), []), true);
 assert.equal(pool.busy[2], true, "1-2 QR jobs must stay on one worker so cached frames are adjacent");
+assert.equal(pool.workers[2], sameTemporalWorker, "temporal history worker must not migrate between adjacent frames");
 assert.equal(pool.busy[0], false);
 
 pool.busy[2] = false;
@@ -82,9 +89,13 @@ pool.activeIds[2] = undefined;
 clearTimeout(pool.jobTimers[2]);
 pool.jobTimers[2] = undefined;
 assert.equal(pool.submit({ id: 3, full: true, w: 800, h: 800 }, []), true);
-assert.equal(pool.busy[2], false, "full recovery should use another free worker and preserve temporal cache affinity");
-assert.equal(pool.busy[0] || pool.busy[1], true);
+assert.equal(pool.__airgapperLowCountWorker, undefined, "full acquisition must release temporal affinity");
+assert.equal(pool.workers[2].kind, "normal", "full acquisition must restore the specialized slot to production worker.js");
+assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true,
+  "dense/acquisition mode must recover the full normal worker pool");
+assert.ok(createdKinds.includes("temporal"), "test factory should have created one temporal specialization");
+assert.equal(createdKinds.at(-1), "normal", "restoring acquisition should instantiate a normal worker");
+
 endPoseRecovery();
 pool.resize(0);
-
 console.log("low-count receiver recovery smoke: ok");
