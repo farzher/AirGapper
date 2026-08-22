@@ -15,11 +15,10 @@ function postNative(message, transfer) {
   else nativePostMessage(message);
 }
 
-// The production worker posts a preflight signature before its final decode
-// result. Preserve that timing, but hold the final result briefly so a failed
-// low-count frame can append temporal salvage before the pool marks the worker
-// free. WorkerPool guarantees one active job per worker, so one capture slot is
-// sufficient and does not reorder camera jobs.
+// The production worker remains authoritative. Hold only its final response long
+// enough to record the current low-count module grid and, on a miss, optionally
+// append a CRC-verified temporal reconstruction. Preflight page signatures still
+// pass through immediately.
 scope.postMessage = (message, transfer) => {
   if (activeCapture && message?.id === activeCapture.id && !message.preflight) {
     activeCapture.final = { message, transfer };
@@ -85,11 +84,7 @@ function decodeSyntheticGrid(zx, grid, dim, expectedSlot) {
       const bytes = Uint8Array.from(result.bytes);
       const packet = parseFrame(bytes);
       if (!packet || packet.header.slotIndex !== expectedSlot) continue;
-      return {
-        bytes,
-        header: packet.header,
-        modules: result.modules || dim
-      };
+      return { bytes, header: packet.header, modules: result.modules || dim };
     }
   } finally {
     decoded.delete();
@@ -117,9 +112,6 @@ function decodedSlots(message, tracks) {
     }
     if (Number.isInteger(slot)) slots.add(slot);
   }
-  // A one-QR non-AirGapper diagnostic symbol has no slot metadata. Treat any
-  // successful production output as satisfying the sole track rather than
-  // wasting temporal CPU trying to rediscover the same image.
   if (tracks.length === 1 && (message?.symbols?.length ?? 0) > 0 && !slots.size) {
     const slot = Number(tracks[0]?.slot ?? tracks[0]?.id);
     if (Number.isInteger(slot)) slots.add(slot);
@@ -127,9 +119,17 @@ function decodedSlots(message, tracks) {
   return slots;
 }
 
-async function copyFailureY(frame, data) {
+async function copyTemporalY(frame, data) {
   const w = Math.max(1, Number(data.w) || 0);
   const h = Math.max(1, Number(data.h) || 0);
+  if (frame instanceof ArrayBuffer) {
+    const stride = Number(data.yStride) || w;
+    const offset = Number(data.yOffset) || 0;
+    const required = offset + Math.max(0, h - 1) * stride + w;
+    if (stride < w || required > frame.byteLength) return null;
+    return { buffer: new Uint8Array(frame.slice(0)), yPtr: offset, stride, width: w, height: h };
+  }
+  if (!frame || typeof frame.allocationSize !== "function" || typeof frame.copyTo !== "function") return null;
   const rect = {
     x: Math.max(0, Number(data.cropX) || 0),
     y: Math.max(0, Number(data.cropY) || 0),
@@ -145,20 +145,17 @@ async function copyFailureY(frame, data) {
   return { buffer, yPtr: y.offset, stride: y.stride, width: w, height: h };
 }
 
-async function salvageTemporalFailure(data, final, frameClone) {
+async function processTemporalFrame(data, final, retainedFrame) {
   const tracks = Array.isArray(data.tracks) ? data.tracks : [];
-  if (!frameClone || !temporalEnabledForCount(tracks.length) || data.full || data.pixelFormat !== "y8" || final.repeatSkipped) {
+  if (!retainedFrame || !temporalEnabledForCount(tracks.length) || data.full || data.pixelFormat !== "y8" || final.repeatSkipped) {
     if (tracks.length > 2) temporalStitcher.reset();
     return null;
   }
-  const already = decodedSlots(final, tracks);
-  if (already.size >= tracks.length) {
-    temporalStitcher.clearSlots(already);
-    return null;
-  }
-  const copied = await copyFailureY(frameClone, data);
+  const copied = await copyTemporalY(retainedFrame, data);
   if (!copied) return null;
-  const zx = await temporalCodec();
+  const already = decodedSlots(final, tracks);
+  const needsRecovery = already.size < tracks.length;
+  const zx = needsRecovery ? await temporalCodec() : null;
   const recovered = temporalStitcher.recover({
     heap: copied.buffer,
     yPtr: copied.yPtr,
@@ -170,7 +167,7 @@ async function salvageTemporalFailure(data, final, frameClone) {
     tracks,
     sourceSequence: data.sourceSequence,
     decodedSlots: already,
-    decodeGrid: (grid, dim, slot) => decodeSyntheticGrid(zx, grid, dim, slot)
+    decodeGrid: zx ? (grid, dim, slot) => decodeSyntheticGrid(zx, grid, dim, slot) : void 0
   });
   for (const symbol of recovered.symbols) {
     const quad = symbol.track.quad;
@@ -190,7 +187,7 @@ async function salvageTemporalFailure(data, final, frameClone) {
       temporalOrientation: symbol.orientation
     });
   }
-  if (recovered.metrics.attempts || recovered.metrics.hits || recovered.metrics.sampled) {
+  if (recovered.metrics.attempts || recovered.metrics.hits || recovered.metrics.sampled || recovered.metrics.skipped) {
     final.guidedMetrics = {
       ...(final.guidedMetrics ?? {}),
       temporalStitchAttempts: recovered.metrics.attempts,
@@ -216,9 +213,11 @@ scope.onmessage = async (event) => {
   const data = event.data ?? {};
   const tracks = Array.isArray(data.tracks) ? data.tracks : [];
   const lowCount = temporalEnabledForCount(tracks.length) && !data.full && data.pixelFormat === "y8";
-  let frameClone = null;
-  if (lowCount && data.videoFrame && typeof data.videoFrame.clone === "function") {
-    try { frameClone = data.videoFrame.clone(); } catch {}
+  let retainedFrame = null;
+  if (lowCount && data.videoFrame instanceof ArrayBuffer) {
+    try { retainedFrame = data.videoFrame.slice(0); } catch {}
+  } else if (lowCount && data.videoFrame && typeof data.videoFrame.clone === "function") {
+    try { retainedFrame = data.videoFrame.clone(); } catch {}
   }
   const capture = { id: data.id, final: null };
   activeCapture = capture;
@@ -229,17 +228,17 @@ scope.onmessage = async (event) => {
   }
   const captured = capture.final;
   if (!captured) {
-    frameClone?.close?.();
+    retainedFrame?.close?.();
     return;
   }
   try {
-    if (lowCount && frameClone) await salvageTemporalFailure(data, captured.message, frameClone);
+    if (lowCount && retainedFrame) await processTemporalFrame(data, captured.message, retainedFrame);
     else if (tracks.length > 2) temporalStitcher.reset();
   } catch {
     // Temporal salvage is strictly opportunistic. The proven production reply
     // must always win over an experimental sidecar failure.
   } finally {
-    frameClone?.close?.();
+    retainedFrame?.close?.();
   }
   postNative(captured.message, captured.transfer);
 };
