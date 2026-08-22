@@ -6,7 +6,6 @@ const nativePostMessage = scope.postMessage.bind(scope);
 const temporalStitcher = new TemporalQrStitcher();
 const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 let activeCapture = null;
-let temporalQueue = Promise.resolve();
 let temporalCodecPromise;
 let syntheticPtr = 0;
 let syntheticCapacity = 0;
@@ -16,15 +15,13 @@ function postNative(message, transfer) {
   else nativePostMessage(message);
 }
 
-// Production completion is never gated by temporal work. Tap the final reply,
-// send it to the main thread immediately, then queue low-count sampling/repair
-// as a sidecar. Late CRC-valid salvage is delivered in a separate message that
-// WorkerPool understands without reopening or extending the original job.
+// Dense/full jobs must behave exactly like the production worker. Only a 1-2 QR
+// tracked job with a retained camera frame is held briefly so its normal result
+// can be augmented by low-count temporal salvage before WorkerPool completes it.
 scope.postMessage = (message, transfer) => {
   const capture = activeCapture;
-  if (capture && message?.id === capture.id && !message.preflight) {
-    postNative(message, transfer);
-    if (capture.retainedFrame) enqueueTemporal(capture, message);
+  if (capture?.retainedFrame && message?.id === capture.id && !message.preflight) {
+    capture.final = { message, transfer };
     return;
   }
   postNative(message, transfer);
@@ -148,45 +145,48 @@ async function copyTemporalY(frame, data) {
   return { buffer, yPtr: y.offset, stride: y.stride, width: w, height: h };
 }
 
-async function processTemporalFrame(capture, productionReply) {
-  const { data, tracks, retainedFrame } = capture;
-  try {
-    const copied = await copyTemporalY(retainedFrame, data);
-    if (!copied) return;
-    const already = decodedSlots(productionReply, tracks);
-    const needsRecovery = already.size < tracks.length;
-    const zx = needsRecovery ? await temporalCodec() : null;
-    const recovered = temporalStitcher.recover({
-      heap: copied.buffer,
-      yPtr: copied.yPtr,
-      width: copied.width,
-      height: copied.height,
-      stride: copied.stride,
-      ox: Number(data.ox) || 0,
-      oy: Number(data.oy) || 0,
-      tracks,
-      sourceSequence: data.sourceSequence,
-      decodedSlots: already,
-      decodeGrid: zx ? (grid, dim, slot) => decodeSyntheticGrid(zx, grid, dim, slot) : void 0
+async function augmentLowCountResult(capture) {
+  const { data, tracks, retainedFrame, final } = capture;
+  if (!final) return null;
+  const copied = await copyTemporalY(retainedFrame, data);
+  if (!copied) return final;
+  const already = decodedSlots(final.message, tracks);
+  const needsRecovery = already.size < tracks.length;
+  const zx = needsRecovery ? await temporalCodec() : null;
+  const recovered = temporalStitcher.recover({
+    heap: copied.buffer,
+    yPtr: copied.yPtr,
+    width: copied.width,
+    height: copied.height,
+    stride: copied.stride,
+    ox: Number(data.ox) || 0,
+    oy: Number(data.oy) || 0,
+    tracks,
+    sourceSequence: data.sourceSequence,
+    decodedSlots: already,
+    decodeGrid: zx ? (grid, dim, slot) => decodeSyntheticGrid(zx, grid, dim, slot) : void 0
+  });
+  for (const symbol of recovered.symbols) {
+    const quad = symbol.track.quad;
+    final.message.symbols ??= [];
+    final.message.symbols.push({
+      bytes: symbol.bytes,
+      box: boundsOf(quad),
+      quad,
+      modules: symbol.modules || symbol.track.dim,
+      tracked: true,
+      geometryMeasured: false,
+      decodePath: "temporal-stitch",
+      crc32: true,
+      verifiedPayload: true,
+      header: symbol.header,
+      temporalSeam: symbol.seam,
+      temporalOrientation: symbol.orientation
     });
-    const symbols = recovered.symbols.map((symbol) => {
-      const quad = symbol.track.quad;
-      return {
-        bytes: symbol.bytes,
-        box: boundsOf(quad),
-        quad,
-        modules: symbol.modules || symbol.track.dim,
-        tracked: true,
-        geometryMeasured: false,
-        decodePath: "temporal-stitch",
-        crc32: true,
-        verifiedPayload: true,
-        header: symbol.header,
-        temporalSeam: symbol.seam,
-        temporalOrientation: symbol.orientation
-      };
-    });
-    const metrics = {
+  }
+  if (recovered.metrics.attempts || recovered.metrics.hits || recovered.metrics.sampled || recovered.metrics.skipped) {
+    final.message.guidedMetrics = {
+      ...(final.message.guidedMetrics ?? {}),
       temporalStitchAttempts: recovered.metrics.attempts,
       temporalStitchHits: recovered.metrics.hits,
       temporalStitchSampled: recovered.metrics.sampled,
@@ -195,34 +195,21 @@ async function processTemporalFrame(capture, productionReply) {
       temporalStitchOrientation: recovered.metrics.orientation,
       temporalStitchSourceDelta: recovered.metrics.sourceDelta
     };
-    if (symbols.length || recovered.metrics.attempts || recovered.metrics.sampled || recovered.metrics.skipped) {
-      postNative({
-        id: data.id,
-        temporalLate: true,
-        sourceSequence: data.sourceSequence,
-        opticsEpoch: data.opticsEpoch,
-        symbols,
-        guidedMetrics: metrics
-      });
-    }
-  } catch {
-    // Temporal salvage is opportunistic. It can never suppress or replace the
-    // already-delivered production decode result.
-  } finally {
-    retainedFrame?.close?.();
   }
-}
-
-function enqueueTemporal(capture, productionReply) {
-  temporalQueue = temporalQueue
-    .catch(() => {})
-    .then(() => processTemporalFrame(capture, productionReply));
+  if (recovered.metrics.hits) {
+    final.message.trackedAttempted = true;
+    final.message.trackedHit = true;
+    final.message.fallbackAttempted = true;
+    final.message.fallbackSucceeded = true;
+    final.message.pixelPath = "y8-temporal-stitch";
+  }
+  return final;
 }
 
 scope.onmessage = async (event) => {
   const data = event.data ?? {};
   const tracks = Array.isArray(data.tracks) ? data.tracks : [];
-  const lowCount = temporalEnabledForCount(tracks.length) && !data.full && data.pixelFormat === "y8" && !data.repeatFilter;
+  const lowCount = temporalEnabledForCount(tracks.length) && !data.full && data.pixelFormat === "y8";
   let retainedFrame = null;
   if (lowCount && data.videoFrame instanceof ArrayBuffer) {
     try { retainedFrame = data.videoFrame.slice(0); } catch {}
@@ -230,22 +217,24 @@ scope.onmessage = async (event) => {
     try { retainedFrame = data.videoFrame.clone(); } catch {}
   }
   if (!lowCount && tracks.length > 2) temporalStitcher.reset();
-  const capture = { id: data.id, data, tracks, retainedFrame };
+  const capture = { id: data.id, data, tracks, retainedFrame, final: null };
   activeCapture = capture;
   try {
     await productionOnMessage.call(scope, event);
   } finally {
     if (activeCapture === capture) activeCapture = null;
-    // If production threw before posting a final reply, do not leak the clone.
-    if (retainedFrame && !capture.queued) retainedFrame.close?.();
   }
-};
 
-// Mark capture ownership when its final production reply is observed. This is
-// separate from enqueueTemporal so the handler's finally block never closes a
-// frame that the sidecar queue still owns.
-const originalEnqueueTemporal = enqueueTemporal;
-enqueueTemporal = function(capture, productionReply) {
-  capture.queued = true;
-  return originalEnqueueTemporal(capture, productionReply);
+  // Dense/full completion already went straight to the main thread. Low-count
+  // completion was captured above; augment and release it now.
+  if (!retainedFrame) return;
+  try {
+    const final = await augmentLowCountResult(capture);
+    if (final) postNative(final.message, final.transfer);
+  } catch {
+    // Never lose a valid production reply because experimental salvage failed.
+    if (capture.final) postNative(capture.final.message, capture.final.transfer);
+  } finally {
+    retainedFrame.close?.();
+  }
 };
