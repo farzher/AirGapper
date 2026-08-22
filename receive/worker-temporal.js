@@ -15,12 +15,12 @@ function postNative(message, transfer) {
   else nativePostMessage(message);
 }
 
-// Dense/full jobs must behave exactly like the production worker. Only a 1-2 QR
-// tracked job with a retained camera frame is held briefly so its normal result
-// can be augmented by low-count temporal salvage before WorkerPool completes it.
+// Only low-count jobs with a successfully snapshotted Y plane are intercepted.
+// Search/acquisition and dense workers never instantiate this module at all, and
+// a low-count snapshot failure falls straight through to the production reply.
 scope.postMessage = (message, transfer) => {
   const capture = activeCapture;
-  if (capture?.retainedFrame && message?.id === capture.id && !message.preflight) {
+  if (capture?.retainedY && message?.id === capture.id && !message.preflight) {
     capture.final = { message, transfer };
     return;
   }
@@ -127,7 +127,7 @@ async function copyTemporalY(frame, data) {
     const offset = Number(data.yOffset) || 0;
     const required = offset + Math.max(0, h - 1) * stride + w;
     if (stride < w || required > frame.byteLength) return null;
-    return { buffer: new Uint8Array(frame), yPtr: offset, stride, width: w, height: h };
+    return { buffer: new Uint8Array(frame.slice(0)), yPtr: offset, stride, width: w, height: h };
   }
   if (!frame || typeof frame.allocationSize !== "function" || typeof frame.copyTo !== "function") return null;
   const rect = {
@@ -160,24 +160,21 @@ function hasUsefulTemporalHistory(tracks, sourceSequence) {
 }
 
 async function augmentLowCountResult(capture) {
-  const { data, tracks, retainedFrame, final } = capture;
-  if (!final) return null;
-  const copied = await copyTemporalY(retainedFrame, data);
-  if (!copied) return final;
+  const { data, tracks, retainedY, final } = capture;
+  if (!final || !retainedY) return final;
   const already = decodedSlots(final.message, tracks);
   const needsRecovery = already.size < tracks.length;
-  // The first low-count frame only needs to seed the tiny module-grid history.
-  // Do not instantiate a second WASM codec until there is actually an adjacent
-  // sample that can be stitched. This keeps lock-on cheap and avoids making a
-  // one-frame miss wait on an unnecessary codec startup.
+  // Always record the current physical module sample. The second codec is only
+  // loaded when an adjacent historical sample exists and ordinary QR decoding
+  // actually missed a low-count slot.
   const canStitch = needsRecovery && hasUsefulTemporalHistory(tracks, data.sourceSequence);
   const zx = canStitch ? await temporalCodec() : null;
   const recovered = temporalStitcher.recover({
-    heap: copied.buffer,
-    yPtr: copied.yPtr,
-    width: copied.width,
-    height: copied.height,
-    stride: copied.stride,
+    heap: retainedY.buffer,
+    yPtr: retainedY.yPtr,
+    width: retainedY.width,
+    height: retainedY.height,
+    stride: retainedY.stride,
     ox: Number(data.ox) || 0,
     oy: Number(data.oy) || 0,
     tracks,
@@ -229,14 +226,19 @@ scope.onmessage = async (event) => {
   const data = event.data ?? {};
   const tracks = Array.isArray(data.tracks) ? data.tracks : [];
   const lowCount = temporalEnabledForCount(tracks.length) && !data.full && data.pixelFormat === "y8";
-  let retainedFrame = null;
-  if (lowCount && data.videoFrame instanceof ArrayBuffer) {
-    try { retainedFrame = data.videoFrame.slice(0); } catch {}
-  } else if (lowCount && data.videoFrame && typeof data.videoFrame.clone === "function") {
-    try { retainedFrame = data.videoFrame.clone(); } catch {}
-  }
   if (!lowCount && tracks.length > 2) temporalStitcher.reset();
-  const capture = { id: data.id, data, tracks, retainedFrame, final: null };
+
+  // Snapshot low-count luminance immediately while the transferred VideoFrame
+  // is unquestionably live. copyTo is non-destructive, so production worker.js
+  // still receives and owns the original frame. Keeping only plain bytes avoids
+  // holding a cloned VideoFrame across WASM decode and eliminates camera-frame
+  // lifetime/GC stalls.
+  let retainedY = null;
+  if (lowCount) {
+    try { retainedY = await copyTemporalY(data.videoFrame, data); } catch {}
+  }
+
+  const capture = { id: data.id, data, tracks, retainedY, final: null };
   activeCapture = capture;
   try {
     await productionOnMessage.call(scope, event);
@@ -244,16 +246,13 @@ scope.onmessage = async (event) => {
     if (activeCapture === capture) activeCapture = null;
   }
 
-  // Dense/full completion already went straight to the main thread. Low-count
-  // completion was captured above; augment and release it now.
-  if (!retainedFrame) return;
+  // If the Y snapshot failed, the production final was never intercepted and
+  // has already gone to the main thread. Otherwise augment exactly that final.
+  if (!retainedY) return;
   try {
     const final = await augmentLowCountResult(capture);
     if (final) postNative(final.message, final.transfer);
   } catch {
-    // Never lose a valid production reply because experimental salvage failed.
     if (capture.final) postNative(capture.final.message, capture.final.transfer);
-  } finally {
-    retainedFrame.close?.();
   }
 };
