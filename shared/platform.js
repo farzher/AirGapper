@@ -1,7 +1,9 @@
 import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
 import {
+  consumeExposureRescue,
   noteSuppressedExposureWrite,
-  shouldPreserveManualExposure
+  shouldPreserveManualExposure,
+  verifiedExposureLatchDecision
 } from "./receiver-recovery-state.js";
 
 installReceiverRecoveryPolicy();
@@ -9,6 +11,7 @@ installReceiverRecoveryPolicy();
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 const isAndroid = !!nav && /Android/.test(nav.userAgent);
+const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 function probeCameraCapabilities(track) {
   var _a, _b, _c, _d, _e;
   const caps = (_b = (_a = track.getCapabilities) == null ? void 0 : _a.call(track)) != null ? _b : {};
@@ -29,7 +32,7 @@ function probeCameraCapabilities(track) {
 function exposureConstraintAlreadySatisfied(track, set) {
   if (!track || !set) return false;
   const touchesFocus = set.focusMode !== void 0 || set.focusDistance !== void 0 || set.pointsOfInterest !== void 0;
-  const touchesExposure = set.exposureMode !== void 0 || set.exposureTime !== void 0 || set.iso !== void 0 || set.exposureCompensation !== void 0;
+  const touchesExposure = EXPOSURE_KEYS.some((key) => set[key] !== void 0);
   if (touchesFocus || !touchesExposure) return false;
   const actual = track.getSettings?.() ?? {};
   const caps = track.getCapabilities?.() ?? {};
@@ -44,26 +47,53 @@ function exposureConstraintAlreadySatisfied(track, set) {
     close(actual.iso, set.iso, caps.iso) &&
     close(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
 }
-async function applyAdvancedConstraint(track, set) {
-  // Camera movement invalidates coordinates, not a QR-proven sensor setting.
-  // During a lattice pose recovery, ignore attempts to surrender a verified
-  // manual exposure back to photographic AE. Autofocus remains untouched.
-  if (set?.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
-    noteSuppressedExposureWrite();
-    return true;
-  }
-  // Reapplying an identical sensor state can wake/reconfigure Android 3A even
-  // though no value changed. Treat exposure-only repeats as successful no-ops.
-  if (exposureConstraintAlreadySatisfied(track, set)) {
-    noteSuppressedExposureWrite();
-    return true;
-  }
+function withoutExposure(set) {
+  const remainder = { ...set };
+  for (const key of EXPOSURE_KEYS) delete remainder[key];
+  return remainder;
+}
+async function applyConstraint(track, set) {
+  if (!Object.keys(set).length) return true;
   try {
     await track.applyConstraints({ advanced: [set] });
     return true;
   } catch {
     return false;
   }
+}
+async function applyAdvancedConstraint(track, set) {
+  const touchesExposure = Boolean(set) && EXPOSURE_KEYS.some((key) => set[key] !== void 0);
+
+  // Reapplying an identical sensor state can wake/reconfigure Android 3A even
+  // though no value changed. Treat exposure-only repeats as successful no-ops.
+  if (exposureConstraintAlreadySatisfied(track, set)) {
+    noteSuppressedExposureWrite();
+    return true;
+  }
+
+  if (touchesExposure) {
+    // Camera movement invalidates coordinates, not a QR-proven sensor setting.
+    // During a lattice pose recovery, never surrender a verified manual exposure
+    // back to photographic AE. If a mixed AF+AE request arrives, strip only the
+    // exposure fields so autofocus remains independent and automatic.
+    if (set?.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
+      noteSuppressedExposureWrite();
+      return applyConstraint(track, withoutExposure(set));
+    }
+
+    // A CRC-valid QR proves the current short exposure works. Temporary decoder
+    // failures are weak evidence about brightness, so suppress exposure/ISO/EV
+    // mutations while QR evidence is fresh or geometry is still moving. After a
+    // stable decode outage, permit exactly one rescue mutation per bounded window.
+    const latch = verifiedExposureLatchDecision(track);
+    if (latch.hold) {
+      noteSuppressedExposureWrite();
+      return applyConstraint(track, withoutExposure(set));
+    }
+    if (latch.rescue) consumeExposureRescue(track);
+  }
+
+  return applyConstraint(track, set);
 }
 export {
   applyAdvancedConstraint,
