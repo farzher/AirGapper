@@ -22,7 +22,7 @@ const STOCK_HARD_POSE_LOSS_MS = 900;
 const LOW_COUNT_ONE_QR_HARD_LOSS_MS = 3500;
 const LOW_COUNT_TWO_QR_HARD_LOSS_MS = 2500;
 const LONG_AE_EXPOSURE = VERIFIED_QR_MAX_EXPOSURE;
-const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
+const MOTION_SAFE_MAX_EXPOSURE = 45;
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -164,75 +164,18 @@ function temporalUsesScalarCodec() {
   return !supportsWasmSimd();
 }
 
-function makeTemporalWorker(pool) {
-  // Unit tests and non-browser harnesses use the pool's fake factory. Production
-  // creates the temporal worker directly so the ordinary pool factory remains
-  // the untouched worker.js factory used by acquisition and dense decoding.
+function makeTemporalCompanion(pool) {
   if (typeof globalThis.Worker !== "function" || typeof globalThis.location === "undefined") {
     const worker = pool.create("temporal");
-    if (worker) worker.__airgapperTemporalWorker = true;
+    if (worker) worker.__airgapperTemporalCompanion = true;
     return worker;
   }
   const file = temporalUsesScalarCodec()
     ? "../receive/worker-temporal.js?scalar=1"
     : "../receive/worker-temporal.js";
   const worker = new Worker(new URL(file, import.meta.url), { type: "module" });
-  worker.__airgapperTemporalWorker = true;
+  worker.__airgapperTemporalCompanion = true;
   return worker;
-}
-
-function replaceIdleWorker(pool, slot, worker) {
-  if (!worker || !Number.isInteger(slot) || slot < 0 || slot >= pool.workers.length || pool.busy[slot]) return false;
-  clearTimeout(pool.jobTimers[slot]);
-  pool.jobTimers[slot] = void 0;
-  pool.activeIds[slot] = void 0;
-  pool.activeFull[slot] = false;
-  pool.activeMeta[slot] = null;
-  pool.workers[slot]?.terminate?.();
-  pool.workers[slot] = worker;
-  pool.busy[slot] = false;
-  pool.configureWorker(slot, worker);
-  return true;
-}
-
-function ensureTemporalWorker(pool, requestedSlot) {
-  let slot = Number(pool.__airgapperLowCountWorker);
-  if (Number.isInteger(slot) && slot >= 0 && slot < pool.workers.length) return slot;
-
-  slot = Number.isInteger(requestedSlot) && requestedSlot >= 0 && requestedSlot < pool.workers.length && !pool.busy[requestedSlot]
-    ? requestedSlot
-    : pool.busy.indexOf(false);
-  if (slot < 0) return -1;
-
-  const worker = makeTemporalWorker(pool);
-  if (!replaceIdleWorker(pool, slot, worker)) {
-    worker?.terminate?.();
-    return -1;
-  }
-  pool.__airgapperLowCountWorker = slot;
-  return slot;
-}
-
-function restoreTemporalWorker(pool) {
-  const slot = Number(pool.__airgapperLowCountWorker);
-  if (!Number.isInteger(slot) || slot < 0 || slot >= pool.workers.length) {
-    pool.__airgapperLowCountWorker = void 0;
-    return true;
-  }
-  if (pool.busy[slot]) return false;
-  const worker = pool.create();
-  if (!replaceIdleWorker(pool, slot, worker)) {
-    worker?.terminate?.();
-    return false;
-  }
-  pool.__airgapperLowCountWorker = void 0;
-  return true;
-}
-
-function submitLowCountAtAffinity(pool, requestedSlot, message, transfer) {
-  const slot = ensureTemporalWorker(pool, requestedSlot);
-  if (slot < 0 || pool.busy[slot]) return false;
-  return pool.submitAtSlot(slot, message, transfer);
 }
 
 function noteTemporalMetrics(metrics) {
@@ -250,41 +193,92 @@ function noteTemporalMetrics(metrics) {
   if (Number.isFinite(Number(metrics.temporalStitchSourceDelta))) temporalStitchLastSourceDelta = Number(metrics.temporalStitchSourceDelta);
 }
 
+function ensureTemporalCompanion(pool) {
+  if (pool.__airgapperTemporalCompanion?.worker) return pool.__airgapperTemporalCompanion;
+  const worker = makeTemporalCompanion(pool);
+  if (!worker) return null;
+  const state = { worker };
+  pool.__airgapperTemporalCompanion = state;
+  worker.onmessage = (event) => {
+    if (pool.__airgapperTemporalCompanion !== state) return;
+    const message = event.data;
+    if (!message?.temporal) return;
+    noteTemporalMetrics(message.guidedMetrics);
+    for (const symbol of message.symbols ?? []) {
+      try {
+        pool.onDecoded?.(symbol.bytes, symbol.box, {
+          scanId: message.id,
+          sourceSequence: message.sourceSequence,
+          quad: symbol.quad,
+          modules: symbol.modules,
+          tracked: true,
+          geometryMeasured: false,
+          decodePath: "temporal-stitch",
+          crc32: true,
+          verifiedPayload: true,
+          header: symbol.header
+        });
+      } catch {}
+    }
+  };
+  worker.onerror = () => {
+    if (pool.__airgapperTemporalCompanion === state) pool.__airgapperTemporalCompanion = null;
+    worker.terminate?.();
+  };
+  return state;
+}
+
+function cloneTemporalFrame(frame) {
+  if (frame instanceof ArrayBuffer) {
+    try { return frame.slice(0); } catch { return null; }
+  }
+  if (frame && typeof frame.clone === "function") {
+    try { return frame.clone(); } catch { return null; }
+  }
+  return null;
+}
+
+function mirrorLowCountFrame(pool, message) {
+  const state = ensureTemporalCompanion(pool);
+  if (!state?.worker) return;
+  const frame = cloneTemporalFrame(message.videoFrame);
+  if (!frame) return;
+  const copy = { ...message, videoFrame: frame };
+  try {
+    state.worker.postMessage(copy, [frame]);
+    pool.__airgapperTemporalLowCountActive = true;
+  } catch {
+    frame.close?.();
+  }
+}
+
+function resetTemporalCompanion(pool) {
+  if (!pool.__airgapperTemporalLowCountActive) return;
+  pool.__airgapperTemporalLowCountActive = false;
+  try { pool.__airgapperTemporalCompanion?.worker?.postMessage({ reset: true }); } catch {}
+}
+
+function stopTemporalCompanion(pool) {
+  const state = pool.__airgapperTemporalCompanion;
+  if (state?.worker) state.worker.terminate?.();
+  pool.__airgapperTemporalCompanion = null;
+  pool.__airgapperTemporalLowCountActive = false;
+}
+
 function installWarmWorkerRecovery() {
   const originalResize = DecodeWorkerPool.prototype.resize;
   const originalSubmit = DecodeWorkerPool.prototype.submit;
   const originalSubmitTo = DecodeWorkerPool.prototype.submitTo;
-  const originalConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
-
-  DecodeWorkerPool.prototype.configureWorker = function(slot, worker) {
-    if (!this.__airgapperTemporalMetricsWrapped) {
-      this.__airgapperTemporalMetricsWrapped = true;
-      const originalCompleted = this.onCompleted;
-      this.onCompleted = (id, completion) => {
-        noteTemporalMetrics(completion?.guidedMetrics);
-        return originalCompleted?.(id, completion);
-      };
-    }
-    return originalConfigureWorker.call(this, slot, worker);
-  };
 
   DecodeWorkerPool.prototype.submit = function(message, transfer) {
-    if (lowCountTemporalMessage(message)) return submitLowCountAtAffinity(this, void 0, message, transfer);
-    // Any acquisition or dense tracked job restores the specialized slot to the
-    // ordinary production worker before scheduling. If the temporal slot is
-    // still busy, leave it alone and let the disposable new frame use another
-    // normal worker (or be dropped when none is free).
-    if (Number.isInteger(this.__airgapperLowCountWorker) && !this.busy[this.__airgapperLowCountWorker]) {
-      restoreTemporalWorker(this);
-    }
+    if (lowCountTemporalMessage(message)) mirrorLowCountFrame(this, message);
+    else resetTemporalCompanion(this);
     return originalSubmit.call(this, message, transfer);
   };
 
   DecodeWorkerPool.prototype.submitTo = function(slot, message, transfer) {
-    if (lowCountTemporalMessage(message)) return submitLowCountAtAffinity(this, slot, message, transfer);
-    const temporalSlot = Number(this.__airgapperLowCountWorker);
-    if (Number.isInteger(temporalSlot) && !this.busy[temporalSlot]) restoreTemporalWorker(this);
-    if (slot === temporalSlot && this.busy[temporalSlot]) return false;
+    if (lowCountTemporalMessage(message)) mirrorLowCountFrame(this, message);
+    else resetTemporalCompanion(this);
     return originalSubmitTo.call(this, slot, message, transfer);
   };
 
@@ -299,8 +293,7 @@ function installWarmWorkerRecovery() {
       if (this.workers.length === count) return;
     }
     const result = originalResize.call(this, count);
-    if (!Number.isInteger(this.__airgapperLowCountWorker) || this.__airgapperLowCountWorker >= this.workers.length)
-      this.__airgapperLowCountWorker = void 0;
+    if (count === 0) stopTemporalCompanion(this);
     return result;
   };
 }
