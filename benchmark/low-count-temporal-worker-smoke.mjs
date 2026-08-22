@@ -11,9 +11,6 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
-    // This smoke tests the specialized worker itself. The application must keep
-    // acquisition on worker.js and only instantiate worker-temporal.js after a
-    // 1-2 QR tracked layout has already been established.
     const worker = new Worker(new URL("/receive/worker-temporal.js", location.href), { type: "module" });
     const width = 180;
     const height = 180;
@@ -50,9 +47,13 @@ try {
       resolve(replies);
     };
 
-    function makeFrame(invert) {
-      const y = new Uint8Array(width * height);
+    function makeFrame(invert, sourceSequence) {
+      const ySize = width * height;
+      const uvSize = width / 2 * (height / 2);
+      const bytes = new Uint8Array(ySize + uvSize * 2);
+      const y = bytes.subarray(0, ySize);
       y.fill(238);
+      bytes.fill(128, ySize);
       for (let my = 0; my < dim; my++) {
         for (let mx = 0; mx < dim; mx++) {
           const dark = ((mx * 7 + my * 11 + (mx ^ my)) & 3) === 0;
@@ -64,11 +65,16 @@ try {
           }
         }
       }
-      return y.buffer;
+      return new VideoFrame(bytes, {
+        format: "I420",
+        codedWidth: width,
+        codedHeight: height,
+        timestamp: sourceSequence * 33_333
+      });
     }
 
     function post(id, sourceSequence, invert) {
-      const frame = makeFrame(invert);
+      const frame = makeFrame(invert, sourceSequence);
       worker.postMessage({
         id,
         videoFrame: frame,
@@ -81,9 +87,7 @@ try {
         full: false,
         tracks: [{ slot: 0, dim, quad }],
         pixelFormat: "y8",
-        yOffset: 0,
-        yStride: width,
-        payloadBytes: frame.byteLength,
+        payloadBytes: width * height,
         sourceSequence,
         strictHotPath: false,
         isolated: true
@@ -96,7 +100,7 @@ try {
   if (result.length !== 2) throw new Error(`expected two low-count replies, got ${result.length}`);
   for (const reply of result) {
     if (reply.error) throw new Error(`low-count worker error: ${reply.error}`);
-    if (reply.directFrameFailed) throw new Error("low-count Y8 ArrayBuffer was rejected");
+    if (reply.directFrameFailed) throw new Error("low-count VideoFrame was rejected by the production decoder");
     if ((reply.guidedMetrics?.temporalStitchSampled ?? 0) < 1)
       throw new Error(`temporal module sampling did not run: ${JSON.stringify(reply.guidedMetrics)}`);
   }
