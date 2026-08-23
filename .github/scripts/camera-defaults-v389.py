@@ -18,7 +18,7 @@ s = s.replace(old, new, 1)
 
 pattern = re.compile(r'  const mainHint = .*?;\n  // A 7x4 wall needs more than 35\.7 camera frames/s to reach 1000 QR/s\.\n  // Prefer a camera capable of crossing that hard cadence threshold before\n  // comparing resolution; measured throughput separates cameras in each tier\.\n  const cadenceTier = fps >= 36 \? 1 : 0;\n  return cadenceTier \* 1e9 \+ area \+ fps \* 10000 \+ goodput \* 1000 \+ af \* 50000 \+ mainHint \* 1000 - index;')
 replacement = '''  const mainHint = /camera(?:2)?\\s*0(?:\\D|$)|\\bmain\\b|\\bprimary\\b/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;\n  // The phone's primary rear sensor is the compatibility default even when an\n  // auxiliary rear lens advertises a higher browser FPS. If labels do not\n  // identify the main sensor, keep the existing cadence/resolution ranking.\n  const cadenceTier = fps >= 36 ? 1 : 0;\n  return mainHint * 1e12 + cadenceTier * 1e9 + area + fps * 10000 + goodput * 1000 + af * 50000 - index;'''
-s, count = pattern.subn(replacement, s, count=1)
+s, count = pattern.subn(lambda _match: replacement, s, count=1)
 if count != 1:
     raise SystemExit('missing automatic camera ranking block')
 
