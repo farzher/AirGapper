@@ -39,7 +39,7 @@ try {
       return new VideoFrame(bytes, { format: "I420", codedWidth: width, codedHeight: height, timestamp: sequence * 33_333 });
     };
 
-    const worker = new Worker(new URL("/receive/worker-reconstruct.js", location.href), { type: "module" });
+    const worker = new Worker(new URL("/receive/worker-reconstruct-bootstrap.js", location.href), { type: "module" });
     const run = (id, videoFrame, sourceSequence) => new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(`wrapper job ${id} timeout`)), 45_000);
       const listener = (event) => {
@@ -54,8 +54,6 @@ try {
       }, [videoFrame]);
     });
 
-    // Both physical frames are deliberately split. First seeds only the soft
-    // history. The second must recover packet 71 through the wrapper path.
     const first = await run(9101, frame(qrs[0], qrs[1], 72, -22, 200), 200);
     const second = await run(9102, frame(qrs[1], qrs[2], 106, -18, 201), 201);
     worker.terminate();
