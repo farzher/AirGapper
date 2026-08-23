@@ -45,68 +45,114 @@ function low(id, sourceSequence = id) {
     tracks: [{ slot: 0, dim: 21, quad }]
   };
 }
+function sampleFor(sequence) {
+  return {
+    slot: 0,
+    dim: 21,
+    modules: new Uint8Array(21 * 21).fill(sequence & 1 ? 255 : 0),
+    quad,
+    sourceSequence: sequence,
+    separation: 180
+  };
+}
+function releaseNormalSlot(slot) {
+  pool.busy[slot] = false;
+  pool.activeIds[slot] = undefined;
+  clearTimeout(pool.jobTimers[slot]);
+  pool.jobTimers[slot] = undefined;
+}
 
 assert.equal(pool.submit(low(1), []), true);
-const temporal = created.find((worker) => worker.kind === "temporal-v2");
-assert.ok(temporal, "first low-count job should create an out-of-pool v2 companion");
-assert.equal(temporal.messages.length, 1);
-assert.equal(temporal.messages[0].action, "sample");
+const split = pool.__airgapperTemporalSplit;
+const sampler = split?.sampler?.worker;
+const recovery = split?.recovery?.worker;
+assert.equal(sampler?.kind, "temporal-sampler", "first low-count job should create a fast sampler");
+assert.equal(recovery?.kind, "temporal-recover", "first low-count job should create an independent recovery decoder");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true,
   "normal decoder pool must never be replaced by temporal workers");
+assert.equal(sampler.messages.length, 1);
+assert.equal(sampler.messages[0].action, "sample");
+assert.equal(recovery.messages.length, 1);
+assert.equal(recovery.messages[0].action, "warm");
 
-// Flood submissions while the companion sample is outstanding. Normal pool
-// scheduling may accept/drop independently, but the companion must retain no
-// additional camera frame and must not build a message queue.
-for (let id = 2; id <= 40; id++) pool.submit(low(id), []);
-assert.equal(temporal.messages.length, 1,
-  "busy temporal companion must drop optional mirrors instead of queuing frames");
+// The sampler has hard one-frame backpressure: never build a camera-frame queue.
+for (let id = 10; id <= 30; id++) pool.submit(low(id), []);
+assert.equal(sampler.messages.length, 1,
+  "busy sampler must drop optional mirrors instead of queuing camera frames");
 
-const sample = temporal.messages[0];
-temporal.onmessage?.({ data: {
+// Warm the recovery decoder independently.
+const warm = recovery.messages[0];
+recovery.onmessage?.({ data: {
+  temporalV2: true,
+  phase: "warm",
+  token: warm.token,
+  generation: warm.generation,
+  id: warm.id,
+  sourceSequence: warm.sourceSequence,
+  symbols: [],
+  guidedMetrics: { temporalWarmMs: 5 }
+} });
+
+// Finish sample N and its normal miss. There is no prior sample yet, so no
+// recovery job should be emitted.
+const firstSample = sampler.messages[0];
+sampler.onmessage?.({ data: {
   temporalV2: true,
   phase: "sample",
-  token: sample.token,
-  generation: sample.generation,
-  id: sample.id,
-  sourceSequence: sample.sourceSequence,
+  token: firstSample.token,
+  generation: firstSample.generation,
+  id: 1,
+  sourceSequence: 1,
+  samples: [sampleFor(1)],
   symbols: [],
-  guidedMetrics: { temporalStitchSampled: 1 }
+  guidedMetrics: { temporalStitchSampled: 1, temporalSampleMs: 2, temporalCopyMs: 0.5 }
 } });
-
-// Normal decode for that sampled frame missed the expected slot. Recovery is
-// requested only now, after the normal decoder outcome is known.
 pool.onCompleted?.(1, { symbols: [], symbolCount: 0 });
-assert.equal(temporal.messages.length, 2);
-assert.equal(temporal.messages[1].action, "recover");
-assert.deepEqual(temporal.messages[1].missingSlots, [0]);
+assert.equal(recovery.messages.length, 1, "first physical sample cannot reconstruct without N-1");
 
-for (let id = 41; id <= 80; id++) pool.submit(low(id), []);
-assert.equal(temporal.messages.length, 2,
-  "expensive recovery must also have hard backpressure with no queued frames");
-
-const recover = temporal.messages[1];
-temporal.onmessage?.({ data: {
+// Capture adjacent frame N+1.
+releaseNormalSlot(0);
+assert.equal(pool.submit(low(2), []), true);
+assert.equal(sampler.messages.length, 2);
+const secondSample = sampler.messages[1];
+sampler.onmessage?.({ data: {
   temporalV2: true,
-  phase: "recover",
-  token: recover.token,
-  generation: recover.generation,
-  id: recover.id,
-  sourceSequence: recover.sourceSequence,
+  phase: "sample",
+  token: secondSample.token,
+  generation: secondSample.generation,
+  id: 2,
+  sourceSequence: 2,
+  samples: [sampleFor(2)],
   symbols: [],
-  guidedMetrics: { temporalStitchAttempts: 18, temporalStitchHits: 0 }
+  guidedMetrics: { temporalStitchSampled: 1, temporalSampleMs: 2, temporalCopyMs: 0.5 }
 } });
+pool.onCompleted?.(2, { symbols: [], symbolCount: 0 });
+assert.equal(recovery.messages.length, 2, "N/N-1 should schedule one recovery job after normal decode misses");
+assert.equal(recovery.messages[1].action, "recover-pairs");
+assert.equal(recovery.messages[1].pairs.length, 1);
+assert.equal(recovery.messages[1].pairs[0].current.sourceSequence, 2);
+assert.equal(recovery.messages[1].pairs[0].previousSamples[0].sourceSequence, 1);
 
-// Free one normal slot so a subsequent tracked job can be scheduled. The next
-// companion message may now be exactly one new sample, proving recovery releases
-// the backpressure gate rather than accumulating prior frames.
-pool.busy[0] = false;
-pool.activeIds[0] = undefined;
-clearTimeout(pool.jobTimers[0]);
-pool.jobTimers[0] = undefined;
-assert.equal(pool.submit(low(81), []), true);
-assert.equal(temporal.messages.length, 3);
-assert.equal(temporal.messages[2].action, "sample");
+// Critical invariant: expensive seam decoding MUST NOT block collection of N+2.
+// The recovery worker stays busy while the independent sampler accepts the next
+// physical camera frame.
+releaseNormalSlot(0);
+assert.equal(pool.submit(low(3), []), true);
+assert.equal(sampler.messages.length, 3,
+  "sampler must keep collecting adjacent frames while recovery decoder is busy");
+assert.equal(sampler.messages[2].action, "sample");
+assert.equal(recovery.messages.length, 2, "busy recovery decoder must not build an unbounded queue");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true);
 
+// A fourth frame while sample N+2 is still in flight is intentionally dropped
+// from temporal mirroring rather than queued.
+releaseNormalSlot(0);
+assert.equal(pool.submit(low(4), []), true);
+assert.equal(sampler.messages.length, 3,
+  "sampler must retain at most one camera frame at a time");
+
+assert.equal(created.filter((worker) => worker.kind === "temporal-sampler").length, 1);
+assert.equal(created.filter((worker) => worker.kind === "temporal-recover").length, 1);
+
 pool.resize(0);
-console.log("temporal backpressure smoke: ok");
+console.log("temporal split backpressure smoke: ok");
