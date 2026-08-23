@@ -51,7 +51,7 @@ const AUTO_GRID_LAYOUTS = (() => {
 })();
 let measuredDisplayHz = 60;
 let autoGridRefreshTimer;
-const SEND_RUNTIME_BUILD = "v0.5.357";
+const SEND_RUNTIME_BUILD = window.AIRGAPPER_BUILD || "dev";
 function selectedLayout() {
   const mode = cfgLayout.value;
   return mode === "auto-1" || mode === "auto-2" || mode === "auto-3" || mode === "auto-4" || mode === "single" || mode === "one-two" || mode === "two-two" || mode === "two-three" || mode === "three-five" || mode === "three-six" || mode === "four-six" || mode === "four-seven" || mode === "four-eight" ? mode : "four-three";
@@ -209,12 +209,11 @@ function selectFps(fps) {
 }
 function updateAutoGridControlState() {
   const automatic = isAutoLayout();
-  // Size remains a real user control in Auto. It is the preferred QR payload
-  // ceiling; Auto only steps down when that size cannot preserve the requested
-  // module density in the current viewport.
+  // In Auto, Size is a ceiling. Smaller QR versions may fit many more
+  // independent symbols and therefore deliver more useful bytes per display frame.
   cfgSize.disabled = false;
   cfgSize.title = automatic
-    ? `Auto ${autoGridTargetModulePx()}px uses this Size when it fits and steps down only when needed`
+    ? `Auto ${autoGridTargetModulePx()}px uses up to this Size and picks the fastest wall`
     : "";
 }
 function gcd(a, b) {
@@ -368,21 +367,17 @@ function chooseAutoGrid(
   }
   if (!candidates.length) throw new Error("Auto Grid could not find a valid QR layout for this transfer.");
 
-  // Size is a preference, not something Auto is free to ignore. Find the
-  // largest selected-or-smaller Size that can actually preserve Auto N's
-  // module density, then optimize the grid only within that Size.
+  // Size is a ceiling, not a forced packet size. Score every selected-or-smaller
+  // QR version that preserves the requested module density. A smaller QR can fit
+  // enough extra independent symbols to beat a larger QR in aggregate bandwidth.
   const densityCandidates = candidates.filter((candidate) => candidate.displayModulePx + 1e-9 >= densityTarget);
   if (!densityCandidates.length) {
     throw new Error(
       `Auto ${densityTarget}px cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} on-screen px/module in this viewport.`
     );
   }
-  const resolvedMaximumFrameBytes = allowedFrameBytes.find((bytes) =>
-    densityCandidates.some((candidate) => candidate.maximumFrameBytes === bytes)
-  );
-  const sizePool = densityCandidates.filter((candidate) => candidate.maximumFrameBytes === resolvedMaximumFrameBytes);
-  const strict = sizePool.filter((candidate) => candidate.changesPerRefresh <= AUTO_GRID_MAX_CHANGES_PER_REFRESH);
-  const pool = strict.length ? strict : sizePool;
+  const strict = densityCandidates.filter((candidate) => candidate.changesPerRefresh <= AUTO_GRID_MAX_CHANGES_PER_REFRESH);
+  const pool = strict.length ? strict : densityCandidates;
   const adjustedScore = (candidate) => {
     // A rolling-shutter stripe destroys a smaller fraction of a wall made from
     // more independent QRs. Allow up to an 18% theoretical throughput trade
@@ -410,7 +405,7 @@ function chooseAutoGrid(
     constrained: strict.length > 0,
     targetModulePx: densityTarget,
     requestedMaximumFrameBytes,
-    sizeFallback: resolvedMaximumFrameBytes !== requestedMaximumFrameBytes
+    sizeFallback: pool[0].maximumFrameBytes !== requestedMaximumFrameBytes
   };
 }
 function monitorDisplayRefreshRate() {
@@ -811,8 +806,8 @@ async function startStream(revealStage = false) {
   const ecc = "L";
   const configuredLayout = selectedLayout();
   const autoMode = isAutoLayout(configuredLayout);
-  // Size is meaningful in both manual and Auto layouts. Auto may step down
-  // from this value to preserve its module-density target, but never above it.
+  // Size is exact in manual layouts and a ceiling in Auto. Auto may choose a
+  // smaller QR version when the denser wall has higher aggregate throughput.
   const maximumFrameBytes = manualFrameBytes;
   if (!fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
