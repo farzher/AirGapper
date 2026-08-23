@@ -15,6 +15,7 @@ function buildAirGridState({ profile, payloadId, sequence, profileId = 0, payloa
   }
   return { sequence, lanes };
 }
+
 function renderAirGridState(ctx, state, width, height) {
   const lanes = state.lanes;
   const laneCount = lanes.length;
@@ -43,4 +44,45 @@ function renderAirGridState(ctx, state, width, height) {
   }
   ctx.restore();
 }
-export { buildAirGridState, renderAirGridState };
+
+class AirGridRasterRenderer {
+  constructor() {
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d', { alpha: false });
+    this.imageData = null;
+    this.pixels32 = null;
+    this.columns = 0;
+    this.lanes = 0;
+  }
+  ensure(columns, lanes) {
+    if (columns === this.columns && lanes === this.lanes && this.imageData) return;
+    this.columns = columns;
+    this.lanes = lanes;
+    this.canvas.width = columns;
+    this.canvas.height = lanes;
+    this.imageData = this.ctx.createImageData(columns, lanes);
+    this.pixels32 = new Uint32Array(this.imageData.data.buffer);
+  }
+  render(targetCtx, state, width, height) {
+    const lanes = state.lanes;
+    const laneCount = lanes.length;
+    const columns = lanes[0]?.length ?? 0;
+    if (!laneCount || !columns) throw new Error('AirGrid state is empty');
+    this.ensure(columns, laneCount);
+    let at = 0;
+    for (let laneIndex = 0; laneIndex < laneCount; laneIndex++) {
+      const bits = lanes[laneIndex];
+      for (let column = 0; column < columns; column++) {
+        this.pixels32[at++] = bits[column] ? 0xff000000 : 0xffffffff;
+      }
+    }
+    this.ctx.putImageData(this.imageData, 0, 0);
+    targetCtx.save();
+    targetCtx.imageSmoothingEnabled = false;
+    targetCtx.globalCompositeOperation = 'copy';
+    targetCtx.drawImage(this.canvas, 0, 0, width, height);
+    targetCtx.restore();
+  }
+}
+
+export { AirGridRasterRenderer, buildAirGridState, renderAirGridState };
