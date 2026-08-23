@@ -8,10 +8,10 @@
  * CRC is still verified in JavaScript before a recovered packet is accepted.
  */
 #include "BitMatrix.h"
+#include "Content.h"
 #include "DecoderResult.h"
 #include "qrcode/QRDecoder.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <cstring>
 
