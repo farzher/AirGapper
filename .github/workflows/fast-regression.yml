@@ -83,6 +83,7 @@ jobs:
           node --input-type=module --check < airgrid-lab-1356.js
           node --input-type=module --check < airgrid-lab-1400.js
           node --input-type=module --check < airgrid-lab-1410.js
+          node --input-type=module --check < airgrid-lab-1420.js
           node --input-type=module --check < receive/airgrid-sampler.js
           node --input-type=module --check < receive/airgrid-pam4-sampler.js
           node --input-type=module --check < receive/airgrid-worker.js
