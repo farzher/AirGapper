@@ -18,11 +18,8 @@ import {
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
-const STOCK_HARD_POSE_LOSS_MS = 900;
-const LOW_COUNT_ONE_QR_HARD_LOSS_MS = 3500;
-const LOW_COUNT_TWO_QR_HARD_LOSS_MS = 2500;
 const LONG_AE_EXPOSURE = VERIFIED_QR_MAX_EXPOSURE;
-const MOTION_SAFE_MAX_EXPOSURE = 45;
+const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -31,36 +28,6 @@ const lastLongAeHandoffAt = new WeakMap();
 const longAeHandoffCounts = new WeakMap();
 const longAeHandoffRunning = new WeakSet();
 const verifiedFreezeRunning = new WeakSet();
-const lowCountFinderEvidenceAt = new WeakMap();
-let temporalStitchAttempts = 0;
-let temporalStitchHits = 0;
-let temporalStitchSampled = 0;
-let temporalStitchSkipped = 0;
-let temporalStitchLastSeam;
-let temporalStitchLastOrientation = "";
-let temporalStitchLastSourceDelta;
-
-function resetTemporalDiagnostics() {
-  temporalStitchAttempts = 0;
-  temporalStitchHits = 0;
-  temporalStitchSampled = 0;
-  temporalStitchSkipped = 0;
-  temporalStitchLastSeam = void 0;
-  temporalStitchLastOrientation = "";
-  temporalStitchLastSourceDelta = void 0;
-}
-
-function latticeSlotCount(lattice) {
-  const layout = lattice?.candidate?.layout;
-  const count = Number(layout?.cols) * Number(layout?.rows);
-  return Number.isInteger(count) && count > 0 ? count : 0;
-}
-
-function lowCountHardLossMs(count) {
-  if (count === 1) return LOW_COUNT_ONE_QR_HARD_LOSS_MS;
-  if (count === 2) return LOW_COUNT_TWO_QR_HARD_LOSS_MS;
-  return STOCK_HARD_POSE_LOSS_MS;
-}
 
 function installLatticeRecoveryBridge() {
   const originalReset = GridLattice.prototype.reset;
@@ -69,16 +36,13 @@ function installLatticeRecoveryBridge() {
   const originalAccept = GridLattice.prototype.accept;
   const originalNoteValidPacket = GridLattice.prototype.noteValidPacket;
   const originalTick = GridLattice.prototype.tick;
-  const originalNudgeFromSightings = GridLattice.prototype.nudgeFromSightings;
 
   GridLattice.prototype.reset = function(...args) {
     endPoseRecovery();
-    lowCountFinderEvidenceAt.delete(this);
     return originalReset.apply(this, args);
   };
 
   GridLattice.prototype.reacquire = function(at, reason = "whole lattice invalidated") {
-    lowCountFinderEvidenceAt.delete(this);
     if (poseRecoveryReasonEligible(reason)) {
       beginPoseRecovery(reason);
       armWarmWorkerRestartSuppression();
@@ -91,39 +55,11 @@ function installLatticeRecoveryBridge() {
     return originalInvalidatePose.call(this, reason);
   };
 
-  GridLattice.prototype.nudgeFromSightings = function(sightings, at = this.lastHitAt) {
-    const result = originalNudgeFromSightings.call(this, sightings, at);
-    const count = latticeSlotCount(this);
-    if (result && count >= 1 && count <= 2) lowCountFinderEvidenceAt.set(this, at);
-    return result;
-  };
-
   GridLattice.prototype.tick = function(now) {
     const staleMs = this.candidate ? now - this.lastHitAt : 0;
-    const count = latticeSlotCount(this);
-    const lowCount = count >= 1 && count <= 2;
-    const finderAt = lowCountFinderEvidenceAt.get(this) ?? -Infinity;
-    const hardEvidenceAge = lowCount ? now - Math.max(this.lastHitAt, finderAt) : staleMs;
-    const hardLimit = lowCountHardLossMs(count);
-    let result;
-
-    if (lowCount && this.candidate && !this.pendingInvalidationReason &&
-        staleMs > STOCK_HARD_POSE_LOSS_MS && hardEvidenceAge <= hardLimit) {
-      const actualLastHitAt = this.lastHitAt;
-      this.lastHitAt = now - (STOCK_HARD_POSE_LOSS_MS - 1);
-      try {
-        result = originalTick.call(this, now);
-      } finally {
-        if (this.candidate) this.lastHitAt = actualLastHitAt;
-      }
-    } else {
-      result = originalTick.call(this, now);
-    }
-
+    const result = originalTick.call(this, now);
     if (this.candidate && staleMs > SOFT_POSE_LOSS_MS && this.state === "PARTIAL_LOSS") {
-      beginPoseRecovery(lowCount
-        ? "whole lattice stale; low-count temporal salvage window"
-        : "whole lattice stale; bounded QR re-anchor window");
+      beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
     }
     return result;
   };
@@ -141,147 +77,8 @@ function installLatticeRecoveryBridge() {
   };
 }
 
-function lowCountTemporalMessage(message) {
-  return Boolean(message && !message.full && message.pixelFormat === "y8" &&
-    Array.isArray(message.tracks) && message.tracks.length >= 1 && message.tracks.length <= 2);
-}
-
-function supportsWasmSimd() {
-  try {
-    return WebAssembly.validate(new Uint8Array([
-      0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
-      3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 15, 11
-    ]));
-  } catch {
-    return false;
-  }
-}
-
-function temporalUsesScalarCodec() {
-  try {
-    if (globalThis.window?.AirGapperAndroid?.is64BitProcess?.() === false) return true;
-  } catch {}
-  return !supportsWasmSimd();
-}
-
-function makeTemporalCompanion(pool) {
-  if (typeof globalThis.Worker !== "function" || typeof globalThis.location === "undefined") {
-    const worker = pool.create("temporal");
-    if (worker) worker.__airgapperTemporalCompanion = true;
-    return worker;
-  }
-  const file = temporalUsesScalarCodec()
-    ? "../receive/worker-temporal.js?scalar=1"
-    : "../receive/worker-temporal.js";
-  const worker = new Worker(new URL(file, import.meta.url), { type: "module" });
-  worker.__airgapperTemporalCompanion = true;
-  return worker;
-}
-
-function noteTemporalMetrics(metrics) {
-  if (!metrics) return;
-  const attempts = Number(metrics.temporalStitchAttempts) || 0;
-  const hits = Number(metrics.temporalStitchHits) || 0;
-  const sampled = Number(metrics.temporalStitchSampled) || 0;
-  const skipped = Number(metrics.temporalStitchSkipped) || 0;
-  temporalStitchAttempts += attempts;
-  temporalStitchHits += hits;
-  temporalStitchSampled += sampled;
-  temporalStitchSkipped += skipped;
-  if (Number.isFinite(Number(metrics.temporalStitchSeam))) temporalStitchLastSeam = Number(metrics.temporalStitchSeam);
-  if (metrics.temporalStitchOrientation) temporalStitchLastOrientation = String(metrics.temporalStitchOrientation);
-  if (Number.isFinite(Number(metrics.temporalStitchSourceDelta))) temporalStitchLastSourceDelta = Number(metrics.temporalStitchSourceDelta);
-}
-
-function ensureTemporalCompanion(pool) {
-  if (pool.__airgapperTemporalCompanion?.worker) return pool.__airgapperTemporalCompanion;
-  const worker = makeTemporalCompanion(pool);
-  if (!worker) return null;
-  const state = { worker };
-  pool.__airgapperTemporalCompanion = state;
-  worker.onmessage = (event) => {
-    if (pool.__airgapperTemporalCompanion !== state) return;
-    const message = event.data;
-    if (!message?.temporal) return;
-    noteTemporalMetrics(message.guidedMetrics);
-    for (const symbol of message.symbols ?? []) {
-      try {
-        pool.onDecoded?.(symbol.bytes, symbol.box, {
-          scanId: message.id,
-          sourceSequence: message.sourceSequence,
-          quad: symbol.quad,
-          modules: symbol.modules,
-          tracked: true,
-          geometryMeasured: false,
-          decodePath: "temporal-stitch",
-          crc32: true,
-          verifiedPayload: true,
-          header: symbol.header
-        });
-      } catch {}
-    }
-  };
-  worker.onerror = () => {
-    if (pool.__airgapperTemporalCompanion === state) pool.__airgapperTemporalCompanion = null;
-    worker.terminate?.();
-  };
-  return state;
-}
-
-function cloneTemporalFrame(frame) {
-  if (frame instanceof ArrayBuffer) {
-    try { return frame.slice(0); } catch { return null; }
-  }
-  if (frame && typeof frame.clone === "function") {
-    try { return frame.clone(); } catch { return null; }
-  }
-  return null;
-}
-
-function mirrorLowCountFrame(pool, message) {
-  const state = ensureTemporalCompanion(pool);
-  if (!state?.worker) return;
-  const frame = cloneTemporalFrame(message.videoFrame);
-  if (!frame) return;
-  const copy = { ...message, videoFrame: frame };
-  try {
-    state.worker.postMessage(copy, [frame]);
-    pool.__airgapperTemporalLowCountActive = true;
-  } catch {
-    frame.close?.();
-  }
-}
-
-function resetTemporalCompanion(pool) {
-  if (!pool.__airgapperTemporalLowCountActive) return;
-  pool.__airgapperTemporalLowCountActive = false;
-  try { pool.__airgapperTemporalCompanion?.worker?.postMessage({ reset: true }); } catch {}
-}
-
-function stopTemporalCompanion(pool) {
-  const state = pool.__airgapperTemporalCompanion;
-  if (state?.worker) state.worker.terminate?.();
-  pool.__airgapperTemporalCompanion = null;
-  pool.__airgapperTemporalLowCountActive = false;
-}
-
 function installWarmWorkerRecovery() {
   const originalResize = DecodeWorkerPool.prototype.resize;
-  const originalSubmit = DecodeWorkerPool.prototype.submit;
-  const originalSubmitTo = DecodeWorkerPool.prototype.submitTo;
-
-  DecodeWorkerPool.prototype.submit = function(message, transfer) {
-    if (lowCountTemporalMessage(message)) mirrorLowCountFrame(this, message);
-    else resetTemporalCompanion(this);
-    return originalSubmit.call(this, message, transfer);
-  };
-
-  DecodeWorkerPool.prototype.submitTo = function(slot, message, transfer) {
-    if (lowCountTemporalMessage(message)) mirrorLowCountFrame(this, message);
-    else resetTemporalCompanion(this);
-    return originalSubmitTo.call(this, slot, message, transfer);
-  };
-
   DecodeWorkerPool.prototype.resize = function(count) {
     if (count === 0 && this.workers.length && consumeWarmWorkerRestartSuppression()) {
       this.__airgapperWarmRecovery = true;
@@ -292,9 +89,7 @@ function installWarmWorkerRecovery() {
       this.__airgapperWarmRecovery = false;
       if (this.workers.length === count) return;
     }
-    const result = originalResize.call(this, count);
-    if (count === 0) stopTemporalCompanion(this);
-    return result;
+    return originalResize.call(this, count);
   };
 }
 
@@ -428,12 +223,7 @@ function installGeometryMotionBridge() {
 }
 
 function installVerifiedDecodeBridge() {
-  const originalAttach = FocusController.prototype.attach;
   const originalNoteValidDecode = FocusController.prototype.noteValidDecode;
-  FocusController.prototype.attach = function(...args) {
-    resetTemporalDiagnostics();
-    return originalAttach.apply(this, args);
-  };
   FocusController.prototype.noteValidDecode = function(...args) {
     const result = originalNoteValidDecode.apply(this, args);
     const track = this.track;
@@ -485,7 +275,6 @@ function installDiagnosticPolicy() {
     next = next.replace(/ · long-AE handoffs \d+/g, "");
     next = next.replace(/ · QR latch [^·\n]+/g, "");
     next = next.replace(/ · exposure rescues \d+/g, "");
-    next = next.replace(/ · stitch \d+\/\d+(?: sampled \d+)?(?: · seam [^\n]+)?/g, "");
     const annotations = [];
     if (handoffs) annotations.push(`long-AE handoffs ${handoffs}`);
     if (state.verifiedExposure) {
@@ -494,13 +283,6 @@ function installDiagnosticPolicy() {
     if (state.exposureRescueCount) annotations.push(`exposure rescues ${state.exposureRescueCount}`);
     if (annotations.length) {
       next = next.replace(/AutoOptics ([^\n]+)/, (line) => `${line} · ${annotations.join(" · ")}`);
-    }
-    if (temporalStitchAttempts || temporalStitchSampled) {
-      const seam = temporalStitchLastSeam === void 0 ? "" :
-        ` · seam ${temporalStitchLastSeam}${temporalStitchLastOrientation ? ` ${temporalStitchLastOrientation}` : ""}${temporalStitchLastSourceDelta ? ` Δ${temporalStitchLastSourceDelta}` : ""}`;
-      next = next.replace(/Recovery ([^\n]+)/, (line) =>
-        `${line} · stitch ${temporalStitchHits}/${temporalStitchAttempts} sampled ${temporalStitchSampled}${temporalStitchSkipped ? ` skip ${temporalStitchSkipped}` : ""}${seam}`
-      );
     }
     if (next !== original) {
       mutating = true;
