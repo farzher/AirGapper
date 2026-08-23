@@ -11,6 +11,8 @@ on:
       - version.js
       - main.js
       - index.html
+      - airgrid.html
+      - airgrid-lab.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -25,6 +27,8 @@ on:
       - version.js
       - main.js
       - index.html
+      - airgrid.html
+      - airgrid-lab.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -74,7 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           node --input-type=module --check < version.js
+          node --input-type=module --check < airgrid-lab.js
           node --input-type=module --check < receive/airgrid-sampler.js
+          node --input-type=module --check < receive/airgrid-worker.js
           node --input-type=module --check < send/airgrid-renderer.js
           node --input-type=module --check < send/airgrid-present-diagnostics.js
           node --input-type=module --check < shared/airgrid-phy.js
