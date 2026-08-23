@@ -22,7 +22,6 @@ function crc16(bytes, laneIndex = 0) {
   for (const value of bytes) feed(value);
   return crc & 0xffff;
 }
-
 function write24(out, offset, value) {
   out[offset] = value & 255;
   out[offset + 1] = value >>> 8 & 255;
@@ -32,9 +31,7 @@ function read24(bytes, offset) {
   return bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16;
 }
 function bytesToBits(bytes, out, offset) {
-  for (const value of bytes) {
-    for (let bit = 7; bit >= 0; bit--) out[offset++] = value >>> bit & 1;
-  }
+  for (const value of bytes) for (let bit = 7; bit >= 0; bit--) out[offset++] = value >>> bit & 1;
   return offset;
 }
 function bitsToBytes(bits, offset, byteLength) {
@@ -74,24 +71,7 @@ function encodeAirGridLane({ columns, profile = 0, payloadId, sequence, laneInde
   bits.set(AIRGRID_PREAMBLE, 0);
   let offset = bytesToBits(packet, bits, AIRGRID_PREAMBLE.length);
   const checksum = crc16(packet, laneIndex);
-  bits[offset++] = checksum >>> 15 & 1;
-  bits[offset++] = checksum >>> 14 & 1;
-  bits[offset++] = checksum >>> 13 & 1;
-  bits[offset++] = checksum >>> 12 & 1;
-  bits[offset++] = checksum >>> 11 & 1;
-  bits[offset++] = checksum >>> 10 & 1;
-  bits[offset++] = checksum >>> 9 & 1;
-  bits[offset++] = checksum >>> 8 & 1;
-  bits[offset++] = checksum >>> 7 & 1;
-  bits[offset++] = checksum >>> 6 & 1;
-  bits[offset++] = checksum >>> 5 & 1;
-  bits[offset++] = checksum >>> 4 & 1;
-  bits[offset++] = checksum >>> 3 & 1;
-  bits[offset++] = checksum >>> 2 & 1;
-  bits[offset++] = checksum >>> 1 & 1;
-  bits[offset++] = checksum & 1;
-  // Fill sub-byte tail cells with a deterministic balanced pattern so every
-  // rendered lane keeps transitions all the way to the right edge.
+  for (let bit = 15; bit >= 0; bit--) bits[offset++] = checksum >>> bit & 1;
   for (; offset < bits.length; offset++) bits[offset] = (offset + laneIndex + sequence) & 1;
   return bits;
 }
@@ -100,19 +80,23 @@ function preambleDistance(bits, offset = 0) {
   for (let i = 0; i < AIRGRID_PREAMBLE.length; i++) distance += Number((bits[offset + i] & 1) !== AIRGRID_PREAMBLE[i]);
   return distance;
 }
-function decodeAirGridLane(bits, { laneIndex, maxPreambleErrors = 2 } = {}) {
+function inspectAirGridLane(bits, { laneIndex, maxPreambleErrors = 2 } = {}) {
   if (!(bits instanceof Uint8Array)) bits = Uint8Array.from(bits ?? []);
-  if (bits.length < AIRGRID_PREAMBLE.length + AIRGRID_HEADER_BYTES * 8 + AIRGRID_CRC_BITS) return null;
-  if (preambleDistance(bits) > maxPreambleErrors) return null;
+  const minimumBits = AIRGRID_PREAMBLE.length + AIRGRID_HEADER_BYTES * 8 + AIRGRID_CRC_BITS;
+  if (bits.length < minimumBits) return { ok: false, reason: 'short', preambleErrors: AIRGRID_PREAMBLE.length };
+  const preambleErrors = preambleDistance(bits);
+  if (preambleErrors > maxPreambleErrors) return { ok: false, reason: 'preamble', preambleErrors };
   const payloadBytes = airGridPayloadBytes(bits.length);
-  if (payloadBytes < AIRGRID_MIN_PAYLOAD_BYTES) return null;
+  if (payloadBytes < AIRGRID_MIN_PAYLOAD_BYTES) return { ok: false, reason: 'short', preambleErrors };
   const packet = bitsToBytes(bits, AIRGRID_PREAMBLE.length, AIRGRID_HEADER_BYTES + payloadBytes);
-  if (packet[0] !== AIRGRID_MAGIC || packet[1] >>> 4 !== AIRGRID_VERSION) return null;
+  if (packet[0] !== AIRGRID_MAGIC) return { ok: false, reason: 'magic', preambleErrors };
+  if (packet[1] >>> 4 !== AIRGRID_VERSION) return { ok: false, reason: 'version', preambleErrors };
   const crcOffset = AIRGRID_PREAMBLE.length + packet.length * 8;
   let expected = 0;
   for (let i = 0; i < AIRGRID_CRC_BITS; i++) expected = expected << 1 | bits[crcOffset + i] & 1;
-  if (expected !== crc16(packet, laneIndex)) return null;
-  return {
+  const actual = crc16(packet, laneIndex);
+  if (expected !== actual) return { ok: false, reason: 'crc', preambleErrors, expectedCrc: expected, actualCrc: actual };
+  const lane = {
     version: packet[1] >>> 4,
     profile: packet[1] & 15,
     payloadId: new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getUint32(2, true),
@@ -120,6 +104,11 @@ function decodeAirGridLane(bits, { laneIndex, maxPreambleErrors = 2 } = {}) {
     laneIndex,
     payload: packet.slice(AIRGRID_HEADER_BYTES)
   };
+  return { ok: true, reason: 'ok', preambleErrors, lane };
+}
+function decodeAirGridLane(bits, options = {}) {
+  const inspected = inspectAirGridLane(bits, options);
+  return inspected.ok ? inspected.lane : null;
 }
 function makeAirGridPayload(payloadBytes, payloadId, sequence, laneIndex) {
   const random = splitmix32((payloadId ^ Math.imul(sequence + 1, 0x9e3779b1) ^ Math.imul(laneIndex + 1, 0x85ebca6b)) >>> 0);
@@ -139,6 +128,7 @@ export {
   crc16 as airGridCrc16,
   decodeAirGridLane,
   encodeAirGridLane,
+  inspectAirGridLane,
   makeAirGridPayload,
   preambleDistance
 };
