@@ -86,6 +86,7 @@ jobs:
           node --input-type=module --check < airgrid-lab-1420.js
           node --input-type=module --check < airgrid-lab-1430.js
           node --input-type=module --check < receive/airgrid-sampler.js
+          node --input-type=module --check < receive/airgrid-block-sampler.js
           node --input-type=module --check < receive/airgrid-pam4-sampler.js
           node --input-type=module --check < receive/airgrid-worker.js
           node --input-type=module --check < send/airgrid-renderer.js
@@ -93,6 +94,7 @@ jobs:
           node --input-type=module --check < send/airgrid-qr-acquisition-renderer.js
           node --input-type=module --check < send/airgrid-present-diagnostics.js
           node --input-type=module --check < shared/airgrid-phy.js
+          node --input-type=module --check < shared/airgrid-block.js
           node --input-type=module --check < shared/airgrid-pam4.js
           node --input-type=module --check < shared/airgrid-acquisition.js
           node --input-type=module --check < shared/airgrid-qr-acquisition.js
@@ -101,6 +103,7 @@ jobs:
       - name: Run AirGrid fast proofs
         run: |
           set -euo pipefail
+          node benchmark/airgrid-block-proof.mjs
           node benchmark/airgrid-qr-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-orientation-proof.mjs
