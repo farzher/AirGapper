@@ -1,3 +1,4 @@
+import { makeAirGridPayload } from '../shared/airgrid-phy.js';
 import { decodeAirGridY8Detailed } from './airgrid-sampler.js';
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
@@ -32,12 +33,19 @@ async function copyVideoFrameY8(frame) {
   }
 }
 
-function summarizeLanes(lanes) {
+function verifyLane(lane) {
+  const expected = makeAirGridPayload(lane.payload.length, lane.payloadId, lane.sequence, lane.laneIndex);
+  if (expected.length !== lane.payload.length) return false;
+  for (let i = 0; i < expected.length; i++) if (expected[i] !== lane.payload[i]) return false;
+  return true;
+}
+function summarizeLanes(lanes, verifiedSet) {
   return lanes.map(lane => ({
     laneIndex: lane.laneIndex,
     sequence: lane.sequence,
     payloadId: lane.payloadId,
     payloadBytes: lane.payload?.length ?? 0,
+    verified: verifiedSet.has(lane),
     separation: lane.separation,
     snr: lane.snr,
     confidence: lane.confidence,
@@ -75,6 +83,20 @@ self.onmessage = async event => {
       minSeparation: message.minSeparation ?? 18,
       includeLaneDiagnostics: Boolean(message.includeLaneDiagnostics)
     });
+    const verifiedSet = new Set();
+    for (const lane of result.lanes) if (verifyLane(lane)) verifiedSet.add(lane);
+    const crcValidLanes = result.lanes.length;
+    const verifiedLanes = verifiedSet.size;
+    const patternMismatches = crcValidLanes - verifiedLanes;
+    const payloadBytes = result.diagnostics.decode.payloadBytesPerLane;
+    result.diagnostics.decode.crcValidLanes = crcValidLanes;
+    result.diagnostics.decode.crcValidBytes = crcValidLanes * payloadBytes;
+    result.diagnostics.decode.patternMismatches = patternMismatches;
+    result.diagnostics.decode.validLanes = verifiedLanes;
+    result.diagnostics.decode.validLaneRate = verifiedLanes / Math.max(1, result.diagnostics.decode.totalLanes);
+    result.diagnostics.decode.bytesDecoded = verifiedLanes * payloadBytes;
+    result.diagnostics.decode.utilization = result.diagnostics.decode.bytesDecoded / Math.max(1, result.diagnostics.decode.capacityBytes);
+    result.diagnostics.decode.failures.patternMismatch = patternMismatches;
     const decodeWallMs = now() - decodeStarted;
     self.postMessage({
       type: 'decoded',
@@ -87,7 +109,7 @@ self.onmessage = async event => {
       decodeWallMs,
       wallMs: now() - started,
       diagnostics: result.diagnostics,
-      lanes: summarizeLanes(result.lanes)
+      lanes: summarizeLanes(result.lanes, verifiedSet)
     });
   } catch (error) {
     self.postMessage({ type: 'error', generation: message?.generation, frameId: message?.frameId, error: error?.message || String(error) });
