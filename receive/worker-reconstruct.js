@@ -12,6 +12,7 @@ const HISTORY_PER_SLOT = 3;
 const MAX_FINAL_WAIT_MS = 12;
 const TARGET_JOB_BUDGET_MS = 31;
 const RECOVERY_SEARCH_MS = 70;
+const MAX_LATE_RECOVERY_FRAMES = 2;
 
 let activeJob = null;
 let nextRecoveryToken = 1;
@@ -31,6 +32,7 @@ const recovery = {
   attempts: 0,
   hits: 0,
   merged: 0,
+  lateMerged: 0,
   dropped: 0,
   recoverMs: 0,
   waitMs: 0,
@@ -283,6 +285,15 @@ function expectedSlots(message) {
     .filter((slot) => Number.isInteger(slot));
 }
 
+function packetKey(symbol) {
+  const header = symbol?.header;
+  const seq = Number(header?.seq);
+  const slot = Number(header?.slotIndex);
+  if (!Number.isInteger(seq) || !Number.isInteger(slot)) return null;
+  const payloadId = Number(header?.payloadId);
+  return `${Number.isFinite(payloadId) ? payloadId : "?"}:${seq}:${slot}`;
+}
+
 function mappedQuad(quad, outputMap) {
   const copy = copyQuad(quad);
   if (!copy || !outputMap || !Number.isFinite(outputMap.scaleX) || outputMap.scaleX <= 0 ||
@@ -345,6 +356,7 @@ function recoveryDiagnostics(waitMs = 0) {
     attempts: recovery.attempts,
     hits: recovery.hits,
     merged: recovery.merged,
+    lateMerged: recovery.lateMerged,
     dropped: recovery.dropped,
     recoverMs: recovery.recoverMs,
     waitMs: recovery.waitMs + waitMs,
@@ -353,36 +365,65 @@ function recoveryDiagnostics(waitMs = 0) {
   };
 }
 
+function readyRecoveryEntries(sequence) {
+  const floor = sequence - MAX_LATE_RECOVERY_FRAMES;
+  const entries = [];
+  for (const [sourceSequence, result] of recoveryResults) {
+    if (sourceSequence < floor) {
+      recoveryResults.delete(sourceSequence);
+      continue;
+    }
+    if (sourceSequence <= sequence) entries.push({ sourceSequence, result });
+  }
+  entries.sort((a, b) => b.sourceSequence - a.sourceSequence);
+  return entries;
+}
+
 async function mergeTemporal(final, job) {
   if (!final || !lowCountMessage(job.message)) return final;
   const sequence = Number(job.message.sourceSequence);
   const expected = expectedSlots(job.message);
   const decoded = decodedSlots(final.message);
   const missing = expected.filter((slot) => !decoded.has(slot));
-  if (!missing.length) {
-    final.message.temporalMetrics = recoveryDiagnostics();
-    return final;
-  }
-
-  let result = recoveryResults.get(sequence) ?? null;
   let waited = 0;
-  if (!result) {
+
+  // Never stall a successful camera decode for temporal work. On a miss, keep
+  // the original sub-frame wait budget for an already-nearby exact result.
+  // Anything that finishes later is still a valid sender packet and is rolled
+  // into the next low-count completion instead of blocking camera cadence.
+  if (missing.length && !recoveryResults.has(sequence)) {
     const elapsed = performance.now() - job.startedAt;
     const budget = Math.max(0, Math.min(MAX_FINAL_WAIT_MS, TARGET_JOB_BUDGET_MS - elapsed));
     if (budget > 0) {
       const before = performance.now();
-      result = await waitForRecovery(sequence, budget);
+      await waitForRecovery(sequence, budget);
       waited = performance.now() - before;
       recovery.waitMs += waited;
     }
   }
 
-  if (result?.symbols?.length) {
-    const tracks = new Map(job.message.tracks.map((track) => [Number(track.slot ?? track.id), track]));
-    const already = decodedSlots(final.message);
-    for (const recovered of result.symbols) {
+  const tracks = new Map(job.message.tracks.map((track) => [Number(track.slot ?? track.id), track]));
+  const packetKeys = new Set((final.message.symbols ?? []).map(packetKey).filter(Boolean));
+  let mergedThisJob = 0;
+  let lastMetrics = null;
+  let lastLag = null;
+
+  for (const entry of readyRecoveryEntries(sequence)) {
+    const { sourceSequence, result } = entry;
+    const lag = sequence - sourceSequence;
+    const exact = lag === 0;
+    lastMetrics = result?.metrics ?? lastMetrics;
+    lastLag = lag;
+
+    for (const recovered of result?.symbols ?? []) {
       const slot = Number(recovered.slot ?? recovered.header?.slotIndex);
-      if (!missing.includes(slot) || already.has(slot)) continue;
+      if (!expected.includes(slot)) continue;
+      // Exact-sequence temporal output only fills a slot the normal decoder
+      // missed. A late result is a different sender packet, so it remains useful
+      // even if this newer camera frame decoded the same slot normally.
+      if (exact && decoded.has(slot)) continue;
+      const key = packetKey(recovered);
+      if (key && packetKeys.has(key)) continue;
       const track = tracks.get(slot);
       if (!track) continue;
       const quad = mappedQuad(track.quad, job.message.outputMap);
@@ -397,21 +438,31 @@ async function mergeTemporal(final, job) {
         decodePath: "temporal-generalized",
         crc32: true,
         verifiedPayload: true,
+        temporalSourceSequence: sourceSequence,
+        temporalLag: lag,
         header: recovered.header
       });
-      already.add(slot);
+      if (key) packetKeys.add(key);
       recovery.merged++;
+      recovery.lateMerged += Number(lag > 0);
+      mergedThisJob++;
       if (recovered.bytes?.buffer instanceof ArrayBuffer) final.transfer.push(recovered.bytes.buffer);
     }
+
+    // A result is single-use. Empty results are consumed too; otherwise stale
+    // misses would occupy the tiny result window forever.
+    recoveryResults.delete(sourceSequence);
   }
 
   final.message.trackedHit = (final.message.symbols?.length ?? 0) > 0;
   final.message.latencyMs = performance.now() - job.startedAt;
   final.message.temporalMetrics = {
     ...recoveryDiagnostics(waited),
-    last: result?.metrics ?? null
+    mergedThisJob,
+    lastLag,
+    last: lastMetrics
   };
-  if (recovery.merged && final.message.pixelPath && !String(final.message.pixelPath).includes("temporal"))
+  if (mergedThisJob && final.message.pixelPath && !String(final.message.pixelPath).includes("temporal"))
     final.message.pixelPath += "+temporal";
   return final;
 }
