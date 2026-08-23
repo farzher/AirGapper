@@ -27,3 +27,4 @@ jobs:
           git add receive/main.js shared/transport.js shared/worker-pool.js version.js
           git commit -m "v0.5.391: trim receiver allocation churn"
           git push origin HEAD:master
+# registered trigger
