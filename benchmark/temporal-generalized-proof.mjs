@@ -69,8 +69,6 @@ try {
         for (let x = 0; x < dim; x++) {
           const qr = y + 0.5 < cutAt(x, center, tilt) ? topQr : bottomQr;
           const dark = moduleDark(qr, x, y);
-          // Small deterministic optical noise keeps this a soft-sample test,
-          // not merely an exact binary splice.
           const noise = ((x * 17 + y * 31 + sequence * 7) % 9) - 4;
           luma[y * dim + x] = Math.max(0, Math.min(255, (dark ? 20 : 236) + noise));
         }
@@ -127,10 +125,20 @@ try {
       });
     }
 
+    // Overlap case: both physical camera frames are individually corrupt but
+    // together contain a complete latent middle sender page.
     const firstRaw = await normalDecode(qrs[0], qrs[1], 73, -24, 100, 8101);
     const secondRaw = await normalDecode(qrs[1], qrs[2], 105, -20, 101, 8102);
     if ((firstRaw.symbols?.length ?? 0) !== 0 || (secondRaw.symbols?.length ?? 0) !== 0)
-      throw new Error(`diagonal hybrids decoded individually: ${firstRaw.symbols?.length}/${secondRaw.symbols?.length}`);
+      throw new Error(`diagonal overlap hybrids decoded individually: ${firstRaw.symbols?.length}/${secondRaw.symbols?.length}`);
+
+    // Gap case: the transition moved backwards. Between the two lines neither
+    // camera frame contains B at all (previous has A, current has C). This is
+    // the case that requires explicit QR erasures rather than a perfect splice.
+    const gapPreviousRaw = await normalDecode(qrs[0], qrs[1], 96, 24.5, 120, 8121);
+    const gapCurrentRaw = await normalDecode(qrs[1], qrs[2], 81, 24.5, 121, 8122);
+    if ((gapPreviousRaw.symbols?.length ?? 0) !== 0 || (gapCurrentRaw.symbols?.length ?? 0) !== 0)
+      throw new Error(`diagonal gap hybrids decoded individually: ${gapPreviousRaw.symbols?.length}/${gapCurrentRaw.symbols?.length}`);
 
     const worker = new Worker(new URL("/receive/worker-temporal-generalized.js", location.href), { type: "module" });
     let token = 0;
@@ -153,15 +161,21 @@ try {
       { a: 2, b: 3, c: 4, prev: [58, 29], curr: [87, 24], seq: 103, target: 3 },
       { a: 3, b: 4, c: 5, prev: [101, -31], curr: [130, -27], seq: 104, target: 4 },
       { a: 4, b: 5, c: 0, prev: [46, 10], curr: [78, 15], seq: 105, target: 5 },
-      { a: 5, b: 0, c: 1, prev: [112, 7], curr: [143, 3], seq: 106, target: 0 }
+      { a: 5, b: 0, c: 1, prev: [112, 7], curr: [143, 3], seq: 106, target: 0 },
+      // Backwards seam motion creates a true unobserved strip. The midlines are
+      // chosen at broad-search positions, while the diagonal slopes differ
+      // slightly to exercise the erasure margin rather than a hand-perfect cut.
+      { a: 0, b: 1, c: 2, prev: [96, 24.5], curr: [81, 23.0], seq: 107, target: 1, requireErasures: true },
+      { a: 2, b: 3, c: 4, prev: [141, -24.0], curr: [124.5, -26.0], seq: 108, target: 3, requireErasures: true }
     ];
 
     const summaries = [];
+    let erasureProofs = 0;
     for (const spec of cases) {
       const previous = hybridSoft(qrs[spec.a], qrs[spec.b], spec.prev[0], spec.prev[1], spec.seq - 1);
       const current = hybridSoft(qrs[spec.b], qrs[spec.c], spec.curr[0], spec.curr[1], spec.seq);
       const response = await call({
-        action: "recover", sourceSequence: spec.seq, maxMs: 140,
+        action: "recover", sourceSequence: spec.seq, maxMs: 150,
         pairs: [{ slot: 0, previous, current }]
       }, [previous.luma.buffer, current.luma.buffer]);
       if ((response.symbols?.length ?? 0) !== 1)
@@ -173,20 +187,31 @@ try {
       const parsed = parseFrame(actual);
       if (!parsed || parsed.header.seq !== 41 + spec.target || parsed.header.payloadId !== payloadId)
         throw new Error(`case ${spec.seq} failed AirGapper CRC/header validation`);
+      if (spec.requireErasures) {
+        if (!(response.metrics?.erasureHits > 0) || !response.symbols[0].usedErasures)
+          throw new Error(`case ${spec.seq} did not prove erasure recovery: ${JSON.stringify(response.metrics)}`);
+        erasureProofs++;
+      }
       summaries.push({
         seq: spec.seq,
         attempts: response.metrics.attempts,
+        erasureAttempts: response.metrics.erasureAttempts,
+        erasureHits: response.metrics.erasureHits,
         fastAttempts: response.metrics.fastAttempts,
         ms: response.metrics.recoverMs,
         center: response.metrics.centerRow,
         tilt: response.metrics.tiltRows,
-        source: response.metrics.candidateSource
+        source: response.metrics.candidateSource,
+        usedErasures: response.metrics.usedErasures
       });
     }
     worker.terminate();
 
+    if (erasureProofs !== 2) throw new Error(`expected 2 erasure proofs, got ${erasureProofs}`);
     return {
-      raw: [firstRaw.symbols?.length ?? 0, secondRaw.symbols?.length ?? 0],
+      rawOverlap: [firstRaw.symbols?.length ?? 0, secondRaw.symbols?.length ?? 0],
+      rawGap: [gapPreviousRaw.symbols?.length ?? 0, gapCurrentRaw.symbols?.length ?? 0],
+      erasureProofs,
       cases: summaries
     };
   });
