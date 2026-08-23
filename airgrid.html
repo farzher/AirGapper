@@ -1,18 +1,54 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AirGrid Bandwidth Lab</title>
-  <script>
-    (() => {
-      const q = location.search;
-      location.replace('./airgrid-1430.html' + q + location.hash);
-    })();
-  </script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>AirGrid Bandwidth Lab</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#eee;background:#111;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#111}.shell{max-width:980px;margin:auto;padding:14px}.top{display:flex;justify-content:space-between;gap:10px;align-items:center}.build{font:12px ui-monospace,monospace;color:#83ef9b}.card{margin-top:14px;padding:14px;border:1px solid #333;border-radius:10px;background:#181818}button,select{font:inherit;padding:10px 13px;border:1px solid #555;border-radius:8px;background:#eee;color:#111}.modes button{background:#222;color:#eee}.modes button.active{background:#eee;color:#111}.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:end}.controls label{display:grid;gap:5px;font-size:12px;color:#aaa}.hidden{display:none!important}.status{margin-top:10px;font:13px ui-monospace,monospace;white-space:pre-wrap;line-height:1.45}.good{color:#83ef9b}.warn{color:#ffd66b}.bad{color:#ff8383}.preview{position:relative;margin-top:12px;background:#000;border-radius:10px;overflow:hidden}.preview video{display:block;width:100%;max-height:68vh}.preview canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:12px}.metric{border:1px solid #333;background:#101010;border-radius:8px;padding:9px}.metric b{font-size:18px;display:block}.metric span{font-size:11px;color:#999}
+.sender{position:fixed;inset:0;background:#fff;z-index:9999;display:none;overflow:hidden;color:#000}.sender.active{display:block}.acq-layer,.data-layer{position:absolute;inset:0}.acq-layer{background:#fff}.data-layer canvas{display:block;width:100%;height:100%;image-rendering:pixelated}.qr{position:absolute;width:23.5vmin;height:23.5vmin;transform:translate(-50%,-50%);background:#fff}.qr svg{width:100%;height:100%;display:block;shape-rendering:crispEdges}.qTL{left:13%;top:13%}.qTR{left:87%;top:13%}.qBR{left:87%;top:87%}.qBL{left:13%;top:87%}.sender-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;color:#000;font:700 clamp(18px,3vmin,44px) ui-monospace,monospace}.sender-center small{display:block;margin-top:10px;font-size:.43em;font-weight:500;line-height:1.5}.sender-hud{position:absolute;left:8px;bottom:8px;z-index:5;padding:6px 8px;background:#000d;color:#fff;font:12px ui-monospace,monospace;border-radius:6px;white-space:pre}.sender-exit{position:absolute;right:10px;bottom:10px;font:12px ui-monospace,monospace;color:#333}
+</style>
 </head>
 <body>
-  <p>Redirecting to AirGrid AGRS-20260823-1430…</p>
-  <p><a href="./airgrid-1430.html">Open build</a></p>
+<div class="shell">
+ <div class="top"><div><b>AirGrid bandwidth lab</b> <span class="build">AGRS-20260823-1430</span></div><div class="modes"><button id="send-mode">Sender</button><button id="recv-mode">Receiver</button></div></div>
+ <section id="send-panel" class="card hidden">
+  <div class="controls">
+   <label>Cell pitch<select id="pitch"><option>3</option><option>2.5</option><option selected>2.25</option><option>2</option></select></label>
+   <label>Data state rate<select id="sender-hz"><option selected>30</option><option>60</option></select></label>
+   <button id="start-sender">Start fullscreen sender</button>
+  </div>
+  <div id="sender-status" class="status">Starts on the proven QR acquisition screen. After the phone says LOCKED, press Space on this PC to start binary data. Press R to reacquire.</div>
+ </section>
+ <section id="recv-panel" class="card hidden">
+  <button id="start-camera">Start camera</button> <button id="stop-camera" disabled>Stop</button>
+  <div id="status" class="status">Camera stopped · AGRS-20260823-1430</div>
+  <div class="preview"><video id="video" muted playsinline></video><canvas id="overlay"></canvas></div>
+  <div class="metrics">
+   <div class="metric"><b id="m-lock">SEARCHING</b><span>acquisition</span></div>
+   <div class="metric"><b id="m-goodput">0.00 MB/s</b><span>unique byte-exact goodput</span></div>
+   <div class="metric"><b id="m-ceiling">—</b><span>30 fps payload ceiling</span></div>
+   <div class="metric"><b id="m-valid">0%</b><span>verified lanes / frame</span></div>
+   <div class="metric"><b id="m-fps">0 fps</b><span>camera frames</span></div>
+   <div class="metric"><b id="m-pxcell">—</b><span>camera px / cell</span></div>
+   <div class="metric"><b id="m-decode">— ms</b><span>decode wall time</span></div>
+   <div class="metric"><b id="m-drop">0</b><span>worker-busy drops</span></div>
+  </div>
+  <div id="details" class="status"></div>
+ </section>
+</div>
+<div id="sender" class="sender">
+ <div id="acq-layer" class="acq-layer">
+  <div id="qr-TL" class="qr qTL"></div><div id="qr-TR" class="qr qTR"></div><div id="qr-BR" class="qr qBR"></div><div id="qr-BL" class="qr qBL"></div>
+  <div class="sender-center">AIRGRID ACQUIRE<small id="sender-center-info">AGRS-20260823-1430<br>WAIT FOR PHONE: LOCKED<br>THEN PRESS SPACE FOR DATA</small></div>
+  <div class="sender-exit">Esc exits · Space=data · R=reacquire</div>
+ </div>
+ <div id="data-layer" class="data-layer hidden"><canvas id="data-canvas"></canvas></div>
+ <div id="sender-hud" class="sender-hud">AGRS-20260823-1430</div>
+</div>
+<script type="module" src="./airgrid-lab.js?rev=canonical-1430"></script>
 </body>
 </html>
