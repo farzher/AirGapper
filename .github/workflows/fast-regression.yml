@@ -116,7 +116,7 @@ jobs:
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
-        if: always()
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
           cd android
