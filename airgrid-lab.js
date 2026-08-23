@@ -1,4 +1,5 @@
 import { airGridProfile, makeAirGridPayload } from './shared/airgrid-phy.js';
+import { airGridPam4Profile } from './shared/airgrid-pam4.js';
 import { AirGridDiagnostics, formatAirGridDiagnostics } from './shared/airgrid-diagnostics.js';
 import { AirGridPresentationDiagnostics } from './send/airgrid-present-diagnostics.js';
 import { AirGridRasterRenderer, buildAirGridState } from './send/airgrid-renderer.js';
@@ -9,8 +10,10 @@ const AIRGRID_TARGET_BPS = 2_500_000;
 const pitchValue = element => Number(element.value);
 const intValue = element => Math.max(1, Math.round(Number(element.value) || 1));
 
-function profileFor(width, height, pitch) {
-  return airGridProfile({ projectedWidth: width, projectedHeight: height, cellPx: pitch });
+function profileFor(width, height, pitch, modulation = 'binary') {
+  return modulation === 'pam4'
+    ? airGridPam4Profile({ projectedWidth: width, projectedHeight: height, cellPx: pitch })
+    : { ...airGridProfile({ projectedWidth: width, projectedHeight: height, cellPx: pitch }), modulation: 'binary', bitsPerCell: 1 };
 }
 function mbps(bytesPerSecond) { return `${(bytesPerSecond / 1e6).toFixed(2)} MB/s`; }
 function percent(value) { return `${(value * 100).toFixed(1)}%`; }
@@ -19,6 +22,8 @@ function parsePayloadId(value) {
   const parsed = Number.parseInt(clean, 16);
   return Number.isFinite(parsed) ? parsed >>> 0 : 0x51a7c0de;
 }
+function senderModulation() { return $('send-modulation')?.value === 'pam4' ? 'pam4' : 'binary'; }
+function receiverModulation() { return $('recv-modulation')?.value === 'pam4' ? 'pam4' : 'binary'; }
 
 const sendPanel = $('send-panel'), receivePanel = $('receive-panel');
 function setMode(mode) {
@@ -47,6 +52,7 @@ let senderRaf = 0;
 let senderNextDue = 0;
 let senderProfile = null;
 let senderPayloadId = 0;
+let activeSenderModulation = 'binary';
 
 function plannedDisplayPixels() {
   const dpr = window.devicePixelRatio || 1;
@@ -58,17 +64,20 @@ function updateSendPlan() {
   const { width, height, dpr } = plannedDisplayPixels();
   const pitch = pitchValue($('send-pitch'));
   const hz = intValue($('send-hz'));
-  const profile = profileFor(width, height, pitch);
+  const modulation = senderModulation();
+  const profile = profileFor(width, height, pitch, modulation);
   if (!profile) { $('send-plan').textContent = 'Selected grid is too small.'; return; }
   const perState = profile.lanes * profile.payloadBytes;
   $('send-plan').textContent = [
     `planned fullscreen raster: ${width}×${height} device px (DPR ${dpr})`,
+    `modulation: ${modulation === 'pam4' ? 'PAM4 · 2 bits/cell' : 'binary · 1 bit/cell'}`,
     `grid: ${profile.columns} columns × ${profile.lanes} lanes @ ${pitch} display px/cell`,
     `payload: ${profile.payloadBytes} B/lane · ${(perState / 1024).toFixed(1)} KiB/state · ${mbps(perState * hz)} sender payload at ${hz} Hz`,
-    `receiver must use the same sender width/height/pitch; its diagnostics will report actual camera px/cell.`
+    `30-fps receive ceiling if every lane is captured once/frame: ${mbps(perState * 30)}`,
+    `receiver must use the same sender width/height/pitch/modulation; diagnostics report actual camera px/cell.`
   ].join('\n');
 }
-for (const id of ['send-hz','send-pitch','send-payload-id']) $(id).addEventListener('input', updateSendPlan);
+for (const id of ['send-modulation','send-hz','send-pitch','send-payload-id']) $(id).addEventListener('input', updateSendPlan);
 updateSendPlan();
 
 function resizeSenderCanvas() {
@@ -76,7 +85,8 @@ function resizeSenderCanvas() {
   senderCanvas.width = Math.max(1, Math.round(innerWidth * dpr));
   senderCanvas.height = Math.max(1, Math.round(innerHeight * dpr));
   const pitch = pitchValue($('send-pitch'));
-  senderProfile = profileFor(senderCanvas.width, senderCanvas.height, pitch);
+  activeSenderModulation = senderModulation();
+  senderProfile = profileFor(senderCanvas.width, senderCanvas.height, pitch, activeSenderModulation);
   if (!senderProfile) throw new Error('Fullscreen AirGrid profile is too small');
 }
 function updateSenderHud() {
@@ -84,11 +94,12 @@ function updateSenderHud() {
   const snap = presentation.snapshot();
   const perState = senderProfile.lanes * senderProfile.payloadBytes;
   senderHud.textContent = [
-    `seq ${senderSequence} · ${senderCanvas.width}×${senderCanvas.height}`,
+    `seq ${senderSequence} · ${senderCanvas.width}×${senderCanvas.height} · ${activeSenderModulation}`,
     `${senderProfile.columns}×${senderProfile.lanes} · ${senderProfile.payloadBytes} B/lane`,
     `${snap.actualHz.toFixed(1)} / ${snap.requestedHz.toFixed(0)} Hz`,
     `render p95 ${snap.renderP95Ms.toFixed(2)} ms · missed ${snap.missedIntervals}`,
-    `${mbps(perState * snap.actualHz)} presentation payload`
+    `${mbps(perState * snap.actualHz)} presentation payload`,
+    `${mbps(perState * 30)} theoretical @ 30 camera fps`
   ].join('\n');
 }
 function senderTick(now) {
@@ -103,9 +114,10 @@ function senderTick(now) {
   const started = performance.now();
   const state = buildAirGridState({
     profile: senderProfile,
+    modulation: activeSenderModulation,
     payloadId: senderPayloadId,
     sequence: senderSequence,
-    profileId: 0,
+    profileId: activeSenderModulation === 'pam4' ? 1 : 0,
     payloadForLane: laneIndex => makeAirGridPayload(senderProfile.payloadBytes, senderPayloadId, senderSequence, laneIndex)
   });
   const ctx = senderCanvas.getContext('2d', { alpha: false });
@@ -158,6 +170,7 @@ let calibrationPoints = [];
 let calibrating = false;
 let receiverQuad = null;
 let receiverProfile = null;
+let activeReceiverModulation = 'binary';
 let receiverSettings = {};
 let settingsReadAt = 0;
 let lastFrameDiagnostics = null;
@@ -171,21 +184,23 @@ function receiverPlan() {
   const senderH = intValue($('recv-sender-h'));
   const pitch = pitchValue($('recv-pitch'));
   const cameraFps = intValue($('cam-fps'));
-  receiverProfile = profileFor(senderW, senderH, pitch);
+  activeReceiverModulation = receiverModulation();
+  receiverProfile = profileFor(senderW, senderH, pitch, activeReceiverModulation);
   if (!receiverProfile) return null;
   const perCapture = receiverProfile.lanes * receiverProfile.payloadBytes;
   const ceiling = perCapture * cameraFps;
   const floorEfficiency = QR_FLOOR_BPS / Math.max(1, ceiling);
   const targetEfficiency = AIRGRID_TARGET_BPS / Math.max(1, ceiling);
   $('recv-plan').textContent = [
-    `logical sender grid: ${receiverProfile.columns} × ${receiverProfile.lanes} · ${receiverProfile.payloadBytes} B/lane`,
+    `logical sender grid: ${receiverProfile.columns} × ${receiverProfile.lanes} · ${receiverProfile.payloadBytes} B/lane · ${activeReceiverModulation}`,
     `camera-FPS ceiling: ${mbps(ceiling)} at ${cameraFps} fps if every lane decodes`,
-    `required valid-lane efficiency: ${(floorEfficiency * 100).toFixed(1)}% to beat QR · ${(targetEfficiency * 100).toFixed(1)}% to hit 2.5 MB/s`,
+    `required byte-exact lane efficiency: ${(floorEfficiency * 100).toFixed(1)}% to beat QR · ${(targetEfficiency * 100).toFixed(1)}% to hit 2.5 MB/s`,
     ceiling <= QR_FLOOR_BPS ? '⚠ This profile cannot beat the 2.0 MB/s QR benchmark at the selected camera FPS.' : 'Profile has enough theoretical camera bandwidth to beat QR.'
   ].join('\n');
   return receiverProfile;
 }
-for (const id of ['cam-res','cam-fps','recv-sender-w','recv-sender-h','recv-pitch','recv-sender-hz']) $(id).addEventListener('input', receiverPlan);
+for (const id of ['recv-modulation','cam-res','cam-fps','recv-sender-w','recv-sender-h','recv-pitch','recv-sender-hz']) $(id).addEventListener('input', receiverPlan);
+$('recv-modulation').addEventListener('change', () => { $('recv-separation').value = receiverModulation() === 'pam4' ? '10' : '18'; receiverPlan(); });
 receiverPlan();
 
 function setReceiverStatus(text, cls = '') {
@@ -293,6 +308,7 @@ function postVideoFrame(frame) {
   const captureTimestampMs = Number.isFinite(Number(frame.timestamp)) ? Number(frame.timestamp) / 1000 : performance.now();
   decodeWorker.postMessage({
     action: 'decode', frame, frameId: ++frameId, generation, sentAtMs: performance.now(), captureTimestampMs,
+    modulation: activeReceiverModulation,
     quad: receiverQuad, profile: receiverProfile, minSeparation: intValue($('recv-separation')),
     cameraSettings: settings
   }, [frame]);
@@ -330,6 +346,7 @@ function fallbackLoop(now, metadata) {
     action: 'decode', y8: y8.buffer, width, height, copyMs, copyPath: 'canvas-rgba',
     frameId: ++frameId, generation, sentAtMs: performance.now(),
     captureTimestampMs: Number.isFinite(metadata?.mediaTime) ? metadata.mediaTime * 1000 : performance.now(),
+    modulation: activeReceiverModulation,
     quad: receiverQuad, profile: receiverProfile, minSeparation: intValue($('recv-separation'))
   }, [y8.buffer]);
 }
@@ -362,10 +379,10 @@ async function startCamera() {
     const processor = new MediaStreamTrackProcessor({ track: mediaTrack });
     processorReader = processor.readable.getReader();
     processorLoop().catch(error => setReceiverStatus(`Processor failed: ${error.message}`, 'bad'));
-    setReceiverStatus(`Camera ${actual}. Click Calibrate 4 corners. Path: VideoFrame → worker → Y8.`, 'good');
+    setReceiverStatus(`Camera ${actual}. ${activeReceiverModulation.toUpperCase()} selected. Click Calibrate 4 corners. Path: VideoFrame → worker → Y8.`, 'good');
   } else if (video.requestVideoFrameCallback) {
     video.requestVideoFrameCallback(fallbackLoop);
-    setReceiverStatus(`Camera ${actual}. Click Calibrate 4 corners. Path: canvas RGBA fallback (slower).`, 'warn');
+    setReceiverStatus(`Camera ${actual}. ${activeReceiverModulation.toUpperCase()} selected. Canvas RGBA fallback is active and may be CPU-limited.`, 'warn');
   } else throw new Error('Browser has neither MediaStreamTrackProcessor nor requestVideoFrameCallback');
   drawCalibrationOverlay();
 }
@@ -408,14 +425,19 @@ function updateReceiverMetrics() {
   setMetric('m-drop', String(droppedBusy), droppedBusy ? 'warn' : 'good');
   const failures = lastFrameDiagnostics?.decode?.failures ?? {};
   const settings = receiverSettings;
+  const optics = lastFrameDiagnostics?.optics ?? {};
+  const pam4Detail = activeReceiverModulation === 'pam4'
+    ? `PAM4 centers p50: ${(optics.clusterCentersP50 ?? []).map(v => Number(v).toFixed(1)).join(' / ')} · EVM p90 ${Number(optics.evmP90 ?? 0).toFixed(3)}`
+    : '';
   $('receiver-details').textContent = [
     formatAirGridDiagnostics(s),
-    `bottleneck: ${s.bottleneck}`,
+    `modulation: ${activeReceiverModulation} · bottleneck: ${s.bottleneck}`,
+    pam4Detail,
     `failures/frame: ${Object.entries(failures).map(([k,v]) => `${k}=${v}`).join(' ')}`,
     `sequences in latest capture: ${(lastFrameDiagnostics?.rollingShutter?.sequences ?? []).join(', ') || 'none'}`,
     `camera settings: ${JSON.stringify({width:settings.width,height:settings.height,frameRate:settings.frameRate,exposureTime:settings.exposureTime,iso:settings.iso,focusDistance:settings.focusDistance})}`,
     `worker drops: ${droppedBusy} · decoded frames: ${decodedFrames}`
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 decodeWorker.onmessage = event => {
@@ -438,12 +460,17 @@ decodeWorker.onmessage = event => {
   });
   if (runFrames.length < 1800) runFrames.push({
     tMs: performance.now() - runStartedAt,
+    modulation: data.modulation,
     goodputBps: lastSnapshot.goodput.bytesPerSecond,
     validLaneRate: data.diagnostics.decode.validLaneRate,
+    crcValidLanes: data.diagnostics.decode.crcValidLanes,
+    patternMismatches: data.diagnostics.decode.patternMismatches,
     bytesDecoded: data.diagnostics.decode.bytesDecoded,
     failures: data.diagnostics.decode.failures,
     separationP10: data.diagnostics.optics.separationP10,
     snrP10: data.diagnostics.optics.snrP10,
+    evmP90: data.diagnostics.optics.evmP90,
+    clusterCentersP50: data.diagnostics.optics.clusterCentersP50,
     pxPerCellX: data.diagnostics.frame.pxPerCellX,
     pxPerCellY: data.diagnostics.frame.pxPerCellY,
     sequences: data.diagnostics.rollingShutter.sequences,
@@ -462,6 +489,7 @@ $('export-run').onclick = () => {
     qrBaselineBytesPerSecond: QR_FLOOR_BPS,
     airGridTargetBytesPerSecond: AIRGRID_TARGET_BPS,
     senderProfile: {
+      modulation: activeReceiverModulation,
       width: intValue($('recv-sender-w')), height: intValue($('recv-sender-h')),
       displayCellPx: pitchValue($('recv-pitch')), senderHz: intValue($('recv-sender-hz')),
       ...receiverProfile
@@ -477,7 +505,7 @@ $('export-run').onclick = () => {
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `airgrid-hardware-${Date.now()}.json`;
+  a.download = `airgrid-hardware-${activeReceiverModulation}-${Date.now()}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
