@@ -2,6 +2,7 @@ name: fast regression
 
 on:
   push:
+    branches: [master]
     paths:
       - receive/**
       - send/**
@@ -106,12 +107,7 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/native-y8-worker-smoke.mjs
           node benchmark/temporal-direct-grid-smoke.mjs
-          # Legacy horizontal proof remains as a regression oracle for the
-          # fundamental A/B + B/C reconstruction identity.
           node benchmark/temporal-cross-frame-proof.mjs
-          # Generalized proof: diagonal/drifting seams must reconstruct exact
-          # CRC-valid AirGapper packets, then the live worker wrapper must merge
-          # one without making a second camera-plane copy.
           node benchmark/temporal-generalized-proof.mjs
           node benchmark/temporal-wrapper-integration-proof.mjs
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
