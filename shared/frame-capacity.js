@@ -75,9 +75,30 @@ function sourcePlan(payloadBytes, maximumFrameBytes, extendedGrid = false) {
   if (mds.k <= MDS_MAX_K) return { mode: "mds", ...mds };
   return { mode: "raptorq", ...balancedPlan(payload, maximumFrameBytes, "raptorq", MDS_MAX_K + 1, extendedGrid) };
 }
-function selectTransportPlan(payloadBytes, maximumFrameBytes, extendedGrid = false) {
+function exactSourcePlan(payloadBytes, frameBytes, extendedGrid = false) {
   const payload = Math.max(1, Math.floor(payloadBytes));
-  const { mode, blockLen, k } = sourcePlan(payload, maximumFrameBytes, extendedGrid);
+  const directCapacity = blockLength(frameBytes, "direct", false);
+  if (payload <= directCapacity) return { mode: "direct", blockLen: payload, k: 1 };
+
+  const mdsBlockLen = blockLength(frameBytes, "mds", extendedGrid);
+  if (mdsBlockLen < 1) throw new Error("Size is too small for transport metadata.");
+  const mdsK = Math.ceil(payload / mdsBlockLen);
+  if (mdsK <= MDS_MAX_K) return { mode: "mds", blockLen: mdsBlockLen, k: mdsK };
+
+  const availableRaptorSource = blockLength(frameBytes, "raptorq", extendedGrid) - RAPTOR_PACKET_ID_BYTES;
+  const sourceBlockLen = Math.floor(availableRaptorSource / 8) * 8;
+  if (sourceBlockLen < 1) throw new Error("Size is too small for RaptorQ transport metadata.");
+  return {
+    mode: "raptorq",
+    blockLen: sourceBlockLen + RAPTOR_PACKET_ID_BYTES,
+    k: Math.ceil(payload / sourceBlockLen)
+  };
+}
+function selectTransportPlan(payloadBytes, maximumFrameBytes, extendedGrid = false, exactFrameBytes = false) {
+  const payload = Math.max(1, Math.floor(payloadBytes));
+  const { mode, blockLen, k } = exactFrameBytes
+    ? exactSourcePlan(payload, maximumFrameBytes, extendedGrid)
+    : sourcePlan(payload, maximumFrameBytes, extendedGrid);
   if (k > MAX_SOURCE_BLOCKS) throw new Error("Transfer requires too many source blocks at this Size.");
   if (codingMode(k) !== mode) throw new Error("Could not select a consistent coding mode.");
   const frameBytes = blockLen + frameOverhead(mode, mode === "direct" ? false : extendedGrid);

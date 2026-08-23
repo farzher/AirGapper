@@ -329,7 +329,7 @@ function chooseAutoGrid(
 
   for (const maximumFrameBytes of frameByteChoices) {
     if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
-    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
+    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true, true);
     if (plan.mode === "direct") continue;
     for (const layout of AUTO_GRID_LAYOUTS) {
       const codes = layout.cols * layout.rows;
@@ -800,7 +800,7 @@ async function startStream(revealStage = false) {
     showStreamPanels(true);
   }
   if (autoMode && plainSnippet === null) {
-    const directProbe = selectTransportPlan(payload.length, maximumFrameBytes, true);
+    const directProbe = selectTransportPlan(payload.length, maximumFrameBytes, true, true);
     if (directProbe.mode === "direct") {
       frameBytes = maximumFrameBytes;
       transport = directProbe;
@@ -817,7 +817,7 @@ async function startStream(revealStage = false) {
       transport = autoGrid.plan;
     }
   } else {
-    transport = selectTransportPlan(payload.length, frameBytes);
+    transport = selectTransportPlan(payload.length, frameBytes, false, true);
   }
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode = staticStream ? "single" : configuredLayout;
