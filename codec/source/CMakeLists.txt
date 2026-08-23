@@ -52,11 +52,13 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --bind \
  -s EXPORT_ES6=1 \
  -s DYNAMIC_EXECUTION=0 \
  -s EXPORT_NAME=AirGapperCodec \
- -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA', '_decodeGuidedBatchY']\" \
+ -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA', '_decodeGuidedBatchY', '_decodeModuleGrid']\" \
  -s EXPORTED_RUNTIME_METHODS=HEAPU8 \
  -s ALLOW_MEMORY_GROWTH=1")
 
-add_executable(airgapper_codec wrapper/airgapper_codec.cpp)
+add_executable(airgapper_codec
+    wrapper/airgapper_codec.cpp
+    wrapper/temporal_grid_decode.cpp)
 target_link_libraries(airgapper_codec ZXing::ZXing)
 # Version + build id stamped into the module (version() / build() exports).
 # build.sh passes both; the defaults only appear in by-hand cmake runs.
