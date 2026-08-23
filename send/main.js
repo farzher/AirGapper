@@ -28,16 +28,11 @@ const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
 const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
-// Sender FPS is always the user's requested presentation rate. Auto Grid may
-// choose QR count/size, but never silently changes the requested FPS.
-const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
-// Receiver production scheduling keeps one <=32-track warm batch. Larger
-// walls remain available as explicit layouts, but Auto optimizes for what an
-// older offline phone can economically decode.
+// Sender FPS is always the user's requested presentation rate. Auto Grid never
+// silently changes FPS or Size; it only chooses the densest fitting wall.
+// Receiver production scheduling keeps one <=32-track warm batch, so 32 is
+// the useful production ceiling until the receiver batch itself is widened.
 const AUTO_GRID_MAX_CODES = 32;
-// This is intentionally relaxed for the >32-slot experiment. At 360 Hz and
-// 30 sender fps it permits roughly 96 independently changing QR slots.
-const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 8;
 const AUTO_GRID_LAYOUTS = (() => {
   const layouts = [];
   for (let cols = 1; cols <= 32; cols++) {
@@ -209,11 +204,11 @@ function selectFps(fps) {
 }
 function updateAutoGridControlState() {
   const automatic = isAutoLayout();
-  // In Auto, Size is a ceiling. Smaller QR versions may fit many more
-  // independent symbols and therefore deliver more useful bytes per display frame.
+  // Size is always the user's selected transport ceiling. Auto changes only
+  // wall geometry, so choosing 2.9 KB never silently becomes 1.0 KB.
   cfgSize.disabled = false;
   cfgSize.title = automatic
-    ? `Auto ${autoGridTargetModulePx()} physical px/module uses up to this Size and picks the fastest wall`
+    ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this Size and fits the most QR codes`
     : "";
 }
 function gcd(a, b) {
@@ -310,105 +305,82 @@ function chooseAutoGrid(
   txFps,
   fitScaling,
   targetModulePx = autoGridTargetModulePx(),
-  preferredMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1]
+  selectedMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1]
 ) {
   const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
-  const requestedMaximumFrameBytes = FRAME_BYTES_OPTIONS.includes(preferredMaximumFrameBytes)
-    ? preferredMaximumFrameBytes
+  const maximumFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
+    ? selectedMaximumFrameBytes
     : FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1];
-  const allowedFrameBytes = FRAME_BYTES_OPTIONS
-    .filter((bytes) => bytes <= requestedMaximumFrameBytes)
-    .sort((a, b) => b - a);
+  if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) {
+    throw new Error(`${formatBytes(maximumFrameBytes)} cannot carry this transfer in one stream.`);
+  }
+  const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
+  if (plan.mode === "direct") throw new Error("Auto Grid is not used for a single direct QR.");
+
   const landscape = landscapeGrid();
   const budgetCss = senderDisplayBudgetCss();
-  // Auto density is measured in device/render pixels. Treating CSS pixels as
-  // panel pixels wastes most of a high-DPR phone's available display resolution.
-  // Solve in the same device-pixel space used by the canvas backing store.
   const dpr = window.devicePixelRatio || 1;
   const budgetW = Math.max(1, Math.floor(budgetCss.width * dpr));
   const budgetH = Math.max(1, Math.floor(budgetCss.height * dpr));
   const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
+  const budgetAspect = budgetW / budgetH;
   const candidates = [];
-  for (const maximumFrameBytes of allowedFrameBytes) {
-    if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
-    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
-    if (plan.mode === "direct") continue;
-    for (const layout of AUTO_GRID_LAYOUTS) {
-      const codes = layout.cols * layout.rows;
-      if (codes < 1 || codes > AUTO_GRID_MAX_CODES) continue;
-      const margin = GRID_MARGIN;
-      const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, margin);
-      const totalW = extent.width;
-      const totalH = extent.height;
-      const displayW = landscape ? totalH : totalW;
-      const displayH = landscape ? totalW : totalH;
-      const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
-      const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
-      if (!(moduleScale > 0)) continue;
-      const displayModulePx = moduleScale;
-      const renderedW = displayW * moduleScale;
-      const renderedH = displayH * moduleScale;
-      const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
-      const changesPerRefresh = codes * txFps / refreshHz;
-      const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
-      const payloadPerSecond = sourceBytesPerQr * codes * txFps;
-      candidates.push({
-        maximumFrameBytes,
-        plan,
-        layout,
-        codes,
-        moduleScale,
-        displayModulePx,
-        screenFill,
-        changesPerRefresh,
-        payloadPerSecond,
-        refreshHz
-      });
-    }
-  }
-  if (!candidates.length) throw new Error("Auto Grid could not find a valid QR layout for this transfer.");
 
-  // Size is a ceiling, not a forced packet size. Score every selected-or-smaller
-  // QR version that preserves the requested module density. A smaller QR can fit
-  // enough extra independent symbols to beat a larger QR in aggregate bandwidth.
-  const densityCandidates = candidates.filter((candidate) => candidate.displayModulePx + 1e-9 >= densityTarget);
-  if (!densityCandidates.length) {
+  for (const layout of AUTO_GRID_LAYOUTS) {
+    const codes = layout.cols * layout.rows;
+    const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
+    const displayW = landscape ? extent.height : extent.width;
+    const displayH = landscape ? extent.width : extent.height;
+    const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
+    const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
+    if (moduleScale + 1e-9 < densityTarget) continue;
+
+    const renderedW = displayW * moduleScale;
+    const renderedH = displayH * moduleScale;
+    const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
+    const changesPerRefresh = codes * txFps / refreshHz;
+    const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
+    const payloadPerSecond = sourceBytesPerQr * codes * txFps;
+    const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
+    candidates.push({
+      maximumFrameBytes,
+      plan,
+      layout,
+      codes,
+      moduleScale,
+      displayModulePx: moduleScale,
+      screenFill,
+      changesPerRefresh,
+      payloadPerSecond,
+      refreshHz,
+      aspectError
+    });
+  }
+
+  if (!candidates.length) {
     throw new Error(
-      `Auto ${densityTarget}px cannot fit ${formatBytes(requestedMaximumFrameBytes)} or any smaller Size at ${densityTarget} on-screen px/module in this viewport.`
+      `Auto ${densityTarget}px cannot fit the selected ${formatBytes(maximumFrameBytes)} Size in this viewport.`
     );
   }
-  const strict = densityCandidates.filter((candidate) => candidate.changesPerRefresh <= AUTO_GRID_MAX_CHANGES_PER_REFRESH);
-  const pool = strict.length ? strict : densityCandidates;
-  const adjustedScore = (candidate) => {
-    // A rolling-shutter stripe destroys a smaller fraction of a wall made from
-    // more independent QRs. Allow up to an 18% theoretical throughput trade
-    // across the 8→32 QR range when fragmentation improves substantially.
-    const fragmentation = Math.max(0, Math.min(1, (candidate.codes - 8) / (AUTO_GRID_MAX_CODES - 8)));
-    const fragmentationBonus = 1 + fragmentation * AUTO_GRID_FRAGMENTATION_BONUS;
-    // Integer scaling has cliffs: score the wall that is ACTUALLY painted.
-    const fillBonus = fitScaling
-      ? 0.80 + 0.20 * Math.sqrt(candidate.screenFill)
-      : 0.30 + 0.70 * Math.sqrt(candidate.screenFill);
-    if (strict.length) return candidate.payloadPerSecond * fragmentationBonus * fillBonus;
-    const transitionPenalty = Math.min(1, AUTO_GRID_MAX_CHANGES_PER_REFRESH / Math.max(0.001, candidate.changesPerRefresh));
-    return candidate.payloadPerSecond * fragmentationBonus * fillBonus * transitionPenalty;
-  };
-  pool.sort((a, b) =>
-    adjustedScore(b) - adjustedScore(a) ||
-    b.screenFill - a.screenFill ||
+
+  // With Size and FPS fixed, useful sender bandwidth is monotonic in QR count.
+  // Maximize independent symbols first. Only then use scale/fill/aspect as
+  // geometry tie-breakers. Never cap the wall because several cells happen
+  // to become visible during one display refresh; that old heuristic made a
+  // 60 Hz / 30 fps sender stop at 16 QRs even when 32 fit comfortably.
+  candidates.sort((a, b) =>
     b.codes - a.codes ||
     b.moduleScale - a.moduleScale ||
-    b.plan.frameBytes - a.plan.frameBytes ||
+    b.screenFill - a.screenFill ||
+    a.aspectError - b.aspectError ||
     a.layout.id - b.layout.id
   );
   return {
-    ...pool[0],
-    constrained: strict.length > 0,
-    targetModulePx: densityTarget,
-    requestedMaximumFrameBytes,
-    sizeFallback: pool[0].maximumFrameBytes !== requestedMaximumFrameBytes
+    ...candidates[0],
+    targetModulePx: densityTarget
   };
 }
+
 function monitorDisplayRefreshRate() {
   const intervals = [];
   let previous = 0;
@@ -807,8 +779,8 @@ async function startStream(revealStage = false) {
   const ecc = "L";
   const configuredLayout = selectedLayout();
   const autoMode = isAutoLayout(configuredLayout);
-  // Size is exact in manual layouts and a ceiling in Auto. Auto may choose a
-  // smaller QR version when the denser wall has higher aggregate throughput.
+  // Size is always respected. Auto chooses geometry only; it never silently
+  // substitutes a smaller Size option.
   const maximumFrameBytes = manualFrameBytes;
   if (!fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
@@ -882,14 +854,12 @@ async function startStream(revealStage = false) {
   };
   const updatePatternLabel = updatePattern === "synchronous" ? "synchronous wall" : updatePattern === "fixed" ? "fixed rows" : updatePattern === "fixed-columns" ? "fixed columns" : "dispersed rotating phases";
   const describeGrid = () => {
-    if (staticStream) return "";
-    if (!autoGrid) return `Update ${updatePatternLabel}`;
-    const fallback = autoGrid.constrained ? "" : " · refresh fallback";
-    const sizeFallback = autoGrid.sizeFallback
-      ? ` · Size ${formatBytes(autoGrid.requestedMaximumFrameBytes)}→${formatBytes(autoGrid.maximumFrameBytes)}`
-      : "";
-    return `Auto ${autoGrid.targetModulePx}px · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
-  };
+  if (staticStream) return "";
+  if (!autoGrid) return `Update ${updatePatternLabel}`;
+  const displayCols = landscapeGrid() ? gridRows : gridCols;
+  const displayRows = landscapeGrid() ? gridCols : gridRows;
+  return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · Size ${formatBytes(autoGrid.maximumFrameBytes)} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+};
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
   if (transport.mode === "raptorq") {
