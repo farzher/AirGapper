@@ -85,14 +85,6 @@ function localQuad(quad, ox = 0, oy = 0) {
   };
 }
 
-/**
- * Sample exactly one luminance value at each predicted QR module center.
- *
- * The caller passes the Y plane it already owns. No VideoFrame is retained and
- * no second camera-plane copy is made. Keeping the soft 8-bit luma, rather than
- * immediately collapsing to black/white, lets the temporal decoder use
- * confidence near a rolling-shutter seam without touching source pixels again.
- */
 function sampleSoftModuleGrid(heap, yPtr, width, height, stride, ox, oy, track, sourceSequence) {
   const dim = Math.round(Number(track?.dim));
   if (!validQuad(track?.quad) || !Number.isInteger(dim) || dim < MIN_DIMENSION ||
@@ -182,11 +174,12 @@ function quadDistanceFraction(a, b) {
   return mean / scale;
 }
 
-function composeTemporalLine(previous, current, centerRow, tiltRows, orientation) {
+function composeTemporalLineWithErasures(previous, current, centerRow, tiltRows, orientation, erasureHalfBand = 0) {
   if (!previous?.luma || !current?.luma || previous.dim !== current.dim ||
       previous.luma.length !== current.luma.length) return null;
   const dim = current.dim;
-  const output = new Uint8Array(dim * dim);
+  const modules = new Uint8Array(dim * dim);
+  const erasures = erasureHalfBand > 0 ? new Uint8Array(dim * dim) : null;
   const prevThreshold = Number(previous.threshold);
   const currThreshold = Number(current.threshold);
   const currentAbove = orientation !== "previous-top/current-bottom";
@@ -195,20 +188,24 @@ function composeTemporalLine(previous, current, centerRow, tiltRows, orientation
     for (let mx = 0; mx < dim; mx++, index++) {
       const xNorm = (mx + 0.5) / dim - 0.5;
       const cut = centerRow + tiltRows * xNorm;
-      const above = my + 0.5 < cut;
+      const signedDistance = my + 0.5 - cut;
+      const above = signedDistance < 0;
       const useCurrent = currentAbove ? above : !above;
       const sample = useCurrent ? current : previous;
       const threshold = useCurrent ? currThreshold : prevThreshold;
-      output[index] = sample.luma[index] <= threshold ? 0 : 255;
+      modules[index] = sample.luma[index] <= threshold ? 0 : 255;
+      if (erasures && Math.abs(signedDistance) <= erasureHalfBand)
+        erasures[index] = 1;
     }
   }
-  return output;
+  return { modules, erasures };
+}
+
+function composeTemporalLine(previous, current, centerRow, tiltRows, orientation) {
+  return composeTemporalLineWithErasures(previous, current, centerRow, tiltRows, orientation, 0)?.modules ?? null;
 }
 
 function isLikelyDataModule(dim, x, y) {
-  // Exclude the three finder/format corners and timing axes. The remaining
-  // interior is dominated by payload/ECC bits, which makes adjacent-frame
-  // agreement useful evidence for the shared latent sender page.
   const corner = 12;
   if (x < corner && y < corner) return false;
   if (x >= dim - corner && y < corner) return false;
@@ -246,8 +243,6 @@ function agreementCandidates(previous, current, tiltRows, maxCandidates = 4) {
     }
     if (total < Math.max(24, dim / 2)) continue;
     const ratio = same / total;
-    // Unrelated random payload regions agree ~50%. A real B/B overlap band is
-    // dramatically higher, even with optical noise.
     if (ratio >= 0.64) scored.push({ row: row + 0.5, ratio, total });
   }
   scored.sort((a, b) => b.ratio - a.ratio || b.total - a.total);
@@ -268,12 +263,6 @@ function pushUniqueCandidate(out, seen, center, tilt, orientation, source) {
   out.push({ centerRow: center, tiltRows: tilt, orientation, source });
 }
 
-/**
- * Candidate order is deliberately front-loaded for the steady state:
- * learned line first, then tiny perturbations, then overlap evidence, then a
- * deterministic coarse-to-fine scan. Recovery can stop at a time budget
- * without ever creating an unbounded search queue.
- */
 function temporalLineCandidates(previous, current, hint = null, limit = 96) {
   const dim = Number(current?.dim) || 0;
   if (!dim || previous?.dim !== dim) return [];
@@ -319,9 +308,6 @@ function temporalLineCandidates(previous, current, hint = null, limit = 96) {
     }
   }
 
-  // Van-der-Corput-like center order: middle, quarters, eighths... It gives a
-  // useful seam quickly but eventually covers the whole QR rather than the old
-  // nine hard-coded fractions.
   const centers = [];
   const levels = Math.ceil(Math.log2(dim));
   for (let level = 0; level <= levels; level++) {
@@ -344,6 +330,7 @@ export {
   LOW_COUNT_TEMPORAL_MAX_QR,
   agreementCandidates,
   composeTemporalLine,
+  composeTemporalLineWithErasures,
   hardModules,
   quadDistanceFraction,
   sampleSoftModuleGrid,
