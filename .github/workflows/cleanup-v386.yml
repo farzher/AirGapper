@@ -30,3 +30,4 @@ jobs:
           git add main.js send/main.js receive/worker.js version.js
           git commit -m "v0.5.386: keep hot state warm and trim frame churn"
           git push origin HEAD:master
+# trigger
