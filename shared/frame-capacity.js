@@ -133,6 +133,7 @@ function smallestSufficientFrameSize(payloadBytes, options, extendedGrid = false
 }
 export {
   MAX_SOURCE_BLOCKS,
+  QR_BYTE_CAPACITY_L,
   blockLength,
   fitsInOneStream,
   minimumFrameBytes,

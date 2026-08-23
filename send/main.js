@@ -3,6 +3,7 @@ import { rasterizeQr } from "../shared/qr-raster.js";
 import { formatBytes } from "../shared/format.js";
 import {
   fitsInOneStream,
+  QR_BYTE_CAPACITY_L,
   selectTransportPlan,
   smallestSufficientFrameSize,
   sourceBlockCount
@@ -317,7 +318,10 @@ function chooseAutoGrid(
   const requestedFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
     ? selectedMaximumFrameBytes
     : FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1];
-  const frameByteChoices = optimizeSize ? FRAME_BYTES_OPTIONS : [requestedFrameBytes];
+  // Manual Size stays intentionally simple, but Auto Size searches every
+  // standard QR-L capacity (v1..v40). This removes the large packing cliffs
+  // caused by choosing from only six arbitrary byte presets.
+  const frameByteChoices = optimizeSize ? QR_BYTE_CAPACITY_L : [requestedFrameBytes];
   const landscape = landscapeGrid();
   const budgetCss = senderDisplayBudgetCss();
   const dpr = window.devicePixelRatio || 1;
@@ -328,14 +332,23 @@ function chooseAutoGrid(
   const candidates = [];
 
   for (const maximumFrameBytes of frameByteChoices) {
-    if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
-    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true, true);
+    let plan;
+    try {
+      // Small QR versions can be below transport-header capacity. They are
+      // simply not candidates; Auto must never abort because v1/v2 are tiny.
+      if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
+      plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true, true);
+    } catch {
+      continue;
+    }
     if (plan.mode === "direct") continue;
     for (const layout of AUTO_GRID_LAYOUTS) {
       const codes = layout.cols * layout.rows;
       const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
       const displayW = landscape ? extent.height : extent.width;
       const displayH = landscape ? extent.width : extent.height;
+      const displayCols = landscape ? layout.rows : layout.cols;
+      const displayRows = landscape ? layout.cols : layout.rows;
       const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
       const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
       if (moduleScale + 1e-9 < densityTarget) continue;
@@ -347,8 +360,8 @@ function chooseAutoGrid(
       const payloadPerSecond = sourceBytesPerQr * codes * txFps;
       const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
       candidates.push({ maximumFrameBytes, plan, layout, codes, moduleScale,
-        displayModulePx: moduleScale, screenFill, changesPerRefresh,
-        payloadPerSecond, refreshHz, aspectError });
+        displayCols, displayRows, displayModulePx: moduleScale, screenFill,
+        changesPerRefresh, payloadPerSecond, refreshHz, aspectError });
     }
   }
   if (!candidates.length) {
@@ -356,14 +369,26 @@ function chooseAutoGrid(
     throw new Error(`Auto ${densityTarget}px cannot fit ${sizeLabel} in this viewport.`);
   }
   if (optimizeSize) {
-    candidates.sort((a, b) => {
-      const rateDelta = b.payloadPerSecond - a.payloadPerSecond;
-      const tied = Math.abs(rateDelta) <= Math.max(a.payloadPerSecond, b.payloadPerSecond) * 0.02;
-      if (!tied) return rateDelta;
-      return b.codes - a.codes || b.moduleScale - a.moduleScale ||
-        b.screenFill - a.screenFill || a.aspectError - b.aspectError ||
-        b.maximumFrameBytes - a.maximumFrameBytes || a.layout.id - b.layout.id;
-    });
+    // First preserve essentially all available theoretical bandwidth. Then,
+    // within 5% of the fastest candidate, bias toward more display rows so a
+    // horizontal rolling-shutter transition destroys a smaller wall fraction.
+    // More independent QRs is the next robustness tie-break.
+    const maxPayloadPerSecond = Math.max(...candidates.map((candidate) => candidate.payloadPerSecond));
+    const robust = candidates.filter((candidate) =>
+      candidate.payloadPerSecond + 1e-9 >= maxPayloadPerSecond * 0.95
+    );
+    robust.sort((a, b) =>
+      b.displayRows - a.displayRows ||
+      b.codes - a.codes ||
+      b.payloadPerSecond - a.payloadPerSecond ||
+      b.screenFill - a.screenFill ||
+      b.moduleScale - a.moduleScale ||
+      a.aspectError - b.aspectError ||
+      b.plan.frameBytes - a.plan.frameBytes ||
+      a.layout.id - b.layout.id
+    );
+    candidates.length = 0;
+    candidates.push(...robust);
   } else {
     candidates.sort((a, b) => b.codes - a.codes || b.moduleScale - a.moduleScale ||
       b.screenFill - a.screenFill || a.aspectError - b.aspectError || a.layout.id - b.layout.id);
@@ -855,7 +880,7 @@ async function startStream(revealStage = false) {
   if (!autoGrid) return `Update ${updatePatternLabel}`;
   const displayCols = landscapeGrid() ? gridRows : gridCols;
   const displayRows = landscapeGrid() ? gridCols : gridRows;
-  const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(autoGrid.maximumFrameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
+  const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(transport.frameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
   return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
 };
   const blockLen = transport.blockLen;
