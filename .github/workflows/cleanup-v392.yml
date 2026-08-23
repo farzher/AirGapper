@@ -1,0 +1,28 @@
+name: cleanup v392
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/scripts/cleanup-v392.py
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply cleanup
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/cleanup-v392.py
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/cleanup-v392.yml .github/scripts/cleanup-v392.py
+          git add -A
+          git commit -m "v0.5.392: simplify Android wrapper and receiver layout"
+          git push origin HEAD:master
