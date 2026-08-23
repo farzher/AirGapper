@@ -1,0 +1,242 @@
+from pathlib import Path
+
+path = Path('send/main.js')
+s = path.read_text()
+
+old = '''function updateAutoGridControlState() {
+  const automatic = isAutoLayout();
+  // Size is always the user's selected transport ceiling. Auto changes only
+  // wall geometry, so choosing 2.9 KB never silently becomes 1.0 KB.
+  cfgSize.disabled = false;
+  cfgSize.title = automatic
+    ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this Size and fits the most QR codes`
+    : "";
+}
+'''
+new = '''function autoSizeEnabled() {
+  return cfgSize.value === "auto";
+}
+function updateAutoGridControlState() {
+  const automatic = isAutoLayout();
+  cfgSize.disabled = false;
+  cfgSize.title = autoSizeEnabled()
+    ? automatic
+      ? `Auto Size + Auto ${autoGridTargetModulePx()}px jointly optimize QR bytes and wall geometry`
+      : "Auto Size uses the largest transport size for manual layouts"
+    : automatic
+      ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this exact Size and fits the most QR codes`
+      : "";
+}
+'''
+if old not in s: raise SystemExit('control state block did not match')
+s = s.replace(old, new, 1)
+
+start = s.index('function chooseAutoGrid(')
+end = s.index('function monitorDisplayRefreshRate()', start)
+choose = r'''function chooseAutoGrid(
+  payloadBytes,
+  txFps,
+  fitScaling,
+  targetModulePx = autoGridTargetModulePx(),
+  selectedMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1],
+  optimizeSize = false
+) {
+  const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
+  const requestedFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
+    ? selectedMaximumFrameBytes
+    : FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1];
+  const frameByteChoices = optimizeSize ? FRAME_BYTES_OPTIONS : [requestedFrameBytes];
+  const landscape = landscapeGrid();
+  const budgetCss = senderDisplayBudgetCss();
+  const dpr = window.devicePixelRatio || 1;
+  const budgetW = Math.max(1, Math.floor(budgetCss.width * dpr));
+  const budgetH = Math.max(1, Math.floor(budgetCss.height * dpr));
+  const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
+  const budgetAspect = budgetW / budgetH;
+  const candidates = [];
+
+  for (const maximumFrameBytes of frameByteChoices) {
+    if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
+    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
+    if (plan.mode === "direct") continue;
+
+    for (const layout of AUTO_GRID_LAYOUTS) {
+      const codes = layout.cols * layout.rows;
+      const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
+      const displayW = landscape ? extent.height : extent.width;
+      const displayH = landscape ? extent.width : extent.height;
+      const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
+      const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
+      if (moduleScale + 1e-9 < densityTarget) continue;
+
+      const renderedW = displayW * moduleScale;
+      const renderedH = displayH * moduleScale;
+      const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
+      const changesPerRefresh = codes * txFps / refreshHz;
+      const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
+      const payloadPerSecond = sourceBytesPerQr * codes * txFps;
+      const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
+      candidates.push({
+        maximumFrameBytes,
+        plan,
+        layout,
+        codes,
+        moduleScale,
+        displayModulePx: moduleScale,
+        screenFill,
+        changesPerRefresh,
+        payloadPerSecond,
+        refreshHz,
+        aspectError
+      });
+    }
+  }
+
+  if (!candidates.length) {
+    const sizeLabel = optimizeSize ? "any available Size" : `the selected ${formatBytes(requestedFrameBytes)} Size`;
+    throw new Error(`Auto ${densityTarget}px cannot fit ${sizeLabel} in this viewport.`);
+  }
+
+  if (optimizeSize) {
+    candidates.sort((a, b) => {
+      const rateDelta = b.payloadPerSecond - a.payloadPerSecond;
+      const tied = Math.abs(rateDelta) <= Math.max(a.payloadPerSecond, b.payloadPerSecond) * 0.02;
+      if (!tied) return rateDelta;
+      return b.codes - a.codes ||
+        b.moduleScale - a.moduleScale ||
+        b.screenFill - a.screenFill ||
+        a.aspectError - b.aspectError ||
+        b.maximumFrameBytes - a.maximumFrameBytes ||
+        a.layout.id - b.layout.id;
+    });
+  } else {
+    candidates.sort((a, b) =>
+      b.codes - a.codes ||
+      b.moduleScale - a.moduleScale ||
+      b.screenFill - a.screenFill ||
+      a.aspectError - b.aspectError ||
+      a.layout.id - b.layout.id
+    );
+  }
+
+  return {
+    ...candidates[0],
+    targetModulePx: densityTarget,
+    autoSize: optimizeSize,
+    requestedMaximumFrameBytes: requestedFrameBytes
+  };
+}
+'''
+s = s[:start] + choose + '\n' + s[end:]
+
+old = '''    if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
+      cfgSize.value = String(saved.sizeLevel);
+    }
+'''
+new = '''    if (saved.sizeMode === "auto") {
+      cfgSize.value = "auto";
+    } else if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
+      cfgSize.value = String(saved.sizeLevel);
+    }
+'''
+if old not in s: raise SystemExit('restore size block did not match')
+s = s.replace(old, new, 1)
+
+old = '''      sizeLevel: Number(cfgSize.value),
+'''
+new = '''      sizeMode: autoSizeEnabled() ? "auto" : "exact",
+      sizeLevel: autoSizeEnabled() ? null : Number(cfgSize.value),
+'''
+if old not in s: raise SystemExit('save size line did not match')
+s = s.replace(old, new, 1)
+
+old = '''  Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
+'''
+new = '''  cfgSize.add(new Option("Auto", "auto", false, true));
+  Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes]) => cfgSize.add(new Option(formatBytes(bytes), String(level))));
+'''
+if old not in s: raise SystemExit('size option population did not match')
+s = s.replace(old, new, 1)
+
+old = '''      if (el === cfgLayout) updateAutoGridControlState();
+'''
+new = '''      if (el === cfgLayout || el === cfgSize) updateAutoGridControlState();
+'''
+if old not in s: raise SystemExit('settings change block did not match')
+s = s.replace(old, new, 1)
+
+old = '''  const sizeLevel = Number(cfgSize.value);
+  const fitScaling = cfgScaling.value === "fit";
+  const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
+'''
+new = '''  const autoSize = autoSizeEnabled();
+  const sizeLevel = autoSize ? FRAME_BYTES_OPTIONS.length - 1 : Number(cfgSize.value);
+  const fitScaling = cfgScaling.value === "fit";
+  const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
+'''
+if old not in s: raise SystemExit('start size selection block did not match')
+s = s.replace(old, new, 1)
+
+old = '''  // Size is always respected. Auto chooses geometry only; it never silently
+  // substitutes a smaller Size option.
+  const maximumFrameBytes = manualFrameBytes;
+  if (!fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
+    const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
+    showSettingsError(
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
+    );
+    return;
+  }
+'''
+new = '''  // Numeric Size is exact. Auto Size may compare every available transport size,
+  // but only when explicitly selected by the user.
+  const maximumFrameBytes = manualFrameBytes;
+  if (!autoSize && !fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
+    const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
+    showSettingsError(
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
+    );
+    return;
+  }
+'''
+if old not in s: raise SystemExit('exact size validation block did not match')
+s = s.replace(old, new, 1)
+
+old = '''      autoGrid = chooseAutoGrid(
+        payload.length,
+        txFps,
+        fitScaling,
+        autoGridTargetModulePx(configuredLayout),
+        maximumFrameBytes
+      );
+'''
+new = '''      autoGrid = chooseAutoGrid(
+        payload.length,
+        txFps,
+        fitScaling,
+        autoGridTargetModulePx(configuredLayout),
+        maximumFrameBytes,
+        autoSize
+      );
+'''
+if old not in s: raise SystemExit('chooseAutoGrid call did not match')
+s = s.replace(old, new, 1)
+
+old = '''    return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · Size ${formatBytes(autoGrid.maximumFrameBytes)} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+'''
+new = '''    const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(autoGrid.maximumFrameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
+    return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+'''
+if old not in s: raise SystemExit('grid description did not match')
+s = s.replace(old, new, 1)
+
+path.write_text(s)
+
+index = Path('index.html')
+html = index.read_text().replace('<label><span>Max size</span><select id="cfg-size"></select></label>', '<label><span>Size</span><select id="cfg-size"></select></label>', 1)
+index.write_text(html)
+
+version = Path('version.js')
+v = version.read_text()
+if 'APP_VERSION = "0.5.380"' not in v: raise SystemExit('unexpected current version')
+version.write_text(v.replace('APP_VERSION = "0.5.380"', 'APP_VERSION = "0.5.381"', 1))
