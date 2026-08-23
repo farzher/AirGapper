@@ -55,11 +55,36 @@ try {
     });
 
     const first = await run(9101, frame(qrs[0], qrs[1], 72, -22, 200), 200);
-    const second = await run(9102, frame(qrs[1], qrs[2], 106, -18, 201), 201);
-    worker.terminate();
+    const completions = [
+      await run(9102, frame(qrs[1], qrs[2], 106, -18, 201), 201)
+    ];
 
-    const temporal = (second.symbols ?? []).find((symbol) => symbol.decodePath === "temporal-generalized");
-    if (!temporal) throw new Error(`wrapper produced no temporal symbol: ${JSON.stringify(second.temporalMetrics)}`);
+    const findTarget = () => {
+      for (let i = 0; i < completions.length; i++) {
+        const symbol = (completions[i].symbols ?? []).find((candidate) =>
+          candidate.decodePath === "temporal-generalized" && Number(candidate.header?.seq) === 71);
+        if (symbol) return { completion: completions[i], symbol, index: i };
+      }
+      return null;
+    };
+
+    // Recovery is intentionally not allowed to hold the hot camera worker past
+    // its small response budget. If it finishes later, the valid sender packet
+    // must roll into one of the next low-count completions instead.
+    if (!findTarget()) completions.push(
+      await run(9103, frame(qrs[2], qrs[0], 78, -14, 202), 202)
+    );
+    if (!findTarget()) completions.push(
+      await run(9104, frame(qrs[0], qrs[1], 96, -10, 203), 203)
+    );
+
+    const target = findTarget();
+    worker.terminate();
+    if (!target) {
+      throw new Error(`wrapper produced no temporal packet 71: ${JSON.stringify(completions.map((item) => item.temporalMetrics))}`);
+    }
+
+    const { completion: carrier, symbol: temporal, index: carrierIndex } = target;
     const actual = new Uint8Array(temporal.bytes);
     const expected = packets[1];
     if (actual.length !== expected.length || !actual.every((value, index) => value === expected[index]))
@@ -67,15 +92,21 @@ try {
     const parsed = parseFrame(actual);
     if (!parsed || parsed.header.seq !== 71 || parsed.header.payloadId !== payloadId)
       throw new Error("wrapper temporal symbol failed CRC/header validation");
-    if (!(second.temporalMetrics?.merged >= 1)) throw new Error("wrapper did not report merged temporal recovery");
+    if (!(carrier.temporalMetrics?.merged >= 1)) throw new Error("wrapper did not report merged temporal recovery");
+    if (carrierIndex > 0 && !(carrier.temporalMetrics?.lateMerged >= 1) && !(temporal.temporalLag > 0))
+      throw new Error(`late recovery was not reported as late: ${JSON.stringify(carrier.temporalMetrics)}`);
+    if (Number(temporal.temporalLag ?? 0) > 2)
+      throw new Error(`temporal recovery rolled forward too far: ${temporal.temporalLag}`);
 
     return {
       firstSymbols: first.symbols?.length ?? 0,
-      secondSymbols: second.symbols?.length ?? 0,
+      carrierJob: 9102 + carrierIndex,
+      carrierSymbols: carrier.symbols?.length ?? 0,
       decodePath: temporal.decodePath,
+      temporalLag: temporal.temporalLag ?? 0,
       seq: parsed.header.seq,
-      latencyMs: second.latencyMs,
-      temporal: second.temporalMetrics
+      latencyMs: carrier.latencyMs,
+      temporal: carrier.temporalMetrics
     };
   });
   console.log("AIRGAPPER_TEMPORAL_WRAPPER_INTEGRATION_PASS", JSON.stringify(result));
