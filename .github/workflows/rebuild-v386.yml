@@ -1,0 +1,29 @@
+name: rebuild optimization v386
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/rebuild-v386.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/rebuild-v386.py
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/rebuild-v386.yml .github/scripts/rebuild-v386.py
+          git add main.js send/main.js version.js
+          git commit -m "v0.5.386: reuse sender state across visual rebuilds"
+          git push origin HEAD:master
+# trigger
