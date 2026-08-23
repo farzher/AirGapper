@@ -445,6 +445,7 @@ let selectedFile = null;
 let generation = 0;
 let resizeDisplay = null;
 let activeTransportEncoder = null;
+let activeTransportEncoderKey = null;
 let activeTransportCursor = null;
 let activeSendRendererCleanup = null;
 let activeSendFpsSetter = null;
@@ -508,8 +509,9 @@ function updateFilePicker() {
 }
 function discardSelectedFile() {
   stopSendRenderer();
-  activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();
+  activeTransportEncoder?.free();
   activeTransportEncoder = null;
+  activeTransportEncoderKey = null;
   activeTransportCursor = null;
   selectedFile == null ? void 0 : selectedFile.payload.fill(0);
   selectedFile = null;
@@ -602,6 +604,7 @@ async function startSelection(status, prepare) {
       name,
       size,
       payload: packed.container,
+      payloadId: fnv1a(packed.container),
       compression: packed.compression,
       transmittedSize: packed.transmittedSize,
       files
@@ -772,8 +775,6 @@ async function startStream(revealStage = false) {
   var _a;
   const gen = ++generation;
   stopSendRenderer();
-  activeTransportEncoder == null ? void 0 : activeTransportEncoder.free();
-  activeTransportEncoder = null;
   resizeDisplay = null;
   canvas.style.display = "";
   stageError.hidden = true;
@@ -784,7 +785,7 @@ async function startStream(revealStage = false) {
     return;
   }
   await requestScreenWakeLock();
-  const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
+  const { name, size: fileSize, payload, payloadId, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return;
   const txFps = selectedFps();
   const autoSize = autoSizeEnabled();
@@ -878,18 +879,22 @@ async function startStream(revealStage = false) {
   return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
 };
   const blockLen = transport.blockLen;
-  const payloadId = fnv1a(payload);
   if (transport.mode === "raptorq") {
     await prepareRaptorQ();
     if (gen !== generation) return;
   }
-  const encoder = new TransportEncoder(payload, blockLen, transport.mode);
-  activeTransportEncoder = encoder;
-  // FPS, layout, orientation and visual scaling do not change the erasure
-  // code. Continue at the next symbol that was actually painted. A transport
-  // Size change changes blockLen/K/mode, so its key differs and correctly
-  // starts a fresh coding stream at ESI 0.
-  const transportKey = `${payloadId}:${encoder.mode}:${encoder.k}:${blockLen}:${payload.length}`;
+  // Visual/layout changes do not alter the erasure code. Keep the expensive
+  // encoder and its payload/WASM state warm whenever transport parameters match.
+  const transportKey = `${payloadId}:${transport.mode}:${transport.k}:${blockLen}:${payload.length}`;
+  let encoder = activeTransportEncoder;
+  if (!encoder || activeTransportEncoderKey !== transportKey) {
+    encoder?.free();
+    encoder = new TransportEncoder(payload, blockLen, transport.mode);
+    activeTransportEncoder = encoder;
+    activeTransportEncoderKey = transportKey;
+  }
+  // Continue at the next symbol that was actually painted. A transport Size
+  // change changes the key and correctly starts a fresh coding stream at ESI 0.
   let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;
   activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };
   const extendedGrid = Boolean(autoGrid && gridCodes > 1);

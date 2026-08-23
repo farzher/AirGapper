@@ -19,7 +19,11 @@ async function prepareServiceWorker() {
 }
 
 void prepareServiceWorker();
-await import(`./send/main.js?build=${APP_BUILD}`);
+let sendModulePromise;
+function ensureSendModule() {
+  if (!sendModulePromise) sendModulePromise = import(`./send/main.js?build=${APP_BUILD}`);
+  return sendModulePromise;
+}
 let receiveModulePromise;
 let receiveModuleLoaded = false;
 function ensureReceiveModule() {
@@ -125,7 +129,10 @@ function dispatchReceiveWhenReady(type = "airgapper:enter-receive") {
   receiveLoadDispatchQueued = true;
   void ensureReceiveModule().then(() => {
     receiveLoadDispatchQueued = false;
-    if (active === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+    if (active === "receive" && !suspended && document.visibilityState === "visible") {
+      window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+      if (isIOS) scheduleReceiveHealthCheck(1500);
+    }
   }).catch(() => {
     receiveLoadDispatchQueued = false;
   });
@@ -173,6 +180,7 @@ function showView(name, historyMode = "push") {
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name !== "home";
   if (name === "receive") dispatchReceiveWhenReady();
+  else if (name === "send" || name === "home") void ensureSendModule();
   const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
   if (name === "send" && !hasMobileInput) {
     document.getElementById("snippet-text").focus({ preventScroll: true });
@@ -196,6 +204,7 @@ if (initialParams.has("r") || initialParams.has("receive")) {
   showView("receive", "none");
 } else {
   history.replaceState({ ...history.state, airgapperView: "home" }, "");
+  void ensureSendModule();
 }
 window.addEventListener("popstate", () => {
   var _a2;
@@ -212,7 +221,7 @@ function liveReceiveTrack() {
   return source.getVideoTracks().find((track) => track.readyState === "live") || null;
 }
 function recycleReceiveCamera() {
-  if (!isIOS || !receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
+  if (!receiveModuleLoaded || !isIOS || !receiveNeedsCamera() || document.visibilityState !== "visible" || cameraRequestPending()) return;
   // pauseReceiver() preserves transport progress/decoder state but clears a
   // dead MediaStream and in-flight frame work. Resuming then opens a fresh
   // camera stream, which is what iPadOS needs after killing a background track.
@@ -224,7 +233,7 @@ function recycleReceiveCamera() {
   });
 }
 function scheduleReceiveHealthCheck(delay = 1200, attempt = 0) {
-  if (!isIOS) return;
+  if (!isIOS || !receiveModuleLoaded) return;
   const token = ++receiveHealthToken;
   setTimeout(() => {
     if (token !== receiveHealthToken || !receiveNeedsCamera() || document.visibilityState !== "visible") return;
@@ -267,7 +276,7 @@ function resumeActiveView() {
   } else if (receiveNeedsCamera()) {
     dispatchReceiveWhenReady();
   }
-  if (receiveNeedsCamera()) scheduleReceiveHealthCheck(wasSuspended ? 1500 : 1200);
+  if (receiveNeedsCamera() && receiveModuleLoaded) scheduleReceiveHealthCheck(wasSuspended ? 1500 : 1200);
 }
 document.addEventListener("visibilitychange", () => {
   var _a2;
