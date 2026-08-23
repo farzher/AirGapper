@@ -40,6 +40,71 @@ function projectedSize(quad) {
     height: (distance(quad.topLeft, quad.bottomLeft) + distance(quad.topRight, quad.bottomRight)) * 0.5
   };
 }
+
+// The QR acquisition quad is excellent for coarse geometry, but dense AirGrid
+// cells can be <2 camera pixels wide. A sub-pixel translation error then turns
+// into a large BER. Refine only the global X/Y sampling phase using the known
+// 16-bit lane preamble before spending time decoding the full frame.
+function refineSamplingPhase(y8, width, height, homography, profile) {
+  const projectedWidth = Math.hypot(homography.a, homography.d);
+  const projectedHeight = Math.hypot(homography.b, homography.e);
+  const pxCellX = projectedWidth / Math.max(1, profile.columns);
+  const pxCellY = projectedHeight / Math.max(1, profile.lanes);
+  const stepX = Math.max(0.18, Math.min(0.45, pxCellX * 0.18));
+  const stepY = Math.max(0.18, Math.min(0.45, pxCellY * 0.18));
+  const offsetsX = [-2, -1, 0, 1, 2].map(v => v * stepX);
+  const offsetsY = [-2, -1, 0, 1, 2].map(v => v * stepY);
+  const laneSamples = Math.min(28, profile.lanes);
+  const laneStep = Math.max(1, Math.floor(profile.lanes / laneSamples));
+  const columns = AIRGRID_PREAMBLE.length;
+  const du = 1 / profile.columns;
+  const u0 = du * 0.5;
+  let best = { score:-Infinity, dx:0, dy:0, separation:0, errors:Infinity };
+
+  for (const dy of offsetsY) for (const dx of offsetsX) {
+    let score = 0;
+    let totalErrors = 0;
+    let totalSeparation = 0;
+    let used = 0;
+    for (let laneIndex = Math.floor(laneStep * 0.5); laneIndex < profile.lanes && used < laneSamples; laneIndex += laneStep) {
+      const v = (laneIndex + 0.5) / profile.lanes;
+      const values = new Uint8Array(columns);
+      let black = 0, white = 0, blackCount = 0, whiteCount = 0;
+      for (let i = 0; i < columns; i++) {
+        const p = project(homography, u0 + i * du, v);
+        let ix = Math.round(p.x + dx), iy = Math.round(p.y + dy);
+        if (ix < 0 || iy < 0 || ix >= width || iy >= height) continue;
+        const value = y8[iy * width + ix];
+        values[i] = value;
+        if (AIRGRID_PREAMBLE[i]) { black += value; blackCount++; }
+        else { white += value; whiteCount++; }
+      }
+      if (!blackCount || !whiteCount) continue;
+      black /= blackCount;
+      white /= whiteCount;
+      const separation = white - black;
+      if (separation <= 0) continue;
+      const threshold = (white + black) * 0.5;
+      let errors = 0;
+      for (let i = 0; i < columns; i++) {
+        const bit = values[i] < threshold ? 1 : 0;
+        errors += Number(bit !== AIRGRID_PREAMBLE[i]);
+      }
+      totalErrors += errors;
+      totalSeparation += separation;
+      // Preamble correctness dominates; separation breaks close ties.
+      score += (AIRGRID_PREAMBLE.length - errors) * 24 + Math.min(255, separation);
+      used++;
+    }
+    if (!used) continue;
+    score /= used;
+    const avgErrors = totalErrors / used;
+    const avgSeparation = totalSeparation / used;
+    if (score > best.score) best = { score, dx, dy, separation:avgSeparation, errors:avgErrors };
+  }
+  return best;
+}
+
 function sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation = 18, scratchValues, scratchBits) {
   const columns = profile.columns;
   const values = scratchValues?.length === columns ? scratchValues : new Uint8Array(columns);
@@ -102,6 +167,11 @@ function decodeAirGridY8Detailed({ y8, width, height, quad, profile, minSeparati
   const started = now();
   const homography = quadHomography(quad);
   const projected = projectedSize(quad);
+  const phaseStarted = now();
+  const phase = refineSamplingPhase(y8, width, height, homography, profile);
+  homography.c += phase.dx;
+  homography.f += phase.dy;
+  const phaseMs = now() - phaseStarted;
   const lanes = [];
   const states = new Array(profile.lanes);
   const separations = [], noises = [], snrs = [], confidences = [], preambleErrors = [];
@@ -152,7 +222,11 @@ function decodeAirGridY8Detailed({ y8, width, height, quad, profile, minSeparati
       projectedHeightPx: projected.height,
       projectedCoverage: projected.width * projected.height / Math.max(1, width * height),
       pxPerCellX: projected.width / profile.columns,
-      pxPerCellY: projected.height / profile.lanes
+      pxPerCellY: projected.height / profile.lanes,
+      phaseX: phase.dx,
+      phaseY: phase.dy,
+      phasePreambleErrors: phase.errors,
+      phaseSeparation: phase.separation
     },
     profile: { ...profile, minSeparation },
     optics: {
@@ -185,6 +259,7 @@ function decodeAirGridY8Detailed({ y8, width, height, quad, profile, minSeparati
       runs: makeRuns(states)
     },
     timing: {
+      phaseMs,
       sampleMs,
       decodeMs,
       totalMs,
