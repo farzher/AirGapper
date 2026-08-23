@@ -13,28 +13,28 @@
 </head>
 <body>
 <div class="shell">
- <div class="top"><div><b>AirGrid bandwidth lab</b> <span class="build">AGRS-20260823-1433</span></div><div class="modes"><button id="send-mode">Sender</button><button id="recv-mode">Receiver</button></div></div>
+ <div class="top"><div><b>AirGrid bandwidth lab</b> <span class="build">AGRS-20260823-1434</span></div><div class="modes"><button id="send-mode">Sender</button><button id="recv-mode">Receiver</button></div></div>
  <section id="send-panel" class="card hidden">
   <div class="controls">
    <label>Cell pitch<select id="pitch"><option selected>3</option><option>2.5</option><option>2.25</option><option>2</option><option>1.75</option></select></label>
    <label>Data state rate<select id="sender-hz"><option selected>30</option><option>60</option></select></label>
    <button id="start-sender">Start fullscreen sender</button>
   </div>
-  <div id="sender-status" class="status">QR is only bootstrap/tracking. After LOCKED, click the fullscreen sender or press Space. Data uses short local Hamming-protected blocks; a 320 ms QR tracking burst appears every 3 seconds. R returns to acquisition.</div>
+  <div id="sender-status" class="status">After LOCKED, click the fullscreen sender or press Space. DATA uses short local Hamming-protected blocks. A 650 ms QR tracking burst appears every 3 seconds. The fullscreen data raster has no text overlay.</div>
  </section>
  <section id="recv-panel" class="card hidden">
   <button id="start-camera">Start camera</button> <button id="stop-camera" disabled>Stop</button>
-  <div id="status" class="status">Camera stopped · AGRS-20260823-1433</div>
+  <div id="status" class="status">Camera stopped · AGRS-20260823-1434</div>
   <div class="preview"><video id="video" muted playsinline></video><canvas id="overlay"></canvas></div>
   <div class="metrics">
    <div class="metric"><b id="m-lock">SEARCHING</b><span>live geometry state</span></div>
    <div class="metric"><b id="m-goodput">0.00 MB/s</b><span>unique byte-exact goodput</span></div>
    <div class="metric"><b id="m-ceiling">—</b><span>30 fps block payload ceiling</span></div>
    <div class="metric"><b id="m-valid">0%</b><span>verified local blocks / frame</span></div>
-   <div class="metric"><b id="m-fps">0 fps</b><span>camera frames</span></div>
+   <div class="metric"><b id="m-fps">0 fps</b><span>DATA frames sent</span></div>
    <div class="metric"><b id="m-pxcell">—</b><span>camera px / cell</span></div>
    <div class="metric"><b id="m-decode">— ms</b><span>decode wall time</span></div>
-   <div class="metric"><b id="m-drop">0</b><span>worker-busy drops</span></div>
+   <div class="metric"><b id="m-drop">0</b><span>data-worker busy skips</span></div>
   </div>
   <div id="details" class="status"></div>
  </section>
@@ -42,11 +42,11 @@
 <div id="sender" class="sender">
  <div id="acq-layer" class="acq-layer">
   <div id="qr-TL" class="qr qTL"></div><div id="qr-TR" class="qr qTR"></div><div id="qr-BR" class="qr qBR"></div><div id="qr-BL" class="qr qBL"></div>
-  <div class="sender-center">AIRGRID ACQUIRE<small id="sender-center-info">AGRS-20260823-1433<br>WAIT FOR PHONE: LOCKED<br>THEN CLICK OR PRESS SPACE</small></div>
+  <div class="sender-center">AIRGRID ACQUIRE<small id="sender-center-info">AGRS-20260823-1434<br>WAIT FOR PHONE: LOCKED<br>THEN CLICK OR PRESS SPACE</small></div>
   <div class="sender-exit">Esc exits · click/Space=data · R=reacquire</div>
  </div>
  <div id="data-layer" class="data-layer hidden"><canvas id="data-canvas"></canvas></div>
 </div>
-<script type="module" src="./airgrid-lab.js?rev=1433"></script>
+<script type="module" src="./airgrid-runtime.js?rev=1434"></script>
 </body>
 </html>
