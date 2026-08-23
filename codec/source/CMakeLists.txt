@@ -33,7 +33,7 @@ add_definitions("-s DISABLE_EXCEPTION_CATCHING=0")
 # and run scalar without this. iOS Safari has shipped wasm SIMD since 16.4;
 # so has every browser this app supports. Set globally so the LIBRARY, where
 # those loops live, gets it — not just the wrapper.
-option(AIRGAPPER_CODEC_SIMD "Build with WebAssembly SIMD" ON)
+option(AIRGAPPER_CODEC_SIMD "Build WebAssembly SIMD" ON)
 if(AIRGAPPER_CODEC_SIMD)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")
 endif()
@@ -52,14 +52,16 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --bind \
  -s EXPORT_ES6=1 \
  -s DYNAMIC_EXECUTION=0 \
  -s EXPORT_NAME=AirGapperCodec \
- -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA', '_decodeGuidedBatchY']\" \
+ -s EXPORTED_FUNCTIONS=\"['_malloc', '_free', '_createTrackedDecoder', '_destroyTrackedDecoder', '_setTrackedDecoderTrack', '_clearTrackedDecoderTrack', '_setTrackedDecoderSampleMap', '_setTrackedDecoderTrackCRC32', '_setTrackedDecoderFallbackBudget', '_decodeTrackedBatchY', '_decodeTrackedBatchRGBA', '_decodeGuidedBatchY', '_decodeModuleGrid', '_decodeModuleGridErasures']\" \
  -s EXPORTED_RUNTIME_METHODS=HEAPU8 \
  -s ALLOW_MEMORY_GROWTH=1")
 
-add_executable(airgapper_codec wrapper/airgapper_codec.cpp)
+add_executable(airgapper_codec
+    wrapper/airgapper_codec.cpp
+    wrapper/temporal_grid_decode.cpp)
 target_link_libraries(airgapper_codec ZXing::ZXing)
 # Version + build id stamped into the module (version() / build() exports).
-# build.sh passes both; the defaults only appear in by-hand cmake runs.
+# build.sh passes both; the defaults only appear in by-hand cmake builds.
 set(AIRGAPPER_CODEC_VERSION "0.0.0-dev" CACHE STRING "Version stamped into the module")
 set(AIRGAPPER_CODEC_BUILD "dev" CACHE STRING "Build id stamped into the module")
 target_compile_definitions(airgapper_codec PRIVATE

@@ -2,6 +2,7 @@ name: fast regression
 
 on:
   push:
+    branches: [master]
     paths:
       - receive/**
       - send/**
@@ -75,29 +76,25 @@ jobs:
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
-          node --input-type=module --check < receive/temporal-qr-stitch.js
-          node --input-type=module --check < receive/temporal-fast-sampler.js
-          node --input-type=module --check < receive/worker-temporal.js
-          node --input-type=module --check < receive/worker-temporal-v2.js
+          node --input-type=module --check < receive/temporal-soft-grid.js
+          node --input-type=module --check < receive/worker-reconstruct-bootstrap.js
+          node --input-type=module --check < receive/worker-reconstruct.js
+          node --input-type=module --check < receive/worker-temporal-generalized.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
           node --input-type=module --check < shared/receiver-recovery-state.js
           node --input-type=module --check < shared/receiver-recovery-policy.js
-          node --input-type=module --check < shared/temporal-backpressure.js
+          node --input-type=module --check < shared/platform.js
 
       - name: Run grid regression
         run: |
           node benchmark/grid-lattice-regression.mjs
-          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
           node benchmark/auto-phase-policy-smoke.mjs
           node benchmark/optics-guard-smoke.mjs
           node benchmark/receiver-recovery-policy-smoke.mjs
-          node benchmark/temporal-qr-stitch-smoke.mjs
-          node benchmark/low-count-recovery-smoke.mjs
-          node benchmark/temporal-backpressure-smoke.mjs
-          node benchmark/android-temporal-bypass-smoke.mjs
+          node benchmark/low-count-worker-affinity-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
@@ -110,18 +107,18 @@ jobs:
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/native-y8-worker-smoke.mjs
-          # This is the proof gate: two individually undecodable v40 rolling-
-          # shutter hybrids must reconstruct the exact middle AirGapper packet
-          # and pass its CRC before temporal recovery is allowed to ship.
+          node benchmark/temporal-wrapper-passthrough-smoke.mjs
+          node benchmark/temporal-direct-grid-smoke.mjs
           node benchmark/temporal-cross-frame-proof.mjs
-          node benchmark/temporal-backpressure-browser-smoke.mjs
+          node benchmark/temporal-generalized-proof.mjs
+          node benchmark/temporal-wrapper-integration-proof.mjs
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-camera-bridge-smoke.mjs
           node benchmark/native-camera-v2-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
-        if: always()
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
           cd android

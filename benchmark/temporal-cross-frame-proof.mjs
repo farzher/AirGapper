@@ -24,7 +24,7 @@ try {
     const payloadId = 0x51a7c0de;
     const blockLen = 1800;
     const totalLen = 4000;
-    const k = Math.ceil(totalLen / blockLen); // 3 => real MDS sender packets.
+    const k = Math.ceil(totalLen / blockLen);
 
     function block(seed) {
       const out = new Uint8Array(blockLen);
@@ -91,7 +91,7 @@ try {
     const currentSpec = { top: qrs[1], bottom: qrs[2], split: 96, sequence: 101 };
 
     async function normalDecode(spec, id) {
-      const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
+      const worker = new Worker(new URL("/receive/worker.js?raw=1", location.href), { type: "module" });
       return await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => { worker.terminate(); reject(new Error("normal proof decode timed out")); }, 45_000);
         worker.onerror = (event) => { clearTimeout(timeout); worker.terminate(); reject(new Error(event.message || "normal worker failed")); };
@@ -115,8 +115,6 @@ try {
       });
     }
 
-    // Establish that these synthetic rolling-shutter frames are individually
-    // corrupt: the target packet must come from combining physical frames.
     const normalPrevious = await normalDecode(previousSpec, 7001);
     const normalCurrent = await normalDecode(currentSpec, 7002);
     if ((normalPrevious.symbols?.length ?? 0) !== 0 || (normalCurrent.symbols?.length ?? 0) !== 0) {
