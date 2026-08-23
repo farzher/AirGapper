@@ -251,10 +251,18 @@ function decodeMetadata(y8,width,height,h,threshold) {
   const bytes = bitsToBytes(bits);
   return bytes ? decodeAirGridAcquisition(bytes) : null;
 }
-function findAirGridAcquisition(y8,width,height) {
-  if (!(y8 instanceof Uint8Array) || y8.length < width*height || width<80 || height<60) return null;
+function findAirGridAcquisition(y8,width,height,debug = null) {
+  if (debug) Object.assign(debug, { reason:'starting', separation:0, threshold:0, candidateCount:0, quadsTried:0, metadataAttempts:0 });
+  if (!(y8 instanceof Uint8Array) || y8.length < width*height || width<80 || height<60) {
+    if (debug) debug.reason = 'invalid-frame';
+    return null;
+  }
   const levels = imageThreshold(y8);
-  if (levels.separation < 18) return null;
+  if (debug) Object.assign(debug, { separation:levels.separation, threshold:levels.threshold });
+  if (levels.separation < 18) {
+    if (debug) debug.reason = 'low-contrast';
+    return null;
+  }
   const thresholdCandidates = [
     levels.threshold,
     levels.threshold - levels.separation*0.12,
@@ -266,6 +274,7 @@ function findAirGridAcquisition(y8,width,height) {
   for (const threshold of thresholdCandidates) {
     const candidates = finderCandidates(y8,width,height,threshold);
     bestCandidateCount = Math.max(bestCandidateCount,candidates.length);
+    if (debug) debug.candidateCount = bestCandidateCount;
     if (candidates.length < 4) continue;
     const top = candidates.slice(0,Math.min(14,candidates.length));
     for (let a=0;a<top.length-3;a++) for (let b=a+1;b<top.length-2;b++) for (let c=b+1;c<top.length-1;c++) for (let d=c+1;d<top.length;d++) {
@@ -274,9 +283,9 @@ function findAirGridAcquisition(y8,width,height) {
         if (polygonArea(ordered) < width*height*0.025) continue;
         const h = homographyFromCorrespondences(MARKER_NORMALIZED, ordered);
         if (!h) continue;
-        // Finder detection may use a threshold that is ideal for edges but not
-        // metadata. Try several metadata thresholds; CRC+magic is the final gate.
+        if (debug) debug.quadsTried++;
         for (const metaThreshold of thresholdCandidates) {
+          if (debug) debug.metadataAttempts++;
           const config = decodeMetadata(y8,width,height,h,metaThreshold);
           if (!config) continue;
           const quad = {
@@ -285,6 +294,7 @@ function findAirGridAcquisition(y8,width,height) {
             bottomRight:projectAirGridAcquisition(h,1,1),
             bottomLeft:projectAirGridAcquisition(h,0,1)
           };
+          if (debug) debug.reason = 'locked';
           return {
             config,
             quad,
@@ -297,6 +307,7 @@ function findAirGridAcquisition(y8,width,height) {
       }
     }
   }
+  if (debug) debug.reason = bestCandidateCount < 4 ? `finders-${bestCandidateCount}-of-4` : 'metadata-crc';
   return null;
 }
 
