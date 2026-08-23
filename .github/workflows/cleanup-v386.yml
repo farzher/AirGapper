@@ -1,0 +1,32 @@
+name: runtime cleanup v386
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/cleanup-v386.yml
+
+concurrency:
+  group: cleanup-v386
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply cleanup
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/cleanup-v386.py
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/cleanup-v386.yml .github/scripts/cleanup-v386.py
+          git add main.js send/main.js receive/worker.js version.js
+          git commit -m "v0.5.386: keep hot state warm and trim frame churn"
+          git push origin HEAD:master
