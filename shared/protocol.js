@@ -40,24 +40,19 @@ async function gzipAsync(bytes) {
 async function gunzipAsync(bytes, maxBytes) {
   const inflated = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
   const reader = inflated.getReader();
-  const chunks = [];
+  const out = new Uint8Array(maxBytes);
   let total = 0;
   for (; ; ) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.length;
-    if (total > maxBytes) {
+    if (total + value.length > maxBytes) {
       await reader.cancel();
       throw new Error("The recovered file expands past its declared length.");
     }
-    chunks.push(value);
+    out.set(value, total);
+    total += value.length;
   }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
+  if (total !== maxBytes) throw new Error("The decompressed file length does not match its header.");
   return out;
 }
 function safeFileName(name) {

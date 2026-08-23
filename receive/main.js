@@ -64,7 +64,11 @@ import {
   stopNativeCameraV2,
   submitNativeCameraV2Plan
 } from "../shared/native-camera-v2.js";
-import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
+let agcapModulePromise;
+function loadAgcap() {
+  if (!agcapModulePromise) agcapModulePromise = import("./agcap.js");
+  return agcapModulePromise;
+}
 const RECEIVER_RUNTIME_BUILD = window.AIRGAPPER_BUILD || "dev";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
@@ -102,7 +106,11 @@ let receiverDevToolsPromise;
 function loadReceiverDevTools() {
   if (!receiverDevToolsPromise) {
     // auto-phase reads controls created by phase-nudge, so preserve order.
-    receiverDevToolsPromise = import("./phase-nudge.js").then(() => import("./auto-phase.js"));
+    // AGCAP is developer/benchmark tooling too; normal receivers never fetch it.
+    receiverDevToolsPromise = Promise.all([
+      import("./phase-nudge.js").then(() => import("./auto-phase.js")),
+      loadAgcap()
+    ]);
   }
   return receiverDevToolsPromise;
 }
@@ -2890,7 +2898,7 @@ copyDiagnostics.addEventListener("click", () => {
   void copyDiagnosticsToClipboard(completionDiagnosticsText || diagnosticsText());
 });
 function freezeCompletionDiagnostics() {
-  if (completionDiagnosticsText) return;
+  if (completionDiagnosticsText || !developerModeEverUsed) return;
   // Snapshot the last live transfer instant, before finalization/paint/file
   // verification can drain the camera/worker recent window.
   updateStats(true);
@@ -2902,8 +2910,6 @@ function freezeCompletionDiagnostics() {
   if (developerModeEverUsed) void copyDiagnosticsToClipboard(completionDiagnosticsText, true);
 }
 let cameraStartedTs = 0;
-const timeline = [];
-const TIMELINE_MAX_SAMPLES = 2400;
 const regions = [];
 const gridLattice = new GridLattice(noteGridTransition);
 let gridShape = "";
@@ -6185,7 +6191,6 @@ function stopReceiver() {
   opticalAnalyzeTotalMs = 0;
   opticalAnalyzeMaxMs = 0;
   opticalTimingStartedAt = performance.now();
-  timeline.length = 0;
   plainQrPolicy.reset();
   result.replaceChildren();
   purgeReceivedData();
@@ -6849,6 +6854,7 @@ function captureSubmittedScan(image, ox, oy, full, tracks = [], scaleX = 1, scal
 async function captureDirectSourceScan(source) {
   if (!captureNextScan || pendingScanCapture || !source.videoFrame || source.image) return;
   try {
+    const { copyVideoFrameY, yToImageData } = await loadAgcap();
     const captured = await copyVideoFrameY(source.videoFrame);
     const width = captured.meta.visibleRect.width, height = captured.meta.visibleRect.height;
     pendingScanCapture = { image: yToImageData(captured.y, width, height), ox: 0, oy: 0, full: !gridLattice.locked,
@@ -8829,7 +8835,15 @@ async function finalizeCompletedTransfer(payloadId) {
   }
   freezeCompletionDiagnostics();
   quiesceCompletedTransfer();
-  const payload = completingDecoder.assemble();
+  let payload;
+  try {
+    payload = completingDecoder.assemble();
+  } finally {
+    // Assembly owns its returned Uint8Array. Decoder/WASM state is no longer
+    // useful, so release it before hashing/decompression can raise peak memory.
+    completingDecoder.free();
+    if (decoder === completingDecoder) decoder = null;
+  }
   const ok = fnv1a(payload) === payloadId;
   await finish(payload, ok, transferSeconds);
 }
@@ -8896,10 +8910,12 @@ async function finish(container, hashOk, seconds) {
   progressEl.setAttribute("aria-valuenow", "100");
   transferSizeLabel.textContent = "";
   etaLabel.textContent = `${formatDuration(seconds)} total`;
+  let retainContainer = false;
   try {
     if (!hashOk) throw new Error("The optical stream checksum did not match.");
     const file = await unpackFile(container);
     if (!await verifyFile(file)) throw new Error("The recovered file failed SHA-256 verification.");
+    retainContainer = isAndroidApp() && file.compression === "none" && !isSnippet(file);
     if (finishGen !== captureGen) {
       file.bytes.fill(0);
       return;
@@ -8964,7 +8980,7 @@ async function finish(container, hashOk, seconds) {
     result.replaceChildren(heading, detail, restartButton("Try again"));
   } finally {
     releaseTransportDecoder();
-    container.fill(0);
+    if (!retainContainer) container.fill(0);
   }
 }
 const MIME_BY_EXTENSION = {
@@ -8999,13 +9015,15 @@ function inferredType(name) {
   const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
   return (_a = MIME_BY_EXTENSION[extension]) != null ? _a : "application/octet-stream";
 }
-function downloadLink(name, type, bytes, label = `Save ${name}`) {
+function downloadLink(name, type, bytes, label = `Save ${name}`, blobUrl) {
   const link = document.createElement("a");
   link.className = "download";
-  link.href = receivedObjectUrl(new Blob([bytes], { type }));
+  link.href = blobUrl || receivedObjectUrl(new Blob([bytes], { type }));
   link.download = name;
   link.textContent = label;
-  link.addEventListener("click", (event) => {
+  // Browser downloads only need the Blob URL. Do not close over a 64 MB
+  // Uint8Array forever just to discover that the Android bridge is absent.
+  if (isAndroidApp()) link.addEventListener("click", (event) => {
     if (!saveFileOnAndroid(name, type, bytes)) return;
     event.preventDefault();
   });
@@ -9016,7 +9034,8 @@ async function appendReceivedFile(entry, parent, declaredType, autoplayVideo = f
   const type = declaredType || inferredType(entry.name);
   const container = document.createElement("section");
   container.className = "received-file";
-  const url = receivedObjectUrl(new Blob([entry.bytes], { type }));
+  const blob = new Blob([entry.bytes], { type });
+  const url = receivedObjectUrl(blob);
   let receivedVideo;
   if (type.startsWith("image/")) {
     const image = document.createElement("img");
@@ -9038,7 +9057,7 @@ async function appendReceivedFile(entry, parent, declaredType, autoplayVideo = f
         receivedVideo = player;
       }
     }
-    const src = await servableMediaUrl(entry.bytes, type, url);
+    const src = await servableMediaUrl(blob, type, url);
     if (dataGeneration !== receivedDataGeneration) {
       purgeReceivedData();
       return;
@@ -9052,7 +9071,7 @@ async function appendReceivedFile(entry, parent, declaredType, autoplayVideo = f
   }
   const downloadRow = document.createElement("div");
   downloadRow.className = "received-file-download";
-  const link = downloadLink(entry.name, type, entry.bytes, entry.name);
+  const link = downloadLink(entry.name, type, entry.bytes, entry.name, url);
   link.title = entry.name;
   const fileSize = document.createElement("span");
   fileSize.textContent = formatBytes(entry.bytes.length);
@@ -9163,7 +9182,7 @@ function enableMediaInspection(media) {
     void open();
   });
 }
-async function servableMediaUrl(bytes, type, blobUrl) {
+async function servableMediaUrl(blob, type, blobUrl) {
   var _a;
   try {
     if (!((_a = navigator.serviceWorker) == null ? void 0 : _a.controller)) return blobUrl;
@@ -9171,10 +9190,10 @@ async function servableMediaUrl(bytes, type, blobUrl) {
     const cache = await caches.open(RECEIVED_MEDIA_CACHE);
     await cache.put(
       target,
-      new Response(new Blob([bytes]), {
+      new Response(blob, {
         headers: {
           "Content-Type": type,
-          "Content-Length": String(bytes.length)
+          "Content-Length": String(blob.size)
         }
       })
     );
@@ -9240,7 +9259,7 @@ function showSnippet(text) {
 function speedQualityClass(rate) {
   return rate < 5 ? "speed-low" : rate < 25 ? "speed-mid" : rate < 75 ? "speed-good" : "speed-high";
 }
-recordCorpusBtn.addEventListener("click", () => {
+recordCorpusBtn.addEventListener("click", async () => {
   var _a, _b, _c, _d, _e, _f;
   if (benchmarkRecorder) {
     void finishCorpusRecording(benchmarkRecorder);
@@ -9252,6 +9271,7 @@ recordCorpusBtn.addEventListener("click", () => {
     return;
   }
   const version = (_c = (_b = (_a = document.querySelector(".app-version")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.replace(/^v/, "")) != null ? _c : "unknown";
+  const { AgcapRecorder } = await loadAgcap();
   benchmarkRecorder = new AgcapRecorder(3e3, {
     width: video.videoWidth,
     height: video.videoHeight,
@@ -9274,6 +9294,7 @@ corpusFile.addEventListener("change", async () => {
   try {
     benchmarkStatus.textContent = "Loading lossless corpus…";
     if (!benchmarkDialog.open) benchmarkDialog.showModal();
+    const { AgcapCorpus } = await loadAgcap();
     benchmarkCorpus = await AgcapCorpus.load(file);
     benchmarkPendingBlob = void 0;
     benchmarkStatus.textContent = `${benchmarkCorpus.length} frames · ${benchmarkCorpus.header.width}×${benchmarkCorpus.header.height} ${benchmarkCorpus.header.pixelFormat} · ${benchmarkCorpus.header.recorderDrops} recorder drops`;
@@ -9469,6 +9490,7 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
     benchmarkStatus.textContent = "Loading recorded frames…";
     await new Promise(requestAnimationFrame);
     try {
+      const { AgcapCorpus } = await loadAgcap();
       benchmarkCorpus = await AgcapCorpus.load(benchmarkPendingBlob);
     } catch (error) {
       benchmarkStatus.textContent = error instanceof Error ? error.message : String(error);
@@ -9887,6 +9909,7 @@ function fastRegressionI420(image) {
 }
 window.__airgapperRunFastRegression = async ({ urls, order, repeats = 1, fps = 30, mode = "performance", cameraPath = false }) => {
   if (!Array.isArray(urls) || !urls.length) throw new Error("Fast regression needs images");
+  const { AgcapCorpus } = await loadAgcap();
   const images = [];
   for (const url of urls) images.push(await fastRegressionImage(url));
   const width = images[0].width;
@@ -10092,21 +10115,6 @@ Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · a
       : "";
   limit.classList.toggle("scanner-bound", stalled || Boolean(lastDecodeError));
   if (!decoder) return;
-  const elapsed = (now - startTs) / 1e3;
-  const activeGrid = regions.filter((region) => region.gridSlot !== void 0 && region.slotState === "ACTIVE");
-  const liveNow = gridLattice.active ? activeGrid.filter((region) => region.decoded).length : decodedCount();
-  if (timeline.length < TIMELINE_MAX_SAMPLES) {
-    timeline.push([
-      Number(elapsed.toFixed(1)),
-      decoder.framesNew,
-      decoder.solvedCount,
-      liveNow,
-      regions.length,
-      Number(cameraRate.toFixed(1)),
-      Number(qrRate.toFixed(1)),
-      fullScans
-    ]);
-  }
   updateProgressEstimate();
   const liveRate = liveGoodputKbs(now);
   metric("m-rate").textContent = `${liveRate.toFixed(1)} KB/s`;

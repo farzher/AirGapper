@@ -87,7 +87,9 @@ class TransportEncoder {
   }
   free() {
     this.raptor?.free();
+    this.raptor = null;
     this.mdsCache = null;
+    this.byteBlocks = null;
   }
 }
 class TransportDecoder {
@@ -189,6 +191,11 @@ class TransportDecoder {
   }
   free() {
     this.raptor?.free();
+    this.raptor = null;
+    this.raptorPayload = null;
+    this.seen.clear();
+    this.mdsBasis.length = 0;
+    this.mdsBlocks = null;
   }
 }
 export {
