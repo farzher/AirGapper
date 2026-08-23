@@ -1,6 +1,7 @@
 import { parseFrame } from "../shared/protocol.js";
 import {
   composeTemporalLine,
+  composeTemporalLineWithErasures,
   quadDistanceFraction,
   temporalLineCandidates
 } from "./temporal-soft-grid.js";
@@ -12,6 +13,8 @@ let syntheticPtr = 0;
 let syntheticCapacity = 0;
 let modulePtr = 0;
 let moduleCapacity = 0;
+let erasurePtr = 0;
+let erasureCapacity = 0;
 let moduleOutputPtr = 0;
 let moduleOutputCapacity = 0;
 let processing = false;
@@ -36,13 +39,20 @@ function ensureSyntheticBuffer(zx, bytes) {
   return syntheticPtr;
 }
 
-function ensureModuleBuffers(zx, moduleBytes, outputBytes = 16 * 1024) {
+function ensureModuleBuffers(zx, moduleBytes, outputBytes = 16 * 1024, needErasures = false) {
   if (!modulePtr || moduleBytes > moduleCapacity) {
     const next = zx._malloc(moduleBytes);
     if (!next) return false;
     if (modulePtr) zx._free(modulePtr);
     modulePtr = next;
     moduleCapacity = moduleBytes;
+  }
+  if (needErasures && (!erasurePtr || moduleBytes > erasureCapacity)) {
+    const next = zx._malloc(moduleBytes);
+    if (!next) return false;
+    if (erasurePtr) zx._free(erasurePtr);
+    erasurePtr = next;
+    erasureCapacity = moduleBytes;
   }
   if (!moduleOutputPtr || outputBytes > moduleOutputCapacity) {
     const next = zx._malloc(outputBytes);
@@ -54,25 +64,41 @@ function ensureModuleBuffers(zx, moduleBytes, outputBytes = 16 * 1024) {
   return true;
 }
 
-// undefined means this checked-in codec predates the direct ABI; null means the
-// direct decoder exists and rejected this candidate. That distinction keeps the
-// feature compatible with an old cached WASM while allowing rebuilt releases to
-// skip rasterization/finder detection entirely.
-function decodeModuleGridDirect(zx, grid, dim, expectedSlot) {
-  if (typeof zx._decodeModuleGrid !== "function") return undefined;
-  if (!ensureModuleBuffers(zx, grid.byteLength)) return null;
-  zx.HEAPU8.set(grid, modulePtr);
-  const length = zx._decodeModuleGrid(
-    modulePtr,
-    dim,
-    moduleOutputPtr,
-    moduleOutputCapacity
-  );
+function parseDirectOutput(zx, length, dim, expectedSlot) {
   if (!(length > 0) || length > moduleOutputCapacity) return null;
   const output = zx.HEAPU8.slice(moduleOutputPtr, moduleOutputPtr + length);
   const packet = parseFrame(output);
   if (!packet || Number(packet.header.slotIndex) !== expectedSlot) return null;
   return { bytes: output, header: packet.header, modules: dim };
+}
+
+// undefined means this checked-in codec predates the direct ABI; null means the
+// direct decoder exists and rejected this candidate.
+function decodeModuleGridDirect(zx, grid, dim, expectedSlot) {
+  if (typeof zx._decodeModuleGrid !== "function") return undefined;
+  if (!ensureModuleBuffers(zx, grid.byteLength)) return null;
+  zx.HEAPU8.set(grid, modulePtr);
+  return parseDirectOutput(zx, zx._decodeModuleGrid(
+    modulePtr,
+    dim,
+    moduleOutputPtr,
+    moduleOutputCapacity
+  ), dim, expectedSlot);
+}
+
+function decodeModuleGridErasuresDirect(zx, modules, erasures, dim, expectedSlot) {
+  if (typeof zx._decodeModuleGridErasures !== "function") return undefined;
+  if (!erasures || erasures.byteLength !== modules.byteLength ||
+      !ensureModuleBuffers(zx, modules.byteLength, 16 * 1024, true)) return null;
+  zx.HEAPU8.set(modules, modulePtr);
+  zx.HEAPU8.set(erasures, erasurePtr);
+  return parseDirectOutput(zx, zx._decodeModuleGridErasures(
+    modulePtr,
+    erasurePtr,
+    dim,
+    moduleOutputPtr,
+    moduleOutputCapacity
+  ), dim, expectedSlot);
 }
 
 function decodeSyntheticGrid(zx, grid, dim, expectedSlot, scale = 2) {
@@ -177,10 +203,15 @@ async function recoverPair(zx, pair, deadline) {
 
   const hint = pair.hint ?? predictedHint(slot, Number(current.sourceSequence));
   const candidates = temporalLineCandidates(previous, current, hint, 128);
+  const erasureHalfBand = Math.max(3, Math.min(12, current.dim * 0.055));
+  const canErase = typeof zx._decodeModuleGridErasures === "function";
   let attempts = 0;
   let fastAttempts = 0;
+  let erasureAttempts = 0;
+  let erasureHits = 0;
   let decoded = null;
   let winning = null;
+  let usedErasures = false;
 
   for (const candidate of candidates) {
     if (performance.now() >= deadline) break;
@@ -195,14 +226,41 @@ async function recoverPair(zx, pair, deadline) {
     attempts++;
     if (candidate.source?.startsWith("learned")) fastAttempts++;
     decoded = decodeSyntheticGrid(zx, grid, current.dim, slot, 2);
-    if (!decoded) continue;
-    winning = candidate;
-    break;
+    if (decoded) {
+      winning = candidate;
+      break;
+    }
+
+    // When the two rolling boundaries cross in the wrong order, a narrow strip
+    // contains A in the previous frame and C in the current frame: B literally
+    // was not photographed there. Mark that strip as erasures instead of
+    // feeding guessed A/C bits into QR RS.
+    if (canErase && performance.now() < deadline) {
+      const composite = composeTemporalLineWithErasures(
+        previous,
+        current,
+        candidate.centerRow,
+        candidate.tiltRows,
+        candidate.orientation,
+        erasureHalfBand
+      );
+      if (composite) {
+        erasureAttempts++;
+        decoded = decodeModuleGridErasuresDirect(
+          zx, composite.modules, composite.erasures, current.dim, slot
+        );
+        if (decoded) {
+          erasureHits++;
+          usedErasures = true;
+          winning = candidate;
+          break;
+        }
+      }
+    }
   }
 
-  // Only old cached codecs can reach this raster fallback. With the direct ABI,
-  // retrying a larger fake image cannot add information and is deliberately
-  // skipped.
+  // Only old cached codecs can reach this raster fallback. With either direct
+  // module ABI, retrying a larger fake image cannot add information.
   if (!decoded && typeof zx._decodeModuleGrid !== "function" && performance.now() < deadline) {
     for (const candidate of candidates.slice(0, 10)) {
       if (performance.now() >= deadline) break;
@@ -223,12 +281,18 @@ async function recoverPair(zx, pair, deadline) {
   }
 
   if (!decoded || !winning)
-    return { symbol: null, attempts, fastAttempts, timedOut: performance.now() >= deadline };
+    return {
+      symbol: null, attempts, fastAttempts, erasureAttempts, erasureHits,
+      erasureHalfBand, timedOut: performance.now() >= deadline
+    };
 
   noteModel(slot, Number(current.sourceSequence), winning);
   return {
     attempts,
     fastAttempts,
+    erasureAttempts,
+    erasureHits,
+    erasureHalfBand,
     symbol: {
       slot,
       ...decoded,
@@ -236,7 +300,8 @@ async function recoverPair(zx, pair, deadline) {
       tiltRows: winning.tiltRows,
       orientation: winning.orientation,
       candidateSource: winning.source,
-      sourceDelta: delta
+      sourceDelta: delta,
+      usedErasures
     }
   };
 }
@@ -248,6 +313,8 @@ async function recover(data) {
   const metrics = {
     attempts: 0,
     fastAttempts: 0,
+    erasureAttempts: 0,
+    erasureHits: 0,
     hits: 0,
     skipped: 0,
     timedOut: 0,
@@ -256,7 +323,10 @@ async function recover(data) {
     tiltRows: null,
     orientation: "",
     candidateSource: "",
-    directGrid: 0
+    erasureHalfBand: 0,
+    usedErasures: 0,
+    directGrid: 0,
+    directErasures: 0
   };
 
   let zx;
@@ -268,6 +338,7 @@ async function recover(data) {
     return { symbols, metrics };
   }
   metrics.directGrid = Number(typeof zx._decodeModuleGrid === "function");
+  metrics.directErasures = Number(typeof zx._decodeModuleGridErasures === "function");
   const deadline = performance.now() + maxMs;
 
   for (const pair of Array.isArray(data.pairs) ? data.pairs : []) {
@@ -278,6 +349,9 @@ async function recover(data) {
     const result = await recoverPair(zx, pair, deadline);
     metrics.attempts += result.attempts || 0;
     metrics.fastAttempts += result.fastAttempts || 0;
+    metrics.erasureAttempts += result.erasureAttempts || 0;
+    metrics.erasureHits += result.erasureHits || 0;
+    metrics.erasureHalfBand = Math.max(metrics.erasureHalfBand, Number(result.erasureHalfBand) || 0);
     metrics.skipped += Number(Boolean(result.skipped));
     metrics.timedOut += Number(Boolean(result.timedOut));
     if (!result.symbol) continue;
@@ -286,6 +360,7 @@ async function recover(data) {
     metrics.tiltRows = result.symbol.tiltRows;
     metrics.orientation = result.symbol.orientation;
     metrics.candidateSource = result.symbol.candidateSource;
+    metrics.usedErasures += Number(Boolean(result.symbol.usedErasures));
     symbols.push(result.symbol);
   }
   metrics.recoverMs = performance.now() - wallStarted;
@@ -296,9 +371,6 @@ async function processMessage(data) {
   if (data?.action === "reset") {
     models.clear();
     return { symbols: [], metrics: { reset: 1, recoverMs: 0 } };
-  }
-  if (data?.action === "warm") {
-    return { symbols: [], metrics: { warm: 1, recoverMs: 0 } };
   }
   return recover(data ?? {});
 }
