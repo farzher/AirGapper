@@ -24,10 +24,7 @@ jobs:
       - name: Apply after sender performance patch
         run: |
           set -euo pipefail
-          if ! grep -q 'APP_VERSION = "0.5.382"' version.js; then
-            echo 'Waiting for v0.5.382; keeping exact-size workflow armed.'
-            exit 0
-          fi
+          grep -q 'APP_VERSION = "0.5.382"' version.js
           python3 .github/scripts/apply-exact-size-v383.py
           grep -q 'exactSourcePlan' shared/frame-capacity.js
           grep -q 'selectTransportPlan(payload.length, frameBytes, false, true)' send/main.js
@@ -38,3 +35,5 @@ jobs:
           git add shared/frame-capacity.js send/main.js version.js
           git commit -m "v0.5.383: make numeric QR Size exact"
           git push origin HEAD:master
+
+# explicit trigger after v0.5.382
