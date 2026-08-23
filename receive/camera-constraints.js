@@ -1,10 +1,10 @@
-import { installReceiverRecoveryPolicy } from "../shared/receiver-recovery-policy.js";
+import { installReceiverRecoveryPolicy } from "./recovery-policy.js";
 import {
   consumeExposureRescue,
   noteSuppressedExposureWrite,
   shouldPreserveManualExposure,
   verifiedExposureLatchDecision
-} from "../shared/receiver-recovery-state.js";
+} from "./recovery-state.js";
 
 installReceiverRecoveryPolicy();
 
