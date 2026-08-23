@@ -57,3 +57,5 @@ console.log(JSON.stringify({
   ok:true,
   profile:{ columns:profile.columns, lanes:profile.lanes, blocksPerLane:profile.blocksPerLane, payloadBytesPerLane:profile.payloadBytesPerLane, capacityBytes:profile.capacityBytes }
 }, null, 2));
+
+await import('./airgrid-block-y8-proof.mjs');
