@@ -12,15 +12,15 @@ try {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
     const jobId = 991352;
-    const worker = new Worker(new URL("/receive/worker-reconstruct.js", location.href), { type: "module" });
+    const worker = new Worker(new URL("/receive/worker-reconstruct-bootstrap.js", location.href), { type: "module" });
     const timer = setTimeout(() => {
       worker.terminate();
-      reject(new Error("reconstruction wrapper passthrough timed out"));
+      reject(new Error("reconstruction bootstrap passthrough timed out"));
     }, 15_000);
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
-      reject(new Error(event.message || "reconstruction wrapper failed"));
+      reject(new Error(event.message || "reconstruction bootstrap failed"));
     };
     worker.onmessage = (event) => {
       if (event.data?.id !== jobId) return;
