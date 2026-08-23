@@ -94,6 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           node benchmark/airgrid-acquisition-proof.mjs
+          node benchmark/airgrid-acquisition-orientation-proof.mjs
           node benchmark/airgrid-rolling-shutter-proof.mjs
           node benchmark/airgrid-y8-proof.mjs
           node benchmark/airgrid-pam4-y8-proof.mjs
