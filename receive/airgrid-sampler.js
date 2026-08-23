@@ -1,5 +1,6 @@
-import { AIRGRID_PREAMBLE, decodeAirGridLane } from '../shared/airgrid-phy.js';
+import { AIRGRID_PREAMBLE, decodeAirGridLane, inspectAirGridLane } from '../shared/airgrid-phy.js';
 
+const now = () => globalThis.performance?.now?.() ?? Date.now();
 function quadHomography(quad) {
   const p0 = quad.topLeft, p1 = quad.topRight, p2 = quad.bottomRight, p3 = quad.bottomLeft;
   const dx1 = p1.x - p2.x, dx2 = p3.x - p2.x, dx3 = p0.x - p1.x + p2.x - p3.x;
@@ -31,7 +32,20 @@ function sampleNearest(y8, width, height, x, y) {
   const iy = Math.max(0, Math.min(height - 1, Math.round(y)));
   return y8[iy * width + ix];
 }
-function sampleAirGridLane(y8, width, height, homography, profile, laneIndex) {
+function quantile(values, q) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = (sorted.length - 1) * q, lo = Math.floor(index), hi = Math.ceil(index), t = index - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
+}
+function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function projectedSize(quad) {
+  return {
+    width: (distance(quad.topLeft, quad.topRight) + distance(quad.bottomLeft, quad.bottomRight)) * 0.5,
+    height: (distance(quad.topLeft, quad.bottomLeft) + distance(quad.topRight, quad.bottomRight)) * 0.5
+  };
+}
+function sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation = 18) {
   const values = new Uint8Array(profile.columns);
   const v = (laneIndex + 0.5) / profile.lanes;
   for (let column = 0; column < profile.columns; column++) {
@@ -39,8 +53,6 @@ function sampleAirGridLane(y8, width, height, homography, profile, laneIndex) {
     const point = project(homography, u, v);
     values[column] = sampleNearest(y8, width, height, point.x, point.y);
   }
-  // Preamble is known, so it doubles as a per-lane black/white calibration and
-  // requires no dedicated optical training rail.
   let black = 0, white = 0, blackCount = 0, whiteCount = 0;
   for (let i = 0; i < AIRGRID_PREAMBLE.length; i++) {
     if (AIRGRID_PREAMBLE[i]) { black += values[i]; blackCount++; }
@@ -48,24 +60,132 @@ function sampleAirGridLane(y8, width, height, homography, profile, laneIndex) {
   }
   black /= blackCount;
   white /= whiteCount;
+  let variance = 0;
+  for (let i = 0; i < AIRGRID_PREAMBLE.length; i++) {
+    const expected = AIRGRID_PREAMBLE[i] ? black : white;
+    variance += (values[i] - expected) ** 2;
+  }
+  const noise = Math.sqrt(variance / AIRGRID_PREAMBLE.length);
   const separation = white - black;
-  if (separation < 18) return { bits: null, separation, threshold: (white + black) * 0.5 };
   const threshold = (white + black) * 0.5;
+  const contrast = Math.max(1, Math.abs(separation) * 0.5);
+  let confidence = 0;
+  for (const value of values) confidence += Math.min(1, Math.abs(value - threshold) / contrast);
+  confidence /= values.length;
+  const base = { values, black, white, noise, snr: separation / Math.max(1, noise), separation, threshold, confidence };
+  if (separation < minSeparation) return { ...base, bits: null };
   const bits = new Uint8Array(profile.columns);
   for (let i = 0; i < values.length; i++) bits[i] = values[i] < threshold ? 1 : 0;
-  return { bits, separation, threshold };
+  return { ...base, bits };
 }
-function decodeAirGridY8({ y8, width, height, quad, profile, minSeparation = 18 }) {
-  if (!(y8 instanceof Uint8Array) || y8.length < width * height) throw new Error('AirGrid Y8 frame is incomplete');
-  const homography = quadHomography(quad);
-  const lanes = [];
-  for (let laneIndex = 0; laneIndex < profile.lanes; laneIndex++) {
-    const sampled = sampleAirGridLane(y8, width, height, homography, profile, laneIndex);
-    if (!sampled.bits || sampled.separation < minSeparation) continue;
-    const decoded = decodeAirGridLane(sampled.bits, { laneIndex });
-    if (decoded) lanes.push({ ...decoded, separation: sampled.separation });
+function makeRuns(states) {
+  const runs = [];
+  for (let lane = 0; lane < states.length; lane++) {
+    const state = states[lane];
+    const key = state.ok ? `s:${state.sequence}` : `f:${state.reason}`;
+    const last = runs[runs.length - 1];
+    if (last?.key === key) { last.endLane = lane; last.count++; continue; }
+    runs.push({ key, startLane: lane, endLane: lane, count: 1, ...(state.ok ? { sequence: state.sequence } : { reason: state.reason }) });
   }
-  return lanes;
+  for (const run of runs) delete run.key;
+  return runs;
 }
+function decodeAirGridY8Detailed({ y8, width, height, quad, profile, minSeparation = 18, includeLaneDiagnostics = false }) {
+  if (!(y8 instanceof Uint8Array) || y8.length < width * height) throw new Error('AirGrid Y8 frame is incomplete');
+  const started = now();
+  const homography = quadHomography(quad);
+  const projected = projectedSize(quad);
+  const lanes = [];
+  const states = new Array(profile.lanes);
+  const separations = [], noises = [], snrs = [], confidences = [], preambleErrors = [];
+  const failures = { lowContrast: 0, preamble: 0, magic: 0, version: 0, crc: 0, short: 0, other: 0 };
+  const laneDiagnostics = includeLaneDiagnostics ? [] : null;
+  let sampleMs = 0, decodeMs = 0;
+  for (let laneIndex = 0; laneIndex < profile.lanes; laneIndex++) {
+    const sampleStarted = now();
+    const sampled = sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation);
+    sampleMs += now() - sampleStarted;
+    separations.push(sampled.separation);
+    noises.push(sampled.noise);
+    snrs.push(sampled.snr);
+    confidences.push(sampled.confidence);
+    if (!sampled.bits) {
+      failures.lowContrast++;
+      states[laneIndex] = { ok: false, reason: 'lowContrast' };
+      if (laneDiagnostics) laneDiagnostics.push({ laneIndex, ok: false, reason: 'lowContrast', separation: sampled.separation, noise: sampled.noise, snr: sampled.snr, confidence: sampled.confidence });
+      continue;
+    }
+    const decodeStarted = now();
+    const inspected = inspectAirGridLane(sampled.bits, { laneIndex });
+    decodeMs += now() - decodeStarted;
+    preambleErrors.push(inspected.preambleErrors ?? AIRGRID_PREAMBLE.length);
+    if (!inspected.ok) {
+      if (Object.hasOwn(failures, inspected.reason)) failures[inspected.reason]++;
+      else failures.other++;
+      states[laneIndex] = { ok: false, reason: inspected.reason };
+      if (laneDiagnostics) laneDiagnostics.push({ laneIndex, ok: false, reason: inspected.reason, preambleErrors: inspected.preambleErrors, separation: sampled.separation, noise: sampled.noise, snr: sampled.snr, confidence: sampled.confidence });
+      continue;
+    }
+    const lane = { ...inspected.lane, separation: sampled.separation, snr: sampled.snr, confidence: sampled.confidence, preambleErrors: inspected.preambleErrors };
+    lanes.push(lane);
+    states[laneIndex] = { ok: true, sequence: lane.sequence };
+    if (laneDiagnostics) laneDiagnostics.push({ laneIndex, ok: true, sequence: lane.sequence, preambleErrors: inspected.preambleErrors, separation: sampled.separation, noise: sampled.noise, snr: sampled.snr, confidence: sampled.confidence });
+  }
+  const totalMs = now() - started;
+  const capacityBytes = profile.lanes * profile.payloadBytes;
+  const bytesDecoded = lanes.length * profile.payloadBytes;
+  const sequences = [...new Set(lanes.map(lane => lane.sequence))].sort((a, b) => a - b);
+  const diagnostics = {
+    frame: {
+      width,
+      height,
+      projectedWidthPx: projected.width,
+      projectedHeightPx: projected.height,
+      projectedCoverage: projected.width * projected.height / Math.max(1, width * height),
+      pxPerCellX: projected.width / profile.columns,
+      pxPerCellY: projected.height / profile.lanes
+    },
+    profile: { ...profile, minSeparation },
+    optics: {
+      separationMin: Math.min(...separations),
+      separationP10: quantile(separations, 0.1),
+      separationP50: quantile(separations, 0.5),
+      separationP90: quantile(separations, 0.9),
+      noiseP50: quantile(noises, 0.5),
+      noiseP90: quantile(noises, 0.9),
+      snrP10: quantile(snrs, 0.1),
+      snrP50: quantile(snrs, 0.5),
+      confidenceP10: quantile(confidences, 0.1),
+      confidenceP50: quantile(confidences, 0.5),
+      preambleErrorsP90: quantile(preambleErrors, 0.9)
+    },
+    decode: {
+      totalLanes: profile.lanes,
+      validLanes: lanes.length,
+      validLaneRate: lanes.length / profile.lanes,
+      payloadBytesPerLane: profile.payloadBytes,
+      bytesDecoded,
+      capacityBytes,
+      utilization: bytesDecoded / Math.max(1, capacityBytes),
+      failures
+    },
+    rollingShutter: {
+      sequences,
+      sequenceCount: sequences.length,
+      transitions: Math.max(0, sequences.length - 1),
+      runs: makeRuns(states)
+    },
+    timing: {
+      sampleMs,
+      decodeMs,
+      totalMs,
+      cellsSampled: profile.columns * profile.lanes,
+      millionCellsPerSecond: totalMs > 0 ? profile.columns * profile.lanes / totalMs / 1000 : 0
+    }
+  };
+  if (laneDiagnostics) diagnostics.lanes = laneDiagnostics;
+  return { lanes, diagnostics };
+}
+function decodeAirGridY8(options) { return decodeAirGridY8Detailed(options).lanes; }
 
-export { decodeAirGridY8, project as projectAirGridPoint, quadHomography, sampleAirGridLane };
+export { decodeAirGridY8, decodeAirGridY8Detailed, project as projectAirGridPoint, quadHomography, sampleAirGridLane };
