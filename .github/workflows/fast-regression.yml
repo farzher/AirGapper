@@ -105,6 +105,7 @@ jobs:
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/native-y8-worker-smoke.mjs
+          node benchmark/temporal-direct-grid-smoke.mjs
           # Legacy horizontal proof remains as a regression oracle for the
           # fundamental A/B + B/C reconstruction identity.
           node benchmark/temporal-cross-frame-proof.mjs
