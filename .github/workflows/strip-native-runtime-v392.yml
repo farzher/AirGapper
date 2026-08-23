@@ -1,0 +1,28 @@
+name: strip native runtime v392
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/scripts/strip-native-runtime-v392.py
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Strip retired native camera runtime
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/strip-native-runtime-v392.py
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/strip-native-runtime-v392.yml .github/scripts/strip-native-runtime-v392.py
+          git add receive/runtime.js
+          git commit -m "v0.5.392: remove retired native camera runtime"
+          git push origin HEAD:master
