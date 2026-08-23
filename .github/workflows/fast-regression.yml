@@ -80,10 +80,12 @@ jobs:
           node --input-type=module --check < version.js
           node --input-type=module --check < airgrid-lab.js
           node --input-type=module --check < receive/airgrid-sampler.js
+          node --input-type=module --check < receive/airgrid-pam4-sampler.js
           node --input-type=module --check < receive/airgrid-worker.js
           node --input-type=module --check < send/airgrid-renderer.js
           node --input-type=module --check < send/airgrid-present-diagnostics.js
           node --input-type=module --check < shared/airgrid-phy.js
+          node --input-type=module --check < shared/airgrid-pam4.js
           node --input-type=module --check < shared/airgrid-diagnostics.js
 
       - name: Run AirGrid fast proofs
@@ -91,6 +93,7 @@ jobs:
           set -euo pipefail
           node benchmark/airgrid-rolling-shutter-proof.mjs
           node benchmark/airgrid-y8-proof.mjs
+          node benchmark/airgrid-pam4-y8-proof.mjs
           node benchmark/airgrid-diagnostics-proof.mjs
           node benchmark/airgrid-throughput-budget.mjs
 
