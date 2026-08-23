@@ -75,6 +75,9 @@ jobs:
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
+          node --input-type=module --check < receive/airgrid-sampler.js
+          node --input-type=module --check < send/airgrid-renderer.js
+          node --input-type=module --check < shared/airgrid-phy.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
           node --input-type=module --check < shared/receiver-recovery-state.js
@@ -82,8 +85,9 @@ jobs:
 
       - name: Run grid regression
         run: |
+          node benchmark/airgrid-rolling-shutter-proof.mjs
+          node benchmark/airgrid-y8-proof.mjs
           node benchmark/grid-lattice-regression.mjs
-          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
           node benchmark/auto-phase-policy-smoke.mjs
@@ -107,7 +111,7 @@ jobs:
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
-        if: always()
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
           cd android
