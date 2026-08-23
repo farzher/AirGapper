@@ -220,9 +220,6 @@ async function recover(data) {
     metrics.recoverMs = performance.now() - wallStarted;
     return { symbols, metrics };
   }
-  // Codec startup is a one-time worker cost, not part of the bounded seam-search
-  // budget. Starting the deadline here means the first real recovery still gets
-  // the same bounded search opportunity as every warm recovery.
   const deadline = performance.now() + maxMs;
 
   for (const pair of Array.isArray(data.pairs) ? data.pairs : []) {
@@ -251,6 +248,12 @@ async function processMessage(data) {
   if (data?.action === "reset") {
     models.clear();
     return { symbols: [], metrics: { reset: 1, recoverMs: 0 } };
+  }
+  if (data?.action === "warm") {
+    // Compatibility no-op for wrapper versions that still send a warm marker.
+    // Codec loading already started at module evaluation, so this must not hold
+    // the one-command processing guard while WASM instantiates.
+    return { symbols: [], metrics: { warm: 1, recoverMs: 0 } };
   }
   return recover(data ?? {});
 }
