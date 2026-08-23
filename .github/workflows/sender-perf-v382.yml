@@ -1,0 +1,298 @@
+name: optimize sync sender performance
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - version.js
+      - .github/workflows/sender-perf-v382.yml
+
+concurrency:
+  group: sender-perf-v382
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Apply after Auto Size lands
+        id: ready
+        run: |
+          if grep -q 'APP_VERSION = "0.5.381"' version.js; then
+            echo 'ready=yes' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Auto Size v0.5.381 has not landed yet; leaving this workflow armed.'
+            echo 'ready=no' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Optimize QR encoder and page worker
+        if: steps.ready.outputs.ready == 'yes'
+        run: |
+          set -euo pipefail
+
+          cp vendor/qrcode.js /tmp/qrcode-before.mjs
+          cat >/tmp/hash-qrs.mjs <<'JS'
+          import crypto from 'node:crypto';
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const mod = await import(pathToFileURL(process.argv[2]).href + `?v=${Date.now()}`);
+          const QRCode = mod.default;
+          const cases = [
+            [500, 15],
+            [1000, 22],
+            [1465, 27],
+            [2331, 35],
+            [2953, 40]
+          ];
+          const out = [];
+          for (const [length, version] of cases) {
+            const bytes = new Uint8Array(length);
+            for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 73 + length * 11 + (i >>> 3)) & 255;
+            const qr = QRCode.create([{ data: bytes, mode: 'byte' }], {
+              errorCorrectionLevel: 'L', version, maskPattern: 4
+            });
+            const hash = crypto.createHash('sha256').update(qr.modules.data).digest('hex');
+            out.push(`${length}:${qr.version}:${qr.modules.size}:${hash}`);
+          }
+          console.log(out.join('\n'));
+          JS
+          node /tmp/hash-qrs.mjs /tmp/qrcode-before.mjs >/tmp/qrs-before.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('vendor/qrcode.js')
+          s = p.read_text()
+
+          old = '''    BitBuffer.prototype = {
+                get: function(index) {
+                  const bufIndex = Math.floor(index / 8);
+                  return (this.buffer[bufIndex] >>> 7 - index % 8 & 1) === 1;
+                },
+                put: function(num, length) {
+                  for (let i = 0; i < length; i++) {
+                    this.putBit((num >>> length - i - 1 & 1) === 1);
+                  }
+                },
+          '''
+          new = '''    BitBuffer.prototype = {
+                get: function(index) {
+                  const bufIndex = Math.floor(index / 8);
+                  return (this.buffer[bufIndex] >>> 7 - index % 8 & 1) === 1;
+                },
+                put: function(num, length) {
+                  // Append several bits at a time instead of dispatching one
+                  // putBit() call per bit. AirGapper's byte-mode QR stream calls
+                  // this for every payload byte, so this removes millions of tiny
+                  // JS calls/sec while preserving the exact bitstream.
+                  while (length > 0) {
+                    const bufIndex = this.length >>> 3;
+                    const used = this.length & 7;
+                    if (this.buffer.length <= bufIndex) this.buffer.push(0);
+                    const room = 8 - used;
+                    const take = Math.min(room, length);
+                    const shift = length - take;
+                    const mask = (1 << take) - 1;
+                    this.buffer[bufIndex] |= (num >>> shift & mask) << room - take;
+                    this.length += take;
+                    length -= take;
+                  }
+                },
+          '''
+          if old not in s: raise SystemExit('BitBuffer block mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''      } else {
+                this.data = new Uint8Array(data);
+              }
+          '''
+          new = '''      } else if (data instanceof Uint8Array) {
+                // QR encoding is read-only. Keep an existing byte view instead of
+                // cloning every AirGapper frame before Reed-Solomon encoding.
+                this.data = data;
+              } else if (ArrayBuffer.isView(data)) {
+                this.data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+              } else {
+                this.data = new Uint8Array(data);
+              }
+          '''
+          if old not in s: raise SystemExit('ByteData block mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''    exports.mod = function mod(divident, divisor) {
+              let result = new Uint8Array(divident);
+              while (result.length - divisor.length >= 0) {
+                const coeff = result[0];
+                for (let i = 0; i < divisor.length; i++) {
+                  result[i] ^= GF.mul(divisor[i], coeff);
+                }
+                let offset = 0;
+                while (offset < result.length && result[offset] === 0) offset++;
+                result = result.slice(offset);
+              }
+              return result;
+            };
+            exports.generateECPolynomial = function generateECPolynomial(degree) {
+              let poly = new Uint8Array([1]);
+              for (let i = 0; i < degree; i++) {
+                poly = exports.mul(poly, new Uint8Array([1, GF.exp(i)]));
+              }
+              return poly;
+            };
+          '''
+          new = '''    exports.mod = function mod(divident, divisor) {
+              // Polynomial long division can operate in one backing array. The
+              // previous implementation sliced the shrinking remainder on every
+              // step, producing a large amount of garbage for every QR symbol.
+              const result = new Uint8Array(divident);
+              let offset = 0;
+              while (result.length - offset >= divisor.length) {
+                const coeff = result[offset];
+                if (coeff !== 0) {
+                  for (let i = 0; i < divisor.length; i++) {
+                    result[offset + i] ^= GF.mul(divisor[i], coeff);
+                  }
+                }
+                while (offset < result.length && result[offset] === 0) offset++;
+              }
+              return result.slice(offset);
+            };
+            const ecPolynomialCache = /* @__PURE__ */ new Map();
+            exports.generateECPolynomial = function generateECPolynomial(degree) {
+              const cached = ecPolynomialCache.get(degree);
+              if (cached) return cached;
+              let poly = new Uint8Array([1]);
+              for (let i = 0; i < degree; i++) {
+                poly = exports.mul(poly, new Uint8Array([1, GF.exp(i)]));
+              }
+              ecPolynomialCache.set(degree, poly);
+              return poly;
+            };
+          '''
+          if old not in s: raise SystemExit('Polynomial block mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''        dcData[b] = buffer.slice(offset, offset + dataSize);
+          '''
+          new = '''        dcData[b] = buffer.subarray(offset, offset + dataSize);
+          '''
+          if old not in s: raise SystemExit('RS data slice mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          cp vendor/qrcode.js /tmp/qrcode-after.mjs
+          node /tmp/hash-qrs.mjs /tmp/qrcode-after.mjs >/tmp/qrs-after.txt
+          diff -u /tmp/qrs-before.txt /tmp/qrs-after.txt
+
+          cat >send/render-worker.js <<'JS'
+          import QRCode from "../vendor/qrcode.js";
+
+          const WHITE = 0xffffffff;
+          const BLACK = 0xff000000;
+
+          let rasterWidth = 0;
+          let rasterHeight = 0;
+          let rasterPixels = null;
+          let rasterImage = null;
+          let rasterCanvas = null;
+          let rasterCtx = null;
+
+          function ensureRaster(width, height) {
+            if (rasterPixels && rasterWidth === width && rasterHeight === height) return;
+            rasterWidth = width;
+            rasterHeight = height;
+            rasterPixels = new Uint32Array(width * height);
+            // Margins never change. Initialize the complete page white once;
+            // each render below rewrites every QR module, including white ones.
+            rasterPixels.fill(WHITE);
+            rasterImage = null;
+            rasterCanvas = null;
+            rasterCtx = null;
+            if (typeof OffscreenCanvas === "function" && typeof ImageData === "function") {
+              rasterImage = new ImageData(new Uint8ClampedArray(rasterPixels.buffer), width, height);
+              rasterCanvas = new OffscreenCanvas(width, height);
+              rasterCtx = rasterCanvas.getContext("2d");
+            }
+          }
+
+          self.onmessage = (event) => {
+            const job = event.data;
+            if (!job || job.type !== "render-page") return;
+            try {
+              const version = Number(job.version);
+              if (!Number.isInteger(version) || version < 1 || version > 40) throw new Error("Render page needs a QR version");
+              const modules = 17 + 4 * version;
+              const width = modules * job.cols + job.margin * (job.cols + 1);
+              const height = modules * job.rows + job.margin * (job.rows + 1);
+              ensureRaster(width, height);
+              const pixels = rasterPixels;
+              const stride = modules + job.margin;
+
+              for (const frame of job.frames) {
+                const qr = QRCode.create([{ data: new Uint8Array(frame.buffer), mode: "byte" }], {
+                  errorCorrectionLevel: "L",
+                  version,
+                  maskPattern: 4
+                });
+                if (modules !== qr.modules.size) throw new Error("QR version changed inside sender page");
+                const ox = frame.slotIndex % job.cols * stride + job.margin;
+                const oy = Math.floor(frame.slotIndex / job.cols) * stride + job.margin;
+                const data = qr.modules.data;
+                for (let y = 0; y < modules; ++y) {
+                  const dst = (oy + y) * width + ox;
+                  const src = y * modules;
+                  // Rewrite each module exactly once. The old worker first filled
+                  // the whole page white and then wrote black modules, doing ~50%
+                  // extra raster writes every frame.
+                  for (let x = 0; x < modules; ++x)
+                    pixels[dst + x] = data[src + x] ? BLACK : WHITE;
+                }
+              }
+
+              const common = { type: "rendered-page", pageId: job.pageId, version, modules, width, height };
+              if (rasterCanvas && rasterCtx && rasterImage) {
+                rasterCtx.putImageData(rasterImage, 0, 0);
+                const bitmap = rasterCanvas.transferToImageBitmap();
+                self.postMessage({ ...common, bitmap }, [bitmap]);
+              } else {
+                // Transferring detaches an ArrayBuffer, so only the legacy
+                // no-OffscreenCanvas fallback takes a copy. Modern sync sender
+                // workers keep and reuse their raster allocation indefinitely.
+                const copy = pixels.slice();
+                self.postMessage({ ...common, pixels: copy.buffer }, [copy.buffer]);
+              }
+            } catch (error) {
+              self.postMessage({
+                type: "render-error",
+                pageId: job?.pageId,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
+          };
+          JS
+
+          cp send/render-worker.js /tmp/render-worker.mjs
+          node --check /tmp/render-worker.mjs
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('version.js')
+          s = p.read_text()
+          if 'APP_VERSION = "0.5.381"' not in s:
+              raise SystemExit('Unexpected version while applying sender perf patch')
+          p.write_text(s.replace('APP_VERSION = "0.5.381"', 'APP_VERSION = "0.5.382"', 1))
+          PY
+
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/sender-perf-v382.yml
+          git add vendor/qrcode.js send/render-worker.js version.js
+          git commit -m "v0.5.382: reduce sync sender CPU and allocations"
+          git push origin HEAD:master
