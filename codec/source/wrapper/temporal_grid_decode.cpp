@@ -189,14 +189,10 @@ extern "C" int decodeModuleGridErasures(const uint8_t* modules,
     if (!modules || !erasureModules || !output || outputCapacity <= 0 || !validDimension(dimension))
         return -1;
 
-    // A normal decode is cheapest and remains the first choice when ordinary QR
-    // RS can already tolerate the transition. Only fall into explicit erasures
-    // when the hard matrix fails.
-    const auto normal = QRCode::Decode(toBitMatrix(modules, dimension));
-    const int direct = copyDecoded(normal, output, outputCapacity);
-    if (direct != 0)
-        return direct;
-
+    // JavaScript always tries this candidate through decodeModuleGrid first.
+    // Repeating that normal QR decode here doubled the cost of every erasure
+    // candidate and delayed the global seam search. Go straight to the known
+    // EC-L/mask-4 erasure decoder.
     const auto erased = decodeKnownProfileWithErasures(modules, erasureModules, dimension);
     return copyDecoded(erased, output, outputCapacity);
 }
