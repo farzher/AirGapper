@@ -48,12 +48,15 @@ function airGridPayloadBytes(columns) {
   return Math.floor(usableBits / 8);
 }
 function airGridProfile({ projectedWidth, projectedHeight, cellPx = 4 }) {
-  const pitch = Math.max(2, Number(cellPx) || 4);
+  // Experimental hardware lab deliberately permits sub-2px logical cells.
+  // Whether the optical path can resolve them is a measured channel property,
+  // not something the profile generator should pre-emptively forbid.
+  const pitch = Math.max(1.5, Number(cellPx) || 4);
   const columns = Math.floor(projectedWidth / pitch);
   const lanes = Math.floor(projectedHeight / pitch);
   const payloadBytes = airGridPayloadBytes(columns);
   if (payloadBytes < AIRGRID_MIN_PAYLOAD_BYTES || lanes < 8) return null;
-  return { cellPx: pitch, columns, lanes, payloadBytes };
+  return { modulation: 'binary', bitsPerCell: 1, cellPx: pitch, columns, lanes, payloadBytes };
 }
 function encodeAirGridLane({ columns, profile = 0, payloadId, sequence, laneIndex, payload }) {
   const payloadBytes = airGridPayloadBytes(columns);
@@ -99,6 +102,7 @@ function inspectAirGridLane(bits, { laneIndex, maxPreambleErrors = 2 } = {}) {
   const lane = {
     version: packet[1] >>> 4,
     profile: packet[1] & 15,
+    modulation: 'binary',
     payloadId: new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getUint32(2, true),
     sequence: read24(packet, 6),
     laneIndex,
