@@ -14,25 +14,27 @@
 
   <section id="send-panel" class="card hidden">
     <div class="controls">
+      <label>Modulation<select id="send-modulation"><option value="binary">Binary · 1 bit/cell</option><option value="pam4" selected>PAM4 · 2 bits/cell</option></select></label>
       <label>Optical rate<select id="send-hz"><option>30</option><option selected>60</option><option>90</option><option>120</option><option>144</option><option>180</option><option>240</option><option>360</option></select></label>
-      <label>Display cell pitch<select id="send-pitch"><option>5</option><option>4</option><option>3.5</option><option selected>3</option><option>2.5</option><option>2</option></select></label>
+      <label>Display cell pitch<select id="send-pitch"><option>4</option><option>3.5</option><option selected>3</option><option>2.75</option><option>2.5</option><option>2.25</option><option>2</option><option>1.75</option></select></label>
       <label>Payload ID<input id="send-payload-id" value="51a7c0de" /></label>
       <button id="send-start">Start fullscreen sender</button>
     </div>
-    <p class="hint">Use a pure fullscreen pattern for measurements. Press <b>D</b> to toggle the sender HUD; the HUD intentionally corrupts a small optical region, so leave it hidden during throughput runs. Escape exits fullscreen.</p>
+    <p class="hint">30 fps camera is the design constraint. PAM4 uses four grayscale levels and learns their camera-domain values per lane. Press <b>D</b> to toggle the sender HUD; leave it hidden during throughput runs. Escape exits fullscreen.</p>
     <div id="send-plan" class="summary"></div>
   </section>
 
   <section id="receive-panel" class="hidden">
     <div class="card">
       <div class="controls">
-        <label>Camera resolution<select id="cam-res"><option value="1280x720">1280×720</option><option value="1920x1080" selected>1920×1080</option><option value="2560x1440">2560×1440</option><option value="3840x2160">3840×2160</option></select></label>
-        <label>Camera FPS<select id="cam-fps"><option>30</option><option selected>60</option><option>120</option></select></label>
+        <label>Modulation<select id="recv-modulation"><option value="binary">Binary · 1 bit/cell</option><option value="pam4" selected>PAM4 · 2 bits/cell</option></select></label>
+        <label>Camera resolution<select id="cam-res"><option value="1280x720">1280×720</option><option value="1920x1080">1920×1080</option><option value="2560x1440" selected>2560×1440</option><option value="3840x2160">3840×2160</option></select></label>
+        <label>Camera FPS<select id="cam-fps"><option selected>30</option><option>60</option><option>120</option></select></label>
         <label>Sender width<input id="recv-sender-w" type="number" value="2560" min="320" /></label>
         <label>Sender height<input id="recv-sender-h" type="number" value="1440" min="240" /></label>
-        <label>Sender cell pitch<select id="recv-pitch"><option>5</option><option>4</option><option>3.5</option><option selected>3</option><option>2.5</option><option>2</option></select></label>
+        <label>Sender cell pitch<select id="recv-pitch"><option>4</option><option>3.5</option><option selected>3</option><option>2.75</option><option>2.5</option><option>2.25</option><option>2</option><option>1.75</option></select></label>
         <label>Sender Hz<select id="recv-sender-hz"><option>30</option><option selected>60</option><option>90</option><option>120</option><option>144</option><option>180</option><option>240</option><option>360</option></select></label>
-        <label>Min separation<input id="recv-separation" type="number" value="18" min="1" max="120" /></label>
+        <label>Min level separation<input id="recv-separation" type="number" value="10" min="1" max="120" /></label>
         <button id="camera-start">Start camera</button>
       </div>
       <div id="recv-plan" class="summary"></div>
@@ -44,14 +46,14 @@
 
     <div class="card">
       <div class="metrics">
-        <div class="metric"><b id="m-goodput">0.00 MB/s</b><span>CRC-valid AirGrid goodput</span></div>
+        <div class="metric"><b id="m-goodput">0.00 MB/s</b><span>byte-exact verified AirGrid goodput</span></div>
         <div class="metric"><b id="m-floor">0%</b><span>of 2.0 MB/s QR floor</span></div>
         <div class="metric"><b id="m-target">0%</b><span>of 2.5 MB/s AirGrid milestone</span></div>
         <div class="metric"><b id="m-camfps">0 fps</b><span>camera frames received</span></div>
-        <div class="metric"><b id="m-valid">0%</b><span>valid lanes</span></div>
+        <div class="metric"><b id="m-valid">0%</b><span>byte-exact valid lanes</span></div>
         <div class="metric"><b id="m-pxcell">—</b><span>projected camera px/cell</span></div>
-        <div class="metric"><b id="m-snr">—</b><span>SNR p10</span></div>
-        <div class="metric"><b id="m-sep">—</b><span>black/white separation p10</span></div>
+        <div class="metric"><b id="m-snr">—</b><span>decision SNR p10</span></div>
+        <div class="metric"><b id="m-sep">—</b><span>minimum adjacent level gap p10</span></div>
         <div class="metric"><b id="m-readout">— ms</b><span>rolling-shutter readout</span></div>
         <div class="metric"><b id="m-cpu">—%</b><span>CPU frame budget p95</span></div>
         <div class="metric"><b id="m-copy">— ms</b><span>frame copy p50</span></div>
