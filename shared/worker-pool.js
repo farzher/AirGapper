@@ -21,7 +21,6 @@ class DecodeWorkerPool {
     this.activeFull = [];
     this.activeMeta = [];
     this.jobTimers = [];
-    this.jobOptics = /* @__PURE__ */ new Map();
   }
   get size() {
     return this.workers.length;
@@ -51,8 +50,7 @@ class DecodeWorkerPool {
       }
       const symbols = (_a = message.symbols) != null ? _a : [];
       const sightings = (_b = message.sightings) != null ? _b : [];
-      const jobOptics = this.jobOptics.get(message.id);
-      this.jobOptics.delete(message.id);
+      const jobMeta = this.activeMeta[slot];
       clearTimeout(this.jobTimers[slot]);
       this.jobTimers[slot] = void 0;
       this.busy[slot] = false;
@@ -102,8 +100,8 @@ class DecodeWorkerPool {
         for (const symbol of symbols) {
           this.onDecoded(symbol.bytes, symbol.box, {
             scanId: message.id,
-            sourceSequence: jobOptics == null ? void 0 : jobOptics.sourceSequence,
-            opticsEpoch: jobOptics == null ? void 0 : jobOptics.opticsEpoch,
+            sourceSequence: jobMeta?.sourceSequence,
+            opticsEpoch: jobMeta?.opticsEpoch,
             quad: symbol.quad,
             modules: symbol.modules,
             tracked: symbol.tracked,
@@ -131,7 +129,6 @@ class DecodeWorkerPool {
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
-      if (id !== void 0) this.jobOptics.delete(id);
       (_b = this.onCompleted) == null ? void 0 : _b.call(this, id != null ? id : -1, {
         full,
         symbolCount: 0,
@@ -200,23 +197,19 @@ class DecodeWorkerPool {
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : void 0;
     this.activeFull[slot] = Boolean(message.full);
+    const startedAt = performance.now();
     this.activeMeta[slot] = {
       id: typeof id === "number" ? id : void 0,
       kind: message.jobKind ?? (message.full ? "full" : "tracked"),
       full: Boolean(message.full),
       tracks: Number(message.trackCount ?? message.tracks?.length ?? 0),
       pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0),
-      startedAt: performance.now()
+      sourceSequence: typeof message.sourceSequence === "number" ? message.sourceSequence : void 0,
+      opticsEpoch: typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0,
+      startedAt
     };
-    if (typeof id === "number") {
-      const metadata = message;
-      this.jobOptics.set(id, {
-        sourceSequence: typeof metadata.sourceSequence === "number" ? metadata.sourceSequence : void 0,
-        opticsEpoch: typeof metadata.opticsEpoch === "number" ? metadata.opticsEpoch : void 0
-      });
-    }
     try {
-      if (message && typeof message === "object") message.sentAt = performance.now();
+      if (message && typeof message === "object") message.sentAt = startedAt;
       this.workers[slot].postMessage(message, transfer);
       const timeoutMs = workerJobTimeout(message);
       this.jobTimers[slot] = setTimeout(() => {
@@ -224,7 +217,6 @@ class DecodeWorkerPool {
         const activeId = this.activeIds[slot];
         if (this.workers[slot] === void 0 || activeId === void 0 || activeId !== id) return;
         const full = (_a2 = this.activeFull[slot]) != null ? _a2 : false;
-        this.jobOptics.delete(activeId);
         const failed = this.workers[slot];
         this.busy[slot] = false;
         this.activeIds[slot] = void 0;
@@ -261,7 +253,6 @@ class DecodeWorkerPool {
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
-      if (typeof id === "number") this.jobOptics.delete(id);
       if (typeof id === "number") (_b = this.onCompleted) == null ? void 0 : _b.call(this, id, {
         full,
         symbolCount: 0,

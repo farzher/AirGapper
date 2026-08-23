@@ -416,12 +416,7 @@ function monitorDisplayRefreshRate() {
       const commonRates = [75, 90, 100, 120, 144, 165, 180, 200, 240, 280, 300, 360, 480];
       const nearestCommon = commonRates.reduce((nearest, rate) => Math.abs(rate - measuredRate) < Math.abs(nearest - measuredRate) ? rate : nearest);
       const refreshRate = Math.abs(nearestCommon - measuredRate) / nearestCommon <= 0.03 ? nearestCommon : Math.round(measuredRate);
-      const previousMeasuredHz = measuredDisplayHz;
       measuredDisplayHz = Math.max(30, refreshRate);
-      if (selectedFile && isAutoLayout() && Math.abs(previousMeasuredHz - measuredDisplayHz) >= 1) {
-        clearTimeout(autoGridRefreshTimer);
-        autoGridRefreshTimer = setTimeout(() => void startStream(), 120);
-      }
       if (refreshRate > 60) {
         const previousValue = displayOption == null ? void 0 : displayOption.value;
         const wasSelected = cfgFps.value === previousValue;
@@ -462,7 +457,6 @@ function stopSendRenderer() {
   cleanup?.();
 }
 function applyLiveSenderFps() {
-  if (isAutoLayout()) return false;
   if (!activeSendFpsSetter) return false;
   activeSendFpsSetter(selectedFps());
   return true;
@@ -889,7 +883,7 @@ async function startStream(revealStage = false) {
     await prepareRaptorQ();
     if (gen !== generation) return;
   }
-  const encoder = new TransportEncoder(payload, blockLen, payloadId, transport.mode);
+  const encoder = new TransportEncoder(payload, blockLen, transport.mode);
   activeTransportEncoder = encoder;
   // FPS, layout, orientation and visual scaling do not change the erasure
   // code. Continue at the next symbol that was actually painted. A transport
@@ -908,7 +902,9 @@ async function startStream(revealStage = false) {
     k: encoder.k,
     blockLen,
     totalLen: payload.length,
-    payloadId
+    payloadId,
+    seq: 0,
+    slotIndex: 0
   };
   let version;
   let modules = 0;
@@ -1062,10 +1058,9 @@ async function startStream(revealStage = false) {
     const ordinal = symbolOrdinal++;
     const slotIndex = ordinal % gridCodes;
     const seq = scheduledEsi(encoder.k, ordinal);
-    const bytes = packFrame(
-      { ...header, seq, slotIndex },
-      encoder.encode(seq)
-    );
+    header.seq = seq;
+    header.slotIndex = slotIndex;
+    const bytes = packFrame(header, encoder.encode(seq));
     return {
       qr: QRCode.create([{ data: bytes, mode: "byte" }], {
         errorCorrectionLevel: ecc,
@@ -1091,53 +1086,6 @@ async function startStream(revealStage = false) {
       if (revealStage) scrollStageIntoView();
       showStreamPanels(true);
       setStatus("");
-      if (false) {
-        void fetch("/__diagnostics", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            role: "sender",
-            when: (/* @__PURE__ */ new Date()).toISOString(),
-            streamId: payloadId,
-            payload: {
-              name,
-              fileBytes: fileSize,
-              containerBytes: payload.length,
-              transmittedBytes: transmittedSize,
-              compression
-            },
-            settings: {
-              txFps,
-              frameBytes,
-              ecc,
-              gridCodes,
-              layout: `${gridCols}×${gridRows}`,
-              layoutMode,
-              orientation: selectedOrientation(),
-              landscape: landscapeGrid(),
-              static: staticStream,
-              sizeLevel,
-              gridMargin,
-              scaling: fitScaling ? "fit" : "integer"
-            },
-            qr: {
-              version,
-              modules,
-              encodedBytes: transport.frameBytes,
-              ceilingBytes: frameBytes,
-              overheadPercent: Number((transport.overheadFraction * 100).toFixed(2))
-            },
-            transport: {
-              mode: encoder.mode,
-              k: encoder.k,
-              blockLen,
-              paddingBytes: transport.paddingBytes,
-              paddingPercent: Number((transport.paddingFraction * 100).toFixed(3))
-            },
-            ua: navigator.userAgent
-          })
-        }).catch(() => void 0);
-      }
     }
     const raster = rasterizeQr(qr.modules.size, qr.modules.data, gridMargin);
     return {
@@ -1156,7 +1104,6 @@ async function startStream(revealStage = false) {
     const maxPagesAhead = Math.max(3, Math.min(10, workerCount + 2));
     const workers = [];
     const readyPages = new Map();
-    const pageMeta = new Map();
     let dispatchTimer = 0;
     let failed = false;
     let nextPageId = 0;
@@ -1175,7 +1122,6 @@ async function startStream(revealStage = false) {
       closePage(currentPage);
       currentPage = null;
       readyPages.clear();
-      pageMeta.clear();
     };
     const fail = (error) => {
       if (failed || gen !== generation) return;
@@ -1190,10 +1136,10 @@ async function startStream(revealStage = false) {
         const ordinal = startOrdinal + offset;
         const slotIndex = ordinal % gridCodes;
         const seq = scheduledEsi(encoder.k, ordinal);
-        const bytes = packFrame({ ...header, seq, slotIndex }, encoder.encode(seq));
-        const buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-          ? bytes.buffer
-          : bytes.slice().buffer;
+        header.seq = seq;
+        header.slotIndex = slotIndex;
+        const bytes = packFrame(header, encoder.encode(seq));
+        const buffer = bytes.buffer;
         frames.push({ slotIndex, buffer });
         transfer.push(buffer);
       }
@@ -1205,13 +1151,13 @@ async function startStream(revealStage = false) {
       const pageId = nextPageId++;
       const startOrdinal = nextGenerateOrdinal;
       nextGenerateOrdinal += gridCodes;
-      pageMeta.set(pageId, { startOrdinal, endOrdinal: startOrdinal + gridCodes });
       try {
         const { frames, transfer } = buildFrames(startOrdinal);
         worker.busy = true;
         worker.postMessage({
           type: "render-page",
           pageId,
+          startOrdinal,
           frames,
           cols: gridCols,
           rows: gridRows,
@@ -1223,7 +1169,6 @@ async function startStream(revealStage = false) {
         }, transfer);
         return true;
       } catch (error) {
-        pageMeta.delete(pageId);
         fail(error);
         return false;
       }
@@ -1406,13 +1351,12 @@ async function startStream(revealStage = false) {
           fail(new Error(page.error || "Sender QR worker failed"));
           return;
         }
-        const meta = pageMeta.get(page?.pageId);
-        if (!meta || page?.type !== "rendered-page") {
+        if (page?.type !== "rendered-page" || !Number.isInteger(page.startOrdinal) || !Number.isInteger(page.endOrdinal)) {
           closePage(page);
           fail(new Error("Sender QR worker returned an invalid page"));
           return;
         }
-        readyPages.set(page.pageId, { ...page, ...meta });
+        readyPages.set(page.pageId, page);
         scheduleDispatch();
       };
       worker.onerror = (event) => fail(new Error(event.message || "Sender QR worker failed"));
@@ -1440,7 +1384,6 @@ async function startStream(revealStage = false) {
       const page = readyPages.get(nextPresentPageId);
       if (!page) return null;
       readyPages.delete(nextPresentPageId);
-      pageMeta.delete(nextPresentPageId);
       return page;
     };
     const tickParallel = (now) => {

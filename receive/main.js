@@ -98,6 +98,14 @@ const recordCorpusBtn = document.getElementById("record-corpus");
 const loadCorpusBtn = document.getElementById("load-corpus");
 const receiverSettings = document.querySelector(".receiver-settings");
 const receiverDevActions = document.querySelector(".receiver-dev-actions");
+let receiverDevToolsPromise;
+function loadReceiverDevTools() {
+  if (!receiverDevToolsPromise) {
+    // auto-phase reads controls created by phase-nudge, so preserve order.
+    receiverDevToolsPromise = import("./phase-nudge.js").then(() => import("./auto-phase.js"));
+  }
+  return receiverDevToolsPromise;
+}
 const mobileCameraUi = isAndroid || isIOS || navigator.userAgentData?.mobile === true;
 if (mobileCameraUi && cameraDeviceControl && receiverDevActions) receiverDevActions.prepend(cameraDeviceControl);
 const focusDev = document.getElementById("focus-dev");
@@ -1106,6 +1114,7 @@ receiverSettings.addEventListener("toggle", () => {
   while (settingsToggleTimes.length && settingsToggleTimes[0] < now - DEV_SETTINGS_TOGGLE_WINDOW_MS) settingsToggleTimes.shift();
   if (receiverSettings.open && settingsToggleTimes.length >= 3) {
     receiverDevActions.hidden = false;
+    void loadReceiverDevTools();
     rememberDeveloperModeUse();
   }
 });
@@ -8689,7 +8698,7 @@ function onDecoded(bytes, box, info) {
   }
   if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);
   if (!decoder) {
-    decoder = new TransportDecoder(header.k, header.blockLen, header.payloadId, header.totalLen);
+    decoder = new TransportDecoder(header.k, header.blockLen, header.totalLen);
     decoder.extendedGrid = Boolean(header.extendedGrid);
     usefulFrameTimes.length = 0;
     uniqueQrTimes.length = 0;

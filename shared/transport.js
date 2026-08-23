@@ -45,9 +45,8 @@ function addScaled(dst, src, factor) {
   for (let i = 0; i < dst.length; i++) dst[i] = dst[i] ^ gfMul(src[i], factor);
 }
 class TransportEncoder {
-  constructor(payload, blockLen, streamSeed, mode) {
+  constructor(payload, blockLen, mode) {
     this.blockLen = blockLen;
-    this.streamSeed = streamSeed;
     this.k = undefined;
     this.mode = undefined;
     this.byteBlocks = undefined;
@@ -87,16 +86,14 @@ class TransportEncoder {
     return out;
   }
   free() {
-    var _a;
-    (_a = this.raptor) == null ? void 0 : _a.free();
+    this.raptor?.free();
     this.mdsCache = null;
   }
 }
 class TransportDecoder {
-  constructor(k, blockLen, streamSeed, totalLen) {
+  constructor(k, blockLen, totalLen) {
     this.k = k;
     this.blockLen = blockLen;
-    this.streamSeed = streamSeed;
     this.totalLen = totalLen;
     this.mode = undefined;
     this.seen = /* @__PURE__ */ new Set();
@@ -191,8 +188,7 @@ class TransportDecoder {
     return out;
   }
   free() {
-    var _a;
-    (_a = this.raptor) == null ? void 0 : _a.free();
+    this.raptor?.free();
   }
 }
 export {

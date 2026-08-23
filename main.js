@@ -2,8 +2,6 @@ import { isAndroid, isIOS } from "./shared/platform.js";
 import { isAndroidApp } from "./shared/android.js";
 import { APP_BUILD } from "./version.js";
 import { cameraRequestPending, installCameraStartGuard } from "./shared/camera-start-guard.js";
-import "./receive/phase-nudge.js";
-import "./receive/auto-phase.js";
 
 installCameraStartGuard();
 window.AIRGAPPER_BUILD = APP_BUILD;
@@ -20,29 +18,18 @@ async function prepareServiceWorker() {
   }
 }
 
-await prepareServiceWorker();
-await Promise.all([
-  import(`./send/main.js?build=${APP_BUILD}`),
-  import(`./receive/main.js?build=${APP_BUILD}`)
-]);
-
-// receive/main.js historically carried its own diagnostic-only build constant.
-// Keep the copied/runtime diagnostics tied to the canonical version.js value so
-// a stale internal label can never make a new deployment look like an old one.
-const runtimeDiagnostics = document.getElementById("transport-diagnostics");
-function syncReceiverRuntimeBuild() {
-  if (!runtimeDiagnostics) return;
-  const text = runtimeDiagnostics.textContent || "";
-  const next = text.replace(/\bRuntime\s+v\d+\.\d+\.\d+\b/g, `Runtime ${APP_BUILD}`);
-  if (next !== text) runtimeDiagnostics.textContent = next;
-}
-if (runtimeDiagnostics) {
-  new MutationObserver(syncReceiverRuntimeBuild).observe(runtimeDiagnostics, {
-    childList: true,
-    characterData: true,
-    subtree: true
-  });
-  syncReceiverRuntimeBuild();
+void prepareServiceWorker();
+await import(`./send/main.js?build=${APP_BUILD}`);
+let receiveModulePromise;
+let receiveModuleLoaded = false;
+function ensureReceiveModule() {
+  if (!receiveModulePromise) {
+    receiveModulePromise = import(`./receive/main.js?build=${APP_BUILD}`).then((module) => {
+      receiveModuleLoaded = true;
+      return module;
+    });
+  }
+  return receiveModulePromise;
 }
 
 if (serviceWorkers) {
@@ -128,6 +115,21 @@ const views = {
 };
 const receiveVideo = document.getElementById("video");
 let active = "home";
+let receiveLoadDispatchQueued = false;
+function dispatchReceiveWhenReady(type = "airgapper:enter-receive") {
+  if (receiveModuleLoaded) {
+    if (active === "receive") window.dispatchEvent(new CustomEvent(type));
+    return;
+  }
+  if (receiveLoadDispatchQueued) return;
+  receiveLoadDispatchQueued = true;
+  void ensureReceiveModule().then(() => {
+    receiveLoadDispatchQueued = false;
+    if (active === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+  }).catch(() => {
+    receiveLoadDispatchQueued = false;
+  });
+}
 function historyView() {
   var _a2;
   const view = (_a2 = history.state) == null ? void 0 : _a2.airgapperView;
@@ -170,7 +172,7 @@ function showView(name, historyMode = "push") {
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name !== "home";
-  if (name === "receive") window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+  if (name === "receive") dispatchReceiveWhenReady();
   const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
   if (name === "send" && !hasMobileInput) {
     document.getElementById("snippet-text").focus({ preventScroll: true });
@@ -254,16 +256,16 @@ window.airgapperSuspend = () => {
   receiveHealthToken++;
   if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
   suspended = true;
-  window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
+  if (receiveModuleLoaded) window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 function resumeActiveView() {
   if (document.visibilityState !== "visible" || cameraRequestPending()) return;
   const wasSuspended = suspended;
   if (suspended) {
     suspended = false;
-    window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
+    dispatchReceiveWhenReady(receiveModuleLoaded ? "airgapper:resume-mode" : "airgapper:enter-receive");
   } else if (receiveNeedsCamera()) {
-    window.dispatchEvent(new CustomEvent("airgapper:enter-receive"));
+    dispatchReceiveWhenReady();
   }
   if (receiveNeedsCamera()) scheduleReceiveHealthCheck(wasSuspended ? 1500 : 1200);
 }

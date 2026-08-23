@@ -31,8 +31,7 @@ const FILE_HEADER_LEN = 41;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 async function digest(bytes) {
-  const stableBytes = Uint8Array.from(bytes);
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", stableBytes));
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
 }
 async function gzipAsync(bytes) {
   const compressed = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
@@ -146,7 +145,7 @@ async function unpackFile(container) {
   if (fileLength === 0 || fileLength > MAX_FILE_BYTES || transmittedLength <= 0 || transmittedLength > MAX_FILE_BYTES || dataOffset > container.length) {
     throw new Error("The recovered file length does not match its header.");
   }
-  const transmitted = container.slice(dataOffset);
+  const transmitted = container.subarray(dataOffset);
   if (compression === "gzip") {
     if (transmitted.length < 18) throw new Error("The recovered gzip payload is incomplete.");
     const trailer = new DataView(

@@ -57,7 +57,17 @@ self.onmessage = (event) => {
       }
     }
 
-    const common = { type: "rendered-page", pageId: job.pageId, version, modules, width, height };
+    const startOrdinal = Number(job.startOrdinal);
+    const common = {
+      type: "rendered-page",
+      pageId: job.pageId,
+      startOrdinal,
+      endOrdinal: startOrdinal + job.frames.length,
+      version,
+      modules,
+      width,
+      height
+    };
     if (rasterCanvas && rasterCtx && rasterImage) {
       rasterCtx.putImageData(rasterImage, 0, 0);
       const bitmap = rasterCanvas.transferToImageBitmap();

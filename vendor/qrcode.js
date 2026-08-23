@@ -139,8 +139,8 @@ var require_error_correction_level = __commonJS({
 // node_modules/qrcode/lib/core/bit-buffer.js
 var require_bit_buffer = __commonJS({
   "node_modules/qrcode/lib/core/bit-buffer.js"(exports, module) {
-    function BitBuffer() {
-      this.buffer = [];
+    function BitBuffer(capacityBytes) {
+      this.buffer = new Uint8Array(capacityBytes);
       this.length = 0;
     }
     BitBuffer.prototype = {
@@ -152,7 +152,6 @@ var require_bit_buffer = __commonJS({
         while (length > 0) {
           const bufIndex = this.length >>> 3;
           const used = this.length & 7;
-          if (this.buffer.length <= bufIndex) this.buffer.push(0);
           const room = 8 - used;
           const take = Math.min(room, length);
           const shift = length - take;
@@ -166,14 +165,24 @@ var require_bit_buffer = __commonJS({
         return this.length;
       },
       putBit: function(bit) {
-        const bufIndex = Math.floor(this.length / 8);
-        if (this.buffer.length <= bufIndex) {
-          this.buffer.push(0);
-        }
-        if (bit) {
-          this.buffer[bufIndex] |= 128 >>> this.length % 8;
-        }
+        const bufIndex = this.length >>> 3;
+        if (bit) this.buffer[bufIndex] |= 128 >>> (this.length & 7);
         this.length++;
+      },
+      putBytes: function(bytes) {
+        const used = this.length & 7;
+        let dst = this.length >>> 3;
+        if (used === 0) {
+          this.buffer.set(bytes, dst);
+          this.length += bytes.length * 8;
+          return;
+        }
+        for (let i = 0; i < bytes.length; i++) {
+          const value = bytes[i];
+          this.buffer[dst] |= value >>> used;
+          this.buffer[++dst] = value << (8 - used) & 255;
+        }
+        this.length += bytes.length * 8;
       }
     };
     module.exports = BitBuffer;
@@ -813,7 +822,7 @@ var require_polynomial = __commonJS({
       return coeff;
     };
     exports.mod = function mod(divident, divisor) {
-      const result = new Uint8Array(divident);
+      const result = divident;
       let offset = 0;
       while (result.length - offset >= divisor.length) {
         const coeff = result[offset];
@@ -824,7 +833,7 @@ var require_polynomial = __commonJS({
         }
         while (offset < result.length && result[offset] === 0) offset++;
       }
-      return result.slice(offset);
+      return result.subarray(offset);
     };
     const ecPolynomialCache = /* @__PURE__ */ new Map();
     exports.generateECPolynomial = function generateECPolynomial(degree) {
@@ -1056,6 +1065,17 @@ var require_version = __commonJS({
           return Math.floor(usableBits / 8);
       }
     };
+    exports.canFitData = function canFitData(data, version, errorCorrectionLevel) {
+      const ecl = ECLevel.from(errorCorrectionLevel, ECLevel.M);
+      if (Array.isArray(data)) {
+        if (data.length > 1) {
+          return getTotalBitsFromDataArray(data, version) <= exports.getCapacity(version, ecl, Mode.MIXED);
+        }
+        if (data.length === 0) return true;
+        data = data[0];
+      }
+      return data.getLength() <= exports.getCapacity(version, ecl, data.mode);
+    };
     exports.getBestVersionForData = function getBestVersionForData(data, errorCorrectionLevel) {
       let seg;
       const ecl = ECLevel.from(errorCorrectionLevel, ECLevel.M);
@@ -1243,9 +1263,7 @@ var require_byte_data = __commonJS({
       return ByteData.getBitsLength(this.data.length);
     };
     ByteData.prototype.write = function(bitBuffer) {
-      for (let i = 0, l = this.data.length; i < l; i++) {
-        bitBuffer.put(this.data[i], 8);
-      }
+      bitBuffer.putBytes(this.data);
     };
     module.exports = ByteData;
   }
@@ -1528,9 +1546,10 @@ var require_segments = __commonJS({
       return { map: graph, table };
     }
     function buildSingleSegment(data, modesHint) {
-      let mode;
+      let mode = Mode.from(modesHint);
+      if (mode === Mode.BYTE) return new ByteData(data);
       const bestMode = Mode.getBestModeForData(data);
-      mode = Mode.from(modesHint, bestMode);
+      mode = mode || bestMode;
       if (mode !== Mode.BYTE && mode.bit < bestMode.bit) {
         throw new Error('"' + data + '" cannot be encoded with mode ' + Mode.toString(mode) + ".\n Suggested mode is: " + Mode.toString(bestMode));
       }
@@ -1704,15 +1723,15 @@ var require_qrcode = __commonJS({
       }
     }
     function createData(version, errorCorrectionLevel, segments) {
-      const buffer = new BitBuffer();
+      const totalCodewords = Utils.getSymbolTotalCodewords(version);
+      const ecTotalCodewords = ECCode.getTotalCodewordsCount(version, errorCorrectionLevel);
+      const dataTotalCodewordsBits = (totalCodewords - ecTotalCodewords) * 8;
+      const buffer = new BitBuffer(dataTotalCodewordsBits >>> 3);
       segments.forEach(function(data) {
         buffer.put(data.mode.bit, 4);
         buffer.put(data.getLength(), Mode.getCharCountIndicator(data.mode, version));
         data.write(buffer);
       });
-      const totalCodewords = Utils.getSymbolTotalCodewords(version);
-      const ecTotalCodewords = ECCode.getTotalCodewordsCount(version, errorCorrectionLevel);
-      const dataTotalCodewordsBits = (totalCodewords - ecTotalCodewords) * 8;
       if (buffer.getLengthInBits() + 4 <= dataTotalCodewordsBits) {
         buffer.put(0, 4);
       }
@@ -1720,11 +1739,12 @@ var require_qrcode = __commonJS({
         buffer.putBit(0);
       }
       const remainingByte = (dataTotalCodewordsBits - buffer.getLengthInBits()) / 8;
-      for (let i = 0; i < remainingByte; i++) {
-        buffer.put(i % 2 ? 17 : 236, 8);
-      }
+      let pad = buffer.getLengthInBits() >>> 3;
+      for (let i = 0; i < remainingByte; i++) buffer.buffer[pad + i] = i % 2 ? 17 : 236;
+      buffer.length += remainingByte * 8;
       return createCodewords(buffer, version, errorCorrectionLevel);
     }
+    const rsEncoderCache = /* @__PURE__ */ new Map();
     function createCodewords(bitBuffer, version, errorCorrectionLevel) {
       const totalCodewords = Utils.getSymbolTotalCodewords(version);
       const ecTotalCodewords = ECCode.getTotalCodewordsCount(version, errorCorrectionLevel);
@@ -1736,12 +1756,16 @@ var require_qrcode = __commonJS({
       const dataCodewordsInGroup1 = Math.floor(dataTotalCodewords / ecTotalBlocks);
       const dataCodewordsInGroup2 = dataCodewordsInGroup1 + 1;
       const ecCount = totalCodewordsInGroup1 - dataCodewordsInGroup1;
-      const rs = new ReedSolomonEncoder(ecCount);
+      let rs = rsEncoderCache.get(ecCount);
+      if (!rs) {
+        rs = new ReedSolomonEncoder(ecCount);
+        rsEncoderCache.set(ecCount, rs);
+      }
       let offset = 0;
       const dcData = new Array(ecTotalBlocks);
       const ecData = new Array(ecTotalBlocks);
       let maxDataSize = 0;
-      const buffer = new Uint8Array(bitBuffer.buffer);
+      const buffer = bitBuffer.buffer;
       for (let b = 0; b < ecTotalBlocks; b++) {
         const dataSize = b < blocksInGroup1 ? dataCodewordsInGroup1 : dataCodewordsInGroup2;
         dcData[b] = buffer.subarray(offset, offset + dataSize);
@@ -1780,16 +1804,13 @@ var require_qrcode = __commonJS({
       } else {
         throw new Error("Invalid data");
       }
-      const bestVersion = Version.getBestVersionForData(segments, errorCorrectionLevel);
-      if (!bestVersion) {
-        throw new Error("The amount of data is too big to be stored in a QR Code");
-      }
-      if (!version) {
-        version = bestVersion;
-      } else if (version < bestVersion) {
-        throw new Error(
-          "\nThe chosen QR Code version cannot contain this amount of data.\nMinimum version required to store current data is: " + bestVersion + ".\n"
-        );
+      if (version) {
+        if (!Version.canFitData(segments, version, errorCorrectionLevel)) {
+          throw new Error("The chosen QR Code version cannot contain this amount of data.");
+        }
+      } else {
+        version = Version.getBestVersionForData(segments, errorCorrectionLevel);
+        if (!version) throw new Error("The amount of data is too big to be stored in a QR Code");
       }
       const dataBits = createData(version, errorCorrectionLevel, segments);
       const moduleCount = Utils.getSymbolSize(version);
