@@ -1,20 +1,19 @@
 name: strip native runtime v392
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - .github/scripts/strip-native-runtime-v392.py
+  create:
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.ref_type == 'branch' && github.ref == 'cleanup-v392-trigger'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 1
       - name: Strip retired native camera runtime
         run: |
@@ -22,7 +21,14 @@ jobs:
           python3 .github/scripts/strip-native-runtime-v392.py
           git config user.name "AirGapper Cleanup"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/strip-native-runtime-v392.yml .github/scripts/strip-native-runtime-v392.py
+          git rm \
+            shared/native-camera.js \
+            shared/native-camera-v2.js \
+            benchmark/native-camera-bridge-smoke.mjs \
+            benchmark/native-camera-v2-bridge-smoke.mjs \
+            .github/workflows/strip-native-runtime-v392.yml \
+            .github/scripts/strip-native-runtime-v392.py
           git add receive/runtime.js
           git commit -m "v0.5.392: remove retired native camera runtime"
           git push origin HEAD:master
+          git push origin --delete cleanup-v392-trigger || true
