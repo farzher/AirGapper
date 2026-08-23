@@ -79,7 +79,7 @@ s = replace_one(s,
     this.seenBits = null;
     this.mdsBasis.length = 0;''',
 "seen free")
-if "this.seen" in s:
+if "this.seen.has" in s or "this.seen.add" in s or "this.seen.clear" in s or "new Set()" in s:
     raise SystemExit("old Set duplicate tracking remains")
 p.write_text(s)
 
