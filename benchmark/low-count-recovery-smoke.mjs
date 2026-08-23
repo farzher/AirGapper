@@ -47,6 +47,8 @@ class FakeWorker {
     this.kind = kind;
     this.terminated = false;
     this.posts = [];
+    this.onmessage = null;
+    this.onerror = null;
   }
   postMessage(message) { this.posts.push(message); }
   terminate() { this.terminated = true; }
@@ -76,22 +78,30 @@ assert.equal(pool.submitTo(2, low(1, 1), []), true);
 assert.equal(pool.busy[2], true, "ordinary low-count decode must still use the requested normal worker");
 assert.equal(pool.workers[2].kind, "normal", "temporal recovery must never replace a production worker slot");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true);
-const companion = pool.__airgapperTemporalV2?.worker;
-assert.equal(companion?.kind, "temporal-v2", "low-count should create the bounded out-of-pool companion");
-assert.equal(companion.posts.length, 1, "first low-count frame should create exactly one sample command");
+
+const split = pool.__airgapperTemporalSplit;
+const sampler = split?.sampler?.worker;
+const recovery = split?.recovery?.worker;
+assert.equal(sampler?.kind, "temporal-sampler", "low-count should create an independent fast sampler");
+assert.equal(recovery?.kind, "temporal-recover", "low-count should create an independent recovery decoder");
+assert.equal(sampler.posts.length, 1, "first low-count frame should create exactly one sample command");
+assert.equal(sampler.posts[0].action, "sample");
+assert.equal(recovery.posts.length, 1, "recovery worker should be prewarmed independently");
+assert.equal(recovery.posts[0].action, "warm");
 
 // While that sample is in flight, another low-count decode still uses a normal
-// worker but must not queue another camera frame into the companion.
+// production worker but must not queue another camera frame into the sampler.
 pool.busy[2] = false;
 pool.activeIds[2] = undefined;
 clearTimeout(pool.jobTimers[2]);
 pool.jobTimers[2] = undefined;
 assert.equal(pool.submitTo(0, low(2, 2), []), true);
 assert.equal(pool.busy[0], true);
-assert.equal(companion.posts.length, 1, "busy companion must apply hard backpressure");
+assert.equal(sampler.posts.length, 1, "busy sampler must drop the optional mirror instead of queuing camera frames");
+assert.equal(recovery.posts.length, 1, "recovery work must remain independent from sampling");
 assert.equal(pool.workers.every((worker) => worker.kind === "normal"), true);
-assert.ok(createdKinds.includes("temporal-v2"));
-assert.equal(createdKinds.filter((kind) => kind === "temporal-v2").length, 1);
+assert.equal(createdKinds.filter((kind) => kind === "temporal-sampler").length, 1);
+assert.equal(createdKinds.filter((kind) => kind === "temporal-recover").length, 1);
 
 endPoseRecovery();
 pool.resize(0);
