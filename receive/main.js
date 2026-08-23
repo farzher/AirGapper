@@ -312,8 +312,8 @@ const STANDARD_RESOLUTIONS = [
   [2560, 1440],
   [3840, 2160]
 ];
-let requestedWidth = 1280;
-let requestedHeight = 720;
+let requestedWidth = 2560;
+let requestedHeight = 1440;
 let requestedFps = 60;
 const CAMERA_BACKEND_KEY = "airgapper:apk-camera-backend:v1";
 let cameraBackendMode = "browser";
@@ -695,12 +695,12 @@ function automaticCameraScore(device, index) {
   const goodput = Math.max(Number(record.bestGoodputKbs) || 0, Number(record.lastGoodputKbs) || 0);
   const focusModes = Array.isArray(caps?.focusMode) ? caps.focusMode : [];
   const af = focusModes.includes("continuous") ? 1 : 0;
-  const mainHint = /camera\s*0(?:\D|$)|main/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
-  // A 7x4 wall needs more than 35.7 camera frames/s to reach 1000 QR/s.
-  // Prefer a camera capable of crossing that hard cadence threshold before
-  // comparing resolution; measured throughput separates cameras in each tier.
+  const mainHint = /camera(?:2)?\s*0(?:\D|$)|\bmain\b|\bprimary\b/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
+  // The phone's primary rear sensor is the compatibility default even when an
+  // auxiliary rear lens advertises a higher browser FPS. If labels do not
+  // identify the main sensor, keep the existing cadence/resolution ranking.
   const cadenceTier = fps >= 36 ? 1 : 0;
-  return cadenceTier * 1e9 + area + fps * 10000 + goodput * 1000 + af * 50000 + mainHint * 1000 - index;
+  return mainHint * 1e12 + cadenceTier * 1e9 + area + fps * 10000 + goodput * 1000 + af * 50000 - index;
 }
 function bestAutomaticCameraDevice(devices) {
   if (!devices.length) return undefined;
@@ -6328,7 +6328,7 @@ async function start() {
     } else if (cameraResolution.value === "auto") {
       acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { ...cameraChoice, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } }
+        video: { ...cameraChoice, width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } }
       });
     } else if (isAndroidApp()) {
       try {
