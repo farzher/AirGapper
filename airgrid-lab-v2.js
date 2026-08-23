@@ -1,0 +1,494 @@
+import { airGridPayloadBytes, airGridProfile, makeAirGridPayload } from './shared/airgrid-phy.js';
+import { airGridPam4PayloadBytes, airGridPam4Profile } from './shared/airgrid-pam4.js';
+import {
+  AIRGRID_QR_CENTERS,
+  AIRGRID_QR_ORDER,
+  airGridQrConfigKey,
+  parseAirGridQrAcquisition
+} from './shared/airgrid-qr-acquisition.js';
+import { homographyFromCorrespondences, projectAirGridAcquisition } from './shared/airgrid-acquisition.js';
+import { AirGridDiagnostics, formatAirGridDiagnostics } from './shared/airgrid-diagnostics.js';
+import { AirGridPresentationDiagnostics } from './send/airgrid-present-diagnostics.js';
+import { AirGridQrAcquisitionRenderer } from './send/airgrid-qr-acquisition-renderer.js';
+import { AirGridRasterRenderer, buildAirGridState } from './send/airgrid-renderer.js';
+
+const $ = id => document.getElementById(id);
+const AIRGRID_BUILD = 'AGRS-20260823-1345';
+const QR_FLOOR_BPS = 2_000_000;
+const AIRGRID_TARGET_BPS = 2_500_000;
+const DEFAULT_PAYLOAD_ID = 0x51a7c0de;
+const intValue = el => Math.max(1, Math.round(Number(el?.value) || 1));
+const numValue = el => Number(el?.value);
+const mbps = bps => `${(bps / 1e6).toFixed(2)} MB/s`;
+const pct = v => `${(v * 100).toFixed(1)}%`;
+
+$('build-id').textContent = AIRGRID_BUILD;
+
+function setMode(mode) {
+  const send = mode === 'send';
+  $('send-panel').classList.toggle('hidden', !send);
+  $('receive-panel').classList.toggle('hidden', send);
+  $('mode-send').classList.toggle('active', send);
+  $('mode-receive').classList.toggle('active', !send);
+  const u = new URL(location.href);
+  const v = u.searchParams.get('v');
+  u.search = send ? '?send' : '?receive';
+  if (v) u.searchParams.set('v', v);
+  history.replaceState(null, '', u);
+}
+$('mode-send').onclick = () => setMode('send');
+$('mode-receive').onclick = () => setMode('receive');
+setMode(location.search.includes('receive') ? 'receive' : 'send');
+
+function parsePayloadId(value) {
+  const parsed = Number.parseInt(String(value ?? '').trim().replace(/^0x/i, ''), 16);
+  return Number.isFinite(parsed) ? parsed >>> 0 : DEFAULT_PAYLOAD_ID;
+}
+function senderModulation() { return $('send-modulation').value === 'pam4' ? 'pam4' : 'binary'; }
+function makeProfile(width, height, pitch, modulation) {
+  return modulation === 'pam4'
+    ? airGridPam4Profile({ projectedWidth: width, projectedHeight: height, cellPx: pitch })
+    : airGridProfile({ projectedWidth: width, projectedHeight: height, cellPx: pitch });
+}
+function profileFromConfig(config) {
+  const payloadBytes = config.modulation === 'pam4'
+    ? airGridPam4PayloadBytes(config.columns)
+    : airGridPayloadBytes(config.columns);
+  if (payloadBytes < 8 || config.lanes < 8) return null;
+  return {
+    modulation: config.modulation,
+    bitsPerCell: config.modulation === 'pam4' ? 2 : 1,
+    columns: config.columns,
+    lanes: config.lanes,
+    payloadBytes
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sender
+// ---------------------------------------------------------------------------
+const senderCanvas = $('sender-canvas');
+const senderStage = $('sender-stage');
+const senderHud = $('sender-hud');
+const rasterRenderer = new AirGridRasterRenderer();
+const acquisitionRenderer = new AirGridQrAcquisitionRenderer();
+const presentation = new AirGridPresentationDiagnostics();
+let senderRunning = false;
+let senderRaf = 0;
+let senderNextDue = 0;
+let senderStartedAt = 0;
+let senderSequence = 0;
+let senderProfile = null;
+let senderPayloadId = DEFAULT_PAYLOAD_ID;
+let senderMode = 'binary';
+let senderWasAcquiring = false;
+
+function plannedDisplayPixels() {
+  const dpr = devicePixelRatio || 1;
+  return {
+    width: Math.max(1, Math.round(screen.width * dpr)),
+    height: Math.max(1, Math.round(screen.height * dpr)),
+    dpr
+  };
+}
+function updateSendPlan() {
+  const { width, height, dpr } = plannedDisplayPixels();
+  const pitch = numValue($('send-pitch'));
+  const hz = intValue($('send-hz'));
+  const modulation = senderModulation();
+  const profile = makeProfile(width, height, pitch, modulation);
+  if (!profile) return $('send-plan').textContent = 'Invalid AirGrid profile';
+  const stateBytes = profile.lanes * profile.payloadBytes;
+  $('send-plan').textContent = [
+    `build: ${AIRGRID_BUILD}`,
+    `QR acquisition beacons → ${modulation.toUpperCase()} payload`,
+    `${width}×${height} device px (DPR ${dpr})`,
+    `${profile.columns} columns × ${profile.lanes} lane rows · ${profile.payloadBytes} B/lane`,
+    `${(stateBytes / 1024).toFixed(1)} KiB/state · ${mbps(stateBytes * 30)} payload ceiling at 30 camera fps`
+  ].join('\n');
+}
+for (const id of ['send-modulation','send-hz','send-pitch','send-payload-id']) $(id).addEventListener('input', updateSendPlan);
+updateSendPlan();
+
+function resizeSender() {
+  const dpr = devicePixelRatio || 1;
+  senderCanvas.width = Math.max(1, Math.round(innerWidth * dpr));
+  senderCanvas.height = Math.max(1, Math.round(innerHeight * dpr));
+  senderMode = senderModulation();
+  senderProfile = makeProfile(senderCanvas.width, senderCanvas.height, numValue($('send-pitch')), senderMode);
+  if (!senderProfile) throw new Error('Fullscreen AirGrid profile is invalid');
+}
+function acquisitionDue(now) {
+  const t = now - senderStartedAt;
+  if (t < 1800) return true;
+  // Bring-up mode: generous beacon dwell so a 30 fps phone cannot miss it.
+  return ((t - 1800) % 3000) < 900;
+}
+function senderConfig() {
+  return {
+    modulation: senderMode,
+    columns: senderProfile.columns,
+    lanes: senderProfile.lanes,
+    senderHz: intValue($('send-hz')),
+    payloadId: senderPayloadId
+  };
+}
+function updateSenderHud(acquiring) {
+  if (!senderProfile) return;
+  const snap = presentation.snapshot();
+  senderHud.textContent = [
+    AIRGRID_BUILD,
+    acquiring ? 'QR ACQUISITION BEACONS' : `DATA seq ${senderSequence}`,
+    `${senderMode.toUpperCase()} ${senderProfile.columns}×${senderProfile.lanes}`,
+    `${snap.actualHz.toFixed(1)} / ${snap.requestedHz.toFixed(0)} Hz`,
+    `${mbps(senderProfile.lanes * senderProfile.payloadBytes * 30)} @ 30fps ceiling`
+  ].join('\n');
+}
+function senderTick(now) {
+  if (!senderRunning) return;
+  senderRaf = requestAnimationFrame(senderTick);
+  const hz = intValue($('send-hz'));
+  const period = 1000 / hz;
+  if (now + 0.2 < senderNextDue) return;
+  const skipped = Math.max(1, Math.floor((now - senderNextDue) / period) + 1);
+  senderNextDue += skipped * period;
+  const ctx = senderCanvas.getContext('2d', { alpha:false });
+  const acquiring = acquisitionDue(now);
+  const started = performance.now();
+  if (acquiring) {
+    acquisitionRenderer.render(ctx, senderCanvas.width, senderCanvas.height, senderConfig(), AIRGRID_BUILD);
+  } else {
+    senderSequence = (senderSequence + skipped) & 0xffffff;
+    const state = buildAirGridState({
+      profile: senderProfile,
+      modulation: senderMode,
+      payloadId: senderPayloadId,
+      sequence: senderSequence,
+      profileId: senderMode === 'pam4' ? 1 : 0,
+      payloadForLane: laneIndex => makeAirGridPayload(senderProfile.payloadBytes, senderPayloadId, senderSequence, laneIndex)
+    });
+    rasterRenderer.render(ctx, state, senderCanvas.width, senderCanvas.height);
+  }
+  presentation.noteFrame({ sequence:senderSequence, requestedHz:hz, presentedAtMs:now, renderMs:performance.now()-started });
+  if (acquiring !== senderWasAcquiring || senderHud.classList.contains('show')) updateSenderHud(acquiring);
+  senderWasAcquiring = acquiring;
+}
+async function startSender() {
+  senderPayloadId = parsePayloadId($('send-payload-id').value);
+  senderSequence = 0;
+  presentation.clear();
+  senderStage.classList.add('active');
+  try { await senderStage.requestFullscreen?.({ navigationUI:'hide' }); } catch {}
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  resizeSender();
+  senderRunning = true;
+  senderStartedAt = performance.now();
+  senderNextDue = senderStartedAt;
+  senderRaf = requestAnimationFrame(senderTick);
+}
+function stopSender() {
+  senderRunning = false;
+  cancelAnimationFrame(senderRaf);
+  senderStage.classList.remove('active');
+  senderHud.classList.remove('show');
+}
+$('send-start').onclick = () => startSender().catch(err => alert(err.message));
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && senderRunning) stopSender(); });
+document.addEventListener('keydown', e => {
+  if (senderRunning && e.key.toLowerCase() === 'd') {
+    senderHud.classList.toggle('show');
+    updateSenderHud(senderWasAcquiring);
+  }
+});
+window.addEventListener('resize', () => { if (senderRunning) resizeSender(); });
+
+// ---------------------------------------------------------------------------
+// Receiver: four standard QR beacons establish the screen homography.
+// ---------------------------------------------------------------------------
+const video = $('camera-video');
+const overlay = $('camera-overlay');
+const overlayCtx = overlay.getContext('2d');
+const decodeWorker = new Worker(new URL('./receive/airgrid-worker.js', import.meta.url), { type:'module' });
+const monitor = new AirGridDiagnostics({ windowFrames:180, targetBytesPerSecond:AIRGRID_TARGET_BPS });
+let mediaStream = null;
+let mediaTrack = null;
+let processorReader = null;
+let receiverRunning = false;
+let workerBusy = false;
+let generation = 1;
+let frameId = 0;
+let droppedBusy = 0;
+let decodedFrames = 0;
+let receiverQuad = null;
+let receiverProfile = null;
+let acquiredConfig = null;
+let receiverMode = 'binary';
+let receiverSettings = {};
+let lastSnapshot = null;
+let lastFrameDiagnostics = null;
+let runFrames = [];
+let runStartedAt = 0;
+let qrDetector = null;
+let qrDetectorState = 'initializing';
+let qrScanBusy = false;
+let qrScans = 0;
+let qrDetections = 0;
+let qrByCorner = new Map();
+let lastQrScanAt = 0;
+let lastLockAt = 0;
+
+function setStatus(text, cls='') {
+  $('receiver-status').textContent = text;
+  $('receiver-status').className = `status-line ${cls}`;
+}
+function enableButtons(enabled) {
+  $('reacquire').disabled = !enabled;
+  $('reset-stats').disabled = !enabled;
+  $('export-run').disabled = !enabled;
+  $('camera-stop').disabled = !enabled;
+}
+function resetRun() {
+  monitor.clear();
+  droppedBusy = 0;
+  decodedFrames = 0;
+  runFrames = [];
+  runStartedAt = performance.now();
+  lastSnapshot = null;
+  lastFrameDiagnostics = null;
+  updateMetrics();
+}
+$('reset-stats').onclick = resetRun;
+function clearLock(reason='Reacquiring') {
+  receiverQuad = null;
+  receiverProfile = null;
+  acquiredConfig = null;
+  qrByCorner.clear();
+  lastLockAt = 0;
+  generation++;
+  $('recv-plan').textContent = '';
+  setStatus(`${reason} · ${AIRGRID_BUILD}`, 'warn');
+  drawOverlay();
+  updateMetrics();
+}
+$('reacquire').onclick = () => clearLock();
+
+async function initBarcodeDetector() {
+  if (!('BarcodeDetector' in globalThis)) {
+    qrDetectorState = 'BarcodeDetector unavailable';
+    return null;
+  }
+  try {
+    const formats = await BarcodeDetector.getSupportedFormats?.();
+    if (Array.isArray(formats) && !formats.includes('qr_code')) {
+      qrDetectorState = 'qr_code unsupported';
+      return null;
+    }
+    qrDetector = new BarcodeDetector({ formats:['qr_code'] });
+    qrDetectorState = 'QR detector ready';
+    return qrDetector;
+  } catch (err) {
+    qrDetectorState = `QR detector error: ${err.message}`;
+    return null;
+  }
+}
+
+function barcodeCenter(code) {
+  const pts = Array.from(code.cornerPoints ?? []);
+  if (pts.length >= 4) return {
+    x: pts.reduce((s,p)=>s+p.x,0)/pts.length,
+    y: pts.reduce((s,p)=>s+p.y,0)/pts.length
+  };
+  const b = code.boundingBox;
+  return b ? { x:b.x+b.width/2, y:b.y+b.height/2 } : null;
+}
+function commonConfig(observations) {
+  if (observations.length < 4) return null;
+  const key = airGridQrConfigKey(observations[0].config);
+  return observations.every(o => airGridQrConfigKey(o.config) === key) ? observations[0].config : null;
+}
+function tryLockFromQr() {
+  const now = performance.now();
+  for (const [corner, obs] of qrByCorner) if (now - obs.at > 1600) qrByCorner.delete(corner);
+  const observations = AIRGRID_QR_ORDER.map(corner => qrByCorner.get(corner)).filter(Boolean);
+  const config = commonConfig(observations);
+  if (!config || observations.length !== 4) return false;
+  const source = AIRGRID_QR_ORDER.map(corner => AIRGRID_QR_CENTERS[corner]);
+  const target = AIRGRID_QR_ORDER.map(corner => qrByCorner.get(corner).center);
+  const h = homographyFromCorrespondences(source, target);
+  if (!h) return false;
+  const profile = profileFromConfig(config);
+  if (!profile) return false;
+  receiverQuad = {
+    topLeft: projectAirGridAcquisition(h,0,0),
+    topRight: projectAirGridAcquisition(h,1,0),
+    bottomRight: projectAirGridAcquisition(h,1,1),
+    bottomLeft: projectAirGridAcquisition(h,0,1)
+  };
+  receiverProfile = profile;
+  acquiredConfig = config;
+  receiverMode = config.modulation;
+  $('recv-separation').value = receiverMode === 'pam4' ? '10' : '18';
+  lastLockAt = now;
+  generation++;
+  resetRun();
+  const ceiling = profile.lanes * profile.payloadBytes * intValue($('cam-fps'));
+  $('recv-plan').textContent = [
+    `build: ${AIRGRID_BUILD}`,
+    `QR LOCKED: ${receiverMode.toUpperCase()} · ${profile.columns}×${profile.lanes} · ${profile.payloadBytes} B/lane`,
+    `sender ${config.senderHz} Hz · ${mbps(ceiling)} 30-fps-request payload ceiling`,
+    `${(QR_FLOOR_BPS/Math.max(1,ceiling)*100).toFixed(1)}% lane efficiency needed to beat QR`
+  ].join('\n');
+  setStatus(`LOCKED · 4/4 QR beacons · ${AIRGRID_BUILD}`, 'good');
+  drawOverlay();
+  return true;
+}
+
+async function scanQrBeacons() {
+  if (!receiverRunning || qrScanBusy || !video.videoWidth || !qrDetector) return;
+  const now = performance.now();
+  const interval = receiverProfile ? 650 : 90;
+  if (now - lastQrScanAt < interval) return;
+  lastQrScanAt = now;
+  qrScanBusy = true;
+  try {
+    qrScans++;
+    const codes = await qrDetector.detect(video);
+    let validThisScan = 0;
+    for (const code of codes) {
+      const parsed = parseAirGridQrAcquisition(code.rawValue);
+      const center = parsed ? barcodeCenter(code) : null;
+      if (!parsed || !center) continue;
+      validThisScan++;
+      qrDetections++;
+      qrByCorner.set(parsed.corner, { config:parsed, center, at:performance.now() });
+    }
+    if (!receiverProfile) {
+      tryLockFromQr();
+      if (!receiverProfile) {
+        const seen = AIRGRID_QR_ORDER.filter(c => qrByCorner.has(c));
+        setStatus(`SEARCHING · ${AIRGRID_BUILD} · QR ${seen.length}/4 [${seen.join(',') || 'none'}] · scan ${qrScans} · detected ${validThisScan}`, 'warn');
+        updateMetrics();
+        drawOverlay();
+      }
+    } else if (validThisScan) {
+      // Periodic acquisition burst can refresh geometry without user input.
+      tryLockFromQr();
+    }
+  } catch (err) {
+    setStatus(`QR acquisition error · ${AIRGRID_BUILD} · ${err.message}`, 'bad');
+  } finally {
+    qrScanBusy = false;
+  }
+}
+function qrVideoLoop() {
+  if (!receiverRunning) return;
+  scanQrBeacons();
+  video.requestVideoFrameCallback?.(qrVideoLoop);
+}
+
+function drawOverlay() {
+  const rect = overlay.getBoundingClientRect();
+  const dpr = devicePixelRatio || 1;
+  const w = Math.max(1,Math.round(rect.width*dpr)), h = Math.max(1,Math.round(rect.height*dpr));
+  if (overlay.width !== w || overlay.height !== h) { overlay.width=w; overlay.height=h; }
+  overlayCtx.clearRect(0,0,w,h);
+  if (!video.videoWidth || !video.videoHeight) return;
+  const vr=video.getBoundingClientRect(), or=overlay.getBoundingClientRect();
+  const map=p=>({x:(vr.left-or.left+p.x/video.videoWidth*vr.width)*dpr,y:(vr.top-or.top+p.y/video.videoHeight*vr.height)*dpr});
+  if (receiverQuad) {
+    const pts=[receiverQuad.topLeft,receiverQuad.topRight,receiverQuad.bottomRight,receiverQuad.bottomLeft].map(map);
+    overlayCtx.strokeStyle='#72ff91';overlayCtx.fillStyle='#72ff91';overlayCtx.lineWidth=2*dpr;
+    overlayCtx.beginPath();overlayCtx.moveTo(pts[0].x,pts[0].y);for(let i=1;i<4;i++)overlayCtx.lineTo(pts[i].x,pts[i].y);overlayCtx.closePath();overlayCtx.stroke();
+    for(const p of pts){overlayCtx.beginPath();overlayCtx.arc(p.x,p.y,5*dpr,0,Math.PI*2);overlayCtx.fill();}
+  } else {
+    overlayCtx.fillStyle='#ffd66b';overlayCtx.font=`${14*dpr}px ui-monospace,monospace`;
+    for (const [corner,obs] of qrByCorner) {
+      const p=map(obs.center);overlayCtx.beginPath();overlayCtx.arc(p.x,p.y,7*dpr,0,Math.PI*2);overlayCtx.fill();overlayCtx.fillText(corner,p.x+10*dpr,p.y-8*dpr);
+    }
+  }
+}
+window.addEventListener('resize',drawOverlay);
+
+function cachedSettings() {
+  try { receiverSettings = mediaTrack?.getSettings?.() ?? receiverSettings; } catch {}
+  return receiverSettings;
+}
+function postVideoFrame(frame) {
+  if (!receiverQuad || !receiverProfile) { frame.close(); return; }
+  if (workerBusy) { droppedBusy++; frame.close(); return; }
+  workerBusy = true;
+  const captureTimestampMs = Number.isFinite(Number(frame.timestamp)) ? Number(frame.timestamp)/1000 : performance.now();
+  decodeWorker.postMessage({
+    action:'decode', frame, frameId:++frameId, generation, sentAtMs:performance.now(), captureTimestampMs,
+    modulation:receiverMode, quad:receiverQuad, profile:receiverProfile,
+    minSeparation:intValue($('recv-separation')), cameraSettings:cachedSettings()
+  },[frame]);
+}
+async function processorLoop() {
+  while (receiverRunning && processorReader) {
+    const {value:frame,done}=await processorReader.read();
+    if(done||!frame) break;
+    postVideoFrame(frame);
+  }
+}
+
+let fallbackCanvas, fallbackCtx;
+function rgbaToY8(data,w,h){const out=new Uint8Array(w*h);for(let i=0,p=0;i<out.length;i++,p+=4)out[i]=Math.round(data[p]*.2126+data[p+1]*.7152+data[p+2]*.0722);return out;}
+function fallbackDecodeLoop(now,metadata){
+  if(!receiverRunning)return;video.requestVideoFrameCallback(fallbackDecodeLoop);
+  if(!receiverQuad||!receiverProfile||workerBusy)return;
+  const w=video.videoWidth,h=video.videoHeight;if(!w||!h)return;
+  if(!fallbackCanvas){fallbackCanvas=document.createElement('canvas');fallbackCtx=fallbackCanvas.getContext('2d',{willReadFrequently:true});}
+  if(fallbackCanvas.width!==w||fallbackCanvas.height!==h){fallbackCanvas.width=w;fallbackCanvas.height=h;}
+  const started=performance.now();fallbackCtx.drawImage(video,0,0,w,h);const y8=rgbaToY8(fallbackCtx.getImageData(0,0,w,h).data,w,h);
+  workerBusy=true;decodeWorker.postMessage({action:'decode',y8:y8.buffer,width:w,height:h,copyMs:performance.now()-started,copyPath:'canvas-rgba',frameId:++frameId,generation,sentAtMs:performance.now(),captureTimestampMs:Number.isFinite(metadata?.mediaTime)?metadata.mediaTime*1000:performance.now(),modulation:receiverMode,quad:receiverQuad,profile:receiverProfile,minSeparation:intValue($('recv-separation'))},[y8.buffer]);
+}
+
+async function startCamera() {
+  await stopCamera();
+  setStatus(`Starting camera · ${AIRGRID_BUILD}`,'warn');
+  await initBarcodeDetector();
+  if (!qrDetector) {
+    setStatus(`${AIRGRID_BUILD} · ${qrDetectorState}. This build requires browser QR detection for acquisition.`, 'bad');
+    return;
+  }
+  const [width,height]=$('cam-res').value.split('x').map(Number);const fps=intValue($('cam-fps'));
+  mediaStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:width},height:{ideal:height},frameRate:{ideal:fps,max:fps}}});
+  mediaTrack=mediaStream.getVideoTracks()[0];video.srcObject=mediaStream;await video.play();
+  receiverRunning=true;workerBusy=false;generation++;qrScans=0;qrDetections=0;qrByCorner.clear();receiverQuad=null;receiverProfile=null;acquiredConfig=null;resetRun();enableButtons(true);$('camera-start').disabled=true;
+  const settings=cachedSettings();
+  setStatus(`SEARCHING · ${AIRGRID_BUILD} · ${video.videoWidth}×${video.videoHeight} @ ${Number(settings.frameRate||0).toFixed(1)}fps · QR 0/4`, 'warn');
+  if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(qrVideoLoop);else setInterval(scanQrBeacons,100);
+  if(globalThis.MediaStreamTrackProcessor){const processor=new MediaStreamTrackProcessor({track:mediaTrack});processorReader=processor.readable.getReader();processorLoop().catch(err=>setStatus(`processor error · ${err.message}`,'bad'));}
+  else if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(fallbackDecodeLoop);
+}
+async function stopCamera(){
+  receiverRunning=false;generation++;try{await processorReader?.cancel();}catch{}processorReader=null;
+  for(const t of mediaStream?.getTracks?.()??[])t.stop();mediaStream=null;mediaTrack=null;video.srcObject=null;workerBusy=false;receiverQuad=null;receiverProfile=null;acquiredConfig=null;qrByCorner.clear();enableButtons(false);$('camera-start').disabled=false;setStatus(`Camera stopped · ${AIRGRID_BUILD}`);drawOverlay();updateMetrics();
+}
+$('camera-start').onclick=()=>startCamera().catch(err=>setStatus(`${AIRGRID_BUILD} · ${err.message}`,'bad'));
+$('camera-stop').onclick=stopCamera;
+
+function setMetric(id,text,cls=''){const el=$(id);el.textContent=text;el.className=cls;}
+function updateMetrics(){
+  const locked=Boolean(receiverQuad&&receiverProfile);setMetric('m-lock',locked?'LOCKED':'SEARCHING',locked?'good':'warn');
+  if(!lastSnapshot){
+    for(const [id,text] of [['m-goodput','0.00 MB/s'],['m-floor','0%'],['m-target','0%'],['m-camfps','0 fps'],['m-valid','0%'],['m-pxcell','—'],['m-snr','—'],['m-sep','—'],['m-readout','— ms'],['m-cpu','—%'],['m-copy','— ms']])setMetric(id,text);
+    setMetric('m-drop',String(droppedBusy));
+    const seen=AIRGRID_QR_ORDER.filter(c=>qrByCorner.has(c));
+    $('receiver-details').textContent=[AIRGRID_BUILD,`QR detector: ${qrDetectorState}`,`QR beacons: ${seen.length}/4 [${seen.join(',')||'none'}]`,`QR scans ${qrScans} · valid detections ${qrDetections}`,locked?'profile acquired; waiting for AirGrid data':'waiting for acquisition burst'].join('\n');return;
+  }
+  const s=lastSnapshot,good=s.goodput.bytesPerSecond;setMetric('m-goodput',mbps(good),good>AIRGRID_TARGET_BPS?'good':good>QR_FLOOR_BPS?'warn':'bad');setMetric('m-floor',`${(good/QR_FLOOR_BPS*100).toFixed(0)}%`);setMetric('m-target',`${(good/AIRGRID_TARGET_BPS*100).toFixed(0)}%`);setMetric('m-camfps',`${s.capture.fps.toFixed(1)} fps`);setMetric('m-valid',pct(s.channel.validLaneRate));
+  const f=lastFrameDiagnostics?.frame;setMetric('m-pxcell',f?`${f.pxPerCellX.toFixed(2)}×${f.pxPerCellY.toFixed(2)}`:'—');setMetric('m-snr',s.channel.snrP10.toFixed(1));setMetric('m-sep',s.channel.separationP10.toFixed(1));const readout=s.rollingShutter.sensorReadoutMs||s.rollingShutter.inferredReadoutMs;setMetric('m-readout',`${readout.toFixed(2)} ms`);setMetric('m-cpu',`${(s.cpu.frameBudgetUsedP95*100).toFixed(0)}%`);setMetric('m-copy',`${s.cpu.copyP50Ms.toFixed(2)} ms`);setMetric('m-drop',String(droppedBusy));
+  $('receiver-details').textContent=[AIRGRID_BUILD,formatAirGridDiagnostics(s),`QR scans ${qrScans} · detections ${qrDetections}`,`auto profile ${receiverMode} ${receiverProfile.columns}×${receiverProfile.lanes}`,`failures ${JSON.stringify(lastFrameDiagnostics?.decode?.failures??{})}`].join('\n');
+}
+
+decodeWorker.onmessage=e=>{
+  const d=e.data;workerBusy=false;if(d.generation!==generation)return;if(d.type==='error'){setStatus(`decode worker · ${d.error}`,'bad');return;}
+  decodedFrames++;lastFrameDiagnostics=d.diagnostics;const settings=cachedSettings();lastSnapshot=monitor.observe({diagnostics:d.diagnostics,captureTimestampMs:d.captureTimestampMs,copyMs:d.copyMs,queueMs:d.queueMs,exposureUs:Number(settings.exposureTime),iso:Number(settings.iso),frameDurationUs:Number(settings.frameRate)>0?1e6/Number(settings.frameRate):undefined,senderHz:acquiredConfig?.senderHz});
+  if(runFrames.length<1800)runFrames.push({tMs:performance.now()-runStartedAt,goodputBps:lastSnapshot.goodput.bytesPerSecond,validLaneRate:d.diagnostics.decode.validLaneRate,bytesDecoded:d.diagnostics.decode.bytesDecoded,failures:d.diagnostics.decode.failures,pxPerCellX:d.diagnostics.frame.pxPerCellX,pxPerCellY:d.diagnostics.frame.pxPerCellY,copyMs:d.copyMs,decodeMs:d.decodeWallMs});updateMetrics();
+};
+decodeWorker.onerror=e=>{workerBusy=false;setStatus(`worker crashed · ${e.message}`,'bad');};
+
+$('export-run').onclick=()=>{const data={build:AIRGRID_BUILD,exportedAt:new Date().toISOString(),acquisition:{qrScans,qrDetections,config:acquiredConfig,quad:receiverQuad,lastLockAt},cameraSettings:receiverSettings,summary:lastSnapshot,frames:runFrames};const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`airgrid-${AIRGRID_BUILD}-${Date.now()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
+window.addEventListener('beforeunload',()=>{try{decodeWorker.terminate();}catch{}stopCamera();});
