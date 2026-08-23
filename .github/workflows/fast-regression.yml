@@ -75,10 +75,10 @@ jobs:
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
+          node --input-type=module --check < receive/recovery-state.js
+          node --input-type=module --check < receive/recovery-policy.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
-          node --input-type=module --check < shared/receiver-recovery-state.js
-          node --input-type=module --check < shared/receiver-recovery-policy.js
 
       - name: Run grid regression
         run: |
