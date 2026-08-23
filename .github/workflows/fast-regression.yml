@@ -92,6 +92,7 @@ jobs:
           node benchmark/auto-phase-policy-smoke.mjs
           node benchmark/optics-guard-smoke.mjs
           node benchmark/receiver-recovery-policy-smoke.mjs
+          node benchmark/low-count-worker-affinity-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
