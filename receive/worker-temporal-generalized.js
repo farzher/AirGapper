@@ -20,6 +20,10 @@ function temporalCodec() {
   }
   return codecPromise;
 }
+// Start module fetch/instantiation as soon as this tiny worker boots. This is
+// intentionally not represented as a command: the real recovery message must
+// never race a warm-up message against the worker's one-command safety guard.
+void temporalCodec().catch(() => {});
 
 function ensureSyntheticBuffer(zx, bytes) {
   if (syntheticPtr && bytes <= syntheticCapacity) return syntheticPtr;
@@ -153,10 +157,6 @@ async function recoverPair(zx, pair, deadline) {
     break;
   }
 
-  // A perfect synthetic v40 code normally decodes at 2 px/module. If the fast
-  // search found nothing and there is still budget, retry only the strongest
-  // few hypotheses at 3 px/module. This is a decoder-resolution fallback, not
-  // a second broad seam search.
   if (!decoded && performance.now() < deadline) {
     for (const candidate of candidates.slice(0, 10)) {
       if (performance.now() >= deadline) break;
@@ -196,9 +196,8 @@ async function recoverPair(zx, pair, deadline) {
 }
 
 async function recover(data) {
-  const started = performance.now();
+  const wallStarted = performance.now();
   const maxMs = Math.max(4, Math.min(160, Number(data.maxMs) || 70));
-  const deadline = started + maxMs;
   const symbols = [];
   const metrics = {
     attempts: 0,
@@ -218,9 +217,13 @@ async function recover(data) {
     zx = await temporalCodec();
   } catch {
     metrics.skipped++;
-    metrics.recoverMs = performance.now() - started;
+    metrics.recoverMs = performance.now() - wallStarted;
     return { symbols, metrics };
   }
+  // Codec startup is a one-time worker cost, not part of the bounded seam-search
+  // budget. Starting the deadline here means the first real recovery still gets
+  // the same bounded search opportunity as every warm recovery.
+  const deadline = performance.now() + maxMs;
 
   for (const pair of Array.isArray(data.pairs) ? data.pairs : []) {
     if (performance.now() >= deadline) {
@@ -240,7 +243,7 @@ async function recover(data) {
     metrics.candidateSource = result.symbol.candidateSource;
     symbols.push(result.symbol);
   }
-  metrics.recoverMs = performance.now() - started;
+  metrics.recoverMs = performance.now() - wallStarted;
   return { symbols, metrics };
 }
 
@@ -248,12 +251,6 @@ async function processMessage(data) {
   if (data?.action === "reset") {
     models.clear();
     return { symbols: [], metrics: { reset: 1, recoverMs: 0 } };
-  }
-  if (data?.action === "warm") {
-    const started = performance.now();
-    let ok = false;
-    try { ok = Boolean(await temporalCodec()); } catch {}
-    return { symbols: [], metrics: { warm: ok ? 1 : 0, recoverMs: performance.now() - started } };
   }
   return recover(data ?? {});
 }
