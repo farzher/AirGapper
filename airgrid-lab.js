@@ -10,7 +10,7 @@ import { homographyFromCorrespondences, projectAirGridAcquisition } from './shar
 import { airGridPayloadBytes, airGridProfile, makeAirGridPayload } from './shared/airgrid-phy.js';
 import { AirGridRasterRenderer, buildAirGridState } from './send/airgrid-renderer.js';
 
-const BUILD = 'AGRS-20260823-1431';
+const BUILD = 'AGRS-20260823-1432';
 const PAYLOAD_ID = 0x51a7c0de;
 const $ = id => document.getElementById(id);
 const decoder = new TextDecoder();
@@ -47,7 +47,6 @@ let senderRaf = 0;
 let senderSequence = 0;
 let nextDataDue = 0;
 let senderTimes = [];
-let lastHudAt = 0;
 
 function currentDisplayPixels() {
   const dpr = devicePixelRatio || 1;
@@ -57,7 +56,7 @@ function currentDisplayPixels() {
     dpr
   };
 }
-function selectedPitch() { return Math.max(1.5, Number($('pitch').value) || 2.25); }
+function selectedPitch() { return Math.max(1.5, Number($('pitch').value) || 3); }
 function selectedSenderHz() { return Math.max(1, Math.round(Number($('sender-hz').value) || 30)); }
 
 function qrSvg(text) {
@@ -118,28 +117,12 @@ function buildAndRenderData(sequence) {
   return performance.now() - started;
 }
 
-function updateSenderHud(renderMs = 0) {
+function hideSenderHud() {
   const hud = $('sender-hud');
-  // Never cover the acquisition QRs. The center acquisition text already has
-  // all information needed before data starts.
-  hud.style.display = senderDataMode ? 'block' : 'none';
-  if (!senderDataMode || !senderProfile) return;
-  const now = performance.now();
-  senderTimes = senderTimes.filter(t => now - t < 1000);
-  const actualHz = senderTimes.length > 1
-    ? (senderTimes.length - 1) * 1000 / Math.max(1, senderTimes.at(-1) - senderTimes[0])
-    : 0;
-  const ceiling = senderProfile.lanes * senderProfile.payloadBytes * 30;
-  hud.textContent = [
-    BUILD,
-    `DATA seq ${senderSequence}`,
-    `${dataCanvas.width}×${dataCanvas.height} px`,
-    `${senderProfile.columns}×${senderProfile.lanes} · ${senderProfile.payloadBytes} B/lane`,
-    `state rate ${actualHz.toFixed(1)} / ${selectedSenderHz()} Hz`,
-    `last render ${renderMs.toFixed(1)} ms`,
-    `${mbps(ceiling)} ceiling @ 30 camera fps`,
-    'R = reacquire'
-  ].join('\n');
+  if (hud) {
+    hud.style.display = 'none';
+    hud.textContent = '';
+  }
 }
 
 function dataTick(now) {
@@ -152,12 +135,9 @@ function dataTick(now) {
   nextDataDue += skipped * period;
   senderSequence = (senderSequence + skipped) & 0xffffff;
   try {
-    const renderMs = buildAndRenderData(senderSequence);
+    buildAndRenderData(senderSequence);
     senderTimes.push(now);
-    if (now - lastHudAt > 250) {
-      lastHudAt = now;
-      updateSenderHud(renderMs);
-    }
+    senderTimes = senderTimes.filter(t => now - t < 1000);
   } catch (error) {
     showAcquisition(`DATA RENDER ERROR: ${error.message || error}`);
   }
@@ -168,7 +148,7 @@ function showAcquisition(message = '') {
   cancelAnimationFrame(senderRaf);
   dataLayer.classList.add('hidden');
   acqLayer.classList.remove('hidden');
-  $('sender-hud').style.display = 'none';
+  hideSenderHud();
   try { configureSenderForCurrentViewport(); }
   catch (error) { message = `ACQUISITION ERROR: ${error.message || error}`; }
   if (message) $('sender-center-info').innerHTML += `<br><br>${message}`;
@@ -177,9 +157,6 @@ function showAcquisition(message = '') {
 function startData() {
   if (!senderRunning || senderDataMode || !senderProfile) return;
   try {
-    // Re-read the actual fullscreen viewport immediately before data begins.
-    // If the browser changed physical dimensions on entering fullscreen, the
-    // data canvas and QR-advertised profile stay identical.
     const before = `${senderProfile.columns}x${senderProfile.lanes}`;
     const next = airGridProfile({
       projectedWidth:currentDisplayPixels().width,
@@ -189,19 +166,17 @@ function startData() {
     if (!next) throw new Error('Fullscreen data profile is invalid');
     if (`${next.columns}x${next.lanes}` !== before) {
       configureSenderForCurrentViewport();
-      // Profile changed after lock. Stay on acquisition so the receiver does
-      // not decode against stale geometry/profile metadata.
       $('sender-center-info').innerHTML += '<br><br>DISPLAY SIZE CHANGED · RE-LOCK PHONE · CLICK AGAIN';
       return;
     }
     senderSequence = 0;
-    const renderMs = buildAndRenderData(senderSequence);
+    buildAndRenderData(senderSequence);
     acqLayer.classList.add('hidden');
     dataLayer.classList.remove('hidden');
     senderDataMode = true;
     senderTimes = [performance.now()];
     nextDataDue = performance.now() + 1000 / selectedSenderHz();
-    updateSenderHud(renderMs);
+    hideSenderHud();
     senderRaf = requestAnimationFrame(dataTick);
   } catch (error) {
     showAcquisition(`DATA START ERROR: ${error.message || error}`);
@@ -215,15 +190,12 @@ $('start-sender').onclick = async () => {
     senderDataMode = false;
     acqLayer.classList.remove('hidden');
     dataLayer.classList.add('hidden');
-    $('sender-hud').style.display = 'none';
-    // Render a valid white acquisition page before fullscreen, so fullscreen
-    // can never expose an unpainted/black canvas if the request fails.
+    hideSenderHud();
     configureSenderForCurrentViewport();
     void sender.offsetWidth;
     try { await sender.requestFullscreen?.({ navigationUI:'hide' }); }
     catch (error) { $('sender-status').textContent = `Rendered; fullscreen request failed: ${error.message}`; }
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    // This is the authoritative profile: actual post-fullscreen viewport.
     configureSenderForCurrentViewport();
   } catch (error) {
     senderRunning = false;
@@ -253,7 +225,7 @@ document.addEventListener('fullscreenchange', () => {
     senderDataMode = false;
     cancelAnimationFrame(senderRaf);
     sender.classList.remove('active');
-    $('sender-hud').style.display = 'none';
+    hideSenderHud();
   }
 });
 
@@ -263,8 +235,8 @@ document.addEventListener('fullscreenchange', () => {
 const video = $('video');
 const overlay = $('overlay');
 const overlayCtx = overlay.getContext('2d');
-const qrWorker = new Worker(new URL('./receive/worker.js?airgrid-acq=1431', import.meta.url), { type:'module' });
-const dataWorker = new Worker(new URL('./receive/airgrid-worker.js?build=1431', import.meta.url), { type:'module' });
+const qrWorker = new Worker(new URL('./receive/worker.js?airgrid-acq=1432', import.meta.url), { type:'module' });
+const dataWorker = new Worker(new URL('./receive/airgrid-worker.js?build=1432', import.meta.url), { type:'module' });
 let workerReady = false;
 let qrBusy = false;
 let dataBusy = false;
@@ -592,12 +564,14 @@ function updateReceiverUi(force = false) {
   $('m-drop').textContent = String(droppedBusy);
   const corners = AIRGRID_QR_ORDER.filter(c => seen.has(c));
   const failures = diagnostics?.decode?.failures ?? {};
+  const phase = diagnostics?.frame;
   $('details').textContent = [
     BUILD,
     `QR worker: ${workerReady ? 'ready' : 'warming'} · scans ${scans} · symbols ${totalSymbols} · last ${lastScanMs.toFixed(0)} ms`,
     `beacons ${corners.length}/4 [${corners.join(', ') || 'none'}]`,
     lockedConfig ? `profile binary ${lockedConfig.columns}×${lockedConfig.lanes} · ${lockedProfile.payloadBytes} B/lane · sender ${lockedConfig.senderHz} Hz` : '',
     lockFrameWidth ? `lock frame ${lockFrameWidth}×${lockFrameHeight}` : '',
+    phase ? `phase ${Number(phase.phaseX || 0).toFixed(2)},${Number(phase.phaseY || 0).toFixed(2)} px · preamble errors ${Number(phase.phasePreambleErrors || 0).toFixed(2)}` : '',
     diagnostics ? `CRC-valid ${diagnostics.decode.crcValidLanes}/${diagnostics.decode.totalLanes} · byte-exact ${diagnostics.decode.validLanes}/${diagnostics.decode.totalLanes}` : 'waiting for data raster',
     diagnostics ? `failures ${Object.entries(failures).map(([key, value]) => `${key}=${value}`).join(' ')}` : '',
     lastDataError ? `DATA ERROR ${lastDataError}` : ''
