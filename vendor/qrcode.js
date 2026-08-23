@@ -149,8 +149,17 @@ var require_bit_buffer = __commonJS({
         return (this.buffer[bufIndex] >>> 7 - index % 8 & 1) === 1;
       },
       put: function(num, length) {
-        for (let i = 0; i < length; i++) {
-          this.putBit((num >>> length - i - 1 & 1) === 1);
+        while (length > 0) {
+          const bufIndex = this.length >>> 3;
+          const used = this.length & 7;
+          if (this.buffer.length <= bufIndex) this.buffer.push(0);
+          const room = 8 - used;
+          const take = Math.min(room, length);
+          const shift = length - take;
+          const mask = (1 << take) - 1;
+          this.buffer[bufIndex] |= (num >>> shift & mask) << room - take;
+          this.length += take;
+          length -= take;
         }
       },
       getLengthInBits: function() {
@@ -804,23 +813,28 @@ var require_polynomial = __commonJS({
       return coeff;
     };
     exports.mod = function mod(divident, divisor) {
-      let result = new Uint8Array(divident);
-      while (result.length - divisor.length >= 0) {
-        const coeff = result[0];
-        for (let i = 0; i < divisor.length; i++) {
-          result[i] ^= GF.mul(divisor[i], coeff);
+      const result = new Uint8Array(divident);
+      let offset = 0;
+      while (result.length - offset >= divisor.length) {
+        const coeff = result[offset];
+        if (coeff !== 0) {
+          for (let i = 0; i < divisor.length; i++) {
+            result[offset + i] ^= GF.mul(divisor[i], coeff);
+          }
         }
-        let offset = 0;
         while (offset < result.length && result[offset] === 0) offset++;
-        result = result.slice(offset);
       }
-      return result;
+      return result.slice(offset);
     };
+    const ecPolynomialCache = /* @__PURE__ */ new Map();
     exports.generateECPolynomial = function generateECPolynomial(degree) {
+      const cached = ecPolynomialCache.get(degree);
+      if (cached) return cached;
       let poly = new Uint8Array([1]);
       for (let i = 0; i < degree; i++) {
         poly = exports.mul(poly, new Uint8Array([1, GF.exp(i)]));
       }
+      ecPolynomialCache.set(degree, poly);
       return poly;
     };
   }
@@ -1211,6 +1225,10 @@ var require_byte_data = __commonJS({
       this.mode = Mode.BYTE;
       if (typeof data === "string") {
         this.data = new TextEncoder().encode(data);
+      } else if (data instanceof Uint8Array) {
+        this.data = data;
+      } else if (ArrayBuffer.isView(data)) {
+        this.data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
       } else {
         this.data = new Uint8Array(data);
       }
@@ -1726,7 +1744,7 @@ var require_qrcode = __commonJS({
       const buffer = new Uint8Array(bitBuffer.buffer);
       for (let b = 0; b < ecTotalBlocks; b++) {
         const dataSize = b < blocksInGroup1 ? dataCodewordsInGroup1 : dataCodewordsInGroup2;
-        dcData[b] = buffer.slice(offset, offset + dataSize);
+        dcData[b] = buffer.subarray(offset, offset + dataSize);
         ecData[b] = rs.encode(dcData[b]);
         offset += dataSize;
         maxDataSize = Math.max(maxDataSize, dataSize);

@@ -3,32 +3,49 @@ import QRCode from "../vendor/qrcode.js";
 const WHITE = 0xffffffff;
 const BLACK = 0xff000000;
 
+let rasterWidth = 0;
+let rasterHeight = 0;
+let rasterPixels = null;
+let rasterImage = null;
+let rasterCanvas = null;
+let rasterCtx = null;
+
+function ensureRaster(width, height) {
+  if (rasterPixels && rasterWidth === width && rasterHeight === height) return;
+  rasterWidth = width;
+  rasterHeight = height;
+  rasterPixels = new Uint32Array(width * height);
+  rasterPixels.fill(WHITE);
+  rasterImage = null;
+  rasterCanvas = null;
+  rasterCtx = null;
+  if (typeof OffscreenCanvas === "function" && typeof ImageData === "function") {
+    rasterImage = new ImageData(new Uint8ClampedArray(rasterPixels.buffer), width, height);
+    rasterCanvas = new OffscreenCanvas(width, height);
+    rasterCtx = rasterCanvas.getContext("2d");
+  }
+}
+
 self.onmessage = (event) => {
   const job = event.data;
   if (!job || job.type !== "render-page") return;
   try {
     const version = Number(job.version);
     if (!Number.isInteger(version) || version < 1 || version > 40) throw new Error("Render page needs a QR version");
-    let modules = 0;
-    let width = 0;
-    let height = 0;
-    let pixels = null;
+    const modules = 17 + 4 * version;
+    const width = modules * job.cols + job.margin * (job.cols + 1);
+    const height = modules * job.rows + job.margin * (job.rows + 1);
+    ensureRaster(width, height);
+    const pixels = rasterPixels;
+    const stride = modules + job.margin;
+
     for (const frame of job.frames) {
       const qr = QRCode.create([{ data: new Uint8Array(frame.buffer), mode: "byte" }], {
         errorCorrectionLevel: "L",
         version,
         maskPattern: 4
       });
-      if (!modules) {
-        modules = qr.modules.size;
-        width = modules * job.cols + job.margin * (job.cols + 1);
-        height = modules * job.rows + job.margin * (job.rows + 1);
-        pixels = new Uint32Array(width * height);
-        pixels.fill(WHITE);
-      } else if (modules !== qr.modules.size) {
-        throw new Error("QR version changed inside sender page");
-      }
-      const stride = modules + job.margin;
+      if (modules !== qr.modules.size) throw new Error("QR version changed inside sender page");
       const ox = frame.slotIndex % job.cols * stride + job.margin;
       const oy = Math.floor(frame.slotIndex / job.cols) * stride + job.margin;
       const data = qr.modules.data;
@@ -36,20 +53,18 @@ self.onmessage = (event) => {
         const dst = (oy + y) * width + ox;
         const src = y * modules;
         for (let x = 0; x < modules; ++x)
-          if (data[src + x]) pixels[dst + x] = BLACK;
+          pixels[dst + x] = data[src + x] ? BLACK : WHITE;
       }
     }
-    if (!pixels) throw new Error("Empty sender page");
+
     const common = { type: "rendered-page", pageId: job.pageId, version, modules, width, height };
-    if (typeof OffscreenCanvas === "function" && typeof ImageData === "function") {
-      const canvas = new OffscreenCanvas(width, height);
-      canvas.getContext("2d").putImageData(
-        new ImageData(new Uint8ClampedArray(pixels.buffer), width, height), 0, 0
-      );
-      const bitmap = canvas.transferToImageBitmap();
+    if (rasterCanvas && rasterCtx && rasterImage) {
+      rasterCtx.putImageData(rasterImage, 0, 0);
+      const bitmap = rasterCanvas.transferToImageBitmap();
       self.postMessage({ ...common, bitmap }, [bitmap]);
     } else {
-      self.postMessage({ ...common, pixels: pixels.buffer }, [pixels.buffer]);
+      const copy = pixels.slice();
+      self.postMessage({ ...common, pixels: copy.buffer }, [copy.buffer]);
     }
   } catch (error) {
     self.postMessage({
