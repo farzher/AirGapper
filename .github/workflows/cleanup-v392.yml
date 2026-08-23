@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - .github/scripts/cleanup-v392.py
+      - .github/workflows/cleanup-v392.yml
 
 permissions:
   contents: write
