@@ -28,7 +28,7 @@ const GRID_MARGIN = GRID_MARGIN_MODULES;
 const LOOKAHEAD = 3;
 const FIT_SUPERSAMPLE = 4;
 const DEFAULT_GRID_CODES = 12;
-const SEND_SETTINGS_KEY = "airgapper:send-settings:v1";
+const SEND_SETTINGS_KEY = "airgapper:send-settings:v2";
 // Sender FPS is always the user's requested presentation rate. Auto Grid never
 // silently changes FPS or Size; it only chooses the densest fitting wall.
 // Receiver production scheduling keeps one <=32-track warm batch, so 32 is
@@ -723,8 +723,9 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
-  cfgSize.add(new Option("Auto", "auto", false, true));
+  cfgSize.add(new Option("Auto", "auto"));
   Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes]) => cfgSize.add(new Option(formatBytes(bytes), String(level))));
+  cfgSize.value = "auto";
   restoreSendSettings();
   updateAutoGridControlState();
   let customFpsTimer;
