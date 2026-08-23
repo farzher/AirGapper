@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>AirGrid RS Hardware Lab</title>
+  <style>
+    :root{font-family:Inter,system-ui,sans-serif;color:#f4f4f4;background:#111;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#111}button,input,select{font:inherit}.shell{max-width:1080px;margin:0 auto;padding:18px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px}.top h1{margin:0;font-size:22px}.modes{display:flex;gap:6px}.modes button,.controls button{border:1px solid #444;background:#1d1d1d;color:#eee;padding:9px 12px;border-radius:8px}.modes button.active{background:#eee;color:#111}.card{margin-top:16px;border:1px solid #333;border-radius:12px;background:#181818;padding:14px}.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end}.controls label{display:grid;gap:5px;font-size:12px;color:#aaa}.controls input,.controls select{width:100%;background:#101010;color:#eee;border:1px solid #444;border-radius:7px;padding:8px}.controls .wide{grid-column:span 2}.summary{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;line-height:1.45;color:#d7d7d7}.hint{font-size:12px;color:#aaa;line-height:1.45}.good{color:#83ef9b}.warn{color:#ffd66b}.bad{color:#ff8383}.stage{position:relative;background:#000;border-radius:12px;overflow:hidden;min-height:360px}.stage video{width:100%;height:auto;max-height:72vh;display:block;object-fit:contain;background:#000}.stage canvas.overlay{position:absolute;inset:0;width:100%;height:100%;touch-action:none}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:8px;margin-top:12px}.metric{background:#101010;border:1px solid #2c2c2c;border-radius:9px;padding:9px}.metric b{display:block;font-size:18px;margin-bottom:2px}.metric span{font-size:11px;color:#aaa}.sender-stage{position:fixed;inset:0;background:#fff;z-index:100;display:none}.sender-stage.active{display:block}.sender-stage canvas{width:100%;height:100%;display:block;image-rendering:pixelated}.sender-hud{position:absolute;top:10px;left:10px;background:#000d;color:#fff;padding:8px;border-radius:6px;font:12px ui-monospace,monospace;display:none}.sender-hud.show{display:block}.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.status-line{font:12px ui-monospace,monospace;margin-top:9px;color:#ddd}.hidden{display:none!important}@media(max-width:640px){.shell{padding:10px}.controls .wide{grid-column:auto}.top{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+<div class="shell" id="lab-shell">
+  <div class="top"><h1>AirGrid RS Hardware Lab</h1><div class="modes"><button id="mode-send">Sender</button><button id="mode-receive">Receiver</button></div></div>
+
+  <section id="send-panel" class="card hidden">
+    <div class="controls">
+      <label>Optical rate<select id="send-hz"><option>30</option><option selected>60</option><option>90</option><option>120</option><option>144</option><option>180</option><option>240</option><option>360</option></select></label>
+      <label>Display cell pitch<select id="send-pitch"><option>5</option><option>4</option><option>3.5</option><option selected>3</option><option>2.5</option><option>2</option></select></label>
+      <label>Payload ID<input id="send-payload-id" value="51a7c0de" /></label>
+      <button id="send-start">Start fullscreen sender</button>
+    </div>
+    <p class="hint">Use a pure fullscreen pattern for measurements. Press <b>D</b> to toggle the sender HUD; the HUD intentionally corrupts a small optical region, so leave it hidden during throughput runs. Escape exits fullscreen.</p>
+    <div id="send-plan" class="summary"></div>
+  </section>
+
+  <section id="receive-panel" class="hidden">
+    <div class="card">
+      <div class="controls">
+        <label>Camera resolution<select id="cam-res"><option value="1280x720">1280×720</option><option value="1920x1080" selected>1920×1080</option><option value="2560x1440">2560×1440</option><option value="3840x2160">3840×2160</option></select></label>
+        <label>Camera FPS<select id="cam-fps"><option>30</option><option selected>60</option><option>120</option></select></label>
+        <label>Sender width<input id="recv-sender-w" type="number" value="2560" min="320" /></label>
+        <label>Sender height<input id="recv-sender-h" type="number" value="1440" min="240" /></label>
+        <label>Sender cell pitch<select id="recv-pitch"><option>5</option><option>4</option><option>3.5</option><option selected>3</option><option>2.5</option><option>2</option></select></label>
+        <label>Sender Hz<select id="recv-sender-hz"><option>30</option><option selected>60</option><option>90</option><option>120</option><option>144</option><option>180</option><option>240</option><option>360</option></select></label>
+        <label>Min separation<input id="recv-separation" type="number" value="18" min="1" max="120" /></label>
+        <button id="camera-start">Start camera</button>
+      </div>
+      <div id="recv-plan" class="summary"></div>
+      <div class="toolbar"><button id="calibrate" disabled>Calibrate 4 corners</button><button id="reset-stats" disabled>Reset stats</button><button id="export-run" disabled>Export JSON</button><button id="camera-stop" disabled>Stop</button></div>
+      <div id="receiver-status" class="status-line"></div>
+    </div>
+
+    <div class="card stage" id="camera-stage"><video id="camera-video" muted playsinline></video><canvas id="camera-overlay" class="overlay"></canvas></div>
+
+    <div class="card">
+      <div class="metrics">
+        <div class="metric"><b id="m-goodput">0.00 MB/s</b><span>CRC-valid AirGrid goodput</span></div>
+        <div class="metric"><b id="m-floor">0%</b><span>of 2.0 MB/s QR floor</span></div>
+        <div class="metric"><b id="m-target">0%</b><span>of 2.5 MB/s AirGrid milestone</span></div>
+        <div class="metric"><b id="m-camfps">0 fps</b><span>camera frames received</span></div>
+        <div class="metric"><b id="m-valid">0%</b><span>valid lanes</span></div>
+        <div class="metric"><b id="m-pxcell">—</b><span>projected camera px/cell</span></div>
+        <div class="metric"><b id="m-snr">—</b><span>SNR p10</span></div>
+        <div class="metric"><b id="m-sep">—</b><span>black/white separation p10</span></div>
+        <div class="metric"><b id="m-readout">— ms</b><span>rolling-shutter readout</span></div>
+        <div class="metric"><b id="m-cpu">—%</b><span>CPU frame budget p95</span></div>
+        <div class="metric"><b id="m-copy">— ms</b><span>frame copy p50</span></div>
+        <div class="metric"><b id="m-drop">0</b><span>frames dropped because worker busy</span></div>
+      </div>
+      <pre id="receiver-details" class="summary"></pre>
+    </div>
+  </section>
+</div>
+
+<div class="sender-stage" id="sender-stage"><canvas id="sender-canvas"></canvas><div id="sender-hud" class="sender-hud"></div></div>
+<script type="module" src="./airgrid-lab.js"></script>
+</body>
+</html>
