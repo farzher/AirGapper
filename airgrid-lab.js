@@ -10,6 +10,7 @@ const $ = id => document.getElementById(id);
 const QR_FLOOR_BPS = 2_000_000;
 const AIRGRID_TARGET_BPS = 2_500_000;
 const DEFAULT_PAYLOAD_ID = 0x51a7c0de;
+const AIRGRID_BUILD = 'AGRS-20260823-1333';
 const intValue = element => Math.max(1, Math.round(Number(element?.value) || 1));
 const numberValue = element => Number(element?.value);
 const mbps = bytesPerSecond => `${(bytesPerSecond / 1e6).toFixed(2)} MB/s`;
@@ -40,6 +41,7 @@ function profileFromAcquisition(config) {
   };
 }
 
+$('build-id').textContent = AIRGRID_BUILD;
 const sendPanel = $('send-panel'), receivePanel = $('receive-panel');
 function setMode(mode) {
   const send = mode === 'send';
@@ -48,7 +50,9 @@ function setMode(mode) {
   $('mode-send').classList.toggle('active', send);
   $('mode-receive').classList.toggle('active', !send);
   const url = new URL(location.href);
+  const buildParam = url.searchParams.get('v');
   url.search = send ? '?send' : '?receive';
+  if (buildParam) url.searchParams.set('v', buildParam);
   history.replaceState(null, '', url);
 }
 $('mode-send').onclick = () => setMode('send');
@@ -86,6 +90,7 @@ function updateSendPlan() {
   if (!profile) { $('send-plan').textContent = 'Selected grid is too small.'; return; }
   const perState = profile.lanes * profile.payloadBytes;
   $('send-plan').textContent = [
+    `build: ${AIRGRID_BUILD}`,
     `fullscreen target: ${width}×${height} device px (DPR ${dpr})`,
     `${modulation.toUpperCase()} · ${profile.columns} columns × ${profile.lanes} lanes · ${profile.payloadBytes} B/lane`,
     `${(perState / 1024).toFixed(1)} KiB/data state · ${mbps(perState * 30)} theoretical at a 30 fps camera`,
@@ -105,10 +110,9 @@ function resizeSenderCanvas() {
 }
 function senderAcquisitionDue(now) {
   const elapsed = now - senderStartedAt;
-  if (elapsed < 1200) return true;
-  // 180 ms every 3.5 s gives a 30 fps camera several chances to observe the
-  // self-describing frame while keeping steady temporal overhead near 5%.
-  return ((elapsed - 1200) % 3500) < 180;
+  if (elapsed < 1600) return true;
+  // Deliberately generous while acquisition is under hardware bring-up.
+  return ((elapsed - 1600) % 3200) < 420;
 }
 function currentAcquisitionConfig() {
   return {
@@ -124,6 +128,7 @@ function updateSenderHud(acquiring = false) {
   const snap = presentation.snapshot();
   const perState = senderProfile.lanes * senderProfile.payloadBytes;
   senderHud.textContent = [
+    AIRGRID_BUILD,
     acquiring ? 'AUTO ACQUISITION BURST' : `seq ${senderSequence}`,
     `${senderCanvas.width}×${senderCanvas.height} · ${activeSenderModulation.toUpperCase()}`,
     `${senderProfile.columns}×${senderProfile.lanes} · ${senderProfile.payloadBytes} B/lane`,
@@ -219,10 +224,15 @@ let runStartedAt = 0;
 let acquisitionBusy = false;
 let acquisitionScans = 0;
 let acquisitionHits = 0;
+let acquisitionDebug = { reason:'not-started', separation:0, candidateCount:0, quadsTried:0, metadataAttempts:0 };
 let lastAcquisitionScanAt = 0;
 let lastLockAt = 0;
 let acquisitionTimer = 0;
 
+function acquisitionDebugText() {
+  const d = acquisitionDebug ?? {};
+  return `build ${AIRGRID_BUILD} · scan ${acquisitionScans} · contrast ${Number(d.separation ?? 0).toFixed(0)} · finders ${Math.min(4, Number(d.candidateCount ?? 0))}/4 (${Number(d.candidateCount ?? 0)} candidates) · quads ${Number(d.quadsTried ?? 0)} · meta ${Number(d.metadataAttempts ?? 0)} · ${d.reason ?? 'unknown'}`;
+}
 function setReceiverStatus(text, cls='') {
   const el = $('receiver-status');
   el.textContent = text;
@@ -253,7 +263,7 @@ function clearLock(reason = 'Searching for AirGrid acquisition frame…') {
   lastLockAt = 0;
   generation++;
   $('recv-plan').textContent = '';
-  setReceiverStatus(`${reason} Keep all four sender-screen corners visible.`, 'warn');
+  setReceiverStatus(`${reason} ${AIRGRID_BUILD}`, 'warn');
   drawReceiverOverlay();
   updateReceiverMetrics();
 }
@@ -293,12 +303,13 @@ function applyAcquisition(found, scanWidth, scanHeight) {
   const perCapture = profile.lanes * profile.payloadBytes;
   const ceiling = perCapture * requestedFps;
   $('recv-plan').textContent = [
+    `build: ${AIRGRID_BUILD}`,
     `AUTO PROFILE: ${activeReceiverModulation.toUpperCase()} · ${profile.columns} columns × ${profile.lanes} lanes · ${profile.payloadBytes} B/lane`,
     `sender ${found.config.senderHz} Hz · payload ID ${found.config.payloadId.toString(16).padStart(8,'0')}`,
     `${mbps(ceiling)} byte payload ceiling at ${requestedFps} camera fps before optical/CPU losses`,
     `${(QR_FLOOR_BPS/Math.max(1,ceiling)*100).toFixed(1)}% byte-exact lane efficiency required to beat 2.0 MB/s`
   ].join('\n');
-  setReceiverStatus(`LOCKED automatically: ${activeReceiverModulation.toUpperCase()} ${profile.columns}×${profile.lanes}. Data decode is live.`, 'good');
+  setReceiverStatus(`LOCKED · ${AIRGRID_BUILD} · ${activeReceiverModulation.toUpperCase()} ${profile.columns}×${profile.lanes}`, 'good');
   drawReceiverOverlay();
   updateReceiverMetrics();
   return true;
@@ -309,6 +320,12 @@ function rgbaToY8(data, width, height) {
   for (let i=0,p=0;i<out.length;i++,p+=4) out[i] = Math.round(data[p]*0.2126 + data[p+1]*0.7152 + data[p+2]*0.0722);
   return out;
 }
+function acquisitionScanSize() {
+  const vw = Math.max(1, video.videoWidth), vh = Math.max(1, video.videoHeight);
+  const maxSide = 480;
+  if (vw >= vh) return { width:maxSide, height:Math.max(80, Math.round(maxSide * vh / vw)) };
+  return { width:Math.max(80, Math.round(maxSide * vw / vh)), height:maxSide };
+}
 function scanForAcquisition() {
   if (!receiverRunning || acquisitionBusy || !video.videoWidth || !video.videoHeight) return;
   const now = performance.now();
@@ -317,18 +334,23 @@ function scanForAcquisition() {
   lastAcquisitionScanAt = now;
   acquisitionBusy = true;
   try {
-    const width = 360;
-    const height = Math.max(120, Math.min(300, Math.round(width * video.videoHeight / video.videoWidth)));
+    const { width, height } = acquisitionScanSize();
     if (acquisitionCanvas.width !== width || acquisitionCanvas.height !== height) { acquisitionCanvas.width=width; acquisitionCanvas.height=height; }
     acquisitionCtx.drawImage(video,0,0,width,height);
     const rgba = acquisitionCtx.getImageData(0,0,width,height).data;
     const y8 = rgbaToY8(rgba,width,height);
     acquisitionScans++;
-    const found = findAirGridAcquisition(y8,width,height);
+    const debug = {};
+    const found = findAirGridAcquisition(y8,width,height,debug);
+    acquisitionDebug = debug;
     if (found) applyAcquisition(found,width,height);
-    else if (!receiverProfile && acquisitionScans % 12 === 0) setReceiverStatus('Searching… point at the whole sender screen. The white finder frame reappears automatically.', 'warn');
+    else if (!receiverProfile && acquisitionScans % 6 === 0) {
+      setReceiverStatus(`SEARCHING · ${acquisitionDebugText()}`, 'warn');
+      updateReceiverMetrics();
+    }
   } catch (error) {
-    if (!receiverProfile) setReceiverStatus(`Acquisition scan error: ${error.message}`, 'bad');
+    acquisitionDebug = { reason:`scan-error:${error.message}`, separation:0, candidateCount:0, quadsTried:0, metadataAttempts:0 };
+    if (!receiverProfile) setReceiverStatus(`Acquisition scan error · ${AIRGRID_BUILD} · ${error.message}`, 'bad');
   } finally {
     acquisitionBusy = false;
   }
@@ -409,24 +431,24 @@ async function startCamera() {
   await stopCamera();
   const [width,height]=$('cam-res').value.split('x').map(Number);
   const fps=intValue($('cam-fps'));
-  setReceiverStatus('Starting camera…','warn');
+  setReceiverStatus(`Starting camera · ${AIRGRID_BUILD}`,'warn');
   mediaStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:width},height:{ideal:height},frameRate:{ideal:fps,max:fps}}});
   mediaTrack=mediaStream.getVideoTracks()[0];
   video.srcObject=mediaStream;
   await video.play();
   receiverRunning=true; workerBusy=false; generation++;
-  acquisitionScans=0; acquisitionHits=0; lastAcquisitionScanAt=0;
+  acquisitionScans=0; acquisitionHits=0; acquisitionDebug={ reason:'starting', separation:0, candidateCount:0, quadsTried:0, metadataAttempts:0 }; lastAcquisitionScanAt=0;
   receiverQuad=null;receiverProfile=null;acquiredConfig=null;lastLockAt=0;
   resetRun();enableReceiverButtons(true);$('camera-start').disabled=true;
   const settings=cachedTrackSettings();
   const actual=`${video.videoWidth}×${video.videoHeight} @ ${Number(settings.frameRate||0).toFixed(1)} fps`;
-  setReceiverStatus(`Camera ${actual}. Searching automatically—keep the whole sender screen visible.`,'warn');
+  setReceiverStatus(`SEARCHING · ${AIRGRID_BUILD} · camera ${actual}`,'warn');
   if(video.requestVideoFrameCallback) video.requestVideoFrameCallback(acquisitionVideoLoop);
   else acquisitionTimer=setInterval(scanForAcquisition,80);
   if(globalThis.MediaStreamTrackProcessor){
     const processor=new MediaStreamTrackProcessor({track:mediaTrack});
     processorReader=processor.readable.getReader();
-    processorLoop().catch(error=>setReceiverStatus(`Processor failed: ${error.message}`,'bad'));
+    processorLoop().catch(error=>setReceiverStatus(`Processor failed · ${AIRGRID_BUILD} · ${error.message}`,'bad'));
   } else if(video.requestVideoFrameCallback) {
     video.requestVideoFrameCallback(fallbackDecodeLoop);
   } else throw new Error('Browser has neither MediaStreamTrackProcessor nor requestVideoFrameCallback');
@@ -440,9 +462,9 @@ async function stopCamera() {
   mediaStream=null;mediaTrack=null;video.srcObject=null;workerBusy=false;
   receiverQuad=null;receiverProfile=null;acquiredConfig=null;
   enableReceiverButtons(false);$('camera-start').disabled=false;
-  setReceiverStatus('Camera stopped.');drawReceiverOverlay();updateReceiverMetrics();
+  setReceiverStatus(`Camera stopped · ${AIRGRID_BUILD}`);drawReceiverOverlay();updateReceiverMetrics();
 }
-$('camera-start').onclick=()=>startCamera().catch(error=>{setReceiverStatus(error.message,'bad');stopCamera();});
+$('camera-start').onclick=()=>startCamera().catch(error=>{setReceiverStatus(`${AIRGRID_BUILD} · ${error.message}`,'bad');stopCamera();});
 $('camera-stop').onclick=()=>stopCamera();
 
 function setMetric(id,text,className=''){const el=$(id);el.textContent=text;el.className=className;}
@@ -453,7 +475,9 @@ function updateReceiverMetrics(){
   if(!s){
     for(const [id,text] of [['m-goodput','0.00 MB/s'],['m-floor','0%'],['m-target','0%'],['m-camfps','0 fps'],['m-valid','0%'],['m-pxcell','—'],['m-snr','—'],['m-sep','—'],['m-readout','— ms'],['m-cpu','—%'],['m-copy','— ms']])setMetric(id,text);
     setMetric('m-drop',String(droppedBusy));
-    $('receiver-details').textContent=locked?`profile acquired; waiting for decoded data\nacquisition scans ${acquisitionScans} · hits ${acquisitionHits}`:'';
+    $('receiver-details').textContent=locked
+      ? `${AIRGRID_BUILD}\nprofile acquired; waiting for decoded data\nacquisition scans ${acquisitionScans} · hits ${acquisitionHits}`
+      : `${AIRGRID_BUILD}\n${acquisitionDebugText()}\nscan raster ${acquisitionCanvas.width || 0}×${acquisitionCanvas.height || 0} from camera ${video.videoWidth || 0}×${video.videoHeight || 0}`;
     return;
   }
   const good=s.goodput.bytesPerSecond;
@@ -472,6 +496,7 @@ function updateReceiverMetrics(){
   const failures=lastFrameDiagnostics?.decode?.failures??{};const optics=lastFrameDiagnostics?.optics??{};const settings=receiverSettings;
   const pam4=activeReceiverModulation==='pam4'?`PAM4 centers p50: ${(optics.clusterCentersP50??[]).map(v=>Number(v).toFixed(1)).join(' / ')} · EVM p90 ${Number(optics.evmP90??0).toFixed(3)}`:'';
   $('receiver-details').textContent=[
+    AIRGRID_BUILD,
     formatAirGridDiagnostics(s),
     `auto profile: ${activeReceiverModulation} ${receiverProfile.columns}×${receiverProfile.lanes} · sender ${acquiredConfig?.senderHz??0} Hz`,
     pam4,
@@ -486,7 +511,7 @@ decodeWorker.onmessage=event=>{
   const data=event.data;
   workerBusy=false;
   if(data.generation!==generation)return;
-  if(data.type==='error'){setReceiverStatus(`Decode worker: ${data.error}`,'bad');return;}
+  if(data.type==='error'){setReceiverStatus(`Decode worker · ${AIRGRID_BUILD} · ${data.error}`,'bad');return;}
   decodedFrames++;lastFrameDiagnostics=data.diagnostics;
   const settings=cachedTrackSettings();
   lastSnapshot=monitor.observe({
@@ -504,17 +529,17 @@ decodeWorker.onmessage=event=>{
   });
   updateReceiverMetrics();
 };
-decodeWorker.onerror=event=>{workerBusy=false;setReceiverStatus(`Worker crashed: ${event.message}`,'bad');};
+decodeWorker.onerror=event=>{workerBusy=false;setReceiverStatus(`Worker crashed · ${AIRGRID_BUILD} · ${event.message}`,'bad');};
 
 $('export-run').onclick=()=>{
   const exportData={
-    exportedAt:new Date().toISOString(),userAgent:navigator.userAgent,qrBaselineBytesPerSecond:QR_FLOOR_BPS,airGridTargetBytesPerSecond:AIRGRID_TARGET_BPS,
-    acquisition:{config:acquiredConfig,scans:acquisitionScans,hits:acquisitionHits,lastLockAtMs:lastLockAt,quad:receiverQuad},
+    build:AIRGRID_BUILD,exportedAt:new Date().toISOString(),userAgent:navigator.userAgent,qrBaselineBytesPerSecond:QR_FLOOR_BPS,airGridTargetBytesPerSecond:AIRGRID_TARGET_BPS,
+    acquisition:{config:acquiredConfig,scans:acquisitionScans,hits:acquisitionHits,debug:acquisitionDebug,lastLockAtMs:lastLockAt,quad:receiverQuad},
     senderProfile:receiverProfile,cameraRequested:{resolution:$('cam-res').value,fps:intValue($('cam-fps'))},cameraSettings:receiverSettings,
     workerBusyDrops:droppedBusy,decodedFrames,summary:lastSnapshot,frames:runFrames
   };
   const blob=new Blob([JSON.stringify(exportData,null,2)],{type:'application/json'});const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);a.download=`airgrid-hardware-${Date.now()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  a.href=URL.createObjectURL(blob);a.download=`airgrid-hardware-${AIRGRID_BUILD}-${Date.now()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 };
 
 window.addEventListener('beforeunload',()=>{try{decodeWorker.terminate();}catch{} stopCamera();});
