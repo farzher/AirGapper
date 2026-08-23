@@ -26,3 +26,4 @@ jobs:
           git add receive/main.js version.js
           git commit -m "v0.5.389: prefer main rear camera at 1440p"
           git push origin HEAD:master
+# trigger
