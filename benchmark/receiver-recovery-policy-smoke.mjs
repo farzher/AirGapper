@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { applyAdvancedConstraint } from "../shared/platform.js";
+import { applyAdvancedConstraint } from "../receive/camera-constraints.js";
 import { FocusController } from "../receive/focus-controller.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 import {
@@ -11,7 +11,7 @@ import {
   noteExposureMotion,
   recoveryDiagnostics,
   verifiedExposureLatchDecision
-} from "../shared/receiver-recovery-state.js";
+} from "../receive/recovery-state.js";
 
 const settings = {
   exposureMode: "continuous",
