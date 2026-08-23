@@ -13,6 +13,7 @@ on:
       - index.html
       - airgrid.html
       - airgrid-lab.js
+      - airgrid-lab-v2.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -29,6 +30,7 @@ on:
       - index.html
       - airgrid.html
       - airgrid-lab.js
+      - airgrid-lab-v2.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -50,8 +52,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # AirGrid is intentionally iteration-fast while the PHY is experimental.
-      # QR/master still gets the complete codec/browser/Android gate below.
       - name: Cache codec toolchain
         if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
         uses: actions/cache@v4
@@ -79,20 +79,24 @@ jobs:
           set -euo pipefail
           node --input-type=module --check < version.js
           node --input-type=module --check < airgrid-lab.js
+          node --input-type=module --check < airgrid-lab-v2.js
           node --input-type=module --check < receive/airgrid-sampler.js
           node --input-type=module --check < receive/airgrid-pam4-sampler.js
           node --input-type=module --check < receive/airgrid-worker.js
           node --input-type=module --check < send/airgrid-renderer.js
           node --input-type=module --check < send/airgrid-acquisition-renderer.js
+          node --input-type=module --check < send/airgrid-qr-acquisition-renderer.js
           node --input-type=module --check < send/airgrid-present-diagnostics.js
           node --input-type=module --check < shared/airgrid-phy.js
           node --input-type=module --check < shared/airgrid-pam4.js
           node --input-type=module --check < shared/airgrid-acquisition.js
+          node --input-type=module --check < shared/airgrid-qr-acquisition.js
           node --input-type=module --check < shared/airgrid-diagnostics.js
 
       - name: Run AirGrid fast proofs
         run: |
           set -euo pipefail
+          node benchmark/airgrid-qr-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-orientation-proof.mjs
           node benchmark/airgrid-rolling-shutter-proof.mjs
