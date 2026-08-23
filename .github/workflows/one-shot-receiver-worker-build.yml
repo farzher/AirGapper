@@ -1,0 +1,62 @@
+name: one-shot receiver worker build cleanup
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/one-shot-receiver-worker-build.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Tie receiver worker to canonical build
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('receive/main.js')
+          text = path.read_text()
+          replacements = [
+            (
+              'const RECEIVER_RUNTIME_BUILD = "v0.5.361";',
+              'const RECEIVER_RUNTIME_BUILD = window.AIRGAPPER_BUILD || "dev";'
+            ),
+            (
+              '''function createDecodeWorker() {\n  const file = usesScalarCodec ? "./worker.js?scalar=1" : "./worker.js";\n  return new Worker(new URL(file, import.meta.url), { type: "module" });\n}''',
+              '''function createDecodeWorker() {\n  const file = usesScalarCodec\n    ? `./worker.js?scalar=1&build=${RECEIVER_RUNTIME_BUILD}`\n    : `./worker.js?build=${RECEIVER_RUNTIME_BUILD}`;\n  return new Worker(new URL(file, import.meta.url), { type: "module" });\n}'''
+            )
+          ]
+          for old, new in replacements:
+            count = text.count(old)
+            if count != 1:
+              raise SystemExit(f'expected exactly one match, found {count}: {old[:100]!r}')
+            text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          version = Path('version.js')
+          version_text = version.read_text()
+          old = 'export const APP_VERSION = "0.5.378";'
+          new = 'export const APP_VERSION = "0.5.379";'
+          if version_text.count(old) != 1:
+            raise SystemExit('unexpected version.js; refusing to guess the next version')
+          version.write_text(version_text.replace(old, new, 1))
+          PY
+
+      - name: Commit change and remove this workflow
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/one-shot-receiver-worker-build.yml
+          git add receive/main.js version.js
+          git commit -m "v0.5.379: keep decoder worker on current build"
+          git push origin HEAD:master
