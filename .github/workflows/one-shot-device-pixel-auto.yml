@@ -1,0 +1,81 @@
+name: one-shot device-pixel Auto QR density
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/one-shot-device-pixel-auto.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Use device pixels for Auto QR density
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('send/main.js')
+          text = path.read_text()
+
+          replacements = [
+            (
+              '? `Auto ${autoGridTargetModulePx()}px uses up to this Size and picks the fastest wall`',
+              '? `Auto ${autoGridTargetModulePx()} physical px/module uses up to this Size and picks the fastest wall`'
+            ),
+            (
+              '''  const landscape = landscapeGrid();\n  const budgetCss = senderDisplayBudgetCss();\n  // Pixel Perfect is defined in final CSS/display pixels, not in an oversized\n  // DPR backing store that Chrome must shrink again. Keep the Auto solver in\n  // exactly the same coordinate space as the element that reaches the screen.\n  const budgetW = Math.max(1, budgetCss.width);\n  const budgetH = Math.max(1, budgetCss.height);''',
+              '''  const landscape = landscapeGrid();\n  const budgetCss = senderDisplayBudgetCss();\n  // Auto density is measured in device/render pixels. Treating CSS pixels as\n  // panel pixels wastes most of a high-DPR phone's available display resolution.\n  // Solve in the same device-pixel space used by the canvas backing store.\n  const dpr = window.devicePixelRatio || 1;\n  const budgetW = Math.max(1, Math.floor(budgetCss.width * dpr));\n  const budgetH = Math.max(1, Math.floor(budgetCss.height * dpr));'''
+            ),
+            (
+              '''    const budget = senderDisplayBudgetCss();\n    const budgetW = budget.width;\n    const budgetH = budget.height;\n    const cssAvailableScale = Math.min(budgetW / displayW, budgetH / displayH);\n    if (fitScaling) {\n      // Fit is intentionally filtered/resampled and may use a DPR-sized backing\n      // store for quality. Pixel Perfect below never does.\n      scale = Math.max(Number.EPSILON, cssAvailableScale * dpr);\n    } else if (autoMode) {\n      // Hard invariant: one QR source module becomes an integer number of final\n      // canvas/CSS pixels. There is no second CSS resize after this raster.\n      scale = Math.max(1, Math.floor(cssAvailableScale));\n    } else {\n      scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);\n    }''',
+              '''    const budget = senderDisplayBudgetCss();\n    const budgetW = budget.width;\n    const budgetH = budget.height;\n    const cssAvailableScale = Math.min(budgetW / displayW, budgetH / displayH);\n    const physicalAvailableScale = Math.min(\n      Math.max(1, Math.floor(budgetW * dpr)) / displayW,\n      Math.max(1, Math.floor(budgetH * dpr)) / displayH\n    );\n    if (fitScaling) {\n      // Fit uses a device-pixel backing store and filtered resampling.\n      scale = Math.max(Number.EPSILON, physicalAvailableScale);\n    } else if (autoMode) {\n      // Auto Pixel Perfect is integer device pixels/module. The CSS box below\n      // maps this backing bitmap 1:1 to device pixels on high-DPR phones.\n      scale = Math.max(1, Math.floor(physicalAvailableScale));\n    } else {\n      scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);\n    }'''
+            ),
+            (
+              '''    const cssNativeW = fitScaling ? displayW * scale / dpr : canvasW;\n    const cssNativeH = fitScaling ? displayH * scale / dpr : canvasH;''',
+              '''    const deviceBacked = fitScaling || autoMode;\n    const cssNativeW = deviceBacked ? canvasW / dpr : canvasW;\n    const cssNativeH = deviceBacked ? canvasH / dpr : canvasH;'''
+            ),
+            (
+              '''    // Pixel Perfect's intrinsic bitmap and CSS box are now the SAME integer\n    // size. Chrome no longer gets a fractional DPR downscale opportunity that\n    // can synthesize gray module edges. Keep only origin snapping as a final\n    // guard against flex centering landing the bitmap between device pixels.''',
+              '''    // Auto Pixel Perfect uses an integer device-pixel backing scale and an\n    // exact backing/dpr CSS box. Manual layouts retain their existing CSS-pixel\n    // sizing. Snap the origin so flex centering cannot land between device pixels.'''
+            ),
+            (
+              '${autoGrid.displayModulePx.toFixed(2)} on-screen px/module',
+              '${autoGrid.displayModulePx.toFixed(2)} physical px/module'
+            )
+          ]
+
+          for old, new in replacements:
+            count = text.count(old)
+            if count != 1:
+              raise SystemExit(f'expected exactly one match, found {count}: {old[:100]!r}')
+            text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+          version = Path('version.js')
+          version_text = version.read_text()
+          old = 'export const APP_VERSION = "0.5.377";'
+          new = 'export const APP_VERSION = "0.5.378";'
+          if version_text.count(old) != 1:
+            raise SystemExit('unexpected version.js; refusing to guess the next version')
+          version.write_text(version_text.replace(old, new, 1))
+          PY
+
+      - name: Commit change and remove this workflow
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/one-shot-device-pixel-auto.yml
+          git add send/main.js version.js
+          git commit -m "v0.5.378: use device pixels for Auto QR density"
+          git push origin HEAD:master
