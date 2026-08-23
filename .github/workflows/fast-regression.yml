@@ -77,6 +77,7 @@ jobs:
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
           node --input-type=module --check < receive/temporal-soft-grid.js
+          node --input-type=module --check < receive/worker-reconstruct-bootstrap.js
           node --input-type=module --check < receive/worker-reconstruct.js
           node --input-type=module --check < receive/worker-temporal-generalized.js
           node --input-type=module --check < shared/camera-start-guard.js
