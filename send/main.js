@@ -202,14 +202,19 @@ function selectFps(fps) {
   cfgFpsCustom.hidden = cfgFps.value !== "custom";
   speedControl.classList.toggle("has-custom", !cfgFpsCustom.hidden);
 }
+function autoSizeEnabled() {
+  return cfgSize.value === "auto";
+}
 function updateAutoGridControlState() {
   const automatic = isAutoLayout();
-  // Size is always the user's selected transport ceiling. Auto changes only
-  // wall geometry, so choosing 2.9 KB never silently becomes 1.0 KB.
   cfgSize.disabled = false;
-  cfgSize.title = automatic
-    ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this Size and fits the most QR codes`
-    : "";
+  cfgSize.title = autoSizeEnabled()
+    ? automatic
+      ? `Auto Size + Auto ${autoGridTargetModulePx()}px jointly optimize QR bytes and wall geometry`
+      : "Auto Size uses the largest transport size for manual layouts"
+    : automatic
+      ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this exact Size and fits the most QR codes`
+      : "";
 }
 function gcd(a, b) {
   a = Math.abs(Math.trunc(a));
@@ -305,18 +310,14 @@ function chooseAutoGrid(
   txFps,
   fitScaling,
   targetModulePx = autoGridTargetModulePx(),
-  selectedMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1]
+  selectedMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1],
+  optimizeSize = false
 ) {
   const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
-  const maximumFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
+  const requestedFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
     ? selectedMaximumFrameBytes
     : FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1];
-  if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) {
-    throw new Error(`${formatBytes(maximumFrameBytes)} cannot carry this transfer in one stream.`);
-  }
-  const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
-  if (plan.mode === "direct") throw new Error("Auto Grid is not used for a single direct QR.");
-
+  const frameByteChoices = optimizeSize ? FRAME_BYTES_OPTIONS : [requestedFrameBytes];
   const landscape = landscapeGrid();
   const budgetCss = senderDisplayBudgetCss();
   const dpr = window.devicePixelRatio || 1;
@@ -326,59 +327,49 @@ function chooseAutoGrid(
   const budgetAspect = budgetW / budgetH;
   const candidates = [];
 
-  for (const layout of AUTO_GRID_LAYOUTS) {
-    const codes = layout.cols * layout.rows;
-    const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
-    const displayW = landscape ? extent.height : extent.width;
-    const displayH = landscape ? extent.width : extent.height;
-    const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
-    const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
-    if (moduleScale + 1e-9 < densityTarget) continue;
-
-    const renderedW = displayW * moduleScale;
-    const renderedH = displayH * moduleScale;
-    const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
-    const changesPerRefresh = codes * txFps / refreshHz;
-    const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
-    const payloadPerSecond = sourceBytesPerQr * codes * txFps;
-    const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
-    candidates.push({
-      maximumFrameBytes,
-      plan,
-      layout,
-      codes,
-      moduleScale,
-      displayModulePx: moduleScale,
-      screenFill,
-      changesPerRefresh,
-      payloadPerSecond,
-      refreshHz,
-      aspectError
-    });
+  for (const maximumFrameBytes of frameByteChoices) {
+    if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) continue;
+    const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
+    if (plan.mode === "direct") continue;
+    for (const layout of AUTO_GRID_LAYOUTS) {
+      const codes = layout.cols * layout.rows;
+      const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
+      const displayW = landscape ? extent.height : extent.width;
+      const displayH = landscape ? extent.width : extent.height;
+      const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
+      const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
+      if (moduleScale + 1e-9 < densityTarget) continue;
+      const renderedW = displayW * moduleScale;
+      const renderedH = displayH * moduleScale;
+      const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
+      const changesPerRefresh = codes * txFps / refreshHz;
+      const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
+      const payloadPerSecond = sourceBytesPerQr * codes * txFps;
+      const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
+      candidates.push({ maximumFrameBytes, plan, layout, codes, moduleScale,
+        displayModulePx: moduleScale, screenFill, changesPerRefresh,
+        payloadPerSecond, refreshHz, aspectError });
+    }
   }
-
   if (!candidates.length) {
-    throw new Error(
-      `Auto ${densityTarget}px cannot fit the selected ${formatBytes(maximumFrameBytes)} Size in this viewport.`
-    );
+    const sizeLabel = optimizeSize ? "any available Size" : `the selected ${formatBytes(requestedFrameBytes)} Size`;
+    throw new Error(`Auto ${densityTarget}px cannot fit ${sizeLabel} in this viewport.`);
   }
-
-  // With Size and FPS fixed, useful sender bandwidth is monotonic in QR count.
-  // Maximize independent symbols first. Only then use scale/fill/aspect as
-  // geometry tie-breakers. Never cap the wall because several cells happen
-  // to become visible during one display refresh; that old heuristic made a
-  // 60 Hz / 30 fps sender stop at 16 QRs even when 32 fit comfortably.
-  candidates.sort((a, b) =>
-    b.codes - a.codes ||
-    b.moduleScale - a.moduleScale ||
-    b.screenFill - a.screenFill ||
-    a.aspectError - b.aspectError ||
-    a.layout.id - b.layout.id
-  );
-  return {
-    ...candidates[0],
-    targetModulePx: densityTarget
-  };
+  if (optimizeSize) {
+    candidates.sort((a, b) => {
+      const rateDelta = b.payloadPerSecond - a.payloadPerSecond;
+      const tied = Math.abs(rateDelta) <= Math.max(a.payloadPerSecond, b.payloadPerSecond) * 0.02;
+      if (!tied) return rateDelta;
+      return b.codes - a.codes || b.moduleScale - a.moduleScale ||
+        b.screenFill - a.screenFill || a.aspectError - b.aspectError ||
+        b.maximumFrameBytes - a.maximumFrameBytes || a.layout.id - b.layout.id;
+    });
+  } else {
+    candidates.sort((a, b) => b.codes - a.codes || b.moduleScale - a.moduleScale ||
+      b.screenFill - a.screenFill || a.aspectError - b.aspectError || a.layout.id - b.layout.id);
+  }
+  return { ...candidates[0], targetModulePx: densityTarget, autoSize: optimizeSize,
+    requestedMaximumFrameBytes: requestedFrameBytes };
 }
 
 function monitorDisplayRefreshRate() {
@@ -650,7 +641,9 @@ function restoreSendSettings() {
     if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
       selectFps(saved.fps);
     }
-    if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
+    if (saved.sizeMode === "auto") {
+      cfgSize.value = "auto";
+    } else if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
       cfgSize.value = String(saved.sizeLevel);
     }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
@@ -668,7 +661,8 @@ function saveSendSettings() {
   try {
     localStorage.setItem(SEND_SETTINGS_KEY, JSON.stringify({
       fps: selectedFps(),
-      sizeLevel: Number(cfgSize.value),
+      sizeMode: autoSizeEnabled() ? "auto" : "exact",
+      sizeLevel: autoSizeEnabled() ? null : Number(cfgSize.value),
       scaling: cfgScaling.value,
       layout: cfgLayout.value,
       updatePattern: selectedUpdatePattern(),
@@ -707,7 +701,8 @@ async function main() {
   });
   sendSnippetBtn.addEventListener("click", () => void selectSnippet());
   applyMode();
-  Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes], index) => cfgSize.add(new Option(formatBytes(bytes), String(level), false, index === 0)));
+  cfgSize.add(new Option("Auto", "auto", false, true));
+  Array.from(FRAME_BYTES_OPTIONS.entries()).reverse().forEach(([level, bytes]) => cfgSize.add(new Option(formatBytes(bytes), String(level))));
   restoreSendSettings();
   updateAutoGridControlState();
   let customFpsTimer;
@@ -733,7 +728,7 @@ async function main() {
   // the already-visible QR wall or cold-start the render workers.
   for (const el of [cfgSize, cfgScaling, cfgLayout, cfgUpdatePattern, cfgOrientation]) {
     el.addEventListener("change", () => {
-      if (el === cfgLayout) updateAutoGridControlState();
+      if (el === cfgLayout || el === cfgSize) updateAutoGridControlState();
       saveSendSettings();
       void startStream();
     });
@@ -773,16 +768,17 @@ async function startStream(revealStage = false) {
   const { name, size: fileSize, payload, compression, transmittedSize } = selectedFile;
   if (gen !== generation) return;
   const txFps = selectedFps();
-  const sizeLevel = Number(cfgSize.value);
+  const autoSize = autoSizeEnabled();
+  const sizeLevel = autoSize ? FRAME_BYTES_OPTIONS.length - 1 : Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
   const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
   const ecc = "L";
   const configuredLayout = selectedLayout();
   const autoMode = isAutoLayout(configuredLayout);
-  // Size is always respected. Auto chooses geometry only; it never silently
-  // substitutes a smaller Size option.
+  // Numeric Size is exact. Auto Size may compare every available transport size,
+  // but only when explicitly selected by the user.
   const maximumFrameBytes = manualFrameBytes;
-  if (!fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
+  if (!autoSize && !fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
     showSettingsError(
       `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
@@ -814,7 +810,8 @@ async function startStream(revealStage = false) {
         txFps,
         fitScaling,
         autoGridTargetModulePx(configuredLayout),
-        maximumFrameBytes
+        maximumFrameBytes,
+        autoSize
       );
       frameBytes = autoGrid.maximumFrameBytes;
       transport = autoGrid.plan;
@@ -858,7 +855,8 @@ async function startStream(revealStage = false) {
   if (!autoGrid) return `Update ${updatePatternLabel}`;
   const displayCols = landscapeGrid() ? gridRows : gridCols;
   const displayRows = landscapeGrid() ? gridCols : gridRows;
-  return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · Size ${formatBytes(autoGrid.maximumFrameBytes)} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+  const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(autoGrid.maximumFrameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
+  return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
 };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
