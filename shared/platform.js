@@ -1,5 +1,6 @@
 import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
 import { installTemporalBackpressure } from "./temporal-backpressure.js";
+import { DecodeWorkerPool } from "./worker-pool.js";
 import {
   consumeExposureRescue,
   noteSuppressedExposureWrite,
@@ -13,6 +14,24 @@ installTemporalBackpressure();
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 const isAndroid = !!nav && /Android/.test(nav.userAgent);
+
+// v0.5.373 proved cross-frame reconstruction, but its out-of-pool sampler
+// reaches full camera rate and copies a second large Y/I420 frame on Android.
+// At 1440x2560 this creates enough memory-bandwidth/allocation pressure to stall
+// the receive UI while the compositor-owned video preview keeps moving. Keep the
+// proven temporal code available off Android, but make Android scheduling exactly
+// the bounded production worker-pool path until temporal module snapshots are
+// emitted by the already-running decode worker with no second camera-frame copy.
+if (isAndroid) {
+  DecodeWorkerPool.prototype.submit = function(message, transfer) {
+    const slot = this.busy.indexOf(false);
+    return slot !== -1 && this.submitAtSlot(slot, message, transfer);
+  };
+  DecodeWorkerPool.prototype.submitTo = function(slot, message, transfer) {
+    return Number.isInteger(slot) && this.submitAtSlot(slot, message, transfer);
+  };
+}
+
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 function probeCameraCapabilities(track) {
   var _a, _b, _c, _d, _e;

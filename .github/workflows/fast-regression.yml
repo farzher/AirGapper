@@ -97,6 +97,7 @@ jobs:
           node benchmark/temporal-qr-stitch-smoke.mjs
           node benchmark/low-count-recovery-smoke.mjs
           node benchmark/temporal-backpressure-smoke.mjs
+          node benchmark/android-temporal-bypass-smoke.mjs
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
