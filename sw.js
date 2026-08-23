@@ -22,6 +22,7 @@
     "./receive/qr-optics.js",
     "./receive/temporal-soft-grid.js",
     "./receive/worker.js",
+    "./receive/worker-reconstruct-bootstrap.js",
     "./receive/worker-reconstruct.js",
     "./receive/worker-temporal-generalized.js",
     "./send/main.js",
