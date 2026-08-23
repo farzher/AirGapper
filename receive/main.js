@@ -65,7 +65,7 @@ import {
   submitNativeCameraV2Plan
 } from "../shared/native-camera-v2.js";
 import { AgcapCorpus, AgcapRecorder, copyVideoFrameY, yToImageData } from "./agcap.js";
-const RECEIVER_RUNTIME_BUILD = "v0.5.361";
+const RECEIVER_RUNTIME_BUILD = window.AIRGAPPER_BUILD || "dev";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
@@ -167,7 +167,9 @@ function supportsWasmSimd() {
 }
 const usesScalarCodec = legacyAndroidApp || !supportsWasmSimd();
 function createDecodeWorker() {
-  const file = usesScalarCodec ? "./worker.js?scalar=1" : "./worker.js";
+  const file = usesScalarCodec
+    ? `./worker.js?scalar=1&build=${RECEIVER_RUNTIME_BUILD}`
+    : `./worker.js?build=${RECEIVER_RUNTIME_BUILD}`;
   return new Worker(new URL(file, import.meta.url), { type: "module" });
 }
 document.body.classList.toggle("legacy-android-camera", legacyAndroidApp);
