@@ -2,7 +2,7 @@ name: strip native runtime v392
 
 on:
   pull_request_target:
-    types: [opened]
+    types: [opened, synchronize]
 
 permissions:
   contents: write
