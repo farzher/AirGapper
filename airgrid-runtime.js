@@ -12,12 +12,21 @@ import {
   airGridBlockProfileFromGrid,
   buildAirGridBlockState
 } from './shared/airgrid-block.js';
+import {
+  applyAirGridManualOptics,
+  applyAirGridShortExposure,
+  exposureMs,
+  formatAirGridOpticsSettings,
+  probeAirGridCameraOptics,
+  restoreAirGridAutoExposure
+} from './shared/airgrid-camera-optics.js';
 import { AirGridRasterRenderer } from './send/airgrid-renderer.js';
 
-const BUILD = 'AGRS-20260823-1435';
+const BUILD = 'AGRS-20260823-1440';
 const PAYLOAD_ID = 0x51a7c0de;
 const QR_BURST_EVERY_MS = 3000;
 const QR_BURST_MS = 650;
+const SHORT_EXPOSURE_TARGET = 25; // exposureTime is 0.1 ms units => 2.5 ms
 const $ = id => document.getElementById(id);
 const decoder = new TextDecoder();
 const mbps = bytesPerSecond => `${(bytesPerSecond / 1e6).toFixed(2)} MB/s`;
@@ -114,14 +123,15 @@ document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement
 const video=$('video');
 const overlay=$('overlay');
 const overlayCtx=overlay.getContext('2d');
-const qrWorker=new Worker(new URL('./receive/worker.js?airgrid-acq=1435',import.meta.url),{type:'module'});
-const dataWorker=new Worker(new URL('./receive/airgrid-worker.js?build=1435',import.meta.url),{type:'module'});
-let mediaStream=null,receiverRunning=false,workerReady=false,qrBusy=false,dataBusy=false;
+const qrWorker=new Worker(new URL('./receive/worker.js?airgrid-acq=1440',import.meta.url),{type:'module'});
+const dataWorker=new Worker(new URL('./receive/airgrid-worker.js?build=1440',import.meta.url),{type:'module'});
+let mediaStream=null,cameraTrack=null,receiverRunning=false,workerReady=false,qrBusy=false,dataBusy=false;
 let scanId=0,lastQrScanAt=0,lastQrFrameWidth=0,lastQrFrameHeight=0;
 let seen=new Map(),lockedQuad=null,lockedConfig=null,lockedProfile=null,lockFrameWidth=0,lockFrameHeight=0;
 let generation=1,frameId=0,lastLockAt=0,lastGoodDataAt=0,firstDataResultAt=0,lastUiAt=0,lastDiagnostics=null,lastDataError='';
 let staleCount=0,geometryRefreshes=0,cameraCallbacks=0,qrFramesSent=0,qrResults=0,qrSymbols=0,dataFramesSent=0,dataResults=0,dataWorkerErrors=0,droppedBusy=0;
 let captureTimes=[];
+let opticsProbe=null,opticsBusy=false,opticsMessage='';
 const goodEvents=[],seenUnits=new Map();
 
 function setStatus(text,cls=''){$('status').textContent=text;$('status').className=`status ${cls}`;}
@@ -146,6 +156,42 @@ function tryLock(){
 function drawOverlay(){const r=overlay.getBoundingClientRect(),dpr=devicePixelRatio||1,w=Math.max(1,Math.round(r.width*dpr)),h=Math.max(1,Math.round(r.height*dpr));if(overlay.width!==w||overlay.height!==h){overlay.width=w;overlay.height=h;}overlayCtx.clearRect(0,0,w,h);if(!lockedQuad||!lockFrameWidth||!lockFrameHeight||!video.videoWidth)return;const vr=video.getBoundingClientRect(),or=overlay.getBoundingClientRect(),map=p=>({x:(vr.left-or.left+p.x/lockFrameWidth*vr.width)*dpr,y:(vr.top-or.top+p.y/lockFrameHeight*vr.height)*dpr}),pts=[lockedQuad.topLeft,lockedQuad.topRight,lockedQuad.bottomRight,lockedQuad.bottomLeft].map(map);overlayCtx.strokeStyle='#72ff91';overlayCtx.lineWidth=2*dpr;overlayCtx.beginPath();overlayCtx.moveTo(pts[0].x,pts[0].y);for(let i=1;i<4;i++)overlayCtx.lineTo(pts[i].x,pts[i].y);overlayCtx.closePath();overlayCtx.stroke();}
 window.addEventListener('resize',drawOverlay);
 
+function rangeSetup(input,range,value){if(!input||!range)return;input.min=String(range.min);input.max=String(range.max);input.step=String(Number.isFinite(Number(range.step))&&Number(range.step)>0?range.step:1);input.value=String(Math.max(range.min,Math.min(range.max,Number(value) || range.min)));}
+function updateOpticsLabels(){const exp=Number($('exposure')?.value),iso=Number($('iso')?.value);if($('exposure-value'))$('exposure-value').textContent=Number.isFinite(exp)?`${exposureMs(exp).toFixed(1)} ms`:'—';if($('iso-value'))$('iso-value').textContent=Number.isFinite(iso)?String(Math.round(iso)):'—';}
+function actualOpticsText(){return cameraTrack?formatAirGridOpticsSettings(cameraTrack.getSettings?.()??{}):'camera stopped';}
+function setOpticsMessage(message,cls='') { opticsMessage=message; const el=$('optics-status'); if(el){el.textContent=message;el.className=`status ${cls}`;} }
+function configureOpticsUi(){
+  if(!cameraTrack)return;
+  opticsProbe=probeAirGridCameraOptics(cameraTrack);$('optics').classList.remove('hidden');
+  const settings=cameraTrack.getSettings?.()??{};
+  $('exposure-control').classList.toggle('hidden',!opticsProbe.exposureTime);
+  $('iso-control').classList.toggle('hidden',!opticsProbe.iso);
+  if(opticsProbe.exposureTime)rangeSetup($('exposure'),opticsProbe.exposureTime,settings.exposureTime??SHORT_EXPOSURE_TARGET);
+  if(opticsProbe.iso)rangeSetup($('iso'),opticsProbe.iso,settings.iso??opticsProbe.iso.min);
+  $('optics-short').disabled=!opticsProbe.manualExposure;
+  updateOpticsLabels();
+  if(opticsProbe.manualExposure)setOpticsMessage(`Manual sensor available · actual ${actualOpticsText()}`,'good');
+  else setOpticsMessage(`Manual exposure is NOT exposed by this browser/camera · actual ${actualOpticsText()}`,'bad');
+}
+async function applyOpticsResult(promise,label){
+  if(!cameraTrack||opticsBusy)return;
+  opticsBusy=true;$('optics-short').disabled=true;$('optics-auto').disabled=true;
+  try{
+    setOpticsMessage(`${label}…`,'warn');
+    const result=await promise;
+    configureOpticsUi();
+    const actual=formatAirGridOpticsSettings(result?.settings??cameraTrack.getSettings?.()??{});
+    setOpticsMessage(result?.ok?`${label} accepted · ${actual}`:`${label} FAILED · ${result?.reason||'rejected'} · actual ${actual}`,result?.ok?'good':'bad');
+  }catch(error){setOpticsMessage(`${label} ERROR · ${error.message||error}`,'bad');}
+  finally{opticsBusy=false;$('optics-auto').disabled=false;$('optics-short').disabled=!opticsProbe?.manualExposure;updateUi(true);}
+}
+async function autoShortExposure(){if(!cameraTrack)return;await applyOpticsResult(applyAirGridShortExposure(cameraTrack,SHORT_EXPOSURE_TARGET),'Short exposure');}
+async function manualOpticsFromUi(){if(!cameraTrack||!opticsProbe?.manualExposure)return;await applyOpticsResult(applyAirGridManualOptics(cameraTrack,{exposureTime:Number($('exposure').value),iso:opticsProbe.iso?Number($('iso').value):undefined}),'Manual optics');}
+$('optics-short').onclick=()=>autoShortExposure();
+$('optics-auto').onclick=()=>cameraTrack&&applyOpticsResult(restoreAirGridAutoExposure(cameraTrack),'Camera auto');
+$('exposure').addEventListener('input',updateOpticsLabels);$('iso').addEventListener('input',updateOpticsLabels);
+$('exposure').addEventListener('change',()=>manualOpticsFromUi());$('iso').addEventListener('change',()=>manualOpticsFromUi());
+
 qrWorker.onmessage=e=>{const d=e.data??{};if(d.id===-1){workerReady=true;updateUi(true);return;}if(d.id!==scanId)return;qrBusy=false;qrResults++;const symbols=Array.isArray(d.symbols)?d.symbols:[];qrSymbols+=symbols.length;const now=performance.now();for(const s of symbols){if(!s?.bytes||!s?.quad)continue;let raw='';try{raw=decoder.decode(s.bytes instanceof Uint8Array?s.bytes:Uint8Array.from(s.bytes));}catch{}const parsed=parseAirGridQrAcquisition(raw),center=parsed?centerOfQuad(s.quad):null;if(parsed&&center)seen.set(parsed.corner,{config:parsed,center,at:now,frameWidth:lastQrFrameWidth||video.videoWidth,frameHeight:lastQrFrameHeight||video.videoHeight});}if(!tryLock()&&!lockedQuad){const corners=AIRGRID_QR_ORDER.filter(c=>seen.has(c));setStatus(`SEARCHING · ${BUILD} · QR ${corners.length}/4`,'warn');}updateUi();};
 qrWorker.onerror=e=>{qrBusy=false;setStatus(`QR WORKER ERROR · ${e.message}`,'bad');};
 dataWorker.onmessage=e=>{const d=e.data??{};dataBusy=false;if(d.generation!==generation)return;dataResults++;if(d.type==='error'){dataWorkerErrors++;lastDataError=d.error||'decode error';updateUi(true);return;}const now=performance.now();if(!firstDataResultAt)firstDataResultAt=now;lastDiagnostics=d;noteVerifiedUnits(d.lanes,now);const valid=Number(d.diagnostics?.decode?.validLanes||0);if(!valid&&now-firstDataResultAt>1800&&(!lastGoodDataAt||now-lastGoodDataAt>1800))markStale('DATA reaches worker; 0 verified blocks');updateUi();};
@@ -154,10 +200,10 @@ dataWorker.onerror=e=>{dataBusy=false;dataWorkerErrors++;lastDataError=`worker c
 function sendQrFrame(now){let f;try{f=new VideoFrame(video,{timestamp:Math.round(now*1000)});}catch(error){lastDataError=`VideoFrame QR: ${error.message}`;return false;}const w=f.codedWidth||f.displayWidth||video.videoWidth,h=f.codedHeight||f.displayHeight||video.videoHeight;lastQrFrameWidth=w;lastQrFrameHeight=h;qrBusy=true;qrFramesSent++;scanId++;lastQrScanAt=now;qrWorker.postMessage({id:scanId,videoFrame:f,cropX:0,cropY:0,w,h,full:true,pixelFormat:'y8',acquisitionMode:'hunt',sentAt:now},[f]);return true;}
 function sendDataFrame(now){if(!lockedQuad||!lockedProfile||dataBusy)return false;let f;try{f=new VideoFrame(video,{timestamp:Math.round(now*1000)});}catch(error){lastDataError=`VideoFrame DATA: ${error.message}`;return false;}const w=f.codedWidth||f.displayWidth||video.videoWidth,h=f.codedHeight||f.displayHeight||video.videoHeight,q=(lockFrameWidth&&lockFrameHeight&&(w!==lockFrameWidth||h!==lockFrameHeight))?scaleQuad(lockedQuad,w/lockFrameWidth,h/lockFrameHeight):lockedQuad;dataBusy=true;dataFramesSent++;captureTimes.push(now);dataWorker.postMessage({action:'decode',frame:f,frameId:++frameId,generation,sentAtMs:now,captureTimestampMs:Number.isFinite(Number(f.timestamp))?Number(f.timestamp)/1000:now,modulation:'binary',quad:q,profile:lockedProfile,payloadId:lockedConfig?.payloadId??PAYLOAD_ID,minSeparation:12},[f]);return true;}
 function cameraLoop(now){if(!receiverRunning)return;video.requestVideoFrameCallback(cameraLoop);cameraCallbacks++;if(!video.videoWidth)return;const healthy=lastGoodDataAt&&now-lastGoodDataAt<1000,qrInterval=!lockedQuad?120:healthy?300:120;if(workerReady&&!qrBusy&&now-lastQrScanAt>=qrInterval)sendQrFrame(now);else if(lockedQuad){if(!sendDataFrame(now)&&dataBusy)droppedBusy++;}updateUi();}
-function updateUi(force=false){const now=performance.now();if(!force&&now-lastUiAt<180)return;lastUiAt=now;const locked=Boolean(lockedQuad&&lockedProfile);$('m-lock').textContent=locked?'LOCKED':'SEARCHING';$('m-lock').className=locked?'good':'warn';const good=currentGoodput(now);$('m-goodput').textContent=mbps(good);$('m-goodput').className=good>=2500000?'good':good>=2000000?'warn':'';const ceiling=lockedProfile?lockedProfile.capacityBytes*30:0;$('m-ceiling').textContent=lockedProfile?mbps(ceiling):'—';const d=lastDiagnostics?.diagnostics;$('m-valid').textContent=d?`${(d.decode.validLaneRate*100).toFixed(1)}%`:'0%';$('m-fps').textContent=`${currentCaptureFps(now).toFixed(1)} fps`;$('m-pxcell').textContent=d?`${d.frame.pxPerCellX.toFixed(2)}×${d.frame.pxPerCellY.toFixed(2)}`:'—';$('m-decode').textContent=lastDiagnostics?`${Number(lastDiagnostics.decodeWallMs||0).toFixed(1)} ms`:'— ms';$('m-drop').textContent=String(droppedBusy);const failures=d?.decode?.failures??{};$('details').textContent=[BUILD,`pipeline camera=${cameraCallbacks} · QR sent=${qrFramesSent} results=${qrResults} symbols=${qrSymbols} · DATA sent=${dataFramesSent} results=${dataResults} errors=${dataWorkerErrors}`,`geometry refreshes=${geometryRefreshes} · stale/reacquire=${staleCount} · lock age=${lastLockAt?(now-lastLockAt).toFixed(0):'—'} ms`,lockedConfig?`profile ${lockedConfig.columns}×${lockedConfig.lanes} · ${lockedProfile.blocksPerLane} blocks/row · ${lockedProfile.payloadBytesPerLane} B/row`:'',d?`local phase ${Number(d.frame.phaseX||0).toFixed(1)},${Number(d.frame.phaseY||0).toFixed(1)} px · camera ${d.frame.pxPerCellX.toFixed(2)}×${d.frame.pxPerCellY.toFixed(2)} px/cell`:'',d?`CRC-valid ${d.decode.crcValidLanes}/${d.decode.totalLanes} · byte-exact ${d.decode.validLanes}/${d.decode.totalLanes}`:'waiting for DATA worker result',d?`failures ${Object.entries(failures).map(([k,v])=>`${k}=${v}`).join(' ')}`:'',lastDataError?`DATA ERROR ${lastDataError}`:''].filter(Boolean).join('\n');}
+function updateUi(force=false){const now=performance.now();if(!force&&now-lastUiAt<180)return;lastUiAt=now;const locked=Boolean(lockedQuad&&lockedProfile);$('m-lock').textContent=locked?'LOCKED':'SEARCHING';$('m-lock').className=locked?'good':'warn';const good=currentGoodput(now);$('m-goodput').textContent=mbps(good);$('m-goodput').className=good>=2500000?'good':good>=2000000?'warn':'';const ceiling=lockedProfile?lockedProfile.capacityBytes*30:0;$('m-ceiling').textContent=lockedProfile?mbps(ceiling):'—';const d=lastDiagnostics?.diagnostics;$('m-valid').textContent=d?`${(d.decode.validLaneRate*100).toFixed(1)}%`:'0%';$('m-fps').textContent=`${currentCaptureFps(now).toFixed(1)} fps`;$('m-pxcell').textContent=d?`${d.frame.pxPerCellX.toFixed(2)}×${d.frame.pxPerCellY.toFixed(2)}`:'—';$('m-decode').textContent=lastDiagnostics?`${Number(lastDiagnostics.decodeWallMs||0).toFixed(1)} ms`:'— ms';$('m-drop').textContent=String(droppedBusy);const failures=d?.decode?.failures??{};$('details').textContent=[BUILD,`optics ${actualOpticsText()}${opticsMessage?` · ${opticsMessage}`:''}`,`pipeline camera=${cameraCallbacks} · QR sent=${qrFramesSent} results=${qrResults} symbols=${qrSymbols} · DATA sent=${dataFramesSent} results=${dataResults} errors=${dataWorkerErrors}`,`geometry refreshes=${geometryRefreshes} · stale/reacquire=${staleCount} · lock age=${lastLockAt?(now-lastLockAt).toFixed(0):'—'} ms`,lockedConfig?`profile ${lockedConfig.columns}×${lockedConfig.lanes} · ${lockedProfile.blocksPerLane} blocks/row · ${lockedProfile.payloadBytesPerLane} B/row`:'',d?`local phase ${Number(d.frame.phaseX||0).toFixed(1)},${Number(d.frame.phaseY||0).toFixed(1)} px · camera ${d.frame.pxPerCellX.toFixed(2)}×${d.frame.pxPerCellY.toFixed(2)} px/cell`:'',d?`CRC-valid ${d.decode.crcValidLanes}/${d.decode.totalLanes} · byte-exact ${d.decode.validLanes}/${d.decode.totalLanes}`:'waiting for DATA worker result',d?`failures ${Object.entries(failures).map(([k,v])=>`${k}=${v}`).join(' ')}`:'',lastDataError?`DATA ERROR ${lastDataError}`:''].filter(Boolean).join('\n');}
 
-async function stopCamera(){receiverRunning=false;generation++;qrBusy=false;dataBusy=false;for(const t of mediaStream?.getTracks?.()??[])t.stop();mediaStream=null;video.srcObject=null;$('start-camera').disabled=false;$('stop-camera').disabled=true;drawOverlay();}
-async function startCamera(){await stopCamera();setStatus(`Starting camera · ${BUILD}`,'warn');mediaStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:2560},height:{ideal:1440},frameRate:{ideal:30,max:30}}});video.srcObject=mediaStream;await video.play();receiverRunning=true;qrBusy=false;dataBusy=false;seen.clear();lockedQuad=lockedConfig=lockedProfile=null;lockFrameWidth=lockFrameHeight=lastQrFrameWidth=lastQrFrameHeight=0;lastLockAt=lastGoodDataAt=firstDataResultAt=0;cameraCallbacks=qrFramesSent=qrResults=qrSymbols=dataFramesSent=dataResults=dataWorkerErrors=droppedBusy=0;geometryRefreshes=staleCount=0;lastQrScanAt=0;resetMetrics();$('start-camera').disabled=true;$('stop-camera').disabled=false;setStatus(`SEARCHING · ${BUILD} · camera ${video.videoWidth}×${video.videoHeight}`,'warn');updateUi(true);if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(cameraLoop);else setStatus(`ERROR · ${BUILD} · requestVideoFrameCallback unavailable`,'bad');}
+async function stopCamera(){receiverRunning=false;generation++;qrBusy=false;dataBusy=false;for(const t of mediaStream?.getTracks?.()??[])t.stop();mediaStream=null;cameraTrack=null;video.srcObject=null;$('start-camera').disabled=false;$('stop-camera').disabled=true;$('optics').classList.add('hidden');drawOverlay();}
+async function startCamera(){await stopCamera();setStatus(`Starting camera · ${BUILD}`,'warn');mediaStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:2560},height:{ideal:1440},frameRate:{ideal:30,max:30}}});cameraTrack=mediaStream.getVideoTracks()[0]??null;video.srcObject=mediaStream;await video.play();receiverRunning=true;qrBusy=false;dataBusy=false;seen.clear();lockedQuad=lockedConfig=lockedProfile=null;lockFrameWidth=lockFrameHeight=lastQrFrameWidth=lastQrFrameHeight=0;lastLockAt=lastGoodDataAt=firstDataResultAt=0;cameraCallbacks=qrFramesSent=qrResults=qrSymbols=dataFramesSent=dataResults=dataWorkerErrors=droppedBusy=0;geometryRefreshes=staleCount=0;lastQrScanAt=0;resetMetrics();$('start-camera').disabled=true;$('stop-camera').disabled=false;setStatus(`SEARCHING · ${BUILD} · camera ${video.videoWidth}×${video.videoHeight}`,'warn');configureOpticsUi();if(opticsProbe?.manualExposure)await autoShortExposure();updateUi(true);if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(cameraLoop);else setStatus(`ERROR · ${BUILD} · requestVideoFrameCallback unavailable`,'bad');}
 $('start-camera').onclick=()=>startCamera().catch(error=>setStatus(`CAMERA ERROR · ${BUILD} · ${error.message}`,'bad'));
 $('stop-camera').onclick=()=>stopCamera();
 window.addEventListener('beforeunload',()=>{try{qrWorker.terminate();dataWorker.terminate();}catch{}stopCamera();});
