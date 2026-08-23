@@ -106,6 +106,7 @@ jobs:
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           node benchmark/native-y8-worker-smoke.mjs
+          node benchmark/temporal-wrapper-passthrough-smoke.mjs
           node benchmark/temporal-direct-grid-smoke.mjs
           node benchmark/temporal-cross-frame-proof.mjs
           node benchmark/temporal-generalized-proof.mjs
