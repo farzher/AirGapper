@@ -12,8 +12,8 @@ on:
       - main.js
       - index.html
       - airgrid.html
-      - airgrid-lab.js
-      - airgrid-lab-v2.js
+      - airgrid-*.html
+      - airgrid-lab*.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -29,8 +29,8 @@ on:
       - main.js
       - index.html
       - airgrid.html
-      - airgrid-lab.js
-      - airgrid-lab-v2.js
+      - airgrid-*.html
+      - airgrid-lab*.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -80,6 +80,8 @@ jobs:
           node --input-type=module --check < version.js
           node --input-type=module --check < airgrid-lab.js
           node --input-type=module --check < airgrid-lab-v2.js
+          node --input-type=module --check < airgrid-lab-1356.js
+          node --input-type=module --check < airgrid-lab-1400.js
           node --input-type=module --check < receive/airgrid-sampler.js
           node --input-type=module --check < receive/airgrid-pam4-sampler.js
           node --input-type=module --check < receive/airgrid-worker.js
