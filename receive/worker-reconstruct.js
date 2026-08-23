@@ -115,8 +115,9 @@ function ensureRecoveryWorker() {
       if (pending >= 0) serviceRecovery(pending);
     };
     recovery.worker = worker;
-    // Warm WASM before the first miss. This does not touch a camera frame.
-    worker.postMessage({ action: "warm", token: 0, sourceSequence: -1 });
+    // The recovery worker starts codec instantiation internally. Do not send a
+    // warm command: a real recovery must never race startup for its one-command
+    // safety slot.
   } catch {
     recovery.errors++;
     recovery.worker = null;
@@ -145,8 +146,6 @@ function serviceRecovery(sequence) {
   const worker = ensureRecoveryWorker();
   if (!worker) return;
   if (recovery.busy) {
-    // Latest wins. The retained state is only tiny module grids; no VideoFrame or
-    // camera-plane buffer can ever queue here.
     if (sequence > recovery.pendingSequence) recovery.pendingSequence = sequence;
     recovery.dropped++;
     return;
@@ -160,9 +159,7 @@ function serviceRecovery(sequence) {
     current: cloneSample(pair.current)
   }));
   const transfer = [];
-  for (const pair of pairs) {
-    transfer.push(pair.previous.luma.buffer, pair.current.luma.buffer);
-  }
+  for (const pair of pairs) transfer.push(pair.previous.luma.buffer, pair.current.luma.buffer);
   const token = ++nextRecoveryToken;
   recovery.token = token;
   recovery.sourceSequence = sequence;
@@ -255,8 +252,7 @@ function sampleBufferMessage(message) {
       const offset = Number(message.yOffset) || 0;
       const bytes = new Uint8Array(message.videoFrame);
       const required = offset + Math.max(0, height - 1) * stride + width;
-      if (stride >= width && required <= bytes.length)
-        sampleActiveY(bytes, offset, width, height, stride);
+      if (stride >= width && required <= bytes.length) sampleActiveY(bytes, offset, width, height, stride);
       return;
     }
     if (!message.videoFrame && message.buf instanceof ArrayBuffer) {
@@ -266,8 +262,7 @@ function sampleBufferMessage(message) {
       const offset = Number(message.yOffset) || 0;
       const bytes = new Uint8Array(message.buf);
       const required = offset + Math.max(0, height - 1) * stride + width;
-      if (stride >= width && required <= bytes.length)
-        sampleActiveY(bytes, offset, width, height, stride);
+      if (stride >= width && required <= bytes.length) sampleActiveY(bytes, offset, width, height, stride);
     }
   } catch {
     recovery.errors++;
@@ -432,18 +427,22 @@ const baseOnMessage = scope.onmessage;
 
 scope.postMessage = function(message, transfer = []) {
   const job = activeJob;
-  if (!job || message?.id === -1 || message?.preflight || message?.id !== job.message.id) {
+  // Non-low-count work must be indistinguishable from worker.js. Do not hold
+  // acquisition/dense replies or touch their transfer lists at all.
+  if (!job || !lowCountMessage(job.message) || message?.id === -1 || message?.preflight || message?.id !== job.message.id) {
     nativePostMessage(message, transfer);
     return;
   }
-  // The base decoder posts exactly one terminal message per owned job. Hold the
-  // terminal reply locally so a recovery result that is already in flight can
-  // be merged under a strict sub-frame wait budget. Preflights remain immediate.
   job.final = { message, transfer: Array.from(transfer ?? []) };
 };
 
 scope.onmessage = async (event) => {
   const message = event.data ?? {};
+  if (!lowCountMessage(message)) {
+    await baseOnMessage(event);
+    return;
+  }
+
   const job = {
     message,
     startedAt: performance.now(),
