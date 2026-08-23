@@ -1,5 +1,6 @@
 import { makeAirGridPayload } from '../shared/airgrid-phy.js';
 import { decodeAirGridY8Detailed } from './airgrid-sampler.js';
+import { decodeAirGridPam4Y8Detailed } from './airgrid-pam4-sampler.js';
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
@@ -46,9 +47,12 @@ function summarizeLanes(lanes, verifiedSet) {
     payloadId: lane.payloadId,
     payloadBytes: lane.payload?.length ?? 0,
     verified: verifiedSet.has(lane),
+    modulation: lane.modulation ?? 'binary',
     separation: lane.separation,
     snr: lane.snr,
     confidence: lane.confidence,
+    evm: lane.evm,
+    centers: lane.centers,
     preambleErrors: lane.preambleErrors
   }));
 }
@@ -74,15 +78,19 @@ self.onmessage = async event => {
     } else throw new Error('AirGrid worker received no frame');
 
     const decodeStarted = now();
-    const result = decodeAirGridY8Detailed({
+    const decodeOptions = {
       y8: source.y8,
       width: source.width,
       height: source.height,
       quad: message.quad,
       profile: message.profile,
-      minSeparation: message.minSeparation ?? 18,
+      minSeparation: message.minSeparation ?? (message.modulation === 'pam4' ? 8 : 18),
       includeLaneDiagnostics: Boolean(message.includeLaneDiagnostics)
-    });
+    };
+    const result = message.modulation === 'pam4'
+      ? decodeAirGridPam4Y8Detailed(decodeOptions)
+      : decodeAirGridY8Detailed(decodeOptions);
+
     const verifiedSet = new Set();
     for (const lane of result.lanes) if (verifyLane(lane)) verifiedSet.add(lane);
     const crcValidLanes = result.lanes.length;
@@ -102,6 +110,7 @@ self.onmessage = async event => {
       type: 'decoded',
       generation: message.generation,
       frameId: message.frameId,
+      modulation: message.modulation ?? 'binary',
       captureTimestampMs: message.captureTimestampMs,
       queueMs: Math.max(0, started - (Number(message.sentAtMs) || started)),
       copyMs: source.copyMs,
