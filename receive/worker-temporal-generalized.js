@@ -10,6 +10,10 @@ const scalarCodec = new URL(import.meta.url).searchParams.has("scalar");
 let codecPromise;
 let syntheticPtr = 0;
 let syntheticCapacity = 0;
+let modulePtr = 0;
+let moduleCapacity = 0;
+let moduleOutputPtr = 0;
+let moduleOutputCapacity = 0;
 let processing = false;
 const models = new Map();
 
@@ -20,9 +24,6 @@ function temporalCodec() {
   }
   return codecPromise;
 }
-// Start module fetch/instantiation as soon as this tiny worker boots. This is
-// intentionally not represented as a command: the real recovery message must
-// never race a warm-up message against the worker's one-command safety guard.
 void temporalCodec().catch(() => {});
 
 function ensureSyntheticBuffer(zx, bytes) {
@@ -35,7 +36,49 @@ function ensureSyntheticBuffer(zx, bytes) {
   return syntheticPtr;
 }
 
+function ensureModuleBuffers(zx, moduleBytes, outputBytes = 16 * 1024) {
+  if (!modulePtr || moduleBytes > moduleCapacity) {
+    const next = zx._malloc(moduleBytes);
+    if (!next) return false;
+    if (modulePtr) zx._free(modulePtr);
+    modulePtr = next;
+    moduleCapacity = moduleBytes;
+  }
+  if (!moduleOutputPtr || outputBytes > moduleOutputCapacity) {
+    const next = zx._malloc(outputBytes);
+    if (!next) return false;
+    if (moduleOutputPtr) zx._free(moduleOutputPtr);
+    moduleOutputPtr = next;
+    moduleOutputCapacity = outputBytes;
+  }
+  return true;
+}
+
+// undefined means this checked-in codec predates the direct ABI; null means the
+// direct decoder exists and rejected this candidate. That distinction keeps the
+// feature compatible with an old cached WASM while allowing rebuilt releases to
+// skip rasterization/finder detection entirely.
+function decodeModuleGridDirect(zx, grid, dim, expectedSlot) {
+  if (typeof zx._decodeModuleGrid !== "function") return undefined;
+  if (!ensureModuleBuffers(zx, grid.byteLength)) return null;
+  zx.HEAPU8.set(grid, modulePtr);
+  const length = zx._decodeModuleGrid(
+    modulePtr,
+    dim,
+    moduleOutputPtr,
+    moduleOutputCapacity
+  );
+  if (!(length > 0) || length > moduleOutputCapacity) return null;
+  const output = zx.HEAPU8.slice(moduleOutputPtr, moduleOutputPtr + length);
+  const packet = parseFrame(output);
+  if (!packet || Number(packet.header.slotIndex) !== expectedSlot) return null;
+  return { bytes: output, header: packet.header, modules: dim };
+}
+
 function decodeSyntheticGrid(zx, grid, dim, expectedSlot, scale = 2) {
+  const direct = decodeModuleGridDirect(zx, grid, dim, expectedSlot);
+  if (direct !== undefined) return direct;
+
   const quietModules = 4;
   const quiet = quietModules * scale;
   const size = (dim + quietModules * 2) * scale;
@@ -157,7 +200,10 @@ async function recoverPair(zx, pair, deadline) {
     break;
   }
 
-  if (!decoded && performance.now() < deadline) {
+  // Only old cached codecs can reach this raster fallback. With the direct ABI,
+  // retrying a larger fake image cannot add information and is deliberately
+  // skipped.
+  if (!decoded && typeof zx._decodeModuleGrid !== "function" && performance.now() < deadline) {
     for (const candidate of candidates.slice(0, 10)) {
       if (performance.now() >= deadline) break;
       const grid = composeTemporalLine(
@@ -209,7 +255,8 @@ async function recover(data) {
     centerRow: null,
     tiltRows: null,
     orientation: "",
-    candidateSource: ""
+    candidateSource: "",
+    directGrid: 0
   };
 
   let zx;
@@ -220,6 +267,7 @@ async function recover(data) {
     metrics.recoverMs = performance.now() - wallStarted;
     return { symbols, metrics };
   }
+  metrics.directGrid = Number(typeof zx._decodeModuleGrid === "function");
   const deadline = performance.now() + maxMs;
 
   for (const pair of Array.isArray(data.pairs) ? data.pairs : []) {
@@ -250,9 +298,6 @@ async function processMessage(data) {
     return { symbols: [], metrics: { reset: 1, recoverMs: 0 } };
   }
   if (data?.action === "warm") {
-    // Compatibility no-op for wrapper versions that still send a warm marker.
-    // Codec loading already started at module evaluation, so this must not hold
-    // the one-command processing guard while WASM instantiates.
     return { symbols: [], metrics: { warm: 1, recoverMs: 0 } };
   }
   return recover(data ?? {});
