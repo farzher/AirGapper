@@ -13,34 +13,53 @@ const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 const isAndroid = !!nav && /Android/.test(nav.userAgent);
 
-// The production receiver still asks for receive/worker.js. Redirect only that
-// worker to a thin wrapper which observes the SAME Y plane after the normal
-// worker has copied the camera frame into WASM. The wrapper never clones or
-// retains a VideoFrame. ?raw=1 is an explicit benchmark escape hatch for tests
-// that need the unwrapped baseline worker.
-function installDecodeWorkerRedirect() {
-  const NativeWorker = globalThis.Worker;
-  if (typeof NativeWorker !== "function" || globalThis.__airgapperWorkerRedirectInstalled) return;
-  const redirect = (input) => {
-    try {
-      const base = globalThis.location?.href || import.meta.url;
-      const url = input instanceof URL ? new URL(input.href) : new URL(String(input), base);
-      if (url.pathname.endsWith("/receive/worker.js") && !url.searchParams.has("raw"))
-        url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-reconstruct.js";
-      return url;
-    } catch {
-      return input;
-    }
-  };
-  function AirGapperWorker(url, options) {
-    return new NativeWorker(redirect(url), options);
+// Only DecodeWorkerPool creation is redirected. Never replace global Worker for
+// the lifetime of the page: sender workers, benchmarks, acquisition helpers and
+// unrelated app workers must remain completely untouched. The pool's create()
+// callback is synchronous, so temporarily substituting Worker only around that
+// callback gives us the existing receive/main.js factory without a broad runtime
+// monkeypatch. The wrapped create function is retained for timeout/error worker
+// replacement as well as normal resize growth.
+function redirectDecodeWorkerInput(input) {
+  try {
+    const base = globalThis.location?.href || import.meta.url;
+    const url = input instanceof URL ? new URL(input.href) : new URL(String(input), base);
+    if (url.pathname.endsWith("/receive/worker.js") && !url.searchParams.has("raw"))
+      url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-reconstruct.js";
+    return url;
+  } catch {
+    return input;
   }
-  try { Object.setPrototypeOf(AirGapperWorker, NativeWorker); } catch {}
-  AirGapperWorker.prototype = NativeWorker.prototype;
-  globalThis.Worker = AirGapperWorker;
-  globalThis.__airgapperWorkerRedirectInstalled = true;
 }
-installDecodeWorkerRedirect();
+
+function installPoolDecodeWorkerFactory() {
+  const poolResize = DecodeWorkerPool.prototype.resize;
+  DecodeWorkerPool.prototype.resize = function(count) {
+    if (!this.__airgapperReconstructCreateWrapped && typeof this.create === "function") {
+      const originalCreate = this.create;
+      const NativeWorker = globalThis.Worker;
+      if (typeof NativeWorker === "function") {
+        this.create = function(...args) {
+          const previousWorker = globalThis.Worker;
+          function ScopedDecodeWorker(url, options) {
+            return new NativeWorker(redirectDecodeWorkerInput(url), options);
+          }
+          try { Object.setPrototypeOf(ScopedDecodeWorker, NativeWorker); } catch {}
+          ScopedDecodeWorker.prototype = NativeWorker.prototype;
+          globalThis.Worker = ScopedDecodeWorker;
+          try {
+            return originalCreate.apply(this, args);
+          } finally {
+            globalThis.Worker = previousWorker;
+          }
+        };
+      }
+      this.__airgapperReconstructCreateWrapped = true;
+    }
+    return poolResize.call(this, count);
+  };
+}
+installPoolDecodeWorkerFactory();
 
 // Low-count temporal history is most valuable when adjacent camera frames land
 // on the same normal decode worker. At 1-2 QRs the measured robust path is well
