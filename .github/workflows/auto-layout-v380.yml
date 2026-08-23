@@ -1,0 +1,205 @@
+name: fix Auto QR layout selection
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/auto-layout-v380.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Make Auto deterministic
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('send/main.js')
+          s = path.read_text()
+
+          old = '''// Sender FPS is always the user's requested presentation rate. Auto Grid may
+          // choose QR count/size, but never silently changes the requested FPS.
+          const AUTO_GRID_FRAGMENTATION_BONUS = 0.18;
+          // Receiver production scheduling keeps one <=32-track warm batch. Larger
+          // walls remain available as explicit layouts, but Auto optimizes for what an
+          // older offline phone can economically decode.
+          const AUTO_GRID_MAX_CODES = 32;
+          // This is intentionally relaxed for the >32-slot experiment. At 360 Hz and
+          // 30 sender fps it permits roughly 96 independently changing QR slots.
+          const AUTO_GRID_MAX_CHANGES_PER_REFRESH = 8;
+          '''
+          new = '''// Sender FPS is always the user's requested presentation rate. Auto Grid never
+          // silently changes FPS or Size; it only chooses the densest fitting wall.
+          // Receiver production scheduling keeps one <=32-track warm batch, so 32 is
+          // the useful production ceiling until the receiver batch itself is widened.
+          const AUTO_GRID_MAX_CODES = 32;
+          '''
+          if old not in s:
+              raise SystemExit('Auto constants block did not match')
+          s = s.replace(old, new, 1)
+
+          old = '''  // In Auto, Size is a ceiling. Smaller QR versions may fit many more
+            // independent symbols and therefore deliver more useful bytes per display frame.
+            cfgSize.disabled = false;
+            cfgSize.title = automatic
+              ? `Auto ${autoGridTargetModulePx()} physical px/module uses up to this Size and picks the fastest wall`
+              : "";
+          '''
+          new = '''  // Size is always the user's selected transport ceiling. Auto changes only
+            // wall geometry, so choosing 2.9 KB never silently becomes 1.0 KB.
+            cfgSize.disabled = false;
+            cfgSize.title = automatic
+              ? `Auto ${autoGridTargetModulePx()} physical px/module keeps this Size and fits the most QR codes`
+              : "";
+          '''
+          if old not in s:
+              raise SystemExit('Auto control block did not match')
+          s = s.replace(old, new, 1)
+
+          start = s.index('function chooseAutoGrid(')
+          end = s.index('function monitorDisplayRefreshRate()', start)
+          choose = r'''function chooseAutoGrid(
+            payloadBytes,
+            txFps,
+            fitScaling,
+            targetModulePx = autoGridTargetModulePx(),
+            selectedMaximumFrameBytes = FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1]
+          ) {
+            const densityTarget = Math.max(1, Math.min(4, Number(targetModulePx) || 2));
+            const maximumFrameBytes = FRAME_BYTES_OPTIONS.includes(selectedMaximumFrameBytes)
+              ? selectedMaximumFrameBytes
+              : FRAME_BYTES_OPTIONS[FRAME_BYTES_OPTIONS.length - 1];
+            if (!fitsInOneStream(payloadBytes, maximumFrameBytes, true)) {
+              throw new Error(`${formatBytes(maximumFrameBytes)} cannot carry this transfer in one stream.`);
+            }
+            const plan = selectTransportPlan(payloadBytes, maximumFrameBytes, true);
+            if (plan.mode === "direct") throw new Error("Auto Grid is not used for a single direct QR.");
+
+            const landscape = landscapeGrid();
+            const budgetCss = senderDisplayBudgetCss();
+            const dpr = window.devicePixelRatio || 1;
+            const budgetW = Math.max(1, Math.floor(budgetCss.width * dpr));
+            const budgetH = Math.max(1, Math.floor(budgetCss.height * dpr));
+            const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
+            const budgetAspect = budgetW / budgetH;
+            const candidates = [];
+
+            for (const layout of AUTO_GRID_LAYOUTS) {
+              const codes = layout.cols * layout.rows;
+              const extent = gridRasterExtent(plan.qrModules, layout.cols, layout.rows, GRID_MARGIN);
+              const displayW = landscape ? extent.height : extent.width;
+              const displayH = landscape ? extent.width : extent.height;
+              const availableScale = Math.min(budgetW / displayW, budgetH / displayH);
+              const moduleScale = fitScaling ? availableScale : Math.floor(availableScale);
+              if (moduleScale + 1e-9 < densityTarget) continue;
+
+              const renderedW = displayW * moduleScale;
+              const renderedH = displayH * moduleScale;
+              const screenFill = Math.max(0, Math.min(1, renderedW * renderedH / Math.max(1, budgetW * budgetH)));
+              const changesPerRefresh = codes * txFps / refreshHz;
+              const sourceBytesPerQr = plan.frameBytes * (1 - plan.overheadFraction);
+              const payloadPerSecond = sourceBytesPerQr * codes * txFps;
+              const aspectError = Math.abs(Math.log((displayW / displayH) / budgetAspect));
+              candidates.push({
+                maximumFrameBytes,
+                plan,
+                layout,
+                codes,
+                moduleScale,
+                displayModulePx: moduleScale,
+                screenFill,
+                changesPerRefresh,
+                payloadPerSecond,
+                refreshHz,
+                aspectError
+              });
+            }
+
+            if (!candidates.length) {
+              throw new Error(
+                `Auto ${densityTarget}px cannot fit the selected ${formatBytes(maximumFrameBytes)} Size in this viewport.`
+              );
+            }
+
+            // With Size and FPS fixed, useful sender bandwidth is monotonic in QR count.
+            // Maximize independent symbols first. Only then use scale/fill/aspect as
+            // geometry tie-breakers. Never cap the wall because several cells happen
+            // to become visible during one display refresh; that old heuristic made a
+            // 60 Hz / 30 fps sender stop at 16 QRs even when 32 fit comfortably.
+            candidates.sort((a, b) =>
+              b.codes - a.codes ||
+              b.moduleScale - a.moduleScale ||
+              b.screenFill - a.screenFill ||
+              a.aspectError - b.aspectError ||
+              a.layout.id - b.layout.id
+            );
+            return {
+              ...candidates[0],
+              targetModulePx: densityTarget
+            };
+          }
+          '''
+          s = s[:start] + choose + '\n' + s[end:]
+
+          old = '''  // Size is exact in manual layouts and a ceiling in Auto. Auto may choose a
+            // smaller QR version when the denser wall has higher aggregate throughput.
+            const maximumFrameBytes = manualFrameBytes;
+          '''
+          new = '''  // Size is always respected. Auto chooses geometry only; it never silently
+            // substitutes a smaller Size option.
+            const maximumFrameBytes = manualFrameBytes;
+          '''
+          if old not in s:
+              raise SystemExit('startStream Size comment did not match')
+          s = s.replace(old, new, 1)
+
+          old_start = s.index('  const describeGrid = () => {')
+          old_end = s.index('  const blockLen = transport.blockLen;', old_start)
+          describe = r'''  const describeGrid = () => {
+            if (staticStream) return "";
+            if (!autoGrid) return `Update ${updatePatternLabel}`;
+            const displayCols = landscapeGrid() ? gridRows : gridCols;
+            const displayRows = landscapeGrid() ? gridCols : gridRows;
+            return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · Size ${formatBytes(autoGrid.maximumFrameBytes)} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+          };
+          '''
+          s = s[:old_start] + describe + s[old_end:]
+
+          path.write_text(s)
+
+          index = Path('index.html')
+          html = index.read_text()
+          html2 = html.replace('<label><span>Size</span><select id="cfg-size"></select></label>', '<label><span>Max size</span><select id="cfg-size"></select></label>', 1)
+          if html2 == html:
+              raise SystemExit('Size label did not match')
+          index.write_text(html2)
+
+          version = Path('version.js')
+          v = version.read_text()
+          if 'APP_VERSION = "0.5.379"' not in v:
+              raise SystemExit('Unexpected current version')
+          version.write_text(v.replace('APP_VERSION = "0.5.379"', 'APP_VERSION = "0.5.380"', 1))
+          PY
+
+          grep -q 'const AUTO_GRID_MAX_CODES = 32' send/main.js
+          ! grep -q 'AUTO_GRID_MAX_CHANGES_PER_REFRESH' send/main.js
+          ! grep -q 'AUTO_GRID_FRAGMENTATION_BONUS' send/main.js
+          grep -q 'b.codes - a.codes' send/main.js
+          grep -q 'Max size' index.html
+          grep -q 'APP_VERSION = "0.5.380"' version.js
+
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/auto-layout-v380.yml
+          git add send/main.js index.html version.js
+          git commit -m "v0.5.380: make Auto layout deterministic"
+          git push origin HEAD:master
