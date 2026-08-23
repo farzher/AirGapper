@@ -1,4 +1,4 @@
-import { AIRGRID_PREAMBLE, decodeAirGridLane, inspectAirGridLane } from '../shared/airgrid-phy.js';
+import { AIRGRID_PREAMBLE, inspectAirGridLane } from '../shared/airgrid-phy.js';
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 function quadHomography(quad) {
@@ -27,11 +27,6 @@ function project(h, u, v) {
   const z = h.g * u + h.h * v + 1;
   return { x: (h.a * u + h.b * v + h.c) / z, y: (h.d * u + h.e * v + h.f) / z };
 }
-function sampleNearest(y8, width, height, x, y) {
-  const ix = Math.max(0, Math.min(width - 1, Math.round(x)));
-  const iy = Math.max(0, Math.min(height - 1, Math.round(y)));
-  return y8[iy * width + ix];
-}
 function quantile(values, q) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -45,13 +40,26 @@ function projectedSize(quad) {
     height: (distance(quad.topLeft, quad.bottomLeft) + distance(quad.topRight, quad.bottomRight)) * 0.5
   };
 }
-function sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation = 18) {
-  const values = new Uint8Array(profile.columns);
+function sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation = 18, scratchValues, scratchBits) {
+  const columns = profile.columns;
+  const values = scratchValues?.length === columns ? scratchValues : new Uint8Array(columns);
+  const bits = scratchBits?.length === columns ? scratchBits : new Uint8Array(columns);
   const v = (laneIndex + 0.5) / profile.lanes;
-  for (let column = 0; column < profile.columns; column++) {
-    const u = (column + 0.5) / profile.columns;
-    const point = project(homography, u, v);
-    values[column] = sampleNearest(y8, width, height, point.x, point.y);
+  const du = 1 / columns;
+  const u0 = du * 0.5;
+  let nx = homography.a * u0 + homography.b * v + homography.c;
+  let ny = homography.d * u0 + homography.e * v + homography.f;
+  let nz = homography.g * u0 + homography.h * v + 1;
+  const dx = homography.a * du, dy = homography.d * du, dz = homography.g * du;
+  const affine = Math.abs(dz) < 1e-12 && Math.abs(nz - 1) < 1e-9;
+  for (let column = 0; column < columns; column++) {
+    const x = affine ? nx : nx / nz;
+    const y = affine ? ny : ny / nz;
+    let ix = Math.round(x), iy = Math.round(y);
+    if (ix < 0) ix = 0; else if (ix >= width) ix = width - 1;
+    if (iy < 0) iy = 0; else if (iy >= height) iy = height - 1;
+    values[column] = y8[iy * width + ix];
+    nx += dx; ny += dy; nz += dz;
   }
   let black = 0, white = 0, blackCount = 0, whiteCount = 0;
   for (let i = 0; i < AIRGRID_PREAMBLE.length; i++) {
@@ -70,12 +78,11 @@ function sampleAirGridLane(y8, width, height, homography, profile, laneIndex, mi
   const threshold = (white + black) * 0.5;
   const contrast = Math.max(1, Math.abs(separation) * 0.5);
   let confidence = 0;
-  for (const value of values) confidence += Math.min(1, Math.abs(value - threshold) / contrast);
-  confidence /= values.length;
+  for (let i = 0; i < columns; i++) confidence += Math.min(1, Math.abs(values[i] - threshold) / contrast);
+  confidence /= columns;
   const base = { values, black, white, noise, snr: separation / Math.max(1, noise), separation, threshold, confidence };
   if (separation < minSeparation) return { ...base, bits: null };
-  const bits = new Uint8Array(profile.columns);
-  for (let i = 0; i < values.length; i++) bits[i] = values[i] < threshold ? 1 : 0;
+  for (let i = 0; i < columns; i++) bits[i] = values[i] < threshold ? 1 : 0;
   return { ...base, bits };
 }
 function makeRuns(states) {
@@ -100,10 +107,12 @@ function decodeAirGridY8Detailed({ y8, width, height, quad, profile, minSeparati
   const separations = [], noises = [], snrs = [], confidences = [], preambleErrors = [];
   const failures = { lowContrast: 0, preamble: 0, magic: 0, version: 0, crc: 0, short: 0, other: 0 };
   const laneDiagnostics = includeLaneDiagnostics ? [] : null;
+  const scratchValues = new Uint8Array(profile.columns);
+  const scratchBits = new Uint8Array(profile.columns);
   let sampleMs = 0, decodeMs = 0;
   for (let laneIndex = 0; laneIndex < profile.lanes; laneIndex++) {
     const sampleStarted = now();
-    const sampled = sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation);
+    const sampled = sampleAirGridLane(y8, width, height, homography, profile, laneIndex, minSeparation, scratchValues, scratchBits);
     sampleMs += now() - sampleStarted;
     separations.push(sampled.separation);
     noises.push(sampled.noise);
