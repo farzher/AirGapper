@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AirGrid Acquisition Bring-up</title>
+  <title>AirGrid Bandwidth Lab</title>
   <meta name="robots" content="noindex" />
   <script>
     (() => {
@@ -11,12 +11,12 @@
       let mode = '';
       if (q === '?r' || q.includes('receive')) mode = '?receive';
       else if (q === '?s' || q.includes('send')) mode = '?send';
-      location.replace('./airgrid-1420.html' + mode + location.hash);
+      location.replace('./airgrid-1430.html' + mode + location.hash);
     })();
   </script>
 </head>
 <body>
-  <p>AirGrid build AGRS-20260823-1420</p>
-  <p><a href="./airgrid-1420.html">Open acquisition bring-up</a></p>
+  <p>AirGrid build AGRS-20260823-1430</p>
+  <p><a href="./airgrid-1430.html">Open bandwidth lab</a></p>
 </body>
 </html>
