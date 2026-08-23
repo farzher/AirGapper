@@ -15,17 +15,15 @@ const isAndroid = !!nav && /Android/.test(nav.userAgent);
 
 // Only DecodeWorkerPool creation is redirected. Never replace global Worker for
 // the lifetime of the page: sender workers, benchmarks, acquisition helpers and
-// unrelated app workers must remain completely untouched. The pool's create()
-// callback is synchronous, so temporarily substituting Worker only around that
-// callback gives us the existing receive/main.js factory without a broad runtime
-// monkeypatch. The wrapped create function is retained for timeout/error worker
-// replacement as well as normal resize growth.
+// unrelated app workers must remain completely untouched. The tiny bootstrap
+// worker queues an immediately-posted first decode job while the reconstruction
+// wrapper imports the mature base worker, eliminating module-startup message loss.
 function redirectDecodeWorkerInput(input) {
   try {
     const base = globalThis.location?.href || import.meta.url;
     const url = input instanceof URL ? new URL(input.href) : new URL(String(input), base);
     if (url.pathname.endsWith("/receive/worker.js") && !url.searchParams.has("raw"))
-      url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-reconstruct.js";
+      url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-reconstruct-bootstrap.js";
     return url;
   } catch {
     return input;
