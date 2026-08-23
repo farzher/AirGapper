@@ -20,18 +20,33 @@ function boundaryFailureLanes(runs = []) {
 function successfulRunLengths(runs = []) {
   return runs.filter(run => run.sequence !== undefined && run.count >= 2).map(run => run.count);
 }
+function airGridNativeMetadata(packet, extras = {}) {
+  return {
+    captureTimestampMs: Number(packet?.timestampNs) > 0 ? Number(packet.timestampNs) / 1e6 : extras.captureTimestampMs,
+    exposureUs: Number(packet?.exposureTimeNs) > 0 ? Number(packet.exposureTimeNs) / 1e3 : extras.exposureUs,
+    frameDurationUs: Number(packet?.frameDurationNs) > 0 ? Number(packet.frameDurationNs) / 1e3 : extras.frameDurationUs,
+    sensorReadoutUs: Number(packet?.rollingShutterSkewNs) > 0 ? Number(packet.rollingShutterSkewNs) / 1e3 : extras.sensorReadoutUs,
+    iso: Number(packet?.iso) > 0 ? Number(packet.iso) : extras.iso,
+    copyMs: Number(extras.copyMs) || 0,
+    queueMs: Number(extras.queueMs) || 0,
+    senderHz: Number(extras.senderHz) || 0
+  };
+}
 function inferBottleneck(snapshot) {
   if (snapshot.cpu.frameBudgetUsedP95 > 0.8) return 'cpu';
   if (snapshot.channel.separationP10 < 24 || snapshot.channel.snrP10 < 4) return 'optics';
   if (snapshot.rollingShutter.boundaryLossRate > 0.05) return 'exposure/rolling-shutter';
   if (snapshot.capture.expectedFps && snapshot.capture.fps < snapshot.capture.expectedFps * 0.85) return 'camera-capture';
-  if (snapshot.goodput.targetRatio < 1 && snapshot.channel.validLaneRate > 0.9) return 'spatial-density';
-  return snapshot.goodput.targetRatio >= 1 ? 'target-cleared' : 'undetermined';
+  if (snapshot.goodput.targetRatio >= 1) return 'target-cleared';
+  if (snapshot.goodput.baselineRatio >= 1) return 'qr-baseline-cleared';
+  if (snapshot.channel.validLaneRate > 0.9) return 'spatial-density';
+  return 'undetermined';
 }
 class AirGridDiagnostics {
-  constructor({ windowFrames = 120, targetBytesPerSecond = 2_000_000 } = {}) {
+  constructor({ windowFrames = 120, baselineBytesPerSecond = 2_000_000, targetBytesPerSecond = 2_500_000 } = {}) {
     this.windowFrames = Math.max(8, windowFrames | 0);
-    this.targetBytesPerSecond = Math.max(1, Number(targetBytesPerSecond) || 2_000_000);
+    this.baselineBytesPerSecond = Math.max(1, Number(baselineBytesPerSecond) || 2_000_000);
+    this.targetBytesPerSecond = Math.max(this.baselineBytesPerSecond, Number(targetBytesPerSecond) || 2_500_000);
     this.frames = [];
   }
   clear() { this.frames.length = 0; }
@@ -51,6 +66,9 @@ class AirGridDiagnostics {
     });
     if (this.frames.length > this.windowFrames) this.frames.splice(0, this.frames.length - this.windowFrames);
     return this.snapshot();
+  }
+  observeNative(packet, diagnostics, extras = {}) {
+    return this.observe({ diagnostics, ...airGridNativeMetadata(packet, extras) });
   }
   snapshot() {
     const frames = this.frames;
@@ -92,9 +110,13 @@ class AirGridDiagnostics {
         megabytesPerSecond: goodputBps / 1e6,
         capacityBytesPerSecond: capacityBps,
         utilization: capacityBps > 0 ? goodputBps / capacityBps : 0,
+        baselineBytesPerSecond: this.baselineBytesPerSecond,
+        baselineRatio: goodputBps / this.baselineBytesPerSecond,
         targetBytesPerSecond: this.targetBytesPerSecond,
         targetRatio: goodputBps / this.targetBytesPerSecond,
-        marginBytesPerSecond: goodputBps - this.targetBytesPerSecond,
+        marginOverBaselineBytesPerSecond: goodputBps - this.baselineBytesPerSecond,
+        marginToTargetBytesPerSecond: goodputBps - this.targetBytesPerSecond,
+        requiredLaneEfficiencyForBaseline: capacityBps > 0 ? this.baselineBytesPerSecond / capacityBps : Infinity,
         requiredLaneEfficiencyForTarget: capacityBps > 0 ? this.targetBytesPerSecond / capacityBps : Infinity
       },
       capture: {
@@ -139,11 +161,12 @@ class AirGridDiagnostics {
 }
 function formatAirGridDiagnostics(snapshot) {
   const mb = snapshot.goodput.megabytesPerSecond.toFixed(2);
+  const baseline = (snapshot.goodput.baselineBytesPerSecond / 1e6).toFixed(2);
   const target = (snapshot.goodput.targetBytesPerSecond / 1e6).toFixed(2);
   const lane = (snapshot.channel.validLaneRate * 100).toFixed(1);
   const cpu = (snapshot.cpu.frameBudgetUsedP95 * 100).toFixed(0);
   const readout = snapshot.rollingShutter.sensorReadoutMs || snapshot.rollingShutter.inferredReadoutMs;
-  return `${mb} MB/s / ${target} target | ${snapshot.capture.fps.toFixed(1)} camera fps | ${lane}% lanes | ${snapshot.channel.separationP10.toFixed(1)} sep p10 | SNR ${snapshot.channel.snrP10.toFixed(1)} | CPU p95 ${cpu}% | readout ${readout.toFixed(2)} ms | ${snapshot.bottleneck}`;
+  return `${mb} MB/s | QR ${baseline} | target ${target} | ${snapshot.capture.fps.toFixed(1)} camera fps | ${lane}% lanes | sep ${snapshot.channel.separationP10.toFixed(1)} | SNR ${snapshot.channel.snrP10.toFixed(1)} | CPU p95 ${cpu}% | readout ${readout.toFixed(2)} ms | ${snapshot.bottleneck}`;
 }
 
-export { AirGridDiagnostics, boundaryFailureLanes, formatAirGridDiagnostics, inferBottleneck, quantile };
+export { AirGridDiagnostics, airGridNativeMetadata, boundaryFailureLanes, formatAirGridDiagnostics, inferBottleneck, quantile };
