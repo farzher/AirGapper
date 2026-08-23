@@ -189,6 +189,48 @@ function transferableBuffers(symbols) {
   return out;
 }
 
+// A learned seam is excellent during steady phase, but it can become badly
+// stale when camera/display phase wraps. Give the exact model and its nearest
+// perturbations first chance, then jump to deterministic whole-QR anchors
+// before spending the rest of the budget around stale local history.
+function prioritizeTemporalCandidates(candidates, dim, hint) {
+  const centerTargets = [0.5, 0.75, 0.25, 0.625, 0.375, 0.875, 0.125].map((v) => v * dim);
+  const tiltTargets = [0.14, -0.14, 0.09, -0.09, 0.045, -0.045, 0].map((v) => v * dim);
+  const hintCenter = Number(hint?.centerRow);
+  const hintTilt = Number(hint?.tiltRows);
+  const hintOrientation = hint?.orientation;
+  const nearestRank = (value, targets, distanceScale) => {
+    let best = Infinity;
+    for (let i = 0; i < targets.length; i++) {
+      const score = i * 4 + Math.abs(value - targets[i]) / distanceScale;
+      if (score < best) best = score;
+    }
+    return best;
+  };
+  const score = (candidate) => {
+    const orientationPenalty = hintOrientation && candidate.orientation !== hintOrientation ? 0.15 : 0;
+    if (candidate.source === "learned") return orientationPenalty;
+    if (candidate.source === "learned-near") {
+      const distance = Number.isFinite(hintCenter) ? Math.abs(candidate.centerRow - hintCenter) : 99;
+      return distance <= 2.01 ? 1 + distance * 0.1 + orientationPenalty : 45 + distance;
+    }
+    if (candidate.source === "learned-tilt") {
+      const distance = Number.isFinite(hintTilt) ? Math.abs(candidate.tiltRows - hintTilt) : 99;
+      return distance <= 2.01 ? 2 + distance * 0.1 + orientationPenalty : 50 + distance;
+    }
+    if (candidate.source === "scan") {
+      return 5 + nearestRank(candidate.centerRow, centerTargets, Math.max(1, dim * 0.02)) +
+        nearestRank(candidate.tiltRows, tiltTargets, Math.max(1, dim * 0.02)) * 0.15 + orientationPenalty;
+    }
+    if (candidate.source === "agreement") return 22 + orientationPenalty;
+    return 60 + orientationPenalty;
+  };
+  return candidates
+    .map((candidate, index) => ({ candidate, index, score: score(candidate) }))
+    .sort((a, b) => a.score - b.score || a.index - b.index)
+    .map((item) => item.candidate);
+}
+
 async function recoverPair(zx, pair, deadline) {
   const slot = Number(pair?.slot);
   const previous = pair?.previous;
@@ -202,7 +244,9 @@ async function recoverPair(zx, pair, deadline) {
     return { symbol: null, attempts: 0, skipped: "geometry-moved" };
 
   const hint = pair.hint ?? predictedHint(slot, Number(current.sourceSequence));
-  const candidates = temporalLineCandidates(previous, current, hint, 128);
+  const candidates = prioritizeTemporalCandidates(
+    temporalLineCandidates(previous, current, hint, 128), current.dim, hint
+  );
   const erasureHalfBand = Math.max(3, Math.min(12, current.dim * 0.055));
   const canErase = typeof zx._decodeModuleGridErasures === "function";
   let attempts = 0;
