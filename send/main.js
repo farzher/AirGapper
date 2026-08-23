@@ -213,7 +213,7 @@ function updateAutoGridControlState() {
   // independent symbols and therefore deliver more useful bytes per display frame.
   cfgSize.disabled = false;
   cfgSize.title = automatic
-    ? `Auto ${autoGridTargetModulePx()}px uses up to this Size and picks the fastest wall`
+    ? `Auto ${autoGridTargetModulePx()} physical px/module uses up to this Size and picks the fastest wall`
     : "";
 }
 function gcd(a, b) {
@@ -321,11 +321,12 @@ function chooseAutoGrid(
     .sort((a, b) => b - a);
   const landscape = landscapeGrid();
   const budgetCss = senderDisplayBudgetCss();
-  // Pixel Perfect is defined in final CSS/display pixels, not in an oversized
-  // DPR backing store that Chrome must shrink again. Keep the Auto solver in
-  // exactly the same coordinate space as the element that reaches the screen.
-  const budgetW = Math.max(1, budgetCss.width);
-  const budgetH = Math.max(1, budgetCss.height);
+  // Auto density is measured in device/render pixels. Treating CSS pixels as
+  // panel pixels wastes most of a high-DPR phone's available display resolution.
+  // Solve in the same device-pixel space used by the canvas backing store.
+  const dpr = window.devicePixelRatio || 1;
+  const budgetW = Math.max(1, Math.floor(budgetCss.width * dpr));
+  const budgetH = Math.max(1, Math.floor(budgetCss.height * dpr));
   const refreshHz = Math.max(30, Number(measuredDisplayHz) || 60);
   const candidates = [];
   for (const maximumFrameBytes of allowedFrameBytes) {
@@ -887,7 +888,7 @@ async function startStream(revealStage = false) {
     const sizeFallback = autoGrid.sizeFallback
       ? ` · Size ${formatBytes(autoGrid.requestedMaximumFrameBytes)}→${formatBytes(autoGrid.maximumFrameBytes)}`
       : "";
-    return `Auto ${autoGrid.targetModulePx}px · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} on-screen px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
+    return `Auto ${autoGrid.targetModulePx}px · ${gridCols}×${gridRows} · ${gridCodes} QR · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR changes/refresh · ${updatePatternLabel}${sizeFallback}${fallback}`;
   };
   const blockLen = transport.blockLen;
   const payloadId = fnv1a(payload);
@@ -977,14 +978,17 @@ async function startStream(revealStage = false) {
     const budgetW = budget.width;
     const budgetH = budget.height;
     const cssAvailableScale = Math.min(budgetW / displayW, budgetH / displayH);
+    const physicalAvailableScale = Math.min(
+      Math.max(1, Math.floor(budgetW * dpr)) / displayW,
+      Math.max(1, Math.floor(budgetH * dpr)) / displayH
+    );
     if (fitScaling) {
-      // Fit is intentionally filtered/resampled and may use a DPR-sized backing
-      // store for quality. Pixel Perfect below never does.
-      scale = Math.max(Number.EPSILON, cssAvailableScale * dpr);
+      // Fit uses a device-pixel backing store and filtered resampling.
+      scale = Math.max(Number.EPSILON, physicalAvailableScale);
     } else if (autoMode) {
-      // Hard invariant: one QR source module becomes an integer number of final
-      // canvas/CSS pixels. There is no second CSS resize after this raster.
-      scale = Math.max(1, Math.floor(cssAvailableScale));
+      // Auto Pixel Perfect is integer device pixels/module. The CSS box below
+      // maps this backing bitmap 1:1 to device pixels on high-DPR phones.
+      scale = Math.max(1, Math.floor(physicalAvailableScale));
     } else {
       scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);
     }
@@ -998,15 +1002,15 @@ async function startStream(revealStage = false) {
       canvas.width = canvasW;
       canvas.height = canvasH;
     }
-    const cssNativeW = fitScaling ? displayW * scale / dpr : canvasW;
-    const cssNativeH = fitScaling ? displayH * scale / dpr : canvasH;
+    const deviceBacked = fitScaling || autoMode;
+    const cssNativeW = deviceBacked ? canvasW / dpr : canvasW;
+    const cssNativeH = deviceBacked ? canvasH / dpr : canvasH;
     canvas.style.width = `${cssNativeW}px`;
     canvas.style.height = `${cssNativeH}px`;
     canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
-    // Pixel Perfect's intrinsic bitmap and CSS box are now the SAME integer
-    // size. Chrome no longer gets a fractional DPR downscale opportunity that
-    // can synthesize gray module edges. Keep only origin snapping as a final
-    // guard against flex centering landing the bitmap between device pixels.
+    // Auto Pixel Perfect uses an integer device-pixel backing scale and an
+    // exact backing/dpr CSS box. Manual layouts retain their existing CSS-pixel
+    // sizing. Snap the origin so flex centering cannot land between device pixels.
     canvas.style.position = "";
     canvas.style.left = "";
     canvas.style.top = "";
