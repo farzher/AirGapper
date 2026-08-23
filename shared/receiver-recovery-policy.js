@@ -18,8 +18,11 @@ import {
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
+const STOCK_HARD_POSE_LOSS_MS = 900;
+const LOW_COUNT_ONE_QR_HARD_LOSS_MS = 3500;
+const LOW_COUNT_TWO_QR_HARD_LOSS_MS = 2500;
 const LONG_AE_EXPOSURE = VERIFIED_QR_MAX_EXPOSURE;
-const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
+const MOTION_SAFE_MAX_EXPOSURE = 45;
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -28,6 +31,19 @@ const lastLongAeHandoffAt = new WeakMap();
 const longAeHandoffCounts = new WeakMap();
 const longAeHandoffRunning = new WeakSet();
 const verifiedFreezeRunning = new WeakSet();
+const lowCountFinderEvidenceAt = new WeakMap();
+
+function latticeSlotCount(lattice) {
+  const layout = lattice?.candidate?.layout;
+  const count = Number(layout?.cols) * Number(layout?.rows);
+  return Number.isInteger(count) && count > 0 ? count : 0;
+}
+
+function lowCountHardLossMs(count) {
+  if (count === 1) return LOW_COUNT_ONE_QR_HARD_LOSS_MS;
+  if (count === 2) return LOW_COUNT_TWO_QR_HARD_LOSS_MS;
+  return STOCK_HARD_POSE_LOSS_MS;
+}
 
 function installLatticeRecoveryBridge() {
   const originalReset = GridLattice.prototype.reset;
@@ -36,13 +52,16 @@ function installLatticeRecoveryBridge() {
   const originalAccept = GridLattice.prototype.accept;
   const originalNoteValidPacket = GridLattice.prototype.noteValidPacket;
   const originalTick = GridLattice.prototype.tick;
+  const originalNudgeFromSightings = GridLattice.prototype.nudgeFromSightings;
 
   GridLattice.prototype.reset = function(...args) {
     endPoseRecovery();
+    lowCountFinderEvidenceAt.delete(this);
     return originalReset.apply(this, args);
   };
 
   GridLattice.prototype.reacquire = function(at, reason = "whole lattice invalidated") {
+    lowCountFinderEvidenceAt.delete(this);
     if (poseRecoveryReasonEligible(reason)) {
       beginPoseRecovery(reason);
       armWarmWorkerRestartSuppression();
@@ -55,11 +74,39 @@ function installLatticeRecoveryBridge() {
     return originalInvalidatePose.call(this, reason);
   };
 
+  GridLattice.prototype.nudgeFromSightings = function(sightings, at = this.lastHitAt) {
+    const result = originalNudgeFromSightings.call(this, sightings, at);
+    const count = latticeSlotCount(this);
+    if (result && count >= 1 && count <= 2) lowCountFinderEvidenceAt.set(this, at);
+    return result;
+  };
+
   GridLattice.prototype.tick = function(now) {
     const staleMs = this.candidate ? now - this.lastHitAt : 0;
-    const result = originalTick.call(this, now);
+    const count = latticeSlotCount(this);
+    const lowCount = count >= 1 && count <= 2;
+    const finderAt = lowCountFinderEvidenceAt.get(this) ?? -Infinity;
+    const hardEvidenceAge = lowCount ? now - Math.max(this.lastHitAt, finderAt) : staleMs;
+    const hardLimit = lowCountHardLossMs(count);
+    let result;
+
+    if (lowCount && this.candidate && !this.pendingInvalidationReason &&
+        staleMs > STOCK_HARD_POSE_LOSS_MS && hardEvidenceAge <= hardLimit) {
+      const actualLastHitAt = this.lastHitAt;
+      this.lastHitAt = now - (STOCK_HARD_POSE_LOSS_MS - 1);
+      try {
+        result = originalTick.call(this, now);
+      } finally {
+        if (this.candidate) this.lastHitAt = actualLastHitAt;
+      }
+    } else {
+      result = originalTick.call(this, now);
+    }
+
     if (this.candidate && staleMs > SOFT_POSE_LOSS_MS && this.state === "PARTIAL_LOSS") {
-      beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
+      beginPoseRecovery(lowCount
+        ? "whole lattice stale; low-count recovery window"
+        : "whole lattice stale; bounded QR re-anchor window");
     }
     return result;
   };
