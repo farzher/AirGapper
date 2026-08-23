@@ -4,9 +4,11 @@ const AIRGRID_ACQ_BYTES = 15;
 const AIRGRID_ACQ_COLS = 15;
 const AIRGRID_ACQ_ROWS = 8;
 const AIRGRID_ACQ_BITS = AIRGRID_ACQ_COLS * AIRGRID_ACQ_ROWS;
-const AIRGRID_ACQ_MARKER_OFFSET = 0.075;
-const AIRGRID_ACQ_MARKER_W = 0.10;
-const AIRGRID_ACQ_MARKER_H = 0.10;
+// Acquisition is intentionally oversized. It is only shown in short bursts,
+// and reliable lock is more valuable than a few percent of temporal overhead.
+const AIRGRID_ACQ_MARKER_OFFSET = 0.105;
+const AIRGRID_ACQ_MARKER_W = 0.17;
+const AIRGRID_ACQ_MARKER_H = 0.17;
 const AIRGRID_ACQ_META = Object.freeze({ x0: 0.20, y0: 0.35, x1: 0.80, y1: 0.65 });
 const FINDER = Object.freeze([
   '1111111',
@@ -88,8 +90,7 @@ function bitsToBytes(bits) {
 }
 function finderValue(row, col) { return FINDER[row]?.charCodeAt(col) === 49 ? 1 : 0; }
 function acquisitionLumaAt(u, v, config, black = 20, white = 235) {
-  const markerCenters = MARKER_NORMALIZED;
-  for (const center of markerCenters) {
+  for (const center of MARKER_NORMALIZED) {
     const x0 = center.x - AIRGRID_ACQ_MARKER_W * 0.5;
     const y0 = center.y - AIRGRID_ACQ_MARKER_H * 0.5;
     if (u >= x0 && u < x0 + AIRGRID_ACQ_MARKER_W && v >= y0 && v < y0 + AIRGRID_ACQ_MARKER_H) {
@@ -146,24 +147,22 @@ function sampleNearest(y8, width, height, x, y) {
   return y8[iy * width + ix];
 }
 function imageThreshold(y8) {
-  let lo = 255, hi = 0;
-  const step = Math.max(1, Math.floor(y8.length / 4096));
+  const step = Math.max(1, Math.floor(y8.length / 8192));
   const values = [];
   for (let i = 0; i < y8.length; i += step) values.push(y8[i]);
   values.sort((a,b)=>a-b);
-  if (values.length) {
-    lo = values[Math.floor(values.length * 0.08)];
-    hi = values[Math.min(values.length - 1, Math.floor(values.length * 0.92))];
-  }
+  if (!values.length) return { threshold:128, separation:0 };
+  const lo = values[Math.floor(values.length * 0.05)];
+  const hi = values[Math.min(values.length - 1, Math.floor(values.length * 0.95))];
   return { threshold:(lo + hi) * 0.5, separation:hi - lo };
 }
 function ratioScore(runs) {
   const total = runs.reduce((a,b)=>a+b,0);
-  if (total < 7) return 1e9;
+  if (total < 5) return 1e9;
   const m = total / 7;
   const expected = [m,m,3*m,m,m];
   let error = 0;
-  for (let i=0;i<5;i++) error += Math.abs(runs[i]-expected[i]) / Math.max(1, expected[i]);
+  for (let i=0;i<5;i++) error += Math.abs(runs[i]-expected[i]) / Math.max(0.75, expected[i]);
   return error;
 }
 function verticalFinderCheck(y8, width, height, x, y, threshold) {
@@ -181,7 +180,7 @@ function verticalFinderCheck(y8, width, height, x, y, threshold) {
   let darkBottom = 0; while (p < height && dark(p)) { darkBottom++; p++; }
   const runs = [darkTop, lightTop, center, lightBottom, darkBottom];
   const score = ratioScore(runs);
-  if (!darkTop || !lightTop || !lightBottom || !darkBottom || score > 1.65) return null;
+  if (!darkTop || !lightTop || !lightBottom || !darkBottom || score > 2.8) return null;
   return { y:(up + down) * 0.5, module:(runs.reduce((a,b)=>a+b,0) / 7), score };
 }
 function finderCandidates(y8, width, height, threshold) {
@@ -198,15 +197,16 @@ function finderCandidates(y8, width, height, threshold) {
       if (runs.length === 5 && runs[0].color && !runs[1].color && runs[2].color && !runs[3].color && runs[4].color) {
         const lengths = runs.map(run=>run.len);
         const hScore = ratioScore(lengths);
-        if (hScore <= 1.45) {
+        if (hScore <= 2.5) {
           const cx = runs[2].start + runs[2].len * 0.5;
           const vertical = verticalFinderCheck(y8,width,height,cx,y,threshold);
           if (vertical) {
             const moduleX = lengths.reduce((a,b)=>a+b,0)/7;
-            if (vertical.module / Math.max(0.1,moduleX) > 0.25 && vertical.module / Math.max(0.1,moduleX) < 4) {
-              const radius = Math.max(3, moduleX * 2.2, vertical.module * 2.2);
+            const aspect = vertical.module / Math.max(0.1,moduleX);
+            if (aspect > 0.10 && aspect < 10) {
+              const radius = Math.max(4, moduleX * 2.8, vertical.module * 2.8);
               let cluster = clusters.find(c => Math.hypot(c.x-cx,c.y-vertical.y) < radius);
-              const weight = 1 / Math.max(0.08, hScore + vertical.score);
+              const weight = 1 / Math.max(0.15, hScore + vertical.score);
               if (!cluster) { cluster = {x:cx,y:vertical.y,moduleX,moduleY:vertical.module,weight:0,hits:0}; clusters.push(cluster); }
               const total = cluster.weight + weight;
               cluster.x = (cluster.x*cluster.weight + cx*weight)/total;
@@ -221,15 +221,20 @@ function finderCandidates(y8, width, height, threshold) {
       color = next; start = x;
     }
   }
-  return clusters.filter(c=>c.hits>=2).sort((a,b)=>(b.hits+b.weight)-(a.hits+a.weight)).slice(0,12);
+  return clusters.filter(c=>c.hits>=1).sort((a,b)=>(b.hits+b.weight)-(a.hits+a.weight)).slice(0,18);
 }
-function orderCorners(points) {
-  const tl = points.reduce((a,p)=>p.x+p.y<a.x+a.y?p:a,points[0]);
-  const br = points.reduce((a,p)=>p.x+p.y>a.x+a.y?p:a,points[0]);
-  const tr = points.reduce((a,p)=>p.x-p.y>a.x-a.y?p:a,points[0]);
-  const bl = points.reduce((a,p)=>p.y-p.x>a.y-a.x?p:a,points[0]);
-  const ordered = [tl,tr,br,bl];
-  return new Set(ordered).size === 4 ? ordered : null;
+function polygonArea(points) {
+  return Math.abs(points.reduce((sum,p,i)=>{const q=points[(i+1)%points.length];return sum+p.x*q.y-q.x*p.y;},0))*0.5;
+}
+function cyclicOrders(points) {
+  const cx = points.reduce((s,p)=>s+p.x,0)/4;
+  const cy = points.reduce((s,p)=>s+p.y,0)/4;
+  const ring = [...points].sort((a,b)=>Math.atan2(a.y-cy,a.x-cx)-Math.atan2(b.y-cy,b.x-cx));
+  const out = [];
+  for (const base of [ring,[...ring].reverse()]) {
+    for (let shift=0;shift<4;shift++) out.push([base[shift],base[(shift+1)%4],base[(shift+2)%4],base[(shift+3)%4]]);
+  }
+  return out;
 }
 function decodeMetadata(y8,width,height,h,threshold) {
   const bits = new Uint8Array(AIRGRID_ACQ_BITS);
@@ -240,7 +245,7 @@ function decodeMetadata(y8,width,height,h,threshold) {
     const v = meta.y0 + (row + 0.5) / AIRGRID_ACQ_ROWS * (meta.y1-meta.y0);
     const p = projectAirGridAcquisition(h,u,v);
     let sum=0,count=0;
-    for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) { sum += sampleNearest(y8,width,height,p.x+dx,p.y+dy); count++; }
+    for (let dy=-2;dy<=2;dy++) for (let dx=-2;dx<=2;dx++) { sum += sampleNearest(y8,width,height,p.x+dx,p.y+dy); count++; }
     bits[at++] = sum/count < threshold ? 1 : 0;
   }
   const bytes = bitsToBytes(bits);
@@ -249,26 +254,48 @@ function decodeMetadata(y8,width,height,h,threshold) {
 function findAirGridAcquisition(y8,width,height) {
   if (!(y8 instanceof Uint8Array) || y8.length < width*height || width<80 || height<60) return null;
   const levels = imageThreshold(y8);
-  if (levels.separation < 35) return null;
-  const candidates = finderCandidates(y8,width,height,levels.threshold);
-  if (candidates.length < 4) return null;
-  const top = candidates.slice(0,Math.min(9,candidates.length));
-  for (let a=0;a<top.length-3;a++) for (let b=a+1;b<top.length-2;b++) for (let c=b+1;c<top.length-1;c++) for (let d=c+1;d<top.length;d++) {
-    const ordered = orderCorners([top[a],top[b],top[c],top[d]]);
-    if (!ordered) continue;
-    const area = Math.abs(ordered.reduce((sum,p,i)=>{const q=ordered[(i+1)%4]; return sum+p.x*q.y-q.x*p.y;},0))*0.5;
-    if (area < width*height*0.08) continue;
-    const h = homographyFromCorrespondences(MARKER_NORMALIZED, ordered);
-    if (!h) continue;
-    const config = decodeMetadata(y8,width,height,h,levels.threshold);
-    if (!config) continue;
-    const quad = {
-      topLeft:projectAirGridAcquisition(h,0,0),
-      topRight:projectAirGridAcquisition(h,1,0),
-      bottomRight:projectAirGridAcquisition(h,1,1),
-      bottomLeft:projectAirGridAcquisition(h,0,1)
-    };
-    return { config, quad, markers:ordered.map(p=>({x:p.x,y:p.y})), threshold:levels.threshold, separation:levels.separation };
+  if (levels.separation < 18) return null;
+  const thresholdCandidates = [
+    levels.threshold,
+    levels.threshold - levels.separation*0.12,
+    levels.threshold + levels.separation*0.12,
+    levels.threshold - levels.separation*0.22,
+    levels.threshold + levels.separation*0.22
+  ];
+  let bestCandidateCount = 0;
+  for (const threshold of thresholdCandidates) {
+    const candidates = finderCandidates(y8,width,height,threshold);
+    bestCandidateCount = Math.max(bestCandidateCount,candidates.length);
+    if (candidates.length < 4) continue;
+    const top = candidates.slice(0,Math.min(14,candidates.length));
+    for (let a=0;a<top.length-3;a++) for (let b=a+1;b<top.length-2;b++) for (let c=b+1;c<top.length-1;c++) for (let d=c+1;d<top.length;d++) {
+      const set = [top[a],top[b],top[c],top[d]];
+      for (const ordered of cyclicOrders(set)) {
+        if (polygonArea(ordered) < width*height*0.025) continue;
+        const h = homographyFromCorrespondences(MARKER_NORMALIZED, ordered);
+        if (!h) continue;
+        // Finder detection may use a threshold that is ideal for edges but not
+        // metadata. Try several metadata thresholds; CRC+magic is the final gate.
+        for (const metaThreshold of thresholdCandidates) {
+          const config = decodeMetadata(y8,width,height,h,metaThreshold);
+          if (!config) continue;
+          const quad = {
+            topLeft:projectAirGridAcquisition(h,0,0),
+            topRight:projectAirGridAcquisition(h,1,0),
+            bottomRight:projectAirGridAcquisition(h,1,1),
+            bottomLeft:projectAirGridAcquisition(h,0,1)
+          };
+          return {
+            config,
+            quad,
+            markers:ordered.map(p=>({x:p.x,y:p.y})),
+            threshold:metaThreshold,
+            separation:levels.separation,
+            candidateCount:candidates.length
+          };
+        }
+      }
+    }
   }
   return null;
 }
