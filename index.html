@@ -1,22 +1,21 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AirGrid Bandwidth Lab</title>
-  <meta name="robots" content="noindex" />
+  <meta name="robots" content="noindex">
   <script>
     (() => {
       const q = location.search;
-      let mode = '';
-      if (q === '?r' || q.includes('receive')) mode = '?receive';
-      else if (q === '?s' || q.includes('send')) mode = '?send';
-      location.replace('./airgrid-1430.html' + mode + location.hash);
+      let mode = q;
+      if (q === '?r') mode = '?receive';
+      else if (q === '?s') mode = '?send';
+      location.replace('./airgrid.html' + mode + location.hash);
     })();
   </script>
 </head>
 <body>
-  <p>AirGrid build AGRS-20260823-1430</p>
-  <p><a href="./airgrid-1430.html">Open bandwidth lab</a></p>
+  <p><a href="./airgrid.html">Open AirGrid bandwidth lab</a></p>
 </body>
 </html>
