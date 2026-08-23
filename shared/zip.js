@@ -123,7 +123,7 @@ function readStoredZip(bytes) {
     const localExtraLength = u16at(localOffset + 28);
     const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
     requireRange(dataOffset, size);
-    const entryBytes = bytes.slice(dataOffset, dataOffset + size);
+    const entryBytes = bytes.subarray(dataOffset, dataOffset + size);
     if (crc32(entryBytes) !== expectedCrc) throw new Error(`ZIP entry ${name} failed its checksum.`);
     if (!name.endsWith("/")) entries.push({ name, bytes: entryBytes });
     offset += recordLength;
