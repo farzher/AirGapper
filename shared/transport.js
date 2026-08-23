@@ -98,7 +98,7 @@ class TransportDecoder {
     this.blockLen = blockLen;
     this.totalLen = totalLen;
     this.mode = undefined;
-    this.seen = /* @__PURE__ */ new Set();
+    this.seenBits = undefined;
     this.mdsBasis = undefined;
     this.mdsBlocks = null;
     this.raptor = undefined;
@@ -108,6 +108,8 @@ class TransportDecoder {
     this.framesDup = 0;
     this.framesRedundant = 0;
     this.mode = codingMode(k);
+    const initialSeenBits = Math.min(RAPTOR_ESI_SPACE, Math.max(MDS_SYMBOLS, k * 2));
+    this.seenBits = new Uint8Array(Math.ceil(initialSeenBits / 8));
     this.mdsBasis = new Array(k).fill(null);
     this.raptor = this.mode === "raptorq" ? new RaptorDecoder(totalLen, blockLen - RAPTOR_PACKET_ID_BYTES) : null;
   }
@@ -117,30 +119,46 @@ class TransportDecoder {
   get usefulSymbols() {
     return this.framesNew - this.framesRedundant;
   }
+  isDuplicate(esi) {
+    const value = Number(esi) >>> 0;
+    const byteIndex = value >>> 3;
+    if (byteIndex >= this.seenBits.length) {
+      const maximum = RAPTOR_ESI_SPACE >>> 3;
+      let length = this.seenBits.length;
+      while (length <= byteIndex && length < maximum) length = Math.min(maximum, length * 2);
+      if (byteIndex >= length) return false;
+      const grown = new Uint8Array(length);
+      grown.set(this.seenBits);
+      this.seenBits = grown;
+    }
+    const mask = 1 << (value & 7);
+    if (this.seenBits[byteIndex] & mask) return true;
+    this.seenBits[byteIndex] |= mask;
+    return false;
+  }
   addFrame(esi, block) {
-    if (this.seen.has(esi)) {
+    if (this.isDuplicate(esi)) {
       this.framesDup++;
       return;
     }
-    this.seen.add(esi);
     this.framesNew++;
     if (this.isComplete) return;
     if (this.raptor) this.addRaptor(block);
     else this.addMds(esi, block);
   }
   addRaptor(block) {
-  const payload = this.raptor.add(block);
-  if (payload) {
-    this.raptorPayload = payload;
-    this.solvedCount = this.k;
-    return;
+    const payload = this.raptor.add(block);
+    if (payload) {
+      this.raptorPayload = payload;
+      this.solvedCount = this.k;
+      return;
+    }
+    // The streaming RaptorQ API only reports completion, not whether an
+    // individual fresh repair symbol was algebraically redundant. Fresh
+    // ESIs can be the coding overhead that completes the transfer, so do
+    // not mark every post-k symbol redundant and make live KB/s drop to 0.
+    this.solvedCount = Math.min(this.framesNew, this.k - 1);
   }
-  // The streaming RaptorQ API only reports completion, not whether an
-  // individual fresh repair symbol was algebraically redundant. Fresh
-  // ESIs can be the coding overhead that completes the transfer, so do
-  // not mark every post-k symbol redundant and make live KB/s drop to 0.
-  this.solvedCount = Math.min(this.framesNew, this.k - 1);
-}
   addMds(esi, block) {
     const coefficients = mdsCoefficients(this.k, esi);
     const bytes = new Uint8Array(this.blockLen);
@@ -152,7 +170,13 @@ class TransportDecoder {
       addScaled(coefficients, basis.coefficients, factor);
       addScaled(bytes, basis.bytes, factor);
     }
-    const pivot = coefficients.findIndex((value) => value !== 0);
+    let pivot = -1;
+    for (let index = 0; index < coefficients.length; index++) {
+      if (coefficients[index] !== 0) {
+        pivot = index;
+        break;
+      }
+    }
     if (pivot < 0) {
       this.framesRedundant++;
       return;
@@ -193,7 +217,7 @@ class TransportDecoder {
     this.raptor?.free();
     this.raptor = null;
     this.raptorPayload = null;
-    this.seen.clear();
+    this.seenBits = null;
     this.mdsBasis.length = 0;
     this.mdsBlocks = null;
   }
