@@ -20,11 +20,7 @@
     "./receive/performance-policy.js",
     "./receive/phase-nudge.js",
     "./receive/qr-optics.js",
-    "./receive/temporal-soft-grid.js",
     "./receive/worker.js",
-    "./receive/worker-reconstruct-bootstrap.js",
-    "./receive/worker-reconstruct.js",
-    "./receive/worker-temporal-generalized.js",
     "./send/main.js",
     "./send/render-worker.js",
     "./shared/android.js",
@@ -41,8 +37,6 @@
     "./shared/protocol.js",
     "./shared/qr-raster.js",
     "./shared/raptorq.js",
-    "./shared/receiver-recovery-policy.js",
-    "./shared/receiver-recovery-state.js",
     "./shared/snippet.js",
     "./shared/status-line.js",
     "./shared/style.css",
@@ -68,6 +62,9 @@
     }));
   });
   self.addEventListener("activate", (event) => {
+    // Normal service-worker lifecycle only: an update cannot activate while
+    // any page is still controlled by the previous worker. Do not claim an
+    // already-open page; it keeps the exact build it started with.
     event.waitUntil(caches.keys().then((keys) => Promise.all(
       keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key))
     )));
@@ -108,6 +105,11 @@
         if (response.ok) cache.put(request, response.clone());
         return response;
       } catch {
+        // Static build/scalar query parameters select runtime behavior, not
+        // different file bytes. Precache stores the canonical paths, so offline
+        // fallback must ignore the query (e.g. main.js?build=v... and
+        // worker.js?scalar=1) or a freshly installed PWA can miss files it
+        // already precached.
         const cached = await cache.match(request, { ignoreSearch: true });
         if (cached) return cached;
         if (request.mode === "navigate") return cache.match("./index.html");

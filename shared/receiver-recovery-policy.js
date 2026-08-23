@@ -18,11 +18,8 @@ import {
 } from "./receiver-recovery-state.js";
 
 const SOFT_POSE_LOSS_MS = 450;
-const STOCK_HARD_POSE_LOSS_MS = 900;
-const LOW_COUNT_ONE_QR_HARD_LOSS_MS = 3500;
-const LOW_COUNT_TWO_QR_HARD_LOSS_MS = 2500;
 const LONG_AE_EXPOSURE = VERIFIED_QR_MAX_EXPOSURE;
-const MOTION_SAFE_MAX_EXPOSURE = 45;
+const MOTION_SAFE_MAX_EXPOSURE = 45; // 4.5 ms first deterministic clamp when no proven state exists.
 const LONG_AE_HANDOFF_COOLDOWN_MS = 2500;
 const QR_LIGHT_SCALE = Math.pow(2, -0.75);
 let installed = false;
@@ -31,19 +28,6 @@ const lastLongAeHandoffAt = new WeakMap();
 const longAeHandoffCounts = new WeakMap();
 const longAeHandoffRunning = new WeakSet();
 const verifiedFreezeRunning = new WeakSet();
-const lowCountFinderEvidenceAt = new WeakMap();
-
-function latticeSlotCount(lattice) {
-  const layout = lattice?.candidate?.layout;
-  const count = Number(layout?.cols) * Number(layout?.rows);
-  return Number.isInteger(count) && count > 0 ? count : 0;
-}
-
-function lowCountHardLossMs(count) {
-  if (count === 1) return LOW_COUNT_ONE_QR_HARD_LOSS_MS;
-  if (count === 2) return LOW_COUNT_TWO_QR_HARD_LOSS_MS;
-  return STOCK_HARD_POSE_LOSS_MS;
-}
 
 function installLatticeRecoveryBridge() {
   const originalReset = GridLattice.prototype.reset;
@@ -52,16 +36,13 @@ function installLatticeRecoveryBridge() {
   const originalAccept = GridLattice.prototype.accept;
   const originalNoteValidPacket = GridLattice.prototype.noteValidPacket;
   const originalTick = GridLattice.prototype.tick;
-  const originalNudgeFromSightings = GridLattice.prototype.nudgeFromSightings;
 
   GridLattice.prototype.reset = function(...args) {
     endPoseRecovery();
-    lowCountFinderEvidenceAt.delete(this);
     return originalReset.apply(this, args);
   };
 
   GridLattice.prototype.reacquire = function(at, reason = "whole lattice invalidated") {
-    lowCountFinderEvidenceAt.delete(this);
     if (poseRecoveryReasonEligible(reason)) {
       beginPoseRecovery(reason);
       armWarmWorkerRestartSuppression();
@@ -74,39 +55,11 @@ function installLatticeRecoveryBridge() {
     return originalInvalidatePose.call(this, reason);
   };
 
-  GridLattice.prototype.nudgeFromSightings = function(sightings, at = this.lastHitAt) {
-    const result = originalNudgeFromSightings.call(this, sightings, at);
-    const count = latticeSlotCount(this);
-    if (result && count >= 1 && count <= 2) lowCountFinderEvidenceAt.set(this, at);
-    return result;
-  };
-
   GridLattice.prototype.tick = function(now) {
     const staleMs = this.candidate ? now - this.lastHitAt : 0;
-    const count = latticeSlotCount(this);
-    const lowCount = count >= 1 && count <= 2;
-    const finderAt = lowCountFinderEvidenceAt.get(this) ?? -Infinity;
-    const hardEvidenceAge = lowCount ? now - Math.max(this.lastHitAt, finderAt) : staleMs;
-    const hardLimit = lowCountHardLossMs(count);
-    let result;
-
-    if (lowCount && this.candidate && !this.pendingInvalidationReason &&
-        staleMs > STOCK_HARD_POSE_LOSS_MS && hardEvidenceAge <= hardLimit) {
-      const actualLastHitAt = this.lastHitAt;
-      this.lastHitAt = now - (STOCK_HARD_POSE_LOSS_MS - 1);
-      try {
-        result = originalTick.call(this, now);
-      } finally {
-        if (this.candidate) this.lastHitAt = actualLastHitAt;
-      }
-    } else {
-      result = originalTick.call(this, now);
-    }
-
+    const result = originalTick.call(this, now);
     if (this.candidate && staleMs > SOFT_POSE_LOSS_MS && this.state === "PARTIAL_LOSS") {
-      beginPoseRecovery(lowCount
-        ? "whole lattice stale; low-count recovery window"
-        : "whole lattice stale; bounded QR re-anchor window");
+      beginPoseRecovery("whole lattice stale; bounded QR re-anchor window");
     }
     return result;
   };
@@ -180,6 +133,9 @@ async function freezeVerifiedShortExposure(controller, track) {
     const finalIso = Number(actual.iso);
     if (!(finalExposure > 0) || finalExposure > VERIFIED_QR_MAX_EXPOSURE || !(finalIso > 0)) return false;
 
+    // Some Android camera stacks accept manual exposure but omit/lag the mode
+    // field in getSettings(). The successful manual constraint plus unchanged
+    // short shutter/ISO is enough to treat this exact sensor state as proven.
     const proven = {
       ...actual,
       exposureMode: "manual",
@@ -188,6 +144,10 @@ async function freezeVerifiedShortExposure(controller, track) {
     };
     rememberManualExposure(track, proven);
     latchVerifiedExposure(track, proven);
+
+    // Synchronize the existing focus/optics controller with the physical camera.
+    // This removes the v0.5.369 split where diagnostics said committed 8.31 ms
+    // while the sensor was actually running a QR-proven 3.33 ms shutter.
     controller?.commitSettings?.(proven);
     if (controller) {
       controller.optimizeLearnedExposure = finalExposure;
@@ -239,6 +199,7 @@ async function handOffLongAe(track) {
       exposureTime: shortExposure,
       iso: shortIso
     }] });
+    // This handoff is only a candidate until another verified QR proves it.
     longAeHandoffCounts.set(track, (longAeHandoffCounts.get(track) ?? 0) + 1);
   } catch {
     lastLongAeHandoffAt.delete(track);
@@ -275,8 +236,14 @@ function installVerifiedDecodeBridge() {
     const result = originalNoteValidDecode.apply(this, args);
     const track = this.track;
     if (track) {
+      // Preserve any already-manual QR-proven state as the fallback used by a
+      // later long-AE escape. Speculative manual probes still are not promoted.
       rememberManualExposure(track);
       const controller = this;
+      // Let synchronous decode/lattice work finish, then make this verified QR
+      // authoritative for exposure. Short settings are frozen exactly; long
+      // settings get one deterministic short-shutter candidate for the NEXT QR
+      // to prove.
       queueMicrotask(async () => {
         if (await freezeVerifiedShortExposure(controller, track)) return;
         if (!recoveryDiagnostics().active) await handOffLongAe(track);

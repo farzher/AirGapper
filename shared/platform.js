@@ -1,5 +1,4 @@
 import { installReceiverRecoveryPolicy } from "./receiver-recovery-policy.js";
-import { DecodeWorkerPool } from "./worker-pool.js";
 import {
   consumeExposureRescue,
   noteSuppressedExposureWrite,
@@ -12,73 +11,6 @@ installReceiverRecoveryPolicy();
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const isIOS = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 const isAndroid = !!nav && /Android/.test(nav.userAgent);
-
-// Only DecodeWorkerPool creation is redirected. Never replace global Worker for
-// the lifetime of the page: sender workers, benchmarks, acquisition helpers and
-// unrelated app workers must remain completely untouched. The tiny bootstrap
-// worker queues an immediately-posted first decode job while the reconstruction
-// wrapper imports the mature base worker, eliminating module-startup message loss.
-function redirectDecodeWorkerInput(input) {
-  try {
-    const base = globalThis.location?.href || import.meta.url;
-    const url = input instanceof URL ? new URL(input.href) : new URL(String(input), base);
-    if (url.pathname.endsWith("/receive/worker.js") && !url.searchParams.has("raw"))
-      url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-reconstruct-bootstrap.js";
-    return url;
-  } catch {
-    return input;
-  }
-}
-
-function installPoolDecodeWorkerFactory() {
-  const poolResize = DecodeWorkerPool.prototype.resize;
-  DecodeWorkerPool.prototype.resize = function(count) {
-    if (!this.__airgapperReconstructCreateWrapped && typeof this.create === "function") {
-      const originalCreate = this.create;
-      const NativeWorker = globalThis.Worker;
-      if (typeof NativeWorker === "function") {
-        this.create = function(...args) {
-          const previousWorker = globalThis.Worker;
-          function ScopedDecodeWorker(url, options) {
-            return new NativeWorker(redirectDecodeWorkerInput(url), options);
-          }
-          try { Object.setPrototypeOf(ScopedDecodeWorker, NativeWorker); } catch {}
-          ScopedDecodeWorker.prototype = NativeWorker.prototype;
-          globalThis.Worker = ScopedDecodeWorker;
-          try {
-            return originalCreate.apply(this, args);
-          } finally {
-            globalThis.Worker = previousWorker;
-          }
-        };
-      }
-      this.__airgapperReconstructCreateWrapped = true;
-    }
-    return poolResize.call(this, count);
-  };
-}
-installPoolDecodeWorkerFactory();
-
-// Low-count temporal history is most valuable when adjacent camera frames land
-// on the same normal decode worker. At 1-2 QRs the measured robust path is well
-// below one frame period, so prefer worker 0 while it is free. Never drop a real
-// camera frame merely to preserve affinity: if worker 0 is busy, fall back to
-// the pool's normal free-worker scheduler.
-const poolSubmit = DecodeWorkerPool.prototype.submit;
-const poolSubmitTo = DecodeWorkerPool.prototype.submitTo;
-const lowCountTracked = (message) => Boolean(message && !message.full && message.pixelFormat === "y8" &&
-  Array.isArray(message.tracks) && message.tracks.length >= 1 && message.tracks.length <= 2);
-DecodeWorkerPool.prototype.submit = function(message, transfer) {
-  if (lowCountTracked(message) && this.workers.length && !this.busy[0])
-    return this.submitAtSlot(0, message, transfer);
-  return poolSubmit.call(this, message, transfer);
-};
-DecodeWorkerPool.prototype.submitTo = function(slot, message, transfer) {
-  if (lowCountTracked(message) && this.workers.length && !this.busy[0])
-    return this.submitAtSlot(0, message, transfer);
-  return poolSubmitTo.call(this, slot, message, transfer);
-};
-
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 function probeCameraCapabilities(track) {
   var _a, _b, _c, _d, _e;
@@ -132,17 +64,27 @@ async function applyConstraint(track, set) {
 async function applyAdvancedConstraint(track, set) {
   const touchesExposure = Boolean(set) && EXPOSURE_KEYS.some((key) => set[key] !== void 0);
 
+  // Reapplying an identical sensor state can wake/reconfigure Android 3A even
+  // though no value changed. Treat exposure-only repeats as successful no-ops.
   if (exposureConstraintAlreadySatisfied(track, set)) {
     noteSuppressedExposureWrite();
     return true;
   }
 
   if (touchesExposure) {
+    // Camera movement invalidates coordinates, not a QR-proven sensor setting.
+    // During a lattice pose recovery, never surrender a verified manual exposure
+    // back to photographic AE. If a mixed AF+AE request arrives, strip only the
+    // exposure fields so autofocus remains independent and automatic.
     if (set?.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
       noteSuppressedExposureWrite();
       return applyConstraint(track, withoutExposure(set));
     }
 
+    // A CRC-valid QR proves the current short exposure works. Temporary decoder
+    // failures are weak evidence about brightness, so suppress exposure/ISO/EV
+    // mutations while QR evidence is fresh or geometry is still moving. After a
+    // stable decode outage, permit exactly one rescue mutation per bounded window.
     const latch = verifiedExposureLatchDecision(track);
     if (latch.hold) {
       noteSuppressedExposureWrite();
