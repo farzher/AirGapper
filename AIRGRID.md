@@ -4,7 +4,7 @@ Experimental rolling-shutter-native optical PHY. This branch starts from the cle
 
 ## Performance bar
 
-The real QR implementation has already demonstrated about **2.0 MB/s verified goodput on a phone with a 1440p sender at 60 Hz**. That is the baseline, not an aspirational target. AirGrid is only a win if real hardware beats it.
+The real QR implementation has already demonstrated about **2.0 MB/s verified goodput on a phone with a 1440p sender at 60 Hz**. That is the floor, not an aspirational target. AirGrid is only a win if real hardware beats it. The first meaningful AirGrid milestone is **2.5 MB/s sustained verified goodput**, then keep optimizing rather than treating 2.5 MB/s as a ceiling.
 
 For a display that actually projects to 2560x1440 camera pixels at 60 camera fps, the current binary lane framing has roughly these PHY payload ceilings:
 
@@ -15,7 +15,7 @@ For a display that actually projects to 2560x1440 camera pixels at 60 camera fps
 | 3 px | ~44.6 KB | ~2.68 MB/s | ~75% |
 | 2.5 px | ~66.2 KB | ~3.97 MB/s | ~50% |
 
-Therefore the first binary target is reliable **3 projected camera px/cell or denser at ~60 camera fps**. If the receiving camera only supplies ~30 fps, binary 3 px/cell cannot beat the existing 2 MB/s result; diagnostics must make that immediately obvious, and the next lever becomes higher camera FPS, denser cells, or multi-level modulation.
+Therefore the first binary target is reliable **3 projected camera px/cell or denser at ~60 camera fps**. In practice, 2.5 px/cell gives much healthier headroom for the 2.5 MB/s milestone. If the receiving camera only supplies ~30 fps, binary 3 px/cell cannot beat the existing 2 MB/s result; diagnostics must make that immediately obvious, and the next lever becomes higher camera FPS, denser cells, or multi-level modulation.
 
 ## Core decision
 
@@ -63,11 +63,11 @@ The rolling window additionally records:
 
 - actual camera FPS and frame-time jitter
 - requested/actual sender presentation Hz, render time, vsync misses and presentation jitter
-- Camera2 exposure, ISO, frame duration and sensor readout/skew when available
+- Camera2 timestamp, exposure, ISO, frame duration and rolling-shutter skew/readout metadata
 - frame-copy time, queue delay and end-to-end CPU frame-budget consumption
-- measured verified MB/s versus the 2.0 MB/s QR target
+- measured verified MB/s versus both the **2.0 MB/s QR floor** and the **2.5 MB/s first AirGrid target**
 - inferred rolling-shutter readout time from display-sequence stripe spacing when hardware metadata does not expose it
-- automatic bottleneck classification: CPU, optics, rolling-shutter/exposure, camera capture, spatial density, or target cleared
+- automatic bottleneck classification: CPU, optics, rolling-shutter/exposure, camera capture, spatial density, QR baseline cleared, or AirGrid target cleared
 
 Diagnostics should stay cheap in the production fast path. Expensive per-lane traces are opt-in; aggregate quantiles and failure runs are always sufficient for normal tuning.
 
@@ -100,5 +100,5 @@ A 360 Hz panel is useful only when camera exposure is short enough to separate t
 
 - `benchmark/airgrid-rolling-shutter-proof.mjs`: multiple display sequences coexist in one capture while intact lanes remain byte-exact and boundary lanes fail CRC.
 - `benchmark/airgrid-y8-proof.mjs`: synthetic 1920x1080 Y8 camera plane with multiple rolling-shutter refresh boundaries and exposure-blurred boundary bands.
-- `benchmark/airgrid-diagnostics-proof.mjs`: optical/decode failure classification, rolling-shutter boundary diagnosis, camera metadata aggregation and sender cadence telemetry.
+- `benchmark/airgrid-diagnostics-proof.mjs`: optical/decode failure classification, rolling-shutter boundary diagnosis, Camera2 metadata aggregation and sender cadence telemetry.
 - `benchmark/airgrid-throughput-budget.mjs`: guards the architecture against regressing below the existing 2 MB/s QR benchmark at the 1440p/60-fps target geometry.
