@@ -14,6 +14,7 @@ on:
       - airgrid.html
       - airgrid-*.html
       - airgrid-lab*.js
+      - airgrid-runtime.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -31,6 +32,7 @@ on:
       - airgrid.html
       - airgrid-*.html
       - airgrid-lab*.js
+      - airgrid-runtime.js
       - sw.js
       - benchmark/**
       - .github/workflows/fast-regression.yml
@@ -85,6 +87,7 @@ jobs:
           node --input-type=module --check < airgrid-lab-1410.js
           node --input-type=module --check < airgrid-lab-1420.js
           node --input-type=module --check < airgrid-lab-1430.js
+          node --input-type=module --check < airgrid-runtime.js
           node --input-type=module --check < receive/airgrid-sampler.js
           node --input-type=module --check < receive/airgrid-block-sampler.js
           node --input-type=module --check < receive/airgrid-pam4-sampler.js
@@ -95,6 +98,7 @@ jobs:
           node --input-type=module --check < send/airgrid-present-diagnostics.js
           node --input-type=module --check < shared/airgrid-phy.js
           node --input-type=module --check < shared/airgrid-block.js
+          node --input-type=module --check < shared/airgrid-camera-optics.js
           node --input-type=module --check < shared/airgrid-pam4.js
           node --input-type=module --check < shared/airgrid-acquisition.js
           node --input-type=module --check < shared/airgrid-qr-acquisition.js
@@ -104,6 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           node benchmark/airgrid-block-proof.mjs
+          node benchmark/airgrid-block-y8-proof.mjs
           node benchmark/airgrid-qr-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-proof.mjs
           node benchmark/airgrid-acquisition-orientation-proof.mjs
