@@ -23,6 +23,14 @@ jobs:
       - name: Apply cleanup
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/scripts/cleanup-v386.py')
+          s = p.read_text()
+          s = s.replace("'''  } else {\n    history.replaceState({ ...history.state, airgapperView: \"home\" }, \"\");\n  }\n'''", "'''} else {\n  history.replaceState({ ...history.state, airgapperView: \"home\" }, \"\");\n}\n'''")
+          s = s.replace("'''  } else {\n    history.replaceState({ ...history.state, airgapperView: \"home\" }, \"\");\n    void ensureSendModule();\n  }\n'''", "'''} else {\n  history.replaceState({ ...history.state, airgapperView: \"home\" }, \"\");\n  void ensureSendModule();\n}\n'''")
+          p.write_text(s)
+          PY
           python3 .github/scripts/cleanup-v386.py
           git config user.name "AirGapper Cleanup"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -30,4 +38,4 @@ jobs:
           git add main.js send/main.js receive/worker.js version.js
           git commit -m "v0.5.386: keep hot state warm and trim frame churn"
           git push origin HEAD:master
-# trigger
+# retrigger
