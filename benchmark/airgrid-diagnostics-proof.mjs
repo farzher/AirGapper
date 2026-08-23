@@ -49,17 +49,13 @@ assert.equal(bad.lanes.length, 0);
 assert.equal(bad.diagnostics.decode.failures.lowContrast, profile.lanes, 'flat image should diagnose optical contrast, not generic decode failure');
 
 const monitor = new AirGridDiagnostics({ targetBytesPerSecond: 2_000_000 });
-for (let i = 0; i < 12; i++) monitor.observe({
-  diagnostics,
-  captureTimestampMs: i * 1000 / 60,
-  copyMs: 0.2,
-  queueMs: 0.1,
-  exposureUs: 1100,
-  iso: 320,
-  frameDurationUs: 1e6 / 60,
-  sensorReadoutUs: 11800,
-  senderHz: 60
-});
+for (let i = 0; i < 12; i++) monitor.observeNative({
+  timestampNs: i * 1e9 / 60,
+  exposureTimeNs: 1_100_000,
+  frameDurationNs: 1e9 / 60,
+  rollingShutterSkewNs: 11_800_000,
+  iso: 320
+}, diagnostics, { copyMs: 0.2, queueMs: 0.1, senderHz: 60 });
 const snapshot = monitor.snapshot();
 assert.ok(snapshot.capture.fps > 59 && snapshot.capture.fps < 61, `capture FPS telemetry wrong: ${snapshot.capture.fps}`);
 assert.equal(snapshot.capture.exposureUs, 1100);
@@ -80,6 +76,7 @@ console.log('AIRGAPPER_AIRGRID_DIAGNOSTICS_PASS', JSON.stringify({
   separationP50: diagnostics.optics.separationP50,
   snrP10: diagnostics.optics.snrP10,
   captureFps: snapshot.capture.fps,
+  exposureUs: snapshot.capture.exposureUs,
   sensorReadoutMs: snapshot.rollingShutter.sensorReadoutMs,
   senderHz: sender.actualHz
 }));
