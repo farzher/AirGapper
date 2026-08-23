@@ -46,7 +46,10 @@ jobs:
         with:
           fetch-depth: 1
 
+      # AirGrid is intentionally iteration-fast while the PHY is experimental.
+      # QR/master still gets the complete codec/browser/Android gate below.
       - name: Cache codec toolchain
+        if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
         uses: actions/cache@v4
         with:
           path: |
@@ -57,6 +60,7 @@ jobs:
           key: airgapper-codec-emsdk-6.0.6-zxing-${{ hashFiles('codec/source/zxing-cpp.commit') }}
 
       - name: Build codecs
+        if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
         run: |
           set -euo pipefail
           AIRGAPPER_CODEC_SIMD=1 AIRGAPPER_CODEC_OUTPUT_DIR=.. codec/source/build.sh
@@ -70,23 +74,33 @@ jobs:
         run: |
           set -euo pipefail
           node --input-type=module --check < version.js
+          node --input-type=module --check < receive/airgrid-sampler.js
+          node --input-type=module --check < send/airgrid-renderer.js
+          node --input-type=module --check < send/airgrid-present-diagnostics.js
+          node --input-type=module --check < shared/airgrid-phy.js
+          node --input-type=module --check < shared/airgrid-diagnostics.js
+
+      - name: Run AirGrid fast proofs
+        run: |
+          set -euo pipefail
+          node benchmark/airgrid-rolling-shutter-proof.mjs
+          node benchmark/airgrid-y8-proof.mjs
+          node benchmark/airgrid-diagnostics-proof.mjs
+          node benchmark/airgrid-throughput-budget.mjs
+
+      - name: Run QR/core regression
+        if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
+        run: |
+          set -euo pipefail
           node --input-type=module --check < main.js
           node --input-type=module --check < receive/main.js
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/optics-guard.js
-          node --input-type=module --check < receive/airgrid-sampler.js
-          node --input-type=module --check < send/airgrid-renderer.js
-          node --input-type=module --check < shared/airgrid-phy.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/native-camera-v2.js
           node --input-type=module --check < shared/receiver-recovery-state.js
           node --input-type=module --check < shared/receiver-recovery-policy.js
-
-      - name: Run grid regression
-        run: |
-          node benchmark/airgrid-rolling-shutter-proof.mjs
-          node benchmark/airgrid-y8-proof.mjs
           node benchmark/grid-lattice-regression.mjs
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
@@ -96,9 +110,11 @@ jobs:
           node benchmark/version-source-smoke.mjs
 
       - name: Install browser benchmark dependency
+        if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
         run: npm install --no-save --package-lock=false playwright@1.55.0
 
       - name: Run production regression
+        if: github.ref != 'refs/heads/airgrid-rs' && github.head_ref != 'airgrid-rs'
         run: |
           set -euo pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
