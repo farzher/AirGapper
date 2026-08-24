@@ -1,11 +1,10 @@
 import { FocusController } from "./focus-controller.js";
 
 // Native continuous AF is already optimized by the camera HAL for live video.
-// Repeated POI writes, forced single-shot escalation, or switching a QR-proven
-// continuous lens into manual hold can all leave some phones hunting or stuck
-// on the wrong plane after distance changes. When continuous AF exists, leave
-// it running untouched; only devices without continuous AF may use the bounded
-// single-shot acquisition fallback.
+// Repeated POI writes, forced single-shot escalation, switching a QR-proven
+// continuous lens into manual hold, or simply re-applying the same continuous
+// mode can all restart lens work on some phones. Once continuous AF is active,
+// AirGapper leaves focus ownership entirely to the camera HAL.
 function preserveNativeContinuousAf(controller) {
   if (!controller.focusModes().includes("continuous")) return;
   controller.singleShotAfRejected = true;
@@ -25,6 +24,20 @@ FocusController.prototype.setStrategy = function(strategy) {
   const result = baseSetStrategy.call(this, strategy);
   if (strategy === "auto") preserveNativeContinuousAf(this);
   return result;
+};
+
+const baseMaybeRetrySeekingAutofocus = FocusController.prototype.maybeRetrySeekingAutofocus;
+FocusController.prototype.maybeRetrySeekingAutofocus = function(...args) {
+  if (this.strategy === "auto" && this.focusModes().includes("continuous") &&
+      this.settings().focusMode === "continuous") {
+    this.singleShotAfRejected = true;
+    this.__airgapperFocusHoldRejected = true;
+    this.__airgapperFocusHeld = false;
+    this.lastReason = "native continuous autofocus owns focus; no camera focus write needed";
+    this.changed();
+    return Promise.resolve();
+  }
+  return baseMaybeRetrySeekingAutofocus.apply(this, args);
 };
 
 // POI writes are not a reliable, passive AF hint across camera HALs. Some
