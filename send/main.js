@@ -8,7 +8,7 @@ import {
   smallestSufficientFrameSize,
   sourceBlockCount
 } from "../shared/frame-capacity.js";
-import { scheduledEsi, TransportEncoder } from "../shared/transport.js";
+import { scheduledEncodingId, TransportEncoder } from "../shared/transport.js";
 import { prepareRaptorQ } from "../shared/raptorq.js";
 import { MAX_SNIPPET_BYTES, MAX_SNIPPET_LABEL, packSnippet } from "../shared/snippet.js";
 import {
@@ -1061,19 +1061,19 @@ async function startStream(revealStage = false) {
         ordinal: null
       };
     }
-    const ordinal = symbolOrdinal++;
-    const slotIndex = ordinal % gridCodes;
-    const seq = scheduledEsi(encoder.k, ordinal);
-    header.seq = seq;
+    const senderOrdinal = symbolOrdinal++;
+    const slotIndex = senderOrdinal % gridCodes;
+    const repairRequestId = scheduledEncodingId(encoder.k, senderOrdinal);
+    header.seq = encoder.mode === "mds" ? repairRequestId : 0;
     header.slotIndex = slotIndex;
-    const bytes = packFrame(header, encoder.encode(seq));
+    const bytes = packFrame(header, encoder.encode(repairRequestId));
     return {
       qr: QRCode.create([{ data: bytes, mode: "byte" }], {
         errorCorrectionLevel: ecc,
         version,
         maskPattern: 4
       }),
-      ordinal
+      ordinal: senderOrdinal
     };
   };
   const makeCell = () => {
@@ -1139,12 +1139,12 @@ async function startStream(revealStage = false) {
       const frames = [];
       const transfer = [];
       for (let offset = 0; offset < gridCodes; ++offset) {
-        const ordinal = startOrdinal + offset;
-        const slotIndex = ordinal % gridCodes;
-        const seq = scheduledEsi(encoder.k, ordinal);
-        header.seq = seq;
+        const senderOrdinal = startOrdinal + offset;
+        const slotIndex = senderOrdinal % gridCodes;
+        const repairRequestId = scheduledEncodingId(encoder.k, senderOrdinal);
+        header.seq = encoder.mode === "mds" ? repairRequestId : 0;
         header.slotIndex = slotIndex;
-        const bytes = packFrame(header, encoder.encode(seq));
+        const bytes = packFrame(header, encoder.encode(repairRequestId));
         const buffer = bytes.buffer;
         frames.push({ slotIndex, buffer });
         transfer.push(buffer);

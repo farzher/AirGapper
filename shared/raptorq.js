@@ -21,8 +21,8 @@ class RaptorEncoder {
       throw new Error("Transfer needs more than one RaptorQ source block.");
     }
   }
-  repair(sequence) {
-    return this.native.repair(0, sequence);
+  repair(requestId) {
+    return this.native.repair(0, requestId);
   }
   free() {
     this.native.free();

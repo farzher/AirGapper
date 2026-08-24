@@ -25,8 +25,6 @@
     "./send/transfer-qr.js",
     "./shared/android.js",
     "./shared/camera-start-guard.js",
-    "./shared/native-camera.js",
-    "./shared/native-camera-v2.js",
     "./shared/coding-mode.js",
     "./shared/format.js",
     "./shared/frame-capacity.js",

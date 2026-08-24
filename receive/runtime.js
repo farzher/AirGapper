@@ -25,7 +25,8 @@ import {
 import { RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { statusLine } from "../shared/status-line.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
-import { applyAdvancedConstraint, isAndroid, isIOS } from "../shared/platform.js";
+import { isAndroid, isIOS } from "../shared/platform.js";
+import { applyAdvancedConstraint } from "./camera-constraints.js";
 import {
   FocusController,
   CAMERA_TUNING
@@ -44,26 +45,6 @@ import {
   showScanCaptureMenuOnAndroid
 } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
-import {
-  ackNativeCameraFrame,
-  listNativeCameras,
-  nativeCameraAvailable,
-  nativeCameraTrack,
-  setNativeCameraFrameHandler,
-  startNativeCamera,
-  stopNativeCamera
-} from "../shared/native-camera.js";
-import {
-  listNativeCamerasV2,
-  nativeCameraV2Available,
-  nativeCameraV2Track,
-  setNativeCameraV2FrameHandler,
-  setNativeCameraV2PreviewHandler,
-  setNativeCameraV2ResultHandler,
-  startNativeCameraV2,
-  stopNativeCameraV2,
-  submitNativeCameraV2Plan
-} from "../shared/native-camera-v2.js";
 let agcapModulePromise;
 function loadAgcap() {
   if (!agcapModulePromise) agcapModulePromise = import("./agcap.js");
@@ -73,8 +54,6 @@ const RECEIVER_RUNTIME_BUILD = window.AIRGAPPER_BUILD || "dev";
 const startBtn = document.getElementById("start");
 const cameraDevice = document.getElementById("camera-device");
 const cameraDeviceControl = document.getElementById("camera-device-control");
-const cameraBackendControl = document.getElementById("camera-backend-control");
-const cameraBackend = document.getElementById("camera-backend");
 const cameraResolution = document.getElementById("camera-resolution");
 const cameraResolutionLabel = document.getElementById("camera-resolution-label");
 const decodeWorkers = document.getElementById("decode-workers");
@@ -149,8 +128,6 @@ const scanDialogStatus = document.getElementById("scan-dialog-status");
 const scanSightingLegend = document.getElementById("scan-sighting-legend");
 const scanCapture = document.getElementById("scan-capture");
 const video = document.getElementById("video");
-const nativePreview = document.getElementById("native-camera-preview");
-const nativePreviewCtx = nativePreview?.getContext("2d");
 const preview = document.getElementById("preview");
 const cameraBox = document.querySelector(".preview");
 const overlay = document.getElementById("detect-overlay");
@@ -323,38 +300,6 @@ const STANDARD_RESOLUTIONS = [
 let requestedWidth = 2560;
 let requestedHeight = 1440;
 let requestedFps = 60;
-const CAMERA_BACKEND_KEY = "airgapper:apk-camera-backend:v1";
-let cameraBackendMode = "browser";
-if (cameraBackend) {
-  cameraBackendControl.hidden = !isAndroidApp();
-  const nativeOption = cameraBackend.querySelector('option[value="native-v2"]');
-  const nativeAvailable = isAndroidApp() && nativeCameraV2Available();
-  if (nativeOption) nativeOption.disabled = !nativeAvailable;
-  if (isAndroidApp()) {
-    try {
-      const saved = localStorage.getItem(CAMERA_BACKEND_KEY);
-      if (saved === "native-v2" && nativeAvailable) cameraBackendMode = saved;
-    } catch {}
-  }
-  cameraBackend.value = cameraBackendMode;
-}
-let nativeCamera2 = isAndroidApp() && cameraBackendMode === "native-v2" && nativeCameraV2Available();
-let nativeCameraV2Running = false;
-let nativeV2ActiveJob;
-function currentNativeTrack() {
-  return nativeCameraV2Running ? nativeCameraV2Track() : nativeCameraTrack();
-}
-const nativeStreamShim = Object.freeze({
-  __airgapperNativeCamera: true,
-  getTracks: () => currentNativeTrack() ? [currentNativeTrack()] : [],
-  getVideoTracks: () => currentNativeTrack() ? [currentNativeTrack()] : []
-});
-let nativeCameraCatalog;
-let nativeCameraInfo;
-let nativeCameraRunning = false;
-let nativeCameraUnsupportedReason = "";
-let nativePreviewLastAt = -Infinity;
-let nativePreviewImage;
 const AUTO_QR_EV_BIAS = -0.75;
 const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
@@ -765,102 +710,6 @@ function standardBrowserModes() {
 function browserModeSuffix(key) {
   return browserModeResults[key] === true ? "" : browserModeResults[key] === false ? " · Retry" : " · Try";
 }
-function nativeModeLabel(mode) {
-  if (mode.highSpeed) return `${formatCameraMode(mode.width, mode.height, mode.fps)} · sensor ${mode.sensorFps} fps HFR · NDK`;
-  const path = mode.pipeline === "gpu" ? " · PRIVATE" : " · YUV";
-  const control = mode.fpsControl === "manual" ? " · manual sensor" : "";
-  if (mode.fixedFps) return `${formatCameraMode(mode.width, mode.height, mode.fps)}${path}${control} · NDK`;
-  return `${mode.width}×${mode.height} · ${mode.fps} fps target · AE ${mode.fpsMin}–${mode.fpsMax}${path}${control} · NDK`;
-}
-function nativePreviewRotation(info = nativeCameraInfo ?? selectedNativeCamera()) {
-  if (!info) return 0;
-  const sensor = Number(info.sensorOrientation) || 0;
-  const device = Number(screen.orientation?.angle ?? window.orientation ?? 0) || 0;
-  // Android Camera2: rear output rotates against device rotation; front output
-  // rotates with it (mirroring is a separate display concern). The old signs
-  // were reversed, which broke landscape and some 270-degree sensors.
-  const rotation = info.facing === "front" ? sensor + device : sensor - device;
-  return ((rotation % 360) + 360) % 360;
-}
-function syncNativePreviewAspect(width = requestedWidth, height = requestedHeight, info = nativeCameraInfo ?? selectedNativeCamera()) {
-  const rotation = nativePreviewRotation(info);
-  cameraBox.style.aspectRatio = rotation === 90 || rotation === 270 ? `${height} / ${width}` : `${width} / ${height}`;
-}
-function selectedNativeCamera() {
-  const cameras = nativeCameraCatalog?.cameras ?? [];
-  const usable = (camera) => camera?.modes?.some((mode) => mode.pipeline === "yuv" && !mode.highSpeed);
-  if (preferredCameraDeviceId) {
-    const explicit = cameras.find((camera) => camera.id === preferredCameraDeviceId && usable(camera));
-    if (explicit) return explicit;
-  }
-  return cameras.find((camera) => camera.facing === "rear" && usable(camera))
-    ?? cameras.find(usable)
-    ?? cameras[0];
-}
-function nativeAutoMode(camera) {
-  const modes = (camera?.modes ?? []).filter((mode) => mode.pipeline === "yuv" && !mode.highSpeed);
-  const exact = (width, height, fps) => modes.find((mode) =>
-    mode.width === width && mode.height === height && mode.fps === fps && mode.fixedFps);
-  // Keep the production native path on direct ImageReader YUV. PRIVATE/GPU
-  // modes synchronously glReadPixels a full frame and only produce luma preview;
-  // leave them out until that experimental path has real-device validation.
-  return exact(1280, 720, 60)
-    ?? exact(1280, 720, 30)
-    ?? exact(1920, 1080, 30)
-    ?? modes.find((mode) => mode.fps === 30 && mode.fixedFps)
-    ?? modes.find((mode) => mode.fixedFps)
-    ?? modes[0];
-}
-function populateNativeCameraModes() {
-  if (!nativeCamera2 || !nativeCameraCatalog) return;
-  const camera = selectedNativeCamera();
-  const prior = cameraResolution.value;
-  browserModes = (camera?.modes ?? [])
-    .filter((mode) => mode.pipeline === "yuv" && !mode.highSpeed)
-    .map((mode) => ({ ...mode, label: nativeModeLabel(mode) }))
-    .sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
-  cameraResolution.replaceChildren(
-    new Option("Auto", "auto"),
-    ...browserModes.map((mode) => new Option(mode.label, mode.key))
-  );
-  cameraResolution.value = browserModes.some((mode) => mode.key === prior) ? prior : "auto";
-  const automatic = nativeAutoMode(camera);
-  const selected = browserModes.find((mode) => mode.key === cameraResolution.value) ?? automatic;
-  if (selected) {
-    requestedWidth = selected.width;
-    requestedHeight = selected.height;
-    requestedFps = selected.fps;
-  }
-  cameraResolutionLabel.textContent = "Mode";
-  cameraExposureControl.hidden = true;
-  cameraOpticsManual.hidden = true;
-  opticsAutoActions.hidden = true;
-  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
-}
-async function refreshNativeCameraDevices() {
-  if (!nativeCamera2) return false;
-  const catalog = cameraBackendMode === "native-v2" ? await listNativeCamerasV2() : await listNativeCameras();
-  if (!catalog.supported) {
-    nativeCameraUnsupportedReason = catalog.reason || "Native Camera2 binary bridge unavailable";
-    nativeCameraCatalog = catalog;
-    return false;
-  }
-  nativeCameraUnsupportedReason = "";
-  nativeCameraCatalog = catalog;
-  const cameras = catalog.cameras ?? [];
-  const options = [new Option("Rear camera (auto)", "")];
-  for (const camera of cameras) options.push(new Option(camera.label || `Camera ${camera.id}`, camera.id));
-  cameraDevice.replaceChildren(...options);
-  if (preferredCameraDeviceId && cameras.some((camera) => camera.id === preferredCameraDeviceId)) {
-    cameraDevice.value = preferredCameraDeviceId;
-  } else {
-    preferredCameraDeviceId = "";
-    cameraDevice.value = "";
-  }
-  cameraDevice.disabled = cameras.length <= 1;
-  populateNativeCameraModes();
-  return true;
-}
 function populateCameraOptions() {
   browserModes = standardBrowserModes();
   cameraResolution.replaceChildren(
@@ -941,7 +790,6 @@ async function refreshCameraDevices(activeTrack) {
       setTimeout(() => {
         if (!stream || done || preferredCameraDeviceId || stream.getVideoTracks()[0] !== upgradeTrack) return;
         if (gridLattice.identity || lastStreamDecodeAt >= cameraStartedTs) {
-          notePipelineEvent("camera-upgrade-skipped-after-qr");
           return;
         }
         stopReceiver();
@@ -980,17 +828,12 @@ function showRequestedCameraSettings() {
   cameraResolutionLabel.textContent = "Mode";
   captureScanBtn.hidden = false;
   decodeWorkersControl.hidden = legacyAndroidApp;
-  video.hidden = nativeCamera2;
-  if (nativePreview) nativePreview.hidden = !nativeCamera2;
-  if (nativeCamera2) syncNativePreviewAspect();
-  else cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
+  video.hidden = false;
+  cameraBox.style.aspectRatio = `${requestedWidth} / ${requestedHeight}`;
 }
 populateCameraOptions();
 restoreCameraSettings();
 showRequestedCameraSettings();
-if (nativeCamera2) void refreshNativeCameraDevices().catch((error) => {
-  nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error);
-});
 let frameId = 0;
 const focusController = new FocusController(
   applyCameraConstraint,
@@ -1058,9 +901,6 @@ async function reapplyManualOpticsAfterFreshFrames(track, reason) {
     await applyExposureSetting(track);
     if (generation !== manualOpticsReapplyGeneration || automaticOptics ||
         stream?.getVideoTracks()[0] !== track || track.readyState !== "live") return;
-    notePipelineEvent("manual-optics-reapplied", 2);
-  } else {
-    notePipelineEvent("manual-optics-reapplied", 1);
   }
   lastRecoveryReason = `${reason}; manual optics restored`;
 }
@@ -1091,7 +931,6 @@ async function maintainManualOptics(now) {
   manualSensorSessionActive = false;
   try {
     await applyExposureSetting(track);
-    notePipelineEvent("manual-optics-watchdog");
     lastRecoveryReason = "manual optics drift corrected";
   } finally {
     manualOpticsRepairRunning = false;
@@ -2015,7 +1854,6 @@ function temporalBandMissSlots(auditMode, completion, attempts = [], ignoredMiss
       );
     }
   }
-  notePipelineEvent("temporal-band", misses.length);
   return transientBand ? new Set(misses) : new Set();
 }
 function shouldScheduleTemporalBandSlot(region, sourceSequence, now = receiverNow(), plan) {
@@ -2414,7 +2252,6 @@ let optimizerPipelineActive = false;
 let optimizerTransition;
 let activeOptimizerEpoch;
 let latestSourceFrameSequence = -1;
-let latestNativeSettingsEpoch = 0;
 let optimizeMeasureToken = 0;
 let optimizerFixedTargets = [];
 let optimizerDiscoveryMode = false;
@@ -2996,16 +2833,6 @@ let recoveryAbortedJobs = 0;
 let recoveryAbortedWorkerMs = 0;
 let lastRecoveryReason = "—";
 let maxSequenceGapMs = 0;
-const pipelineEvents = [];
-const PIPELINE_EVENT_LIMIT = 80;
-function notePipelineEvent(kind, value = 0) {
-  if (pipelineEvents.length >= PIPELINE_EVENT_LIMIT) return;
-  pipelineEvents.push([
-    Number(((receiverNow() - cameraStartedTs) / 1e3).toFixed(2)),
-    kind,
-    value
-  ]);
-}
 const QUALITY_WINDOW_MS = 3e3;
 function pruneSequenceSamples(region, now) {
   let count = 0;
@@ -3215,7 +3042,6 @@ function noteDecodeCompleted(id, completion) {
         // re-homography the entire wall. Reset its throttle so the next fresh
         // camera frame gets a recovery opportunity immediately.
         geometryRecoveryAssistUntil = Math.max(geometryRecoveryAssistUntil, now + 550);
-        notePipelineEvent("geometry-recovery-assist", trackedOutputs);
       }
     } else if (coverage > GEOMETRY_COLLAPSE_BAD_RATIO) {
       geometryCoverageCollapseStreak = 0;
@@ -3248,7 +3074,6 @@ function noteDecodeCompleted(id, completion) {
   if (fullJob?.acquisition && !gridLattice.active && completion.symbolCount === 0 && completion.sightings?.length) {
     for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, capturedAt, false);
     acquisitionSightings += Math.min(3, completion.sightings.length);
-    notePipelineEvent("acquisition-finder-sighting", completion.sightings.length);
   }
   // A recovery finder pass can fail payload/RS decode while still locating
   // several QR bodies accurately. Once a wall has been proven, use that
@@ -3259,7 +3084,6 @@ function noteDecodeCompleted(id, completion) {
     if (nudged) {
       geometrySightingNudges++;
       syncGrid(nudged, capturedAt);
-      notePipelineEvent("sighting-lattice-nudge", geometrySightingNudges);
       lastRecoveryReason = `finder sightings recentered locked lattice (${geometrySightingNudges})`;
     }
   }
@@ -3277,7 +3101,6 @@ function noteDecodeCompleted(id, completion) {
     }
   }
   if (completion.directFrameFailed) {
-    notePipelineEvent("direct-frame-drop");
     finishScanCapture(id, completion);
     scanOutcomes.delete(id);
     cropAttempts.delete(id);
@@ -3324,7 +3147,6 @@ function noteDecodeCompleted(id, completion) {
     const skippedAt = receiverNow();
     repeatSkipTimes.push(skippedAt);
     pruneTimestampSamples(repeatSkipTimes, skippedAt - STATS_WINDOW_MS);
-    notePipelineEvent("repeat-frame-skip", Number.isFinite(completion.repeatDistance) ? completion.repeatDistance : 0);
   }
   if (auditThisCompletion && completion.nativeMetrics) {
     hotPathAudit.trackedJobs++;
@@ -3361,7 +3183,6 @@ function noteDecodeCompleted(id, completion) {
   if (completion.error) {
     decodeExceptions++;
     lastDecodeError = completion.error;
-    notePipelineEvent("decode-exception", decodeExceptions);
   } else if (completion.symbolCount > 0) {
     lastDecodeError = "";
   }
@@ -3426,7 +3247,6 @@ function noteDecodeCompleted(id, completion) {
                 refreshed.consecutiveMisses = 0;
                 refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
               }
-              notePipelineEvent("slot-geometry-reprobe", slot);
               lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
             }
           }
@@ -3559,7 +3379,6 @@ function noteRegion(box, now, decoded = true, info) {
     averageDecodeCostMs: 0,
     lastHitScanId: decoded ? info == null ? void 0 : info.scanId : void 0
   });
-  notePipelineEvent(decoded ? "region-decoded-created" : "region-sighting-created", regions.length);
   if (regions.length > MAX_REGIONS) {
     regions.sort((a, b) => Number(b.decoded) - Number(a.decoded) || b.seen - a.seen);
     regions.length = MAX_REGIONS;
@@ -3850,7 +3669,6 @@ function beginAutomaticOpticsMeasurementCohort() {
     }
   }
   autoOpticsMeasurementSlots = new Set(selected.map((region) => Number(region.gridSlot)).filter(Number.isFinite));
-  notePipelineEvent("auto-optics-cohort", autoOpticsMeasurementSlots.size);
   return autoOpticsMeasurementSlots.size;
 }
 function autoOpticsPoseDrift(a, b) {
@@ -3892,7 +3710,7 @@ function autoOpticsMemoryKey(track) {
     settings.deviceId || track?.label || settings.facingMode || "default",
     `${settings.width || 0}x${settings.height || 0}`,
     Math.round(Number(settings.frameRate) || 0),
-    settings.pipeline || (nativeCameraRunning ? "camera2" : "browser"),
+    settings.pipeline || "browser",
     settings.sensorMode || settings.sensorOrientation || "default"
   ].join("|");
 }
@@ -3990,7 +3808,6 @@ async function applyAutomaticShortSeed(track, baseline, reason) {
   autoOpticsRescueRetryAt = autoOpticsAcquisitionSince + AUTO_OPTICS_ACQUISITION_RESCUE_MS;
   autoOpticsTuneSummary = `${reason} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
   focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");
-  notePipelineEvent("auto-optics-short-seed");
   return true;
 }
 async function applyAutomaticOpticsMemoryBoot(track, saved) {
@@ -4023,7 +3840,6 @@ async function applyAutomaticOpticsMemoryBoot(track, saved) {
   autoOpticsRescueRetryAt = now + AUTO_OPTICS_MEMORY_BOOT_MAX_MS;
   autoOpticsTuneSummary = `remembered QR winner · ${formatExposureMs(autoOpticsMemoryBoot.exposure)} · ISO ${Math.round(autoOpticsMemoryBoot.iso)} · proving`;
   focusController.adoptAutomaticCameraState("recent QR-proven exposure restored before acquisition");
-  notePipelineEvent("auto-optics-memory-boot");
   return true;
 }
 async function primeAutomaticQrOpticsStartup(track) {
@@ -4064,7 +3880,6 @@ async function primeAutomaticQrOpticsStartup(track) {
       ? `hardware AE fallback · ${formatExposureMs(settings.exposureTime)} · ISO ${Math.round(settings.iso)}`
       : "hardware AE fallback";
     focusController.adoptAutomaticCameraState("fast-dark startup unavailable; hardware AE is rescue authority");
-    notePipelineEvent("auto-optics-ae-acquire");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4089,7 +3904,6 @@ async function abandonAutomaticShortSeed(track, reason = "fast-dark seed produce
     autoOpticsHeldYield = 0;
     autoOpticsTuneSummary = `${reason} · neutral AE rescue`;
     focusController.adoptAutomaticCameraState("fast-dark startup failed; hardware AE rescue enabled");
-    notePipelineEvent("auto-optics-seed-fallback");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4115,7 +3929,6 @@ async function abandonAutomaticOpticsStartupMemory(track, reason = "startup winn
     autoOpticsHeldYield = 0;
     autoOpticsTuneSummary = `${reason} · hardware AE fallback`;
     focusController.adoptAutomaticCameraState("recent automatic optics unconfirmed; hardware AE fallback");
-    notePipelineEvent("auto-optics-memory-fallback");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4189,19 +4002,16 @@ async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held 
     autoOpticsHeldYield = 0;
     autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · neutral hardware AE recovery`;
     focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; neutral hardware AE restored");
-    notePipelineEvent("auto-optics-hold-collapse");
   } finally {
     autoOpticsMutationRunning = false;
   }
 }
 async function waitForFreshAutoOpticsFrames(track, afterSequence, frames = CAMERA_TUNING.exposureDiscardFrames, timeoutMs = 420) {
   const target = afterSequence + Math.max(1, frames);
-  const requestedEpoch = Number(track?.getSettings?.().settingsEpoch) || 0;
   const started = performance.now();
   while (performance.now() - started < timeoutMs) {
     if (!automaticOpticsSessionAlive(track)) return false;
-    const epochActive = !nativeCameraRunning || !requestedEpoch || latestNativeSettingsEpoch >= requestedEpoch;
-    if (epochActive && latestSourceFrameSequence >= target) return true;
+    if (latestSourceFrameSequence >= target) return true;
     await new Promise((resolve) => setTimeout(resolve, 12));
   }
   return false;
@@ -4392,7 +4202,6 @@ async function settleAutomaticQrOptics(track, now) {
   autoOpticsMutationRunning = true;
   autoOpticsRuntimeState = "settling";
   autoOpticsControllerState = "LEARN";
-  notePipelineEvent("auto-optics-freeze-ae");
   try {
     // Android's recommended AE->manual handoff: copy the values which just
     // produced valid camera results. This is our always-safe rollback point.
@@ -4505,7 +4314,6 @@ async function settleAutomaticQrOptics(track, now) {
         autoOpticsHeldYield, frozenExposure * frozenIso, Number(best.tailYield) || 0);
     autoOpticsTuneSummary = `${best.label || "AE baseline"} · ${formatExposureMs(winnerExposure)} · ISO ${Math.round(winnerIso)} · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%${temporalDominant ? " · temporal seam present; no brightness chase" : ""}`;
     focusController.adoptAutomaticCameraState("bounded QR-proven automatic optics converged; sensor values are now held for the session");
-    notePipelineEvent("auto-optics-converged", Math.round(autoOpticsHeldYield * 100));
   } finally {
     autoOpticsMeasurementSlots = void 0;
     autoOpticsMutationRunning = false;
@@ -4566,7 +4374,6 @@ async function rescueAutomaticQrAcquisition(track, now) {
     autoOpticsAeRescueStep = (step + 1) % candidates.length;
     const completedCycle = autoOpticsAeRescueStep === 0;
     autoOpticsRescueRetryAt = receiverNow() + (completedCycle ? AUTO_OPTICS_AE_RESCUE_RETRY_MS : AUTO_OPTICS_AE_RESCUE_DWELL_MS);
-    notePipelineEvent("auto-optics-ae-rescue", Math.round(candidate.value * 100));
   } finally {
     if (automaticOpticsSessionAlive(track)) autoOpticsRuntimeState = "ae";
     autoOpticsMutationRunning = false;
@@ -4649,7 +4456,6 @@ function maintainAutomaticQrOptics(now) {
       autoOpticsRetryAt = Infinity;
       autoOpticsTuneSummary = `remembered winner proven · ${formatExposureMs(saved?.exposure)} · ISO ${Math.round(saved?.iso || 0)} · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%`;
       focusController.adoptAutomaticCameraState("remembered QR-proven exposure reacquired immediately and is held");
-      notePipelineEvent("auto-optics-memory-proven", Math.round(autoOpticsHeldYield * 100));
       return;
     }
     if (!recentDecode && autoOpticsMemoryBootAt && now - autoOpticsMemoryBootAt >= AUTO_OPTICS_MEMORY_BOOT_MAX_MS)
@@ -4879,8 +4685,8 @@ function drawOverlay(now) {
   lastOverlayDrawAt = now;
   const cw = overlay.clientWidth;
   const ch = overlay.clientHeight;
-  const vw = nativeCameraRunning ? receiverFrameWidth : video.videoWidth;
-  const vh = nativeCameraRunning ? receiverFrameHeight : video.videoHeight;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
   if (!cw || !ch || !vw || !vh) return;
   const dpr = window.devicePixelRatio || 1;
   const physicalPw = Math.round(cw * dpr);
@@ -4891,7 +4697,7 @@ function drawOverlay(now) {
   }
   overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
   overlayCtx.clearRect(0, 0, physicalPw, physicalPh);
-  const rotation = nativeCameraRunning ? nativePreviewRotation() : 0;
+  const rotation = 0;
   let pw = physicalPw;
   let ph = physicalPh;
   overlayCtx.save();
@@ -5158,11 +4964,7 @@ function renderFocusDiagnostics() {
   const pumpDetail = framePumpMode === "MediaStreamTrackProcessor"
     ? `${framePumpMode}${Number.isFinite(frameTrackProcessor?.discardedFrames) ? ` · source ${frameTrackProcessor.totalFrames} · discarded ${frameTrackProcessor.discardedFrames}` : ""}`
     : `${framePumpMode}${rvfcSkippedFrames ? ` · presented skips ${rvfcSkippedFrames}` : ""}`;
-  const sourceLine = nativeCameraInfo
-    ? nativeCameraInfo.nativeDecode
-      ? `Camera2 NDK ${nativeCameraInfo.cameraId} · ${nativeCameraInfo.pipeline === "gpu" ? "PRIVATE→GPU Y8" : "YUV Y8"} ${nativeCameraInfo.width}×${nativeCameraInfo.height} · decode ${nativeCameraInfo.fps} fps · sensor target ${nativeCameraInfo.sensorFps ?? nativeCameraInfo.fps} fps${sourceTrack?.getSettings?.().measuredFps ? ` · measured ${Number(sourceTrack.getSettings().measuredFps).toFixed(1)}` : ""} · scheduler ${sourceCaptureRate.toFixed(1)}/s · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
-      : `Camera2 ${nativeCameraInfo.cameraId} · ${nativeCameraInfo.pipeline === "gpu" ? "PRIVATE→GPU Y8" : "YUV"} ${nativeCameraInfo.width}×${nativeCameraInfo.height} · target ${nativeCameraInfo.fps} fps · ${nativeCameraInfo.fpsControl === "manual" ? "manual sensor FPS" : `AE ${nativeCameraInfo.fpsMin}–${nativeCameraInfo.fpsMax}${nativeCameraInfo.fixedFps ? " fixed" : " variable"}`} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${framePumpMode} · sensor ${nativeCameraInfo.sensorOrientation ?? "—"}°`
-    : sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
+  const sourceLine = sourceSettings ? `${sourceTrack?.label || "camera"} · id ${(sourceSettings.deviceId || "—").slice(0, 8)} · track ${sourceSettings.width ?? "—"}×${sourceSettings.height ?? "—"}@${sourceSettings.frameRate ? Number(sourceSettings.frameRate).toFixed(1) : "—"} · video ${video.videoWidth || "—"}×${video.videoHeight || "—"} · capture ${receiverFrameWidth || "—"}×${receiverFrameHeight || "—"}@${sourceCaptureRate.toFixed(1)} · pump ${pumpDetail} · VideoFrame ${lastVideoFrameInfo ?? "—"}` : "camera inactive";
   const cameraLine = (value) => {
     var _a2, _b2, _c2, _d2, _e2;
     return value ? `${(_a2 = value.focusMode) != null ? _a2 : "—"}/${(_b2 = value.focusDistance) != null ? _b2 : "—"} · ${(_c2 = value.exposureMode) != null ? _c2 : "—"}/${formatExposureMs(value.exposureTime)} · ISO ${(_d2 = value.iso) != null ? _d2 : "—"} · EV ${(_e2 = value.exposureCompensation) != null ? _e2 : "—"}` : "—";
@@ -5254,13 +5056,6 @@ const changeCameraSettings = async () => {
   var _a, _b;
   showRequestedCameraSettings();
   saveCameraSettings();
-  if (nativeCamera2) {
-    populateNativeCameraModes();
-    if (!stream || done) return;
-    stopReceiver();
-    await start();
-    return;
-  }
   const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (!track || done) return;
   if (cameraResolution.value === "auto") {
@@ -5325,32 +5120,16 @@ cameraResolution.addEventListener("change", () => {
     enterGeometryRecovery("camera mode changed", receiverNow(), true);
   });
 });
-cameraBackend?.addEventListener("change", () => {
-  const next = cameraBackend.value === "native-v2" && nativeCameraV2Available() ? "native-v2" : "browser";
-  if (next === cameraBackendMode) return;
-  stopReceiver();
-  cameraBackendMode = next;
-  nativeCamera2 = isAndroidApp() && cameraBackendMode === "native-v2";
-  nativeCameraCatalog = void 0;
-  preferredCameraDeviceId = "";
-  try { localStorage.setItem(CAMERA_BACKEND_KEY, cameraBackendMode); } catch {}
-  populateCameraOptions();
-  showRequestedCameraSettings();
-  if (nativeCamera2) void refreshNativeCameraDevices().finally(() => { if (!stream && !done) void start(); });
-  else void start();
-});
 cameraDevice?.addEventListener("change", () => {
   preferredCameraDeviceId = cameraDevice.value;
   automaticCameraUpgradeAttempted = false;
-  if (nativeCamera2) {
-    populateNativeCameraModes();
-  } else if (!preferredCameraDeviceId) automaticCameraDeviceId = learnedAutomaticCameraId();
+  if (!preferredCameraDeviceId) automaticCameraDeviceId = learnedAutomaticCameraId();
   saveCameraSettings();
   if (!stream || done) return;
   stopReceiver();
   void start();
 });
-if (!nativeCamera2) navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+navigator.mediaDevices?.addEventListener?.("devicechange", () => {
   void refreshCameraDevices(stream?.getVideoTracks()[0]);
 });
 cameraExposureAuto.addEventListener("change", () => {
@@ -5444,580 +5223,7 @@ decodeWorkers.addEventListener("change", () => {
 window.addEventListener("airgapper:enter-receive", () => {
   if (!stream && !startBtn.disabled) void start();
 });
-screen.orientation?.addEventListener?.("change", () => { if (nativeCamera2) { syncNativePreviewAspect(); queueOverlayDraw(); } });
-function stopNativeReceiverSource() {
-  if (nativeCameraV2Running) {
-    nativeCameraV2Running = false;
-    nativeV2ActiveJob = void 0;
-    setNativeCameraV2FrameHandler();
-    setNativeCameraV2ResultHandler();
-    setNativeCameraV2PreviewHandler();
-    void stopNativeCameraV2();
-  }
-  if (nativeCameraRunning) {
-    nativeCameraRunning = false;
-    setNativeCameraFrameHandler();
-    void stopNativeCamera();
-  }
-  nativeCameraInfo = void 0;
-  if (nativePreview) {
-    nativePreview.hidden = true;
-    nativePreview.width = 0;
-    nativePreview.height = 0;
-    nativePreviewImage = void 0;
-  }
-}
-function drawNativePreview(source) {
-  if (!nativePreviewCtx || !source.nativeY || !source.width || !source.height) return;
-  const now = performance.now();
-  const busy = pool.size && pool.busyCount >= Math.max(1, pool.size - 1);
-  if (now - nativePreviewLastAt < (busy ? 320 : 160)) return;
-  nativePreviewLastAt = now;
-  const rotation = nativePreviewRotation();
-  const rotated = rotation === 90 || rotation === 270;
-  const displayWidth = rotated ? source.height : source.width;
-  const displayHeight = rotated ? source.width : source.height;
-  const outWidth = Math.min(320, displayWidth);
-  const outHeight = Math.max(1, Math.round(displayHeight * outWidth / displayWidth));
-  if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
-    nativePreview.width = outWidth;
-    nativePreview.height = outHeight;
-    nativePreviewImage = void 0;
-  }
-  const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);
-  nativePreviewImage = rgba;
-  for (let y = 0; y < outHeight; y++) {
-    const dy = Math.min(displayHeight - 1, Math.floor((y + 0.5) * displayHeight / outHeight));
-    for (let x = 0; x < outWidth; x++) {
-      const dx = Math.min(displayWidth - 1, Math.floor((x + 0.5) * displayWidth / outWidth));
-      let sx = dx, sy = dy;
-      if (rotation === 90) { sx = dy; sy = source.height - 1 - dx; }
-      else if (rotation === 180) { sx = source.width - 1 - dx; sy = source.height - 1 - dy; }
-      else if (rotation === 270) { sx = source.width - 1 - dy; sy = dx; }
-      const luma = source.nativeY[sy * (source.nativeStride || source.width) + sx];
-      const at = (y * outWidth + x) * 4;
-      rgba.data[at] = luma;
-      rgba.data[at + 1] = luma;
-      rgba.data[at + 2] = luma;
-      rgba.data[at + 3] = 255;
-    }
-  }
-  nativePreviewCtx.putImageData(rgba, 0, 0);
-}
-function nativeV2PreviewBounds(quad) {
-  if (!validQuadObject(quad)) return null;
-  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
-  const left = Math.min(...points.map((point) => point.x));
-  const top = Math.min(...points.map((point) => point.y));
-  const right = Math.max(...points.map((point) => point.x));
-  const bottom = Math.max(...points.map((point) => point.y));
-  const w = right - left, h = bottom - top;
-  return w > 0 && h > 0 ? { x: left, y: top, w, h } : null;
-}
-function nativeV2TrackModuleSize(track) {
-  if (!track?.dim || !validQuadObject(track.quad)) return 0;
-  const points = [track.quad.topLeft, track.quad.topRight, track.quad.bottomRight, track.quad.bottomLeft];
-  return Math.min(...points.map((point, index) => {
-    const next = points[(index + 1) % points.length];
-    return Math.hypot(next.x - point.x, next.y - point.y);
-  })) / track.dim;
-}
-function nativeV2WallMotion(samples) {
-  if (!samples.length) return null;
-  const median = (values) => {
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = sorted.length >> 1;
-    return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  };
-  if (samples.length >= 2) {
-    const meanX = samples.reduce((sum, item) => sum + item.x, 0) / samples.length;
-    const meanY = samples.reduce((sum, item) => sum + item.y, 0) / samples.length;
-    const meanQx = samples.reduce((sum, item) => sum + item.x + item.dx, 0) / samples.length;
-    const meanQy = samples.reduce((sum, item) => sum + item.y + item.dy, 0) / samples.length;
-    let denom = 0, real = 0, imag = 0;
-    for (const item of samples) {
-      const px = item.x - meanX, py = item.y - meanY;
-      const qx = item.x + item.dx - meanQx, qy = item.y + item.dy - meanQy;
-      denom += px * px + py * py;
-      real += px * qx + py * qy;
-      imag += px * qy - py * qx;
-    }
-    if (denom > 1) {
-      const a = real / denom, b = imag / denom;
-      const motion = {
-        a, b,
-        tx: meanQx - a * meanX + b * meanY,
-        ty: meanQy - b * meanX - a * meanY
-      };
-      const scale = Math.hypot(a, b);
-      const rotation = Math.atan2(b, a);
-      const residuals = samples.map((item) => {
-        const x = a * item.x - b * item.y + motion.tx;
-        const y = b * item.x + a * item.y + motion.ty;
-        return Math.hypot(x - item.x - item.dx, y - item.y - item.dy);
-      });
-      const shifts = samples.map((item) => {
-        const x = a * item.x - b * item.y + motion.tx;
-        const y = b * item.x + a * item.y + motion.ty;
-        return Math.hypot(x - item.x, y - item.y);
-      });
-      if (scale >= 0.975 && scale <= 1.025 && Math.abs(rotation) <= 0.035 &&
-          Math.max(...residuals) <= 1.05 && Math.max(...shifts) <= 5.1) {
-        return {
-          kind: "similarity", ...motion,
-          dx: samples.reduce((sum, item) => sum + item.dx, 0) / samples.length,
-          dy: samples.reduce((sum, item) => sum + item.dy, 0) / samples.length,
-          samples: samples.length,
-          residual: Math.sqrt(residuals.reduce((sum, value) => sum + value * value, 0) / residuals.length),
-          maxShift: Math.max(...shifts)
-        };
-      }
-    }
-  }
-  const dx = median(samples.map((item) => item.dx));
-  const dy = median(samples.map((item) => item.dy));
-  const coherent = samples.filter((item) => Math.hypot(item.dx - dx, item.dy - dy) <= 0.75);
-  if (coherent.length >= Math.max(1, Math.ceil(samples.length * 0.6)) && Math.hypot(dx, dy) <= 4.5) {
-    return {
-      kind: "translation", a: 1, b: 0, tx: dx, ty: dy, dx, dy,
-      samples: coherent.length,
-      residual: Math.max(0, ...coherent.map((item) => Math.hypot(item.dx - dx, item.dy - dy))),
-      maxShift: Math.hypot(dx, dy)
-    };
-  }
-  return null;
-}
-function drawNativeV2Preview(packet) {
-  if (!nativePreviewCtx || !packet?.y || !packet.width || !packet.height) return;
-  const rotation = nativePreviewRotation({ sensorOrientation: packet.orientation, facing: nativeCameraInfo?.facing });
-  const rotated = rotation === 90 || rotation === 270;
-  const outWidth = rotated ? packet.height : packet.width;
-  const outHeight = rotated ? packet.width : packet.height;
-  if (nativePreview.width !== outWidth || nativePreview.height !== outHeight) {
-    nativePreview.width = outWidth;
-    nativePreview.height = outHeight;
-    nativePreviewImage = void 0;
-  }
-  cameraBox.style.aspectRatio = `${outWidth} / ${outHeight}`;
-  const rgba = nativePreviewImage ?? nativePreviewCtx.createImageData(outWidth, outHeight);
-  nativePreviewImage = rgba;
-  const color = packet.format === "yuv420p" && packet.u?.length && packet.v?.length;
-  const chromaWidth = packet.width >> 1;
-  const clampByte = (value) => value < 0 ? 0 : value > 255 ? 255 : value;
-  for (let y = 0; y < outHeight; y++) {
-    for (let x = 0; x < outWidth; x++) {
-      let sx = x, sy = y;
-      if (rotation === 90) { sx = y; sy = packet.height - 1 - x; }
-      else if (rotation === 180) { sx = packet.width - 1 - x; sy = packet.height - 1 - y; }
-      else if (rotation === 270) { sx = packet.width - 1 - y; sy = x; }
-      const luma = packet.y[sy * packet.width + sx];
-      const at = (y * outWidth + x) * 4;
-      if (color) {
-        const uv = (sy >> 1) * chromaWidth + (sx >> 1);
-        const c = Math.max(0, luma - 16) * 298;
-        const d = packet.u[uv] - 128;
-        const e = packet.v[uv] - 128;
-        rgba.data[at] = clampByte((c + 409 * e + 128) >> 8);
-        rgba.data[at + 1] = clampByte((c - 100 * d - 208 * e + 128) >> 8);
-        rgba.data[at + 2] = clampByte((c + 516 * d + 128) >> 8);
-      } else {
-        rgba.data[at] = luma;
-        rgba.data[at + 1] = luma;
-        rgba.data[at + 2] = luma;
-      }
-      rgba.data[at + 3] = 255;
-    }
-  }
-  nativePreviewCtx.putImageData(rgba, 0, 0);
-}
-function nativeV2SourceFrame(frame, gen) {
-  if (!nativeCameraV2Running || done || gen !== captureGen || !frame) return;
-  const callbackTime = performance.now();
-  const sequence = sourceFrameSequence++;
-  latestSourceFrameSequence = sequence;
-  latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);
-  if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
-  framePumpProcessorTotal++;
-  processSourceFrame({
-    nativeV2: true,
-    sequence,
-    cameraSequence: frame.frameNumber,
-    cameraSettingsEpoch: frame.settingsEpoch,
-    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,
-    width: frame.width || nativeCameraInfo?.width || requestedWidth,
-    height: frame.height || nativeCameraInfo?.height || requestedHeight,
-    callbackTimeMs: callbackTime,
-    mediaTimeMs: frame.timestampNs > 0 ? frame.timestampNs / 1e6 : callbackTime,
-    presentationTimeMs: callbackTime,
-    expectedDisplayTimeMs: callbackTime,
-    cameraMetadata: {
-      timestampNs: frame.timestampNs,
-      frameNumber: frame.frameNumber,
-      exposureTimeNs: frame.exposureTimeNs,
-      frameDurationNs: frame.frameDurationNs,
-      rollingShutterSkewNs: frame.rollingShutterSkewNs,
-      focusDistance: frame.focusDistance,
-      iso: frame.iso,
-      settingsEpoch: frame.settingsEpoch,
-      orientation: frame.orientation
-    }
-  }, gen);
-}
-function submitNativeV2Job(message, sourceSequence, sourceCapturedAt) {
-  if (!nativeCameraV2Running || nativeV2ActiveJob) return false;
-  const tracks = Array.isArray(message.tracks) ? message.tracks : [];
-  const guided = !message.full && Boolean(message.guidedDecode) && tracks.length > 0;
-  const plan = {
-    mode: guided ? "guided" : "full",
-    jobId: message.id,
-    sourceSequence: Number(sourceSequence) || 0,
-    cropX: Math.max(0, Math.round(Number(message.ox) || 0)),
-    cropY: Math.max(0, Math.round(Number(message.oy) || 0)),
-    cropWidth: Math.max(0, Math.round(Number(message.w) || 0)),
-    cropHeight: Math.max(0, Math.round(Number(message.h) || 0)),
-    tryHarder: Boolean(message.full ? message.acquisitionMode !== "fast" : true),
-    tryDownscale: Boolean(message.full && message.acquisitionMode === "thorough"),
-    returnErrors: Boolean(message.full),
-    maxSymbols: guided ? tracks.length : Math.min(8, Math.max(1, tracks.length || (message.full ? 1 : 4))),
-    fallbackMask: Number(message.guidedFallbackMask ?? 0xffffffff) >>> 0,
-    repairMask: Number(message.guidedRepairMask ?? 0xffffffff) >>> 0
-  };
-  if (guided) {
-    plan.tracks = tracks.map((track, index) => ({
-      id: Number(track.id ?? track.slot ?? index),
-      slot: Number(track.slot ?? track.id ?? index),
-      dim: Number(track.dim),
-      quad: [
-        track.quad.topLeft.x, track.quad.topLeft.y,
-        track.quad.topRight.x, track.quad.topRight.y,
-        track.quad.bottomRight.x, track.quad.bottomRight.y,
-        track.quad.bottomLeft.x, track.quad.bottomLeft.y
-      ]
-    }));
-  }
-  if (!submitNativeCameraV2Plan(plan)) return false;
-  nativeV2ActiveJob = {
-    id: message.id, message, sourceSequence, sourceCapturedAt,
-    opticsEpoch: message.opticsEpoch,
-    submittedAt: performance.now()
-  };
-  return true;
-}
-function completeNativeV2Job(packet) {
-  const job = nativeV2ActiveJob;
-  if (!job) return;
-  if (packet?.type === "decode" && packet.jobId !== job.id) return;
-  nativeV2ActiveJob = void 0;
-  const message = job.message;
-  if (packet?.type === "error") {
-    noteDecodeCompleted(job.id, {
-      full: Boolean(message.full), symbolCount: 0, sightingCount: 0,
-      trackedAttempted: !message.full, trackedHit: false, fallbackAttempted: false, fallbackSucceeded: false,
-      readFullAttempts: Number(Boolean(message.full)), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,
-      targetedSuccesses: 0, latencyMs: performance.now() - job.submittedAt, frameCopyMs: 0,
-      symbols: [], sightings: [], error: packet.detail || "Native Camera2 NDK decode failed"
-    });
-    return;
-  }
-  const metrics = packet.guidedMetrics;
-  const tracks = Array.isArray(message.tracks) ? message.tracks : [];
-  if (metrics && tracks.length) {
-    const sizes = tracks.map(nativeV2TrackModuleSize).filter((value) => value > 0 && Number.isFinite(value));
-    metrics.moduleSizeMin = sizes.length ? Math.min(...sizes) : 0;
-    metrics.moduleSizeMax = sizes.length ? Math.max(...sizes) : 0;
-    metrics.moduleSizeAvg = sizes.length ? sizes.reduce((sum, value) => sum + value, 0) / sizes.length : 0;
-  }
-  const expectedSlots = new Set(tracks.map((track) => Number(track.slot ?? track.id)).filter(Number.isInteger));
-  const acceptedSlots = new Set();
-  const symbols = [];
-  const sightings = [];
-  const motionSamples = [];
-  for (const record of packet.records ?? []) {
-    const box = nativeV2PreviewBounds(record.quad);
-    if ((record.status !== 1 && record.status !== 3) || !record.bytes?.length) {
-      if (message.full && box) sightings.push(box);
-      continue;
-    }
-    const parsed = parseFrame(record.bytes);
-    const slot = parsed?.header?.slotIndex;
-    if (!parsed || (expectedSlots.size && !expectedSlots.has(slot)) || acceptedSlots.has(slot)) continue;
-    acceptedSlots.add(slot);
-    const lane = tracks.findIndex((track) => Number(track.slot ?? track.id) === slot);
-    const bit = lane >= 0 && lane < 32 ? (1 << lane) >>> 0 : 0;
-    const decodePath = message.full ? "acquire"
-      : packet.mode === 1
-        ? bit && metrics && (metrics.fallbackSuccessMask & bit) ? "fallback"
-          : bit && metrics && (metrics.sparseSuccessMask & bit) ? "sparse" : "hot"
-        : "robust";
-    const symbol = {
-      bytes: record.bytes, box, quad: record.quad, modules: record.dimension,
-      tracked: !message.full, geometryMeasured: record.status === 1, decodePath, crc32: true,
-      verifiedPayload: true, header: parsed.header
-    };
-    symbols.push(symbol);
-    if (!message.full && lane >= 0 && validQuadObject(tracks[lane]?.quad)) {
-      const input = tracks[lane].quad;
-      const names = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
-      const dx = names.reduce((sum, name) => sum + record.quad[name].x - input[name].x, 0) / names.length;
-      const dy = names.reduce((sum, name) => sum + record.quad[name].y - input[name].y, 0) / names.length;
-      if (Number.isFinite(dx) && Number.isFinite(dy) && Math.hypot(dx, dy) <= 5.1) {
-        const points = names.map((name) => input[name]);
-        motionSamples.push({
-          dx, dy,
-          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
-          y: points.reduce((sum, point) => sum + point.y, 0) / points.length
-        });
-      }
-    }
-  }
-  const wallMotion = nativeV2WallMotion(motionSamples);
-  if (wallMotion) for (const symbol of symbols) symbol.wallMotion = wallMotion;
-  const auditMode = hotPathJobMode.get(job.id);
-  if (auditMode) {
-    auditMode.cameraTimestampNs = packet.timestampNs;
-    auditMode.rollingShutterSkewNs = packet.rollingShutterSkewNs;
-    auditMode.cameraOrientation = packet.orientation;
-    auditMode.cameraSettingsEpoch = packet.settingsEpoch;
-  }
-  for (const symbol of symbols) {
-    onDecoded(symbol.bytes, symbol.box, {
-      scanId: job.id, sourceSequence: job.sourceSequence, opticsEpoch: job.opticsEpoch,
-      quad: symbol.quad, modules: symbol.modules, tracked: symbol.tracked,
-      geometryMeasured: symbol.geometryMeasured, wallMotion: symbol.wallMotion, decodePath: symbol.decodePath,
-      crc32: symbol.crc32, verifiedPayload: true, header: symbol.header
-    });
-  }
-  if (!gridLattice.active) for (const sighting of sightings.slice(0, 3)) noteRegion(sighting, receiverNow(), false);
-  const latencyMs = performance.now() - job.submittedAt;
-  noteDecodeCompleted(job.id, {
-    full: Boolean(message.full), symbolCount: symbols.length, sightingCount: sightings.length,
-    trackedAttempted: !message.full, trackedHit: !message.full && symbols.length > 0,
-    fallbackAttempted: !message.full && packet.mode === 0, fallbackSucceeded: !message.full && packet.mode === 0 && symbols.length > 0,
-    readFullAttempts: Number(packet.mode === 0), workerWaitMs: 0, targetedAttempts: 0, targetedPixels: 0,
-    targetedSuccesses: 0, latencyMs, frameCopyMs: 0, nativeMs: metrics?.totalMs ?? 0,
-    guidedMetrics: metrics, pixelPath: packet.mode === 1 ? "ndk-guided" : "ndk-full",
-    symbols, sightings
-  });
-}
-async function startNativeV2Receiver(startAttempt, transportReady) {
-  let catalogReady = Boolean(nativeCameraCatalog?.supported);
-  if (!catalogReady) {
-    try { catalogReady = await refreshNativeCameraDevices(); }
-    catch (error) { nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error); }
-  }
-  if (startAttempt !== cameraStartGen || receiverPaused) return;
-  if (!catalogReady) {
-    pool.resize(0);
-    offerRetry(`Native Camera2 NDK: ${nativeCameraUnsupportedReason || "camera bridge unavailable"}`);
-    return;
-  }
-  const camera = selectedNativeCamera();
-  const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);
-  if (!camera || !selectedMode) {
-    pool.resize(0);
-    offerRetry("Native Camera2 NDK: no supported mode found");
-    return;
-  }
-  requestedWidth = selectedMode.width; requestedHeight = selectedMode.height; requestedFps = selectedMode.fps;
-  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
-  cameraActual.textContent = `${nativeModeLabel(selectedMode)} · native decode`;
-  startBtn.disabled = true; startBtn.style.display = "none";
-  video.srcObject = null; video.hidden = true;
-  if (nativePreview) nativePreview.hidden = false;
-  const futureGen = captureGen + 1;
-  // Install preview delivery before Camera2 starts. Some devices begin producing
-  // frames immediately after session configuration, before the start reply has
-  // crossed back into WebView. Dropping those first packets made a healthy
-  // native session look like a black/blank camera.
-  setNativeCameraV2PreviewHandler(drawNativeV2Preview);
-  let started, transportError;
-  try {
-    [started, transportError] = await Promise.all([
-      startNativeCameraV2({
-        cameraId: camera.id, width: requestedWidth, height: requestedHeight, fps: requestedFps,
-        sensorFps: selectedMode.sensorFps ?? requestedFps, pipeline: selectedMode.pipeline,
-        fpsControl: selectedMode.fpsControl, highSpeed: selectedMode.highSpeed
-      }),
-      transportReady
-    ]);
-  } catch (error) {
-    setNativeCameraV2PreviewHandler();
-    void stopNativeCameraV2();
-    if (startAttempt !== cameraStartGen || receiverPaused) return;
-    pool.resize(0);
-    offerRetry(`Native Camera2 NDK: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  if (transportError) {
-    setNativeCameraV2PreviewHandler();
-    void stopNativeCameraV2(); pool.resize(0);
-    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
-    return;
-  }
-  if (startAttempt !== cameraStartGen || receiverPaused) {
-    setNativeCameraV2PreviewHandler();
-    void stopNativeCameraV2();
-    return;
-  }
-  stream = nativeStreamShim;
-  nativeCameraInfo = { ...started, nativeDecode: true };
-  nativeCameraV2Running = true; nativeCameraRunning = false; nativeV2ActiveJob = void 0;
-  latestNativeSettingsEpoch = 0;
-  const nativeTrack = nativeCameraV2Track();
-  if (nativeTrack) {
-    populateBrowserCapabilities(nativeTrack);
-    attachCameraController(nativeTrack);
-    if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native NDK camera started");
-  }
-  syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
-  setNativeCameraV2ResultHandler(completeNativeV2Job);
-  setNativeCameraV2FrameHandler((frame) => nativeV2SourceFrame(frame, futureGen));
-  preview.classList.remove("camera-loading"); setStatus("");
-  cameraStartedTs = receiverNow();
-  acquisitionRaceStartedAt = 0; acquisitionHuntScans = 0; acquisitionSightingScans = 0; acquisitionSightings = 0;
-  resetLivePipeline(cameraStartedTs);
-  captureGen = futureGen;
-  framePumpMode = "Camera2 NDK"; framePumpStartedAt = receiverNow(); framePumpFirstFrameAt = 0;
-  framePumpProcessorTotal = 0; framePumpProcessorDiscarded = 0;
-  statsTimer = setInterval(updateStats, STATS_TICK_MS);
-  await requestScreenWakeLock();
-}
 
-function nativeSourceFrame(frame, gen) {
-  // shared/native-camera.js has already ACKed ownership. Camera2 metadata and
-  // Y8 share this ArrayBuffer, so candidate fencing uses the capture epoch that
-  // actually produced these pixels rather than a main-thread apply timestamp.
-  if (!nativeCameraRunning || done || gen !== captureGen || !frame) return;
-  const callbackTime = performance.now();
-  const sequence = sourceFrameSequence++;
-  latestSourceFrameSequence = sequence;
-  latestNativeSettingsEpoch = Math.max(latestNativeSettingsEpoch, Number(frame.settingsEpoch) || 0);
-  if (!framePumpFirstFrameAt) framePumpFirstFrameAt = receiverNow();
-  framePumpProcessorTotal++;
-  processSourceFrame({
-    sequence,
-    cameraSequence: frame.sequence,
-    cameraSettingsEpoch: frame.settingsEpoch,
-    opticsEpoch: activeOptimizerEpoch?.collecting ? activeOptimizerEpoch.id : void 0,
-    width: frame.width,
-    height: frame.height,
-    callbackTimeMs: callbackTime,
-    mediaTimeMs: frame.timestampNs > 0 ? frame.timestampNs / 1e6 : callbackTime,
-    presentationTimeMs: callbackTime,
-    expectedDisplayTimeMs: callbackTime,
-    cameraMetadata: frame,
-    nativeY: new Uint8Array(frame.buffer, frame.yOffset, frame.stride * frame.height),
-    nativeBuffer: frame.buffer,
-    nativeYOffset: frame.yOffset,
-    nativeStride: frame.stride
-  }, gen);
-}
-async function startNativeReceiver(startAttempt, transportReady) {
-  if (cameraBackendMode === "native-v2") return startNativeV2Receiver(startAttempt, transportReady);
-  let catalogReady = Boolean(nativeCameraCatalog?.supported);
-  if (!catalogReady) {
-    try {
-      catalogReady = await refreshNativeCameraDevices();
-    } catch (error) {
-      nativeCameraUnsupportedReason = error instanceof Error ? error.message : String(error);
-    }
-  }
-  if (startAttempt !== cameraStartGen || receiverPaused) return;
-  if (!catalogReady) {
-    pool.resize(0);
-    offerRetry(`Native Camera2: ${nativeCameraUnsupportedReason || "camera bridge unavailable"}`);
-    return;
-  }
-  const camera = selectedNativeCamera();
-  const selectedMode = browserModes.find((mode) => mode.key === cameraResolution.value) ?? nativeAutoMode(camera);
-  if (!camera || !selectedMode) {
-    pool.resize(0);
-    offerRetry("Native Camera2: no supported native camera mode found");
-    return;
-  }
-  requestedWidth = selectedMode.width;
-  requestedHeight = selectedMode.height;
-  requestedFps = selectedMode.fps;
-  syncNativePreviewAspect(requestedWidth, requestedHeight, camera);
-  cameraActual.textContent = `${nativeModeLabel(selectedMode)} · Camera2`;
-  startBtn.disabled = true;
-  startBtn.style.display = "none";
-  video.srcObject = null;
-  video.hidden = true;
-  if (nativePreview) nativePreview.hidden = false;
-
-  const futureGen = captureGen + 1;
-  setNativeCameraFrameHandler();
-  let started;
-  let transportError;
-  try {
-    [started, transportError] = await Promise.all([
-      startNativeCamera({
-        cameraId: camera.id,
-        width: requestedWidth,
-        height: requestedHeight,
-        fps: requestedFps,
-        pipeline: selectedMode.pipeline,
-        fpsControl: selectedMode.fpsControl
-      }),
-      transportReady
-    ]);
-  } catch (error) {
-    setNativeCameraFrameHandler();
-    void stopNativeCamera();
-    const message = error instanceof Error ? error.message : String(error);
-    // Android may pause the Activity while its runtime camera-permission sheet
-    // is on top. The native lifecycle deliberately cancels that pending open;
-    // resume immediately starts a fresh request, so cancellation is not a
-    // user-visible camera failure.
-    if (message === "Camera start cancelled" || startAttempt !== cameraStartGen || receiverPaused) return;
-    pool.resize(0);
-    offerRetry(`Native Camera2: ${message}`);
-    return;
-  }
-  if (transportError) {
-    setNativeCameraFrameHandler();
-    void stopNativeCamera();
-    if (startAttempt === cameraStartGen) pool.resize(0);
-    offerRetry(`Transport: ${transportError instanceof Error ? transportError.message : String(transportError)}`);
-    return;
-  }
-  if (startAttempt !== cameraStartGen || receiverPaused) {
-    setNativeCameraFrameHandler();
-    void stopNativeCamera();
-    return;
-  }
-
-  stream = nativeStreamShim;
-  nativeCameraInfo = started;
-  nativeCameraRunning = true;
-  latestNativeSettingsEpoch = 0;
-  const nativeTrack = nativeCameraTrack();
-  if (nativeTrack) {
-    populateBrowserCapabilities(nativeTrack);
-    attachCameraController(nativeTrack);
-    if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(nativeTrack, "native camera started");
-  }
-  syncNativePreviewAspect(started.width ?? requestedWidth, started.height ?? requestedHeight, started);
-  setNativeCameraFrameHandler((frame) => nativeSourceFrame(frame, futureGen));
-  preview.classList.remove("camera-loading");
-  setStatus("");
-  cameraStartedTs = receiverNow();
-  acquisitionRaceStartedAt = 0;
-  acquisitionHuntScans = 0;
-  acquisitionSightingScans = 0;
-  acquisitionSightings = 0;
-  resetLivePipeline(cameraStartedTs);
-  captureGen = futureGen;
-  framePumpMode = started.pipeline === "gpu" ? "Camera2 GPU Y8" : "Camera2 Y8";
-  framePumpStartedAt = receiverNow();
-  framePumpFirstFrameAt = 0;
-  framePumpProcessorTotal = 0;
-  framePumpProcessorDiscarded = 0;
-  statsTimer = setInterval(updateStats, STATS_TICK_MS);
-  ackNativeCameraFrame();
-  await requestScreenWakeLock();
-}
 const { setStatus, showError } = statusLine(stats);
 function restartButton(label) {
   const button = document.createElement("button");
@@ -6089,7 +5295,6 @@ function stopReceiver() {
   releaseScreenWakeLock();
   document.body.classList.remove("receive-complete");
   stopFramePump();
-  stopNativeReceiverSource();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -6176,7 +5381,6 @@ function stopReceiver() {
   frameModeMismatchDrops = 0;
   frameModeSyncTimeouts = 0;
   maxSequenceGapMs = 0;
-  pipelineEvents.length = 0;
   usefulFrameTimes.length = 0;
   totalCaptures = 0;
   totalDecodes = 0;
@@ -6243,7 +5447,6 @@ function pauseReceiver() {
   captureGen++;
   releaseScreenWakeLock();
   stopFramePump();
-  stopNativeReceiverSource();
   stream == null ? void 0 : stream.getTracks().forEach((track) => track.stop());
   stream = null;
   video.srcObject = null;
@@ -6288,7 +5491,7 @@ async function start() {
   // worker before transport prep / permission / getUserMedia so cold WASM
   // compilation is hidden behind work we already have to wait for instead of
   // beginning only after the live preview is visible.
-  pool.resize(nativeCamera2 ? 1 : selectedWorkerCount());
+  pool.resize(selectedWorkerCount());
   const transportReady = prepareRaptorQ().then(() => null, (error) => error);
   if (startAttempt !== cameraStartGen || receiverPaused) return;
   preview.style.display = "";
@@ -6297,10 +5500,6 @@ async function start() {
   progressStatus.style.display = "block";
   progressEl.style.display = "block";
   showRequestedCameraSettings();
-  if (nativeCamera2) {
-    await startNativeReceiver(startAttempt, transportReady);
-    return;
-  }
   if (!((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia)) {
     if (startAttempt === cameraStartGen) pool.resize(0);
     offerRetry(
@@ -6483,11 +5682,6 @@ function sourceFrameMeta(videoFrame, callbackTime = performance.now()) {
 }
 function releaseSourceFrame(frame) {
   frame.videoFrame?.close();
-  if (frame.nativeAck) {
-    const ack = frame.nativeAck;
-    frame.nativeAck = void 0;
-    ack();
-  }
 }
 function processSourceFrame(frame, gen) {
   if (done || gen !== captureGen) {
@@ -6501,12 +5695,7 @@ function processSourceFrame(frame, gen) {
       releaseSourceFrame(frame);
       return;
     }
-    if (!matches) {
-      frameModeSyncTimeouts++;
-      notePipelineEvent("frame-mode-sync-timeout", frameModeMismatchDrops);
-    } else {
-      notePipelineEvent("frame-mode-synced", frameModeMismatchDrops);
-    }
+    if (!matches) frameModeSyncTimeouts++;
     frameModeSync = void 0;
   }
   if (optimizerPipelineActive && !activeOptimizerEpoch) {
@@ -6588,7 +5777,6 @@ function restartFramePumpForCameraMode(track, reason = "camera mode changed") {
   } : void 0;
   startFramePump(captureGen, track);
   if (!automaticOptics) void reapplyManualOpticsAfterFreshFrames(track, reason);
-  notePipelineEvent("frame-pump-mode-restart");
 }
 
 function startFramePump(gen, track) {
@@ -6612,7 +5800,6 @@ function startFramePump(gen, track) {
         frameTrackReader = null;
         frameTrackProcessor = null;
         framePumpMode = "rVFC startup fallback";
-        notePipelineEvent("frame-pump-startup-fallback");
         void reader.cancel().catch(() => void 0).finally(() => {
           try { reader.releaseLock(); } catch {}
         });
@@ -6677,7 +5864,6 @@ function discardInFlightDecodeWork(reason, restartWorkers = true) {
     recoveryWorkerRestarts++;
   }
   lastRecoveryReason = reason;
-  notePipelineEvent("decoder-fresh-start", active.length);
 }
 
 function holdDecoderForCameraMutation(reason, settleMs = CAMERA_MUTATION_SETTLE_MS) {
@@ -6712,7 +5898,6 @@ function enterGeometryRecovery(reason, now = receiverNow(), restartWorkers = tru
   lastDecodedRegionSize = 0;
   lastFullScan = 0;
   resetGuidedRollout();
-  notePipelineEvent("geometry-recovery", geometryRecoveryResets);
 }
 
 let captureNextScan = false;
@@ -6830,7 +6015,6 @@ function invalidateTrackedQuad(region) {
   region.dim = void 0;
   region.consecutiveMisses = 0;
   trackingInvalidations++;
-  notePipelineEvent("tracking-invalidated", trackingInvalidations);
 }
 function captureSubmittedScan(image, ox, oy, full, tracks = [], scaleX = 1, scaleY = 1) {
   if (!captureNextScan) return;
@@ -6939,22 +6123,7 @@ function readBoundedVideoCrop(source, x, y, w, h) {
   const right = Math.min(source.width, x + w);
   const bottom = Math.min(source.height, y + h);
   if (right > sx && bottom > sy) {
-    if (source.nativeY) {
-      const crop = new Uint8ClampedArray((right - sx) * (bottom - sy) * 4);
-      let out = 0;
-      for (let row = sy; row < bottom; row++) {
-        const rowBase = row * source.width;
-        for (let col = sx; col < right; col++) {
-          const luma = source.nativeY[rowBase + col];
-          crop[out++] = luma; crop[out++] = luma; crop[out++] = luma; crop[out++] = 255;
-        }
-      }
-      const cropCanvas = document.createElement("canvas");
-      cropCanvas.width = right - sx;
-      cropCanvas.height = bottom - sy;
-      cropCanvas.getContext("2d").putImageData(new ImageData(crop, cropCanvas.width, cropCanvas.height), 0, 0);
-      ctx.drawImage(cropCanvas, sx - x, sy - y);
-    } else if (source.image) {
+    if (source.image) {
       if (replaySourceCanvas.width !== source.width || replaySourceCanvas.height !== source.height) {
         replaySourceCanvas.width = source.width;
         replaySourceCanvas.height = source.height;
@@ -6970,7 +6139,6 @@ function readBoundedVideoCrop(source, x, y, w, h) {
 function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourceCapturedAt, trackedRegions = [], fixedAttempts = 0, sourceOpticsEpoch, preferredWorker) {
   if (message.strictHotPath === void 0) message.strictHotPath = strictHotPathActive();
   if (message.strictHotPath && !gridLattice.locked && !message.full) {
-    notePipelineEvent("strict-prelock-job-rejected");
     if (trace) trace.decision = "strict pre-lock: only full acquisition allowed";
     return false;
   }
@@ -7028,9 +6196,9 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
   if (repeatEligible && latestRepeatSignature?.sourceSequence === sourceSequence - 1) {
     message.previousFrameSignature = latestRepeatSignature.signature;
   }
-  const accepted = nativeCameraV2Running
-    ? submitNativeV2Job(message, sourceSequence, sourceCapturedAt)
-    : preferredWorker === void 0 ? pool.submit(message, transfer) : pool.submitTo(preferredWorker, message, transfer);
+  const accepted = preferredWorker === void 0
+    ? pool.submit(message, transfer)
+    : pool.submitTo(preferredWorker, message, transfer);
   if (!accepted && guidedStage) guidedRollout.inFlight = Math.max(0, guidedRollout.inFlight - 1);
   if (accepted) {
     if (Number.isInteger(auditMode.temporalProbeSlot) && auditMode.temporalProbeSlot >= 0)
@@ -7235,46 +6403,6 @@ function mappedDirectTrackedFrame(source, x, y, w, h, tracks) {
   // finished retiring that slot. Missing geometry is a normal erasure during
   // target loss, never a reason to throw from the camera loop.
   if (tracks.some((track) => !track || !validQuadObject(track.quad) || !track.dim)) return null;
-  if (source.nativeV2) {
-    const cropX = Math.max(0, Math.min(source.width, Math.floor(x)));
-    const cropY = Math.max(0, Math.min(source.height, Math.floor(y)));
-    const cropRight = Math.max(cropX, Math.min(source.width, Math.ceil(x + w)));
-    const cropBottom = Math.max(cropY, Math.min(source.height, Math.ceil(y + h)));
-    if (cropRight - cropX < 2 || cropBottom - cropY < 2) return null;
-    return {
-      frame: { close() {} }, cropX: 0, cropY: 0,
-      w: cropRight - cropX, h: cropBottom - cropY, ox: cropX, oy: cropY, tracks,
-      pixelFormat: "native-v2", payloadBytes: 0,
-      cameraTimestampNs: source.cameraMetadata?.timestampNs,
-      rollingShutterSkewNs: source.cameraMetadata?.rollingShutterSkewNs,
-      cameraOrientation: source.cameraMetadata?.orientation,
-      cameraSettingsEpoch: source.cameraSettingsEpoch
-    };
-  }
-  if (source.nativeY && source.nativeBuffer instanceof ArrayBuffer && source.nativeBuffer.byteLength) {
-    const cropX = Math.max(0, Math.min(source.width, Math.floor(x)));
-    const cropY = Math.max(0, Math.min(source.height, Math.floor(y)));
-    const cropRight = Math.max(cropX, Math.min(source.width, Math.ceil(x + w)));
-    const cropBottom = Math.max(cropY, Math.min(source.height, Math.ceil(y + h)));
-    const cropWidth = cropRight - cropX;
-    const cropHeight = cropBottom - cropY;
-    if (cropWidth < 2 || cropHeight < 2) return null;
-    return {
-      frame: source.nativeBuffer,
-      cropX: 0, cropY: 0,
-      w: cropWidth, h: cropHeight,
-      ox: cropX, oy: cropY,
-      tracks,
-      pixelFormat: "y8",
-      yOffset: (source.nativeYOffset || 0) + cropY * (source.nativeStride || source.width) + cropX,
-      yStride: source.nativeStride || source.width,
-      payloadBytes: source.nativeBuffer.byteLength,
-      cameraTimestampNs: source.cameraMetadata?.timestampNs,
-      rollingShutterSkewNs: source.cameraMetadata?.rollingShutterSkewNs,
-      cameraOrientation: source.cameraMetadata?.orientation,
-      cameraSettingsEpoch: source.cameraSettingsEpoch
-    };
-  }
   // Once the source is a TrackProcessor VideoFrame, stay on that camera memory
   // path for every receiver state. Never decline direct Y8 because an optics
   // sample is due; doing so used to fall through to live <video> canvas readback.
@@ -7394,7 +6522,6 @@ function cloneDirectFullScanFrame(source) {
 }
 
 function captureOptimizerOpticalSample(source) {
-  if (source.nativeV2) return;
   const epoch = activeOptimizerEpoch;
   if (!(epoch == null ? void 0 : epoch.collecting) || source.opticsEpoch !== epoch.id || source.sequence < epoch.firstValidSourceSequence) return;
   const evidence = candidateEvidenceWindows.get(epoch.id);
@@ -7551,23 +6678,9 @@ async function captureFrame(source) {
   receiverFrameWidth = vw;
   receiverFrameHeight = vh;
   if (captureNextScan && !pendingScanCapture && source.videoFrame && !source.image) await captureDirectSourceScan(source);
-  if (captureNextScan && !pendingScanCapture && source.nativeV2 && !source.image) {
-    scanDialogStatus.textContent = "Raw full-frame capture is unavailable in Camera2 native-decode mode. Switch Backend to Browser / WebView for a lossless raw capture.";
-    cancelScanCapture();
-  }
-  if (captureNextScan && !pendingScanCapture && source.nativeY && !source.image) {
-    pendingScanCapture = {
-      image: yToImageData(source.nativeY.slice(), source.width, source.height),
-      ox: 0, oy: 0, full: !gridLattice.locked,
-      tracks: gridLattice.locked ? regions.filter((region) => validQuadObject(region.quad)).map((region) => region.quad) : [],
-      scaleX: 1, scaleY: 1, rawY: true
-    };
-    scanDialogStatus.textContent = `Captured exact native Camera2 Y frame ${source.width}×${source.height} · waiting for decoder…`;
-  }
-  if (source.nativeY) drawNativePreview(source);
   const now = receiverNow();
-  // Camera2 tracks expose the same constraint surface as browser tracks. Auto
-  // Optics is source-agnostic; HOLD remains mutation-free on both paths.
+  // Camera tracks expose the same constraint surface across browsers. Auto
+  // Optics remains source-agnostic and HOLD remains mutation-free.
   void maintainManualOptics(now);
   maintainAcquisitionAutofocus(now);
   maintainAutomaticQrOptics(now);
@@ -7597,7 +6710,6 @@ async function captureFrame(source) {
     decoderFreshnessHoldActive = false;
     decoderFreshnessHoldUntil = 0;
     lastFullScan = 0;
-    notePipelineEvent("camera-mutation-settled");
   }
   if (!replayRunning && livePipeline.startedAt) {
     if (!livePipeline.firstCaptureAt) livePipeline.firstCaptureAt = now;
@@ -7638,7 +6750,6 @@ async function captureFrame(source) {
     const ttl = region.decoded ? REGION_TTL_MS : SIGHTING_REGION_TTL_MS;
     if (region.gridSlot === void 0 && now - region.seen > ttl) {
       regions.splice(i, 1);
-      notePipelineEvent(region.decoded ? "region-decoded-expired" : "region-sighting-expired", regions.length);
     }
   }
   const wasLockedBeforeTick = gridLattice.locked;
@@ -7844,7 +6955,6 @@ async function captureFrame(source) {
     if (acquisitionInflight >= acquisitionInflightLimit) {
       capturesDropped++;
       poolBusyTimes.push(now);
-      notePipelineEvent("acquisition-inflight-cap", acquisitionInflight);
       if (trace) {
         trace.decision = `acquisition capped at ${acquisitionInflightLimit} in-flight seed scans`;
         trace.stateAfter = gridLattice.state;
@@ -7864,7 +6974,6 @@ async function captureFrame(source) {
     fullScans++;
     if (globalRecoverySeedScan) {
       geometryRecoveryProbes++;
-      notePipelineEvent("global-recovery-probe", geometryRecoveryProbes);
     }
     // A dense wall can present dozens of finder patterns to the generic
     // detector. That is a bad acquisition problem even when every QR is sharp.
@@ -7971,7 +7080,6 @@ async function captureFrame(source) {
           ? `measuring weak grid span ${slots}`
           : `measuring weak grid slot ${slots} ${selected[0].slotState.toLowerCase()}`;
       }
-      notePipelineEvent(selected.length > 1 ? "breadth-recovery-probe" : "local-recovery-probe", geometryRecoveryProbes);
     }
     if (!captureNextScan && boundedScanCandidates.length && (provisionalCrop || localRecoverySeedScan || lockedGeometryTrusted && gridLattice.locked && !geometryProbeDue && !allLockedCandidatesCold)) {
       const points = boundedScanCandidates.flatMap((region) => [
@@ -8022,7 +7130,7 @@ async function captureFrame(source) {
       id: region.id, slot: region.gridSlot, misses: region.consecutiveMisses,
       quad: region.quad, dim: region.dim, crc32: Boolean(region.crc32)
     })) : [];
-    const directFull = (source.videoFrame || source.nativeY || source.nativeV2) && !source.image
+    const directFull = source.videoFrame && !source.image
       ? mappedDirectTrackedFrame(source, scanX, scanY, scanW, scanH, recoveryTracks)
       : null;
     if (directFull) {
@@ -8062,8 +7170,7 @@ async function captureFrame(source) {
     }
     // A TrackProcessor source is never allowed to switch to the live <video>
     // canvas path. Drop this recovery attempt and use the next camera frame.
-    if ((source.videoFrame || source.nativeY || source.nativeV2) && !source.image) {
-      notePipelineEvent("direct-recovery-y8-unavailable");
+    if (source.videoFrame && !source.image) {
       if (trace) {
         trace.decision = "direct recovery Y8 unavailable; frame dropped";
         trace.stateAfter = gridLattice.state;
@@ -8160,7 +7267,6 @@ async function captureFrame(source) {
     if (repair) {
       batchRegions = [...batchRegions, repair];
       geometryCoverageRepairTracks++;
-      notePipelineEvent("coverage-repair-track", Number(repair.gridSlot) || 0);
     }
   }
   batchRegions = selectTrackedRegionsForBudget(batchRegions, source.sequence, now, temporalSchedule);
@@ -8180,7 +7286,7 @@ async function captureFrame(source) {
 // several jobs only duplicates frame mapping/binarization work. Spatial lanes
 // remain a Strict-mode diagnostic; the normal hot path parallelizes across
 // successive camera frames and lets each worker keep its own tracker warm.
-const laneCount = !source.nativeY && strictHotPathActive() && lockedLayout
+const laneCount = strictHotPathActive() && lockedLayout
   ? Math.min(3, Math.min(lockedLayout.cols, lockedLayout.rows) === 1
     ? Math.max(lockedLayout.cols, lockedLayout.rows)
     : Math.min(lockedLayout.cols, lockedLayout.rows))
@@ -8238,7 +7344,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const direct = mappedDirectTrackedFrame(source, x, y, w, h, group.tracks);
       if (!direct) {
         if (source.videoFrame && !source.image) {
-          notePipelineEvent("direct-lane-y8-unavailable");
           continue;
         }
         laneImage = readBoundedVideoCrop(source, x, y, w, h);
@@ -8306,7 +7411,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const healthyGrid = !captureNextScan && lockedGeometryTrusted && !allLockedCandidatesCold && !trackingUnhealthy;
       const freeWorkers = Math.max(0, pool.size - pool.busyCount);
       if (healthyGrid && freeWorkers === 0) {
-        const bufferedLatest = !source.nativeY && !source.nativeV2 && !strictHotPathActive() && queuePendingGridLane(0, source, {
+        const bufferedLatest = !strictHotPathActive() && queuePendingGridLane(0, source, {
           x, y, w, h,
           tracks: batchTracks,
           regions: batchRegions,
@@ -8316,7 +7421,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
           strictHotPath: false
         });
         poolBusyTimes.push(now);
-        if (bufferedLatest) notePipelineEvent("latest-frame-buffered", source.sequence);
         if (trace) trace.decision = bufferedLatest ? "latest frame buffered: workers busy" : "not scheduled: workers busy";
         activeBenchmarkFrame = void 0;
         return;
@@ -8325,7 +7429,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const sharedDirect = mappedDirectTrackedFrame(source, x, y, w, h, batchTracks);
       if (!sharedDirect) {
         if (source.videoFrame && !source.image) {
-          notePipelineEvent("direct-shared-y8-unavailable");
           activeBenchmarkFrame = void 0;
           return;
         }
@@ -8430,7 +7533,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     let img;
     if (!direct) {
       if (source.videoFrame && !source.image) {
-        notePipelineEvent("direct-individual-y8-unavailable");
         continue;
       }
       img = readBoundedVideoCrop(source, x, y, w, h);
@@ -8460,7 +7562,6 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
     }
     if (pendingScanCapture && pendingScanCapture.id === void 0) pendingScanCapture.id = id; captureNextScan = false;
     submitted = true;
-    if (source.nativeY || source.nativeV2) break;
   }
   if (!submitted && scheduledRegions.length > 0) {
     poolBusyTimes.push(now);

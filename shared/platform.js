@@ -26,16 +26,7 @@ function probeCameraCapabilities(track) {
   };
 }
 
-let cameraConstraintApply;
-async function applyAdvancedConstraint(track, set) {
-  if (!cameraConstraintApply) {
-    cameraConstraintApply = (await import("../receive/camera-constraints.js")).applyAdvancedConstraint;
-  }
-  return cameraConstraintApply(track, set);
-}
-
 export {
-  applyAdvancedConstraint,
   isAndroid,
   isIOS,
   probeCameraCapabilities

@@ -2,11 +2,11 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "./coding-mode.js";
 import { RaptorDecoder, RaptorEncoder } from "./raptorq.js";
 const MDS_SYMBOLS = 256;
 const RAPTOR_ESI_SPACE = 16711680;
-function scheduledEsi(k, ordinal) {
+function scheduledEncodingId(k, senderOrdinal) {
   const mode = codingMode(k);
   if (mode === "direct") return 0;
-  if (mode === "mds") return ordinal % MDS_SYMBOLS;
-  return ordinal % RAPTOR_ESI_SPACE;
+  if (mode === "mds") return senderOrdinal % MDS_SYMBOLS;
+  return senderOrdinal % RAPTOR_ESI_SPACE;
 }
 const GF_EXP = new Uint8Array(512);
 const GF_LOG = new Uint8Array(256);
@@ -65,9 +65,9 @@ class TransportEncoder {
     }
     this.mdsCache = this.mode === "mds" ? new Array(MDS_SYMBOLS) : null;
   }
-  encode(esi) {
-    if (this.raptor) return this.raptor.repair(esi);
-    const id = esi % MDS_SYMBOLS;
+  encode(requestId) {
+    if (this.raptor) return this.raptor.repair(requestId);
+    const id = requestId % MDS_SYMBOLS;
     if (id < this.k) {
       const offset = id * this.blockLen;
       return this.byteBlocks.subarray(offset, offset + this.blockLen);
@@ -226,5 +226,5 @@ export {
   TransportDecoder,
   TransportEncoder,
   mdsCoefficients,
-  scheduledEsi
+  scheduledEncodingId
 };

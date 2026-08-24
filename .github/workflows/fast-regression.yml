@@ -78,7 +78,6 @@ jobs:
           node --input-type=module --check < receive/recovery-state.js
           node --input-type=module --check < receive/recovery-policy.js
           node --input-type=module --check < shared/camera-start-guard.js
-          node --input-type=module --check < shared/native-camera-v2.js
 
       - name: Run grid regression
         run: |
@@ -102,8 +101,6 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/native-y8-worker-smoke.mjs
-          node benchmark/native-camera-bridge-smoke.mjs
-          node benchmark/native-camera-v2-bridge-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
