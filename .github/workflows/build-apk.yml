@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/build-apk.yml
       - .github/cleanup-v392-trigger
+      - .github/CLEANUP_V392_TRIGGER
 
 jobs:
   cleanup:
@@ -31,7 +32,8 @@ jobs:
             benchmark/native-camera-v2-bridge-smoke.mjs \
             .github/workflows/strip-native-runtime-v392.yml \
             .github/scripts/strip-native-runtime-v392.py \
-            .github/cleanup-v392-trigger
+            .github/cleanup-v392-trigger \
+            .github/CLEANUP_V392_TRIGGER
           git add receive/runtime.js
           git commit -m "v0.5.392: remove retired native camera runtime"
           git push origin HEAD:master
