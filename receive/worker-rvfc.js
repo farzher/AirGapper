@@ -12,6 +12,7 @@ await import(`./worker.js${query}`);
 const baseOnMessage = self.onmessage;
 const nativePostMessage = self.postMessage.bind(self);
 const PACKED_TRACK_BYTES = 56;
+const PACKED_TRACK_WORDS = PACKED_TRACK_BYTES >> 2;
 const PACKED_SYMBOL_BYTES = 88;
 const GEOMETRY_REPORTS_PER_FRAME = 4;
 const MAX_GEOMETRY_SYMBOLS = 128;
@@ -20,6 +21,7 @@ const activeTracks = [];
 let activeSourceSequence = -1;
 let activeLiveTracked = false;
 let activePackedResultEligible = false;
+let activePackedTrackBuffer = null;
 
 // Geometry thinning runs on every successful dense worker result. Keep its
 // scratch storage worker-local and reusable instead of building filter/map/
@@ -202,10 +204,17 @@ function packLiveGuidedSymbols(message, transfer) {
 
 // worker.js posts through ctx === self, so this interception applies to its
 // final result without changing the codec. Preflight/signature messages have no
-// symbols and pass straight through.
+// symbols and pass straight through. The packed input descriptor is already
+// unpacked by this point; return it with the final message so the page can reuse
+// the allocation on another camera frame.
 self.postMessage = (message, transfer) => {
   thinGeometryReports(message?.symbols);
   transfer = packLiveGuidedSymbols(message, transfer);
+  if (!message?.preflight && activePackedTrackBuffer instanceof ArrayBuffer) {
+    message.__airgapperPackedTrackRecycle = activePackedTrackBuffer;
+    transfer = addTransfer(transfer, activePackedTrackBuffer);
+    activePackedTrackBuffer = null;
+  }
   return nativePostMessage(message, transfer);
 };
 
@@ -236,29 +245,31 @@ function unpackTracks(message) {
   const buffer = message?.__airgapperPackedTracks;
   const count = Math.trunc(Number(message?.__airgapperPackedTrackCount) || 0);
   if (!(buffer instanceof ArrayBuffer) || count <= 0 || buffer.byteLength < count * PACKED_TRACK_BYTES) return;
-  const view = new DataView(buffer);
+  const i32 = new Int32Array(buffer);
+  const f32 = new Float32Array(buffer);
   activeTracks.length = count;
+  activePackedTrackBuffer = buffer;
   for (let index = 0; index < count; index++) {
-    const base = index * PACKED_TRACK_BYTES;
+    const base = index * PACKED_TRACK_WORDS;
     const track = pooledTrack(index);
-    const slot = view.getInt32(base + 4, true);
-    const flags = view.getUint32(base + 16, true);
-    track.id = view.getInt32(base, true);
+    const slot = i32[base + 1];
+    const flags = i32[base + 4] >>> 0;
+    track.id = i32[base];
     track.slot = slot >= 0 ? slot : undefined;
-    track.misses = view.getInt32(base + 8, true);
-    track.dim = view.getInt32(base + 12, true);
+    track.misses = i32[base + 2];
+    track.dim = i32[base + 3];
     track.crc32 = Boolean(flags & 1);
     track.temporalProbe = Boolean(flags & 2);
-    track.temporalRisk = view.getFloat32(base + 20, true);
+    track.temporalRisk = f32[base + 5];
     const q = track.quad;
-    q.topLeft.x = view.getFloat32(base + 24, true);
-    q.topLeft.y = view.getFloat32(base + 28, true);
-    q.topRight.x = view.getFloat32(base + 32, true);
-    q.topRight.y = view.getFloat32(base + 36, true);
-    q.bottomRight.x = view.getFloat32(base + 40, true);
-    q.bottomRight.y = view.getFloat32(base + 44, true);
-    q.bottomLeft.x = view.getFloat32(base + 48, true);
-    q.bottomLeft.y = view.getFloat32(base + 52, true);
+    q.topLeft.x = f32[base + 6];
+    q.topLeft.y = f32[base + 7];
+    q.topRight.x = f32[base + 8];
+    q.topRight.y = f32[base + 9];
+    q.bottomRight.x = f32[base + 10];
+    q.bottomRight.y = f32[base + 11];
+    q.bottomLeft.x = f32[base + 12];
+    q.bottomLeft.y = f32[base + 13];
     activeTracks[index] = track;
   }
   message.tracks = activeTracks;
@@ -272,6 +283,7 @@ self.onmessage = (event) => {
 
   activeSourceSequence = Number(message.sourceSequence);
   activeLiveTracked = Boolean(message.__airgapperLiveTracked);
+  activePackedTrackBuffer = null;
   // Normal repeat-filter-eligible live traffic excludes replay, explicit scan
   // capture and optics tournaments. Keep those diagnostic paths object-rich;
   // pack only the steady production hot path.
