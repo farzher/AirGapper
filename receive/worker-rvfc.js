@@ -325,7 +325,9 @@ self.onmessage = (event) => {
     message.buf = rgbaBuffer;
     message.videoFrame = undefined;
     delete message.__airgapperWorkerLumaFromRgba;
-    return baseOnMessage?.call(self, { data: message });
+    // event.data is the same mutable message object; forwarding the original
+    // MessageEvent avoids allocating a synthetic {data: message} wrapper.
+    return baseOnMessage?.call(self, event);
   }
 
   // Safe forward compaction: for every pixel after the first, the green source
@@ -343,5 +345,5 @@ self.onmessage = (event) => {
   message.payloadBytes = pixelCount;
   message.guidedDecode = true;
   delete message.__airgapperWorkerLumaFromRgba;
-  return baseOnMessage?.call(self, { data: message });
+  return baseOnMessage?.call(self, event);
 };
