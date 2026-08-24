@@ -26,6 +26,7 @@ function installIOSWorkerTrackProcessor() {
       if (!track?.clone) throw new TypeError("MediaStreamTrackProcessor requires a video track");
       const maxBufferSize = Math.max(1, Math.trunc(Number(options.maxBufferSize) || 1));
       const worker = new Worker(new URL("./track-processor-worker.js", import.meta.url), { type: "module" });
+      const settings = track.getSettings?.() ?? {};
       let controller;
       let closed = false;
       this.totalFrames = 0;
@@ -78,7 +79,14 @@ function installIOSWorkerTrackProcessor() {
 
       const workerTrack = track.clone();
       try {
-        worker.postMessage({ type: "start", track: workerTrack, maxBufferSize }, [workerTrack]);
+        worker.postMessage({
+          type: "start",
+          track: workerTrack,
+          maxBufferSize,
+          expectedWidth: Number(settings.width) || 0,
+          expectedHeight: Number(settings.height) || 0,
+          expectedFrameRate: Number(settings.frameRate) || 0
+        }, [workerTrack]);
       } catch (error) {
         workerTrack.stop?.();
         fail(error instanceof Error ? error.message : String(error));
