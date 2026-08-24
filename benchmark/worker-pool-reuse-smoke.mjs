@@ -1,5 +1,16 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
+// The receiver imports worker-capacity-guard.js before constructing its pool.
+// Mock the tiny DOM surface it needs so this smoke exercises the same patched
+// submitAtSlot() prototype instead of only the unwrapped base class.
+globalThis.document = {
+  getElementById: () => null,
+  body: { classList: { contains: () => false } }
+};
+await import("../receive/worker-capacity-guard.js");
+if (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperRvfclumaGuard)
+  throw new Error("worker-capacity guard did not patch submitAtSlot");
+
 class FakeWorker {
   constructor() {
     this.onmessage = null;
@@ -182,6 +193,7 @@ if (preflights[1].id !== 2 || preflights[1].sourceSequence !== 18 || preflights[
 
 pool.resize(0);
 console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
+  guardedSubmitPath: true,
   completionIdentityReused: completions[1].sameIdentity && completions[2].sameIdentity,
   preflightIdentityReused: preflights[1].sameIdentity,
   staleGuidedMetricsCleared: completions[1].guidedMetrics === undefined,
