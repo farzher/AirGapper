@@ -1,7 +1,5 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
-const threads = Math.max(1, Number(navigator.hardwareConcurrency) || 2);
-const autoWorkerFloor = threads >= 8 ? Math.min(7, threads - 1) : 0;
 const PACKED_TRACK_BYTES = 56;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 
@@ -13,9 +11,9 @@ function liveReceiveCamera() {
 }
 
 function addTransfer(transfer, value) {
-  if (!value) return Array.isArray(transfer) ? transfer : [];
   const list = Array.isArray(transfer) ? transfer : [];
-  return list.includes(value) ? list : [...list, value];
+  if (value && !list.includes(value)) list.push(value);
+  return list;
 }
 
 function keepTrackedCameraOnGuided(message, live) {
@@ -106,6 +104,8 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
 }
 
+// Every AirGapper decode worker uses the live-camera wrapper. Preserve the
+// build/scalar query string so it imports the exact same codec variant.
 const NativeWorker = globalThis.Worker;
 if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorkerGuard) {
   const rewriteWorkerUrl = (input) => {
@@ -128,34 +128,9 @@ if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorke
   try { globalThis.Worker = AirGapperWorker; } catch {}
 }
 
-if (autoWorkerFloor > 0) {
-  const baseResize = DecodeWorkerPool.prototype.resize;
-  if (typeof baseResize === "function" && !baseResize.__airgapperCapacityGuard) {
-    const resize = function(count) {
-      const requested = Math.max(0, Math.trunc(Number(count) || 0));
-      const selector = document.getElementById("decode-workers");
-      const effective = requested > 0 && selector?.value === "auto"
-        ? Math.max(requested, autoWorkerFloor)
-        : requested;
-      return baseResize.call(this, effective);
-    };
-    Object.defineProperty(resize, "__airgapperCapacityGuard", { value: true });
-    DecodeWorkerPool.prototype.resize = resize;
-  }
-
-  const syncLabel = () => {
-    const selector = document.getElementById("decode-workers");
-    const option = selector?.querySelector('option[value="auto"]');
-    if (option && selector.value === "auto") {
-      const label = `Auto (${autoWorkerFloor})`;
-      if (option.textContent !== label) option.textContent = label;
-    }
-  };
-  queueMicrotask(syncLabel);
-  const selector = document.getElementById("decode-workers");
-  const option = selector?.querySelector('option[value="auto"]');
-  if (selector && option && typeof MutationObserver === "function") {
-    new MutationObserver(syncLabel).observe(option, { childList: true, characterData: true, subtree: true });
-    selector.addEventListener("change", syncLabel);
-  }
-}
+// Do not override DecodeWorkerPool.resize() here. runtime.js owns the adaptive
+// worker controller and intentionally grows/shrinks based on source FPS,
+// measured latency and sustained pressure. A former 8-core guard silently
+// forced Auto to seven workers even while the controller believed its target
+// was 2-5, which defeated feedback, multiplied WASM/cache memory and reduced
+// per-worker temporal locality. Manual worker counts remain untouched.
