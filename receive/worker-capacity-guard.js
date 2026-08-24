@@ -70,6 +70,19 @@ function keepTrackedCameraOnGuided(message, live) {
   }
 }
 
+function boundLiveAcquisition(message, live) {
+  if (!live || !message?.full || message.thorough) return;
+  const mode = message.acquisitionMode;
+  if (mode === undefined || mode === "fast") {
+    // A camera frame that fails the full-resolution dense seed search is
+    // disposable. Do not immediately run a second generic tryHarder scan on the
+    // same optical frame: rolling-shutter/mixed pages are exactly the frames
+    // that make that fallback pathological. Runtime already schedules explicit
+    // deep/hunt/sighting work when fresh frames still cannot acquire a seed.
+    message.acquisitionMode = "seed";
+  }
+}
+
 function capDenseRepairMask(message, live) {
   const tracks = message?.tracks;
   if (!live || message?.full || !message?.guidedDecode ||
@@ -143,37 +156,6 @@ function recycleUnsentBuffers(message) {
   if (result instanceof ArrayBuffer && result.byteLength) recyclePackedResultBuffer(result);
 }
 
-// Learn stale-job deadlines from actual successful tracked latency. Separate
-// sparse, medium and dense batches because their normal service times differ.
-// Until a bucket has enough evidence the pool's conservative base timeout wins.
-const TRACKED_LATENCY_BUCKETS = 3;
-const TRACKED_LATENCY_MIN_SAMPLES = 5;
-const trackedLatencyEwma = new Float64Array(TRACKED_LATENCY_BUCKETS);
-const trackedLatencySamples = new Uint16Array(TRACKED_LATENCY_BUCKETS);
-function trackedLatencyBucket(trackCount) {
-  const count = Math.max(0, Math.trunc(Number(trackCount) || 0));
-  return count <= 4 ? 0 : count <= 12 ? 1 : 2;
-}
-function noteTrackedLatency(trackCount, latencyMs) {
-  const latency = Number(latencyMs);
-  if (!Number.isFinite(latency) || latency <= 0) return;
-  const bucket = trackedLatencyBucket(trackCount);
-  const samples = trackedLatencySamples[bucket];
-  const previous = trackedLatencyEwma[bucket];
-  const weight = samples < 8 ? 0.25 : 0.12;
-  trackedLatencyEwma[bucket] = previous > 0 ? previous * (1 - weight) + latency * weight : latency;
-  trackedLatencySamples[bucket] = Math.min(65535, samples + 1);
-}
-function adaptiveTrackedTimeoutMs(trackCount, baseTimeoutMs) {
-  const base = Math.max(1, Number(baseTimeoutMs) || 1);
-  const bucket = trackedLatencyBucket(trackCount);
-  if (trackedLatencySamples[bucket] < TRACKED_LATENCY_MIN_SAMPLES) return base;
-  const latencyBudget = trackedLatencyEwma[bucket] * 6;
-  const fps = Number(receiveVideo?.srcObject?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0;
-  const freshnessBudget = fps > 0 ? 12 * 1000 / fps : 0;
-  return Math.min(base, Math.max(400, latencyBudget, freshnessBudget));
-}
-
 const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
 if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedBufferRecycle) {
   const configureWorker = function(slot, worker) {
@@ -181,9 +163,6 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
-      const activeMeta = this.activeMeta?.[slot];
-      if (activeMeta && !activeMeta.full && !message?.error)
-        noteTrackedLatency(activeMeta.tracks, message?.latencyMs);
       const recycledTrack = message?.__airgapperPackedTrackRecycle;
       if (recycledTrack instanceof ArrayBuffer) {
         recyclePackedTrackBuffer(recycledTrack);
@@ -215,8 +194,10 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
   const submitAtSlot = function(slot, message, transfer) {
     if (slot < 0 || slot >= this.workers.length || this.busy[slot]) return false;
 
+    const cameraLive = liveReceiveCamera();
     const candidate = message && !message.full && !message.strictHotPath;
-    const live = Boolean(candidate && liveReceiveCamera());
+    const live = Boolean(candidate && cameraLive);
+    boundLiveAcquisition(message, cameraLive);
     if (live && !message.videoFrame &&
         Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
@@ -244,16 +225,10 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
       recycleUnsentBuffers(message);
       return false;
     }
-    if (live && !message.full) {
-      const meta = this.activeMeta?.[slot];
-      if (meta && meta.id === message.id) {
-        const timeout = adaptiveTrackedTimeoutMs(meta.tracks, meta.timeoutMs);
-        if (timeout < meta.timeoutMs) {
-          meta.timeoutMs = timeout;
-          meta.deadlineAt = meta.startedAt + timeout;
-        }
-      }
-    }
+    // Do not shorten the base tracked deadline here. A timeout currently means
+    // terminating the worker, which discards its warmed WASM/sample-map state.
+    // Stale-frame budgets belong inside cooperative Guided/WASM cancellation;
+    // until that exists, false-positive timeout/restart churn costs more than it saves.
     return true;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
