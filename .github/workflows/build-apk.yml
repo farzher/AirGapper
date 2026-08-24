@@ -31,7 +31,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 2
+
+      - name: Apply v0.5.420 sensor cadence patch
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Fq 'APP_VERSION = "0.5.420"' version.js && grep -Fq 'const sequence = sourceFrameSequence++;' receive/runtime.js; then
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("receive/runtime.js")
+          text = p.read_text()
+
+          old = "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet benchmarkTraces = [];"
+          new = "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet sourceFrameCameraTimestampUs = NaN;\nlet sourceFrameRate = 0;\nlet benchmarkTraces = [];"
+          if text.count(old) != 1:
+              raise SystemExit(f"sequence declaration match count {text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          old = "  framePumpStartedAt = 0;\n  framePumpFirstFrameAt = 0;\n  rvfcLastPresentedFrames = 0;"
+          new = "  framePumpStartedAt = 0;\n  framePumpFirstFrameAt = 0;\n  sourceFrameCameraTimestampUs = NaN;\n  sourceFrameRate = 0;\n  rvfcLastPresentedFrames = 0;"
+          if text.count(old) != 1:
+              raise SystemExit(f"stopFramePump match count {text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          old = "function startFramePump(gen, track) {\n  stopFramePump();\n  framePumpStartedAt = receiverNow();"
+          new = "function startFramePump(gen, track) {\n  stopFramePump();\n  framePumpStartedAt = receiverNow();\n  sourceFrameRate = Math.max(0, Number(track?.getSettings?.().frameRate) || 0);"
+          if text.count(old) != 1:
+              raise SystemExit(f"startFramePump match count {text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          old = "  const sequence = sourceFrameSequence++;\n  latestSourceFrameSequence = sequence;"
+          new = '''  // sourceSequence is the temporal model's camera-frame clock. A processor may\n  // discard sensor frames before JS receives them, so advance by elapsed sensor\n  // time rather than pretending every delivered VideoFrame is consecutive.\n  let sequenceStep = 1;\n  if (videoFrame && Number.isFinite(timestamp) && sourceFrameRate > 0) {\n    if (Number.isFinite(sourceFrameCameraTimestampUs) && timestamp > sourceFrameCameraTimestampUs) {\n      const elapsedFrames = (timestamp - sourceFrameCameraTimestampUs) * sourceFrameRate / 1e6;\n      if (Number.isFinite(elapsedFrames) && elapsedFrames > 1.5)\n        sequenceStep = Math.max(1, Math.min(8, Math.round(elapsedFrames)));\n    }\n    sourceFrameCameraTimestampUs = timestamp;\n  } else if (!videoFrame) {\n    // rVFC has no transferable VideoFrame timestamp. Reset the anchor so a later\n    // TrackProcessor recovery never compares against a pre-fallback timestamp.\n    sourceFrameCameraTimestampUs = NaN;\n  }\n  const sequence = sourceFrameSequence;\n  sourceFrameSequence += sequenceStep;\n  latestSourceFrameSequence = sequence;'''
+          if text.count(old) != 1:
+              raise SystemExit(f"sourceFrameMeta match count {text.count(old)}")
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+          PY
+
+            git show 97ee16f0fc3819bc3007a4035340821ec3a8def0:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add receive/runtime.js .github/workflows/build-apk.yml
+            git commit -m "v0.5.420: track sensor frame cadence"
+            git push origin HEAD:master
+            exit 0
+          fi
 
       - name: Read app version
         id: version
