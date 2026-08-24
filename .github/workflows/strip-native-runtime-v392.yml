@@ -1,8 +1,8 @@
 name: strip native runtime v392
 
 on:
-  pull_request_target:
-    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   patch:
-    if: github.event.pull_request.head.ref == 'cleanup-v392-trigger'
+    if: github.event.issue.pull_request && github.event.issue.number == 31 && github.event.comment.body == '/cleanup-v392'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
