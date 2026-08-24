@@ -1,8 +1,10 @@
 import "./camera-constraints.js";
 import "./camera-constraint-guard.js";
+import "./exposure-ev.js";
 import "./track-processor-proxy.js";
 import "./track-processor-watchdog.js";
 import "./runtime-guards.js";
+import "./acquisition-focus-recovery.js";
 import "./lattice-cache-guard.js";
 import "./worker-capacity-guard.js";
 import "./runtime.js";
