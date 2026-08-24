@@ -33,27 +33,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Apply pending sender developer settings patch
-        if: github.event_name == 'push'
-        run: |
-          set -euo pipefail
-          if ! grep -Fq 'SEND_DEV_TOGGLE_WINDOW_MS' send/main.js && [ -f benchmark/apply-send-gutter-only.mjs ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            if node benchmark/apply-send-gutter-only.mjs; then
-              rm -f benchmark/send-gutter-failure.txt
-              git add send/main.js benchmark/send-gutter-failure.txt
-              git commit -m "v0.5.414: add sender curved-display gutter"
-              git push origin HEAD:master
-            else
-              printf 'sender gutter patch failed at %s\n' "$(date -u +%FT%TZ)" > benchmark/send-gutter-failure.txt
-              git add benchmark/send-gutter-failure.txt
-              git commit -m "report sender gutter patch failure"
-              git push origin HEAD:master || true
-              exit 1
-            fi
-          fi
-
       - name: Read app version
         id: version
         run: |
