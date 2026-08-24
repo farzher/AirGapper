@@ -66,6 +66,19 @@ installIOSCameraConstraintFallback();
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
 
+function supportedExposureSet(track, set) {
+  const out = { ...set };
+  const caps = track?.getCapabilities?.() ?? {};
+  if (out.exposureMode !== void 0) {
+    const modes = Array.isArray(caps.exposureMode) ? caps.exposureMode : [];
+    if (!modes.includes(out.exposureMode)) delete out.exposureMode;
+  }
+  if (out.exposureTime !== void 0 && !caps.exposureTime) delete out.exposureTime;
+  if (out.iso !== void 0 && !caps.iso) delete out.iso;
+  if (out.exposureCompensation !== void 0 && !caps.exposureCompensation) delete out.exposureCompensation;
+  return out;
+}
+
 function exposureConstraintAlreadySatisfied(track, set) {
   if (!track || !set) return false;
   const touchesFocus = set.focusMode !== void 0 || set.focusDistance !== void 0 || set.pointsOfInterest !== void 0;
@@ -91,45 +104,77 @@ function withoutExposure(set) {
   return remainder;
 }
 
-async function applyConstraint(track, set) {
-  if (!Object.keys(set).length) return true;
+async function awaitConstraint(promise) {
   let timer;
+  let timedOut = false;
   try {
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Camera constraint write timed out")), CAMERA_CONSTRAINT_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error("Camera constraint write timed out"));
+      }, CAMERA_CONSTRAINT_TIMEOUT_MS);
     });
-    await Promise.race([track.applyConstraints({ advanced: [set] }), timeout]);
-    return true;
+    await Promise.race([promise, timeout]);
+    return { ok: true, timedOut: false };
   } catch {
-    return false;
+    return { ok: false, timedOut };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function applyAdvancedConstraint(track, set) {
-  const touchesExposure = Boolean(set) && EXPOSURE_KEYS.some((key) => set[key] !== void 0);
+function exactExposureConstraints(set) {
+  const exact = {};
+  for (const key of EXPOSURE_KEYS) {
+    if (set[key] !== void 0) exact[key] = { exact: set[key] };
+  }
+  return exact;
+}
 
-  if (exposureConstraintAlreadySatisfied(track, set)) {
+async function applyConstraint(track, set) {
+  if (!Object.keys(set).length) return false;
+  const exposureOnly = Object.keys(set).every((key) => EXPOSURE_KEYS.includes(key));
+  if (exposureOnly) {
+    const strict = await awaitConstraint(track.applyConstraints(exactExposureConstraints(set)));
+    if (strict.ok) return true;
+    // A hung camera transaction is the failure mode we are protecting against;
+    // do not immediately issue a second write into the same driver queue.
+    if (strict.timedOut) return false;
+  }
+  const fallback = await awaitConstraint(track.applyConstraints({ advanced: [set] }));
+  return fallback.ok;
+}
+
+async function applyAdvancedConstraint(track, set) {
+  const requestedExposure = Boolean(set) && EXPOSURE_KEYS.some((key) => set[key] !== void 0);
+  const supported = supportedExposureSet(track, set ?? {});
+  const touchesExposure = EXPOSURE_KEYS.some((key) => supported[key] !== void 0);
+
+  // Safari commonly exposes no manual exposure/ISO capability at all. Do not
+  // keep sending unsupported camera mutations merely because Auto Optics asked
+  // for them; the hardware AE path remains authoritative on those devices.
+  if (requestedExposure && !touchesExposure && Object.keys(withoutExposure(supported)).length === 0) return false;
+
+  if (exposureConstraintAlreadySatisfied(track, supported)) {
     noteSuppressedExposureWrite();
     return true;
   }
 
   if (touchesExposure) {
-    if (set?.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
+    if (supported.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
       noteSuppressedExposureWrite();
-      return applyConstraint(track, withoutExposure(set));
+      return applyConstraint(track, withoutExposure(supported));
     }
 
     const latch = verifiedExposureLatchDecision(track);
     if (latch.hold) {
       noteSuppressedExposureWrite();
-      return applyConstraint(track, withoutExposure(set));
+      return applyConstraint(track, withoutExposure(supported));
     }
     if (latch.rescue) consumeExposureRescue(track);
   }
 
-  return applyConstraint(track, set);
+  return applyConstraint(track, supported);
 }
 
 export { applyAdvancedConstraint };
