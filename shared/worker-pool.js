@@ -76,6 +76,11 @@ class DecodeWorkerPool {
     this.activeIds = [];
     this.activeFull = [];
     this.activeMeta = [];
+    // onAvailable() may synchronously schedule the next job before the current
+    // completion has finished consuming jobMeta. Keep two metadata records per
+    // slot and alternate them so both jobs can overlap in JS without allocation.
+    this.metaRecords = [];
+    this.metaRecordNext = [];
     this.resizeGeneration = 0;
     this.lastNonZeroSize = 1;
     this.watchdog = void 0;
@@ -378,6 +383,8 @@ class DecodeWorkerPool {
       this.activeIds.pop();
       this.activeFull.pop();
       this.activeMeta.pop();
+      this.metaRecords.pop();
+      this.metaRecordNext.pop();
       this.packedSymbolPools.pop();
       this.packedSymbolLists.pop();
       this.completions.pop();
@@ -391,6 +398,8 @@ class DecodeWorkerPool {
       this.activeIds.push(void 0);
       this.activeFull.push(false);
       this.activeMeta.push(null);
+      this.metaRecords.push([{}, {}]);
+      this.metaRecordNext.push(0);
       this.packedSymbolPools.push([]);
       this.packedSymbolLists.push([]);
       this.completions.push({});
@@ -434,18 +443,20 @@ class DecodeWorkerPool {
     this.activeFull[slot] = Boolean(message.full);
     const startedAt = performance.now();
     const timeoutMs = workerJobTimeout(message);
-    this.activeMeta[slot] = {
-      id: typeof id === "number" ? id : void 0,
-      kind: message.jobKind ?? (message.full ? "full" : "tracked"),
-      full: Boolean(message.full),
-      tracks: Number(message.trackCount ?? message.tracks?.length ?? 0),
-      pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0),
-      sourceSequence: typeof message.sourceSequence === "number" ? message.sourceSequence : void 0,
-      opticsEpoch: typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0,
-      startedAt,
-      timeoutMs,
-      deadlineAt: startedAt + timeoutMs
-    };
+    const recordIndex = this.metaRecordNext[slot];
+    this.metaRecordNext[slot] = recordIndex ^ 1;
+    const meta = this.metaRecords[slot][recordIndex];
+    meta.id = typeof id === "number" ? id : void 0;
+    meta.kind = message.jobKind ?? (message.full ? "full" : "tracked");
+    meta.full = Boolean(message.full);
+    meta.tracks = Number(message.trackCount ?? message.tracks?.length ?? 0);
+    meta.pixels = Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0);
+    meta.sourceSequence = typeof message.sourceSequence === "number" ? message.sourceSequence : void 0;
+    meta.opticsEpoch = typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0;
+    meta.startedAt = startedAt;
+    meta.timeoutMs = timeoutMs;
+    meta.deadlineAt = startedAt + timeoutMs;
+    this.activeMeta[slot] = meta;
     try {
       if (message && typeof message === "object") message.sentAt = startedAt;
       transfer = prepareTrackedBrowserY8(message, transfer);
