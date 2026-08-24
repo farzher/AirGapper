@@ -87,6 +87,7 @@ jobs:
           node --input-type=module --check < receive/worker.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
+          node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
 
       - name: Run grid regression
         run: |
@@ -110,6 +111,7 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/direct-y8-worker-smoke.mjs
+          node benchmark/repeat-signature-worker-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
