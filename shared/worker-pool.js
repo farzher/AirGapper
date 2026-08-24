@@ -2,6 +2,7 @@ const TRACKED_JOB_TIMEOUT_MS = 2200;
 const RECOVERY_JOB_TIMEOUT_MS = 6500;
 const ACQUISITION_JOB_TIMEOUT_MS = 9000;
 const WORKER_WATCHDOG_MS = 250;
+let receiveVideo;
 
 function workerJobTimeout(message) {
   if (!message?.full) return TRACKED_JOB_TIMEOUT_MS;
@@ -10,10 +11,9 @@ function workerJobTimeout(message) {
 
 function liveReceiveCamera() {
   if (typeof document === "undefined") return false;
-  const video = document.getElementById("video");
-  const tracks = video?.srcObject?.getVideoTracks?.() ?? [];
+  receiveVideo ??= document.getElementById("video");
   return document.body?.classList?.contains("receive-mode") === true &&
-    tracks.some((track) => track?.readyState === "live");
+    receiveVideo?.srcObject?.active === true;
 }
 
 function addTransfer(transfer, value) {
@@ -29,7 +29,9 @@ function addTransfer(transfer, value) {
  * compact green->Y8 in-place after ownership transfer, so this fallback must
  * never allocate a second full Y plane on the browser main thread. */
 function prepareTrackedBrowserY8(message, transfer) {
-  if (!liveReceiveCamera() || message?.full || message?.videoFrame || message?.strictHotPath) return transfer;
+  // The normal TrackProcessor path is already a direct VideoFrame/Y8 payload.
+  // Test cheap message state before touching DOM/camera state.
+  if (message?.full || message?.videoFrame || message?.strictHotPath || !liveReceiveCamera()) return transfer;
   if (!Array.isArray(message?.tracks) || message.tracks.length < 2) return transfer;
   if (message.pixelFormat && message.pixelFormat !== "rgba") return transfer;
   if (!(message.buf instanceof ArrayBuffer)) return transfer;
@@ -65,6 +67,10 @@ class DecodeWorkerPool {
     this.resizeGeneration = 0;
     this.lastNonZeroSize = 1;
     this.watchdog = void 0;
+    // Normal live decode consumes this synchronously. Reuse it for every symbol
+    // instead of allocating one metadata object per QR. Optimizer-attributed jobs
+    // use a dedicated object because runtime may intentionally retain it.
+    this.decodeInfo = {};
   }
   get size() {
     return this.workers.length;
@@ -200,21 +206,22 @@ class DecodeWorkerPool {
       };
       try {
         if (message.trackedAttempted) this.onTrackedAttempt?.();
+        const reusableInfo = jobMeta?.opticsEpoch === void 0 ? this.decodeInfo : null;
         for (const symbol of symbols) {
-          this.onDecoded(symbol.bytes, symbol.box, {
-            scanId: message.id,
-            sourceSequence: jobMeta?.sourceSequence,
-            opticsEpoch: jobMeta?.opticsEpoch,
-            quad: symbol.quad,
-            modules: symbol.modules,
-            tracked: symbol.tracked,
-            geometryMeasured: symbol.geometryMeasured !== false,
-            wallMotion: symbol.wallMotion,
-            decodePath: symbol.decodePath,
-            crc32: symbol.crc32,
-            verifiedPayload: Boolean(symbol.verifiedPayload),
-            header: symbol.header
-          });
+          const info = reusableInfo ?? {};
+          info.scanId = message.id;
+          info.sourceSequence = jobMeta?.sourceSequence;
+          info.opticsEpoch = jobMeta?.opticsEpoch;
+          info.quad = symbol.quad;
+          info.modules = symbol.modules;
+          info.tracked = symbol.tracked;
+          info.geometryMeasured = symbol.geometryMeasured !== false;
+          info.wallMotion = symbol.wallMotion;
+          info.decodePath = symbol.decodePath;
+          info.crc32 = symbol.crc32;
+          info.verifiedPayload = Boolean(symbol.verifiedPayload);
+          info.header = symbol.header;
+          this.onDecoded(symbol.bytes, symbol.box, info);
         }
         if (this.onSighted) for (const sighting of sightings) this.onSighted(sighting, message.id);
       } finally {
