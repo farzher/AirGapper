@@ -10,9 +10,69 @@ const query = self.location.search || "";
 await import(`./worker.js${query}`);
 
 const baseOnMessage = self.onmessage;
+const nativePostMessage = self.postMessage.bind(self);
 const PACKED_TRACK_BYTES = 56;
+const GEOMETRY_REPORTS_PER_FRAME = 4;
 const trackPool = [];
 const activeTracks = [];
+let activeSourceSequence = -1;
+let activeLiveTracked = false;
+
+function validQuad(quad) {
+  return Boolean(quad?.topLeft && quad?.topRight && quad?.bottomRight && quad?.bottomLeft &&
+    [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].every((point) =>
+      Number.isFinite(point.x) && Number.isFinite(point.y)));
+}
+
+function thinGeometryReports(symbols) {
+  if (!activeLiveTracked || !Array.isArray(symbols)) return;
+  const measured = symbols.filter((symbol) => symbol?.geometryMeasured !== false && validQuad(symbol?.quad));
+  if (measured.length <= GEOMETRY_REPORTS_PER_FRAME) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const positioned = measured.map((symbol) => {
+    const q = symbol.quad;
+    const x = (q.topLeft.x + q.topRight.x + q.bottomRight.x + q.bottomLeft.x) * 0.25;
+    const y = (q.topLeft.y + q.topRight.y + q.bottomRight.y + q.bottomLeft.y) * 0.25;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+    return { symbol, x, y };
+  });
+  const midX = (minX + maxX) * 0.5;
+  const midY = (minY + maxY) * 0.5;
+  const groups = [[], [], [], []];
+  for (const item of positioned) {
+    const quadrant = (item.y >= midY ? 2 : 0) + Number(item.x >= midX);
+    groups[quadrant].push(item.symbol);
+  }
+
+  // Rotate within each quadrant so persistent lens-residual learning eventually
+  // samples every slot instead of only the four corners, while every individual
+  // frame still reports geometry distributed across the wall.
+  const selected = new Set();
+  const sequence = Math.max(0, Math.trunc(Number(activeSourceSequence) || 0));
+  for (let quadrant = 0; quadrant < groups.length; quadrant++) {
+    const group = groups[quadrant];
+    if (group.length) selected.add(group[(sequence + quadrant) % group.length]);
+  }
+  if (selected.size < GEOMETRY_REPORTS_PER_FRAME) {
+    const offset = measured.length ? sequence % measured.length : 0;
+    for (let step = 0; step < measured.length && selected.size < GEOMETRY_REPORTS_PER_FRAME; step++) {
+      selected.add(measured[(offset + step) % measured.length]);
+    }
+  }
+  for (const symbol of measured) {
+    if (!selected.has(symbol)) symbol.geometryMeasured = false;
+  }
+}
+
+// worker.js posts through ctx === self, so this interception applies to its
+// final result without changing the codec. Preflight/signature messages have no
+// symbols and pass straight through.
+self.postMessage = (message, transfer) => {
+  thinGeometryReports(message?.symbols);
+  return nativePostMessage(message, transfer);
+};
 
 function pooledTrack(index) {
   let track = trackPool[index];
@@ -75,6 +135,9 @@ self.onmessage = (event) => {
   const message = event?.data;
   if (!message) return baseOnMessage?.call(self, event);
 
+  activeSourceSequence = Number(message.sourceSequence);
+  activeLiveTracked = Boolean(message.__airgapperLiveTracked);
+  delete message.__airgapperLiveTracked;
   unpackTracks(message);
 
   if (!message.__airgapperWorkerLumaFromRgba) {
