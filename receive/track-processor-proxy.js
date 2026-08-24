@@ -1,19 +1,10 @@
-import { isAndroid } from "../shared/platform.js";
-
-// Prefer a DedicatedWorker camera drain on Android as well as on Safari/WebKit.
-//
-// A Window-side MediaStreamTrackProcessor still depends on the browser main
-// thread servicing reader.read() frequently enough. At 30 fps, one >33 ms UI /
-// geometry/completion burst can overflow maxBufferSize=1 and discard a sensor
-// frame. The worker processor below continuously drains the camera off-thread
-// and retains only the newest pending VideoFrame, so main-thread jitter drops
-// stale optical pages intentionally instead of starving the camera processor.
-//
-// Safari/WebKit also needs this proxy on releases where the constructor is absent
-// from Window. During worker startup, bridge from the already playing <video>
-// with a transferable WebCodecs VideoFrame so Receive never has to wait on a
-// canvas/RGBA capture just to get its first frame.
-const preferWorkerProcessor = isAndroid;
+// Prefer a DedicatedWorker camera drain on mobile/coarse-pointer devices.
+// The worker continuously drains the camera and retains only the freshest
+// pending VideoFrame, so main-thread scheduling jitter cannot starve the native
+// processor or build a stale queue. Browsers without a Window-side processor use
+// the same compatibility path regardless of device class.
+const preferWorkerProcessor = navigator.userAgentData?.mobile === true ||
+  globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
 if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "function") &&
     typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
@@ -125,8 +116,6 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
             let workerRequested = false;
             if (this._worker) {
               try {
-                // A string avoids allocating/cloning a one-property command object
-                // for every camera frame.
                 this._worker.postMessage("pull");
                 workerRequested = true;
               } catch (error) {
@@ -139,10 +128,6 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
               }
             }
 
-            // While worker delivery is unproven, race the first read(s) against
-            // the exact frame requestVideoFrameCallback says is being presented.
-            // Once any worker VideoFrame arrives, this bridge permanently turns
-            // itself off for that processor instance.
             if (this._snapshotEnabled && !this._workerHealthy) {
               this._requestSnapshot(token);
             } else if (!workerRequested && !this._snapshotEnabled) {
@@ -193,9 +178,6 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
               : Math.max(0, Math.round(Number(callbackTime || performance.now()) * 1e3));
             frame = new globalThis.VideoFrame(video, { timestamp });
           } catch (error) {
-            // If the worker is still alive, let its outstanding pull finish. If
-            // this browser cannot construct VideoFrame(video) and no worker is
-            // available, surface the failure so runtime.js can use canvas.
             this._snapshotEnabled = false;
             if (!this._worker) this._fail(error instanceof Error ? error : new Error(String(error)));
             return;
@@ -248,8 +230,6 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         return;
       }
       if (message.type === "stopped") {
-        // A deliberately disabled worker is allowed to stop while the Window
-        // VideoFrame bridge continues serving reads.
         if (!this._worker && this._snapshotEnabled && !this._closed) return;
         this._closed = true;
         const resolve = this._pendingResolve;
