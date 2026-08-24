@@ -6,10 +6,7 @@ const PACKED_SYMBOL_BYTES = 88;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
-const LIVE_TRACKED_TIMEOUT_MS = 1200;
 const receiveVideo = document.getElementById("video");
-const decodeWorkers = document.getElementById("decode-workers");
-const reportedHardwareThreads = Math.max(1, Number(navigator.hardwareConcurrency) || 2);
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
 
@@ -17,11 +14,6 @@ function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
   return document.body?.classList?.contains("receive-mode") === true &&
     cameraStream?.active === true;
-}
-
-function negotiatedCameraFps() {
-  const track = receiveVideo?.srcObject?.getVideoTracks?.()[0];
-  return Number(track?.getSettings?.().frameRate) || 0;
 }
 
 function addTransfer(transfer, value) {
@@ -65,8 +57,6 @@ function stripIdentityOutputMap(message) {
   if (!map) return;
   if (Number(map.offsetX) === 0 && Number(map.offsetY) === 0 &&
       Number(map.scaleX) === 1 && Number(map.scaleY) === 1) {
-    // worker.js otherwise rebuilds a quad (four point objects) and a box for
-    // every decoded QR just to apply this no-op transform.
     message.outputMap = undefined;
   }
 }
@@ -90,10 +80,13 @@ function capDenseRepairMask(message, live) {
     : Number(message.guidedRepairMask) >>> 0;
   const allowed = requested & laneMask;
   if (!allowed || (allowed & (allowed - 1)) === 0) return;
-  // RaptorQ already treats a missing QR as an erasure. On a dense wall, bound
-  // expensive ambiguity repair to one best candidate and spend the rest of the
-  // budget on the next fresh camera frame.
-  message.guidedRepairMask = (allowed & -allowed) >>> 0;
+  // Missing symbols are ordinary erasures for the fountain layer. Bound all
+  // expensive per-QR salvage to one candidate on a dense frame so one damaged
+  // optical page cannot multiply fallback cost across many tracks.
+  const chosen = (allowed & -allowed) >>> 0;
+  message.guidedRepairMask = chosen;
+  if (message.guidedFallbackMask !== undefined)
+    message.guidedFallbackMask = (Number(message.guidedFallbackMask) >>> 0) & chosen;
 }
 
 function attachPackedResultScratch(message, transfer) {
@@ -138,9 +131,6 @@ function packTracks(message, transfer) {
   }
   message.__airgapperPackedTracks = packed;
   message.__airgapperPackedTrackCount = count;
-  // DecodeWorkerPool records this after our wrapper runs. Preserve the count so
-  // latency/cost samples and the adaptive track-budget controller do not see a
-  // packed job as a zero-track job.
   message.trackCount = count;
   message.tracks = undefined;
   return addTransfer(transfer, packed);
@@ -153,11 +143,37 @@ function recycleUnsentBuffers(message) {
   if (result instanceof ArrayBuffer && result.byteLength) recyclePackedResultBuffer(result);
 }
 
-// Packed track descriptors are only needed long enough for worker-rvfc.js to
-// unpack them into its reusable track objects. The worker transfers that tiny
-// buffer back with the final result; compact result metadata follows the same
-// ping-pong pattern. After warm-up neither direction allocates a metadata buffer
-// at camera cadence.
+// Learn stale-job deadlines from actual successful tracked latency. Separate
+// sparse, medium and dense batches because their normal service times differ.
+// Until a bucket has enough evidence the pool's conservative base timeout wins.
+const TRACKED_LATENCY_BUCKETS = 3;
+const TRACKED_LATENCY_MIN_SAMPLES = 5;
+const trackedLatencyEwma = new Float64Array(TRACKED_LATENCY_BUCKETS);
+const trackedLatencySamples = new Uint16Array(TRACKED_LATENCY_BUCKETS);
+function trackedLatencyBucket(trackCount) {
+  const count = Math.max(0, Math.trunc(Number(trackCount) || 0));
+  return count <= 4 ? 0 : count <= 12 ? 1 : 2;
+}
+function noteTrackedLatency(trackCount, latencyMs) {
+  const latency = Number(latencyMs);
+  if (!Number.isFinite(latency) || latency <= 0) return;
+  const bucket = trackedLatencyBucket(trackCount);
+  const samples = trackedLatencySamples[bucket];
+  const previous = trackedLatencyEwma[bucket];
+  const weight = samples < 8 ? 0.25 : 0.12;
+  trackedLatencyEwma[bucket] = previous > 0 ? previous * (1 - weight) + latency * weight : latency;
+  trackedLatencySamples[bucket] = Math.min(65535, samples + 1);
+}
+function adaptiveTrackedTimeoutMs(trackCount, baseTimeoutMs) {
+  const base = Math.max(1, Number(baseTimeoutMs) || 1);
+  const bucket = trackedLatencyBucket(trackCount);
+  if (trackedLatencySamples[bucket] < TRACKED_LATENCY_MIN_SAMPLES) return base;
+  const latencyBudget = trackedLatencyEwma[bucket] * 6;
+  const fps = Number(receiveVideo?.srcObject?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0;
+  const freshnessBudget = fps > 0 ? 12 * 1000 / fps : 0;
+  return Math.min(base, Math.max(400, latencyBudget, freshnessBudget));
+}
+
 const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
 if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedBufferRecycle) {
   const configureWorker = function(slot, worker) {
@@ -165,6 +181,9 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
+      const activeMeta = this.activeMeta?.[slot];
+      if (activeMeta && !activeMeta.full && !message?.error)
+        noteTrackedLatency(activeMeta.tracks, message?.latencyMs);
       const recycledTrack = message?.__airgapperPackedTrackRecycle;
       if (recycledTrack instanceof ArrayBuffer) {
         recyclePackedTrackBuffer(recycledTrack);
@@ -176,16 +195,11 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
       try {
         result = baseOnMessage?.call(worker, event);
       } finally {
-        // shared/worker-pool.js has synchronously unpacked resultMeta before the
-        // base handler returns, so it can immediately become the next worker's
-        // scratch buffer. If a frame produced no packed result, the worker sends
-        // the unused scratch back under the dedicated recycle field instead.
         if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
         if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta)
           recyclePackedResultBuffer(unusedScratch);
         if (message) {
           delete message.__airgapperPackedSymbolScratchRecycle;
-          // Keep no stale event reference to a pooled buffer.
           delete message.__airgapperPackedSymbolMeta;
         }
       }
@@ -196,12 +210,6 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
   DecodeWorkerPool.prototype.configureWorker = configureWorker;
 }
 
-// Preprocess live-camera jobs here, then delegate ownership/bookkeeping to the
-// pool itself. The pool now keeps ping-pong activeMeta records per slot so an
-// onAvailable() callback can schedule the next frame without mutating metadata
-// still being consumed by the previous completion. Keeping a second copy of the
-// submission state machine here previously bypassed that fix and could corrupt
-// sourceSequence/opticsEpoch on re-entrant scheduling.
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
   const submitAtSlot = function(slot, message, transfer) {
@@ -236,47 +244,20 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
       recycleUnsentBuffers(message);
       return false;
     }
-    // A tracked camera frame older than a second is dozens of sender frames
-    // behind and has essentially no real-time value. Do not let a rare stuck
-    // VideoFrame/copy/decode monopolize a worker for the old 2.2 second timeout.
     if (live && !message.full) {
       const meta = this.activeMeta?.[slot];
-      if (meta && meta.id === message.id && meta.timeoutMs > LIVE_TRACKED_TIMEOUT_MS) {
-        meta.timeoutMs = LIVE_TRACKED_TIMEOUT_MS;
-        meta.deadlineAt = meta.startedAt + LIVE_TRACKED_TIMEOUT_MS;
+      if (meta && meta.id === message.id) {
+        const timeout = adaptiveTrackedTimeoutMs(meta.tracks, meta.timeoutMs);
+        if (timeout < meta.timeoutMs) {
+          meta.timeoutMs = timeout;
+          meta.deadlineAt = meta.startedAt + timeout;
+        }
       }
     }
     return true;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
-}
-
-// The runtime controller deliberately starts at two workers and only asks for
-// three after sustained pressure. On a >=25 fps camera, that first pressure
-// escalation is exactly where a fourth slot is useful: three 80-110 ms jobs can
-// sit on the edge of 30 fps, and one stalled frame then collapses delivery. Jump
-// 3 -> 4 only in Auto mode after the controller has already requested growth;
-// its normal 10-second headroom path can still shrink back to two.
-const baseResize = DecodeWorkerPool.prototype.resize;
-if (typeof baseResize === "function" && !baseResize.__airgapperThirtyFpsHeadroom) {
-  const resize = function(count) {
-    let target = Math.max(0, Math.trunc(Number(count) || 0));
-    if (decodeWorkers?.value === "auto" && target === 3 && reportedHardwareThreads >= 4 &&
-        liveReceiveCamera() && negotiatedCameraFps() >= 25) {
-      target = 4;
-    }
-    const result = baseResize.call(this, target);
-    if (decodeWorkers?.value === "auto") {
-      queueMicrotask(() => {
-        const option = Array.from(decodeWorkers.options).find((candidate) => candidate.value === "auto");
-        if (option && decodeWorkers.value === "auto") option.textContent = `Auto (${this.size})`;
-      });
-    }
-    return result;
-  };
-  Object.defineProperty(resize, "__airgapperThirtyFpsHeadroom", { value: true });
-  DecodeWorkerPool.prototype.resize = resize;
 }
 
 // Every AirGapper decode worker uses the live-camera wrapper. Preserve the
