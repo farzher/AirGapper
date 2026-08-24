@@ -40,11 +40,21 @@ const GF_LOG = new Uint8Array(256);
   for (let i = 255; i < GF_EXP.length; ++i) GF_EXP[i] = GF_EXP[i - 255];
 }
 
+// RS encoding performs many repeated GF multiplications. One 64 KiB table per
+// render worker replaces two logarithm lookups plus an exponent lookup in the
+// inner parity loop. This is sender-only scratch and stays fixed for the worker.
+const GF_MUL = new Uint8Array(256 * 256);
+for (let a = 1; a < 256; ++a) {
+  const logA = GF_LOG[a];
+  const row = a << 8;
+  for (let b = 1; b < 256; ++b) GF_MUL[row | b] = GF_EXP[logA + GF_LOG[b]];
+}
+
 const generatorCache = new Map();
 const templateCache = new Map();
 
 function gfMul(a, b) {
-  return a === 0 || b === 0 ? 0 : GF_EXP[GF_LOG[a] + GF_LOG[b]];
+  return GF_MUL[a << 8 | b];
 }
 
 function generatorPolynomial(degree) {
@@ -220,6 +230,7 @@ function buildTemplate(version) {
   setupAlignmentPatterns(modules, reserved, version, size);
   setupFormatInfo(modules, reserved, size);
   setupVersionInfo(modules, reserved, version, size);
+  const staticModules = modules.slice();
 
   const totalCodewords = TOTAL_CODEWORDS[version];
   const ecTotalCodewords = EC_CODEWORDS_L[version];
@@ -251,8 +262,10 @@ function buildTemplate(version) {
     version,
     size,
     modules,
+    staticModules,
     positions: traversal.positions,
     masks: traversal.masks,
+    rasterLayouts: new Map(),
     totalCodewords,
     dataTotalCodewords,
     blockCount,
@@ -275,6 +288,24 @@ function templateFor(version) {
     templateCache.set(version, template);
   }
   return template;
+}
+
+function transferQrRasterLayout(version, rasterWidth) {
+  const template = templateFor(version);
+  let layout = template.rasterLayouts.get(rasterWidth);
+  if (layout) return layout;
+  const offsets = new Uint32Array(template.positions.length);
+  for (let i = 0; i < offsets.length; ++i) {
+    const position = template.positions[i];
+    const row = Math.floor(position / template.size);
+    offsets[i] = row * rasterWidth + position - row * template.size;
+  }
+  layout = {
+    template,
+    offsets
+  };
+  template.rasterLayouts.set(rasterWidth, layout);
+  return layout;
 }
 
 function putBits(out, bitOffset, value, width) {
@@ -329,8 +360,9 @@ function encodeParity(template, dataOffset, dataLength, parityOffset) {
   for (let i = 0; i < dataLength; ++i) {
     const factor = scratch[i];
     if (factor === 0) continue;
+    const mulRow = factor << 8;
     for (let j = 0; j < generator.length; ++j)
-      scratch[i + j] ^= gfMul(generator[j], factor);
+      scratch[i + j] ^= GF_MUL[mulRow | generator[j]];
   }
   for (let i = 0; i < template.ecPerBlock; ++i)
     template.parity[parityOffset + i] = scratch[dataLength + i];
@@ -375,7 +407,7 @@ function encodeTransferQr(payload, version) {
   buildDataBytes(template, payload);
   buildCodewords(template);
   writeMaskedModules(template);
-  return template.modules;
+  return template;
 }
 
-export { encodeTransferQr };
+export { encodeTransferQr, transferQrRasterLayout };
