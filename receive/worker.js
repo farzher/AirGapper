@@ -82,6 +82,23 @@ let directConfigured = [];
 let directCropX = NaN;
 let directCropY = NaN;
 const directRefresh = /* @__PURE__ */ new Set();
+const guidedSymbolsScratch = [];
+const guidedWallMotionScratch = [];
+const guidedSeenSlots = new Int32Array(GUIDED_BATCH_MAX_TRACKS);
+const guidedOutputOffsets = new Int32Array(GUIDED_BATCH_MAX_TRACKS);
+const guidedOutputLengths = new Int32Array(GUIDED_BATCH_MAX_TRACKS);
+function guidedTrackIndexForSlot(tracks, slot) {
+  // Map.set() in the old implementation kept the last duplicate slot. Search
+  // backwards to preserve that behavior without allocating a Map every frame.
+  for (let index = tracks.length - 1; index >= 0; index--) {
+    if (Number(tracks[index].slot ?? tracks[index].id) === slot) return index;
+  }
+  return -1;
+}
+function guidedSlotAlreadySeen(slot, count) {
+  for (let index = 0; index < count; index++) if (guidedSeenSlots[index] === slot) return true;
+  return false;
+}
 function ensureGuidedBatch(zx) {
   if (!guidedTracksPtr) guidedTracksPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
   if (!guidedResultsPtr) guidedResultsPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
@@ -92,10 +109,13 @@ function ensureGuidedBatch(zx) {
 function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fallbackAllowedMask = 0xffffffff, repairAllowedMask = 0xffffffff) {
   if (!ensureGuidedBatch(zx) || !tracks.length || tracks.length > GUIDED_BATCH_MAX_TRACKS) return null;
   let view = new DataView(zx.HEAPU8.buffer, guidedTracksPtr, tracks.length * GUIDED_TRACK_BYTES);
+  let validTrackSlotCount = 0;
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i];
     if (!validQuad(track.quad) || !track.dim) return null;
     const base = i * GUIDED_TRACK_BYTES;
+    const slot = Number(track.slot ?? track.id);
+    if (Number.isInteger(slot) && slot >= 0) validTrackSlotCount++;
     view.setInt32(base, track.slot ?? track.id ?? i, true);
     view.setInt32(base + 4, track.dim, true);
     const q = track.quad;
@@ -204,15 +224,11 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   metrics.moduleSizeAvg = moduleSizeCount ? moduleSizeSum / moduleSizeCount : 0;
   if (count < 0) return { symbols: [], metrics, error: "guided decode failed" };
   view = new DataView(zx.HEAPU8.buffer, guidedResultsPtr, count * GUIDED_RESULT_BYTES);
-  const symbols = [];
-  const trackIndexBySlot = new Map();
-  for (let index = 0; index < tracks.length; index++) {
-    const slot = Number(tracks[index].slot ?? tracks[index].id);
-    if (Number.isInteger(slot) && slot >= 0) trackIndexBySlot.set(slot, index);
-  }
-  const decodedSlots = new Set();
-  const wallMotionSamples = [];
-  const pendingSymbols = [];
+  const symbols = guidedSymbolsScratch;
+  const wallMotionSamples = guidedWallMotionScratch;
+  symbols.length = 0;
+  wallMotionSamples.length = 0;
+  let seenCount = 0;
   let outputEnd = 0;
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
@@ -228,10 +244,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     const packet = parseVerifiedFrame(bytes);
     const slot = packet?.header.slotIndex;
     if (!packet || !Number.isInteger(slot) || slot < 0) continue;
-    if (trackIndexBySlot.size && !trackIndexBySlot.has(slot) || decodedSlots.has(slot)) continue;
-    decodedSlots.add(slot);
-    const trackIndex = trackIndexBySlot.get(slot);
-    const slotBit = Number.isInteger(trackIndex) && trackIndex >= 0 && trackIndex < 32
+    const trackIndex = guidedTrackIndexForSlot(tracks, slot);
+    if (validTrackSlotCount && trackIndex < 0 || guidedSlotAlreadySeen(slot, seenCount)) continue;
+    guidedSeenSlots[seenCount++] = slot;
+    const slotBit = trackIndex >= 0 && trackIndex < 32
       ? (1 << trackIndex) >>> 0
       : 0;
     const decodePath = slotBit && (metrics.fallbackSuccessMask & slotBit)
@@ -248,7 +264,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     if (!validQuad(quad)) continue;
     const outputQuad = shifted(quad, ox, oy);
     const geometryMeasured = status === DIRECT_TRACK_OK;
-    const input = Number.isInteger(trackIndex) ? tracks[trackIndex] : void 0;
+    const input = trackIndex >= 0 ? tracks[trackIndex] : void 0;
     if (input?.quad && validQuad(input.quad)) {
       const iq = input.quad, oq = outputQuad;
       const dx = ((oq.topLeft.x - iq.topLeft.x) + (oq.topRight.x - iq.topRight.x) +
@@ -265,10 +281,12 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
         wallMotionSamples.push({ dx, dy, x, y, edge, slot, measured: geometryMeasured });
       }
     }
+    const symbolIndex = symbols.length;
+    guidedOutputOffsets[symbolIndex] = outputOffset;
+    guidedOutputLengths[symbolIndex] = outputLength;
     outputEnd = Math.max(outputEnd, outputOffset + outputLength);
-    pendingSymbols.push({
-      outputOffset,
-      outputLength,
+    symbols.push({
+      bytes: null,
       box: boundsOf(quad, ox, oy),
       quad: outputQuad,
       modules,
@@ -281,18 +299,10 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     });
   }
   const output = outputEnd ? zx.HEAPU8.slice(guidedOutputPtr, guidedOutputPtr + outputEnd) : new Uint8Array(0);
-  for (const pending of pendingSymbols) symbols.push({
-    bytes: output.subarray(pending.outputOffset, pending.outputOffset + pending.outputLength),
-    box: pending.box,
-    quad: pending.quad,
-    modules: pending.modules,
-    tracked: pending.tracked,
-    geometryMeasured: pending.geometryMeasured,
-    decodePath: pending.decodePath,
-    crc32: pending.crc32,
-    verifiedPayload: pending.verifiedPayload,
-    header: pending.header
-  });
+  for (let index = 0; index < symbols.length; index++) {
+    const offset = guidedOutputOffsets[index];
+    symbols[index].bytes = output.subarray(offset, offset + guidedOutputLengths[index]);
+  }
   // Full independently measured finder geometry remains absolute authority.
   // Otherwise the Turbo/Stable-RS CRC oracle gives us something almost as
   // valuable every frame: each successful predicted QR says "the wall is this
