@@ -18,23 +18,24 @@ function addTransfer(transfer, value) {
   return list.includes(value) ? list : [...list, value];
 }
 
-function keepTrackedCameraOnGuided(message) {
+function keepTrackedCameraOnGuided(message, live) {
   // The old rollout scheduler still injects a dense robust scout every ~30
   // tracked jobs. Guided is no longer experimental: it has cached Turbo,
   // Sparse, generic per-track fallback and dedicated whole-lattice recovery.
   // A full-crop robust scout can cost hundreds of milliseconds and duplicates
   // work without improving healthy throughput. Keep ordinary multi-QR camera
   // frames on Guided; explicit full/recovery jobs remain untouched.
-  if (liveReceiveCamera() && message && !message.full && !message.strictHotPath &&
+  if (live && message && !message.full && !message.strictHotPath &&
       message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
       (message.pixelFormat === "y8" || message.__airgapperWorkerLumaFromRgba)) {
     message.guidedDecode = true;
+    message.__airgapperLiveTracked = true;
   }
 }
 
-function capDenseRepairMask(message) {
+function capDenseRepairMask(message, live) {
   const tracks = message?.tracks;
-  if (!liveReceiveCamera() || message?.full || !message?.guidedDecode ||
+  if (!live || message?.full || !message?.guidedDecode ||
       !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
   const laneMask = tracks.length >= 32 ? 0xffffffff : (2 ** tracks.length - 1) >>> 0;
   const requested = message.guidedRepairMask === undefined
@@ -92,7 +93,8 @@ function packTracks(message, transfer) {
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
   const submitAtSlot = function(slot, message, transfer) {
-    if (liveReceiveCamera() && message && !message.full && !message.videoFrame && !message.strictHotPath &&
+    const live = liveReceiveCamera();
+    if (live && message && !message.full && !message.videoFrame && !message.strictHotPath &&
         Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
       const rgba = message.buf;
@@ -106,8 +108,8 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
         transfer = addTransfer(transfer, rgba);
       }
     }
-    keepTrackedCameraOnGuided(message);
-    capDenseRepairMask(message);
+    keepTrackedCameraOnGuided(message, live);
+    capDenseRepairMask(message, live);
     transfer = packTracks(message, transfer);
     return baseSubmitAtSlot.call(this, slot, message, transfer);
   };
