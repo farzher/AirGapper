@@ -13,57 +13,98 @@ const baseOnMessage = self.onmessage;
 const nativePostMessage = self.postMessage.bind(self);
 const PACKED_TRACK_BYTES = 56;
 const GEOMETRY_REPORTS_PER_FRAME = 4;
+const MAX_GEOMETRY_SYMBOLS = 128;
 const trackPool = [];
 const activeTracks = [];
 let activeSourceSequence = -1;
 let activeLiveTracked = false;
 
+// Geometry thinning runs on every successful dense worker result. Keep its
+// scratch storage worker-local and reusable instead of building filter/map/
+// group/Set object graphs at camera cadence.
+const measuredSymbols = new Array(MAX_GEOMETRY_SYMBOLS);
+const measuredX = new Float64Array(MAX_GEOMETRY_SYMBOLS);
+const measuredY = new Float64Array(MAX_GEOMETRY_SYMBOLS);
+const quadrantCounts = new Uint16Array(4);
+const quadrantSeen = new Uint16Array(4);
+const selectedSymbols = new Array(GEOMETRY_REPORTS_PER_FRAME);
+
 function validQuad(quad) {
-  return Boolean(quad?.topLeft && quad?.topRight && quad?.bottomRight && quad?.bottomLeft &&
-    [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].every((point) =>
-      Number.isFinite(point.x) && Number.isFinite(point.y)));
+  if (!quad) return false;
+  const a = quad.topLeft, b = quad.topRight, c = quad.bottomRight, d = quad.bottomLeft;
+  return Boolean(a && b && c && d &&
+    Number.isFinite(a.x) && Number.isFinite(a.y) &&
+    Number.isFinite(b.x) && Number.isFinite(b.y) &&
+    Number.isFinite(c.x) && Number.isFinite(c.y) &&
+    Number.isFinite(d.x) && Number.isFinite(d.y));
+}
+
+function alreadySelected(symbol, count) {
+  for (let index = 0; index < count; index++) {
+    if (selectedSymbols[index] === symbol) return true;
+  }
+  return false;
 }
 
 function thinGeometryReports(symbols) {
   if (!activeLiveTracked || !Array.isArray(symbols)) return;
-  const measured = symbols.filter((symbol) => symbol?.geometryMeasured !== false && validQuad(symbol?.quad));
-  if (measured.length <= GEOMETRY_REPORTS_PER_FRAME) return;
 
+  let measuredCount = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  const positioned = measured.map((symbol) => {
+  for (let index = 0; index < symbols.length && measuredCount < MAX_GEOMETRY_SYMBOLS; index++) {
+    const symbol = symbols[index];
+    if (!symbol || symbol.geometryMeasured === false || !validQuad(symbol.quad)) continue;
     const q = symbol.quad;
     const x = (q.topLeft.x + q.topRight.x + q.bottomRight.x + q.bottomLeft.x) * 0.25;
     const y = (q.topLeft.y + q.topRight.y + q.bottomRight.y + q.bottomLeft.y) * 0.25;
-    minX = Math.min(minX, x); minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
-    return { symbol, x, y };
-  });
+    measuredSymbols[measuredCount] = symbol;
+    measuredX[measuredCount] = x;
+    measuredY[measuredCount] = y;
+    measuredCount++;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  if (measuredCount <= GEOMETRY_REPORTS_PER_FRAME) return;
+
   const midX = (minX + maxX) * 0.5;
   const midY = (minY + maxY) * 0.5;
-  const groups = [[], [], [], []];
-  for (const item of positioned) {
-    const quadrant = (item.y >= midY ? 2 : 0) + Number(item.x >= midX);
-    groups[quadrant].push(item.symbol);
+  quadrantCounts.fill(0);
+  for (let index = 0; index < measuredCount; index++) {
+    const quadrant = (measuredY[index] >= midY ? 2 : 0) + Number(measuredX[index] >= midX);
+    quadrantCounts[quadrant]++;
   }
 
   // Rotate within each quadrant so persistent lens-residual learning eventually
   // samples every slot instead of only the four corners, while every individual
   // frame still reports geometry distributed across the wall.
-  const selected = new Set();
   const sequence = Math.max(0, Math.trunc(Number(activeSourceSequence) || 0));
-  for (let quadrant = 0; quadrant < groups.length; quadrant++) {
-    const group = groups[quadrant];
-    if (group.length) selected.add(group[(sequence + quadrant) % group.length]);
-  }
-  if (selected.size < GEOMETRY_REPORTS_PER_FRAME) {
-    const offset = measured.length ? sequence % measured.length : 0;
-    for (let step = 0; step < measured.length && selected.size < GEOMETRY_REPORTS_PER_FRAME; step++) {
-      selected.add(measured[(offset + step) % measured.length]);
+  quadrantSeen.fill(0);
+  let selectedCount = 0;
+  for (let index = 0; index < measuredCount; index++) {
+    const quadrant = (measuredY[index] >= midY ? 2 : 0) + Number(measuredX[index] >= midX);
+    const target = (sequence + quadrant) % quadrantCounts[quadrant];
+    if (quadrantSeen[quadrant]++ === target) {
+      selectedSymbols[selectedCount++] = measuredSymbols[index];
+      if (selectedCount === GEOMETRY_REPORTS_PER_FRAME) break;
     }
   }
-  for (const symbol of measured) {
-    if (!selected.has(symbol)) symbol.geometryMeasured = false;
+
+  if (selectedCount < GEOMETRY_REPORTS_PER_FRAME) {
+    const offset = sequence % measuredCount;
+    for (let step = 0; step < measuredCount && selectedCount < GEOMETRY_REPORTS_PER_FRAME; step++) {
+      const symbol = measuredSymbols[(offset + step) % measuredCount];
+      if (!alreadySelected(symbol, selectedCount)) selectedSymbols[selectedCount++] = symbol;
+    }
   }
+
+  for (let index = 0; index < measuredCount; index++) {
+    const symbol = measuredSymbols[index];
+    if (!alreadySelected(symbol, selectedCount)) symbol.geometryMeasured = false;
+    measuredSymbols[index] = undefined;
+  }
+  for (let index = 0; index < selectedCount; index++) selectedSymbols[index] = undefined;
 }
 
 // worker.js posts through ctx === self, so this interception applies to its
@@ -151,11 +192,10 @@ self.onmessage = (event) => {
 
   if (!(rgbaBuffer instanceof ArrayBuffer) || width <= 0 || height <= 0 ||
       pixelCount <= 0 || rgbaBuffer.byteLength < pixelCount * 4) {
-    const fallback = message;
-    fallback.buf = rgbaBuffer;
-    fallback.videoFrame = undefined;
-    delete fallback.__airgapperWorkerLumaFromRgba;
-    return baseOnMessage?.call(self, { data: fallback });
+    message.buf = rgbaBuffer;
+    message.videoFrame = undefined;
+    delete message.__airgapperWorkerLumaFromRgba;
+    return baseOnMessage?.call(self, { data: message });
   }
 
   // Safe forward compaction: for every pixel after the first, the green source
