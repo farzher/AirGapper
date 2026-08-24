@@ -291,11 +291,11 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
         else resolve?.({ value: undefined, done: true });
       }
       const worker = this._worker;
-      this._worker = null;
       if (worker) {
         try { worker.postMessage({ type: "stop" }); } catch {}
         if (!this._terminateTimer) {
           this._terminateTimer = setTimeout(() => {
+            if (this._worker === worker) this._worker = null;
             try { worker.terminate(); } catch {}
             this._terminateTimer = 0;
           }, 100);
