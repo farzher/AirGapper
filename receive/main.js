@@ -7,6 +7,7 @@ import "./runtime-guards.js";
 import "./acquisition-focus-recovery.js";
 import "./lattice-cache-guard.js";
 import "./worker-capacity-guard.js";
+import "./stale-timeout-latency-guard.js";
 import "./dev-settings-unlock.js";
 import "./status-neutral.js";
 import "./runtime.js";
