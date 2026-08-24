@@ -19,6 +19,7 @@ function publishLatest() {
 
 async function stopSource() {
   stopped = true;
+  wantsFrame = false;
   const activeReader = reader;
   reader = null;
   if (activeReader) {
@@ -44,6 +45,15 @@ function frameMatchesExpected(frame) {
   return size.width === expectedWidth && size.height === expectedHeight;
 }
 
+function trackAlreadyMatchesExpected(track) {
+  if (!(expectedWidth > 0) || !(expectedHeight > 0)) return true;
+  const settings = track?.getSettings?.() ?? {};
+  const sameSize = Number(settings.width) === expectedWidth && Number(settings.height) === expectedHeight;
+  if (!sameSize) return false;
+  if (!(expectedFrameRate > 0) || !(Number(settings.frameRate) > 0)) return true;
+  return Math.abs(Number(settings.frameRate) - expectedFrameRate) < 1;
+}
+
 async function startSource(track, maxBufferSize = 1, expected = {}) {
   await stopSource();
   stopped = false;
@@ -61,11 +71,11 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
     return;
   }
 
-  // WebKit can reset a cloned camera track to a different sensor mode when it
-  // crosses into a worker. Ask the clone to retain the already-negotiated main
-  // track mode before creating the processor. Failure is harmless because the
-  // first VideoFrame is validated below and the page falls back to rVFC.
-  if (expectedWidth && expectedHeight && sourceTrack?.applyConstraints) {
+  // A clone normally inherits the already-negotiated sensor mode. Do not issue
+  // a redundant applyConstraints() write when it already matches: camera mode
+  // writes can stall/restart delivery on mobile. Only repair a clone that
+  // actually arrived in the worker with a different mode.
+  if (!trackAlreadyMatchesExpected(sourceTrack) && expectedWidth && expectedHeight && sourceTrack?.applyConstraints) {
     try {
       await sourceTrack.applyConstraints({
         width: { exact: expectedWidth },
@@ -163,5 +173,7 @@ self.onmessage = (event) => {
     publishLatest();
     return;
   }
-  if (message.type === "stop") void stopSource();
+  if (message.type === "stop") {
+    void stopSource().finally(() => postMessage({ type: "stopped", totalFrames, discardedFrames }));
+  }
 };
