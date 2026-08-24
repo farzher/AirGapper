@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -Fq 'APP_VERSION = "0.5.415"' version.js; then
+          if grep -Fq 'const autoWorkerMax = Math.max(1, Math.min(5, hardwareThreadCount - 1));' receive/runtime.js; then
             python3 - <<'PY'
           from pathlib import Path
 
@@ -66,20 +66,13 @@ jobs:
               "const TRACKED_JOB_TIMEOUT_MS = 2200;",
               "const TRACKED_JOB_TIMEOUT_MS = 1200;"
           )
-
-          replace_once(
-              "version.js",
-              'export const APP_VERSION = "0.5.415";',
-              'export const APP_VERSION = "0.5.416";'
-          )
           PY
 
-            # This workflow edit is only a transport for the large runtime patch.
-            # Put the normal build-only workflow back in the product commit.
-            git show HEAD^:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
+            # Restore the known clean build-only workflow in the product commit.
+            git show 25d616375ae47dfc8af03896f6924efbe2f0b1e1:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add receive/runtime.js shared/worker-pool.js version.js .github/workflows/build-apk.yml
+            git add receive/runtime.js shared/worker-pool.js .github/workflows/build-apk.yml
             git commit -m "v0.5.416: target full camera throughput"
             git push origin HEAD:master
           fi
