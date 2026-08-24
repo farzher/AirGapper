@@ -2,12 +2,12 @@ import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 const PACKED_TRACK_BYTES = 56;
 const DENSE_REPAIR_MIN_TRACKS = 12;
+const receiveVideo = document.getElementById("video");
 
 function liveReceiveCamera() {
-  const video = document.getElementById("video");
-  const tracks = video?.srcObject?.getVideoTracks?.() ?? [];
+  const cameraStream = receiveVideo?.srcObject;
   return document.body?.classList?.contains("receive-mode") === true &&
-    tracks.some((track) => track?.readyState === "live");
+    cameraStream?.active === true;
 }
 
 function addTransfer(transfer, value) {
@@ -80,8 +80,9 @@ function packTracks(message, transfer) {
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
   const submitAtSlot = function(slot, message, transfer) {
-    const live = liveReceiveCamera();
-    if (live && message && !message.full && !message.videoFrame && !message.strictHotPath &&
+    const candidate = message && !message.full && !message.strictHotPath;
+    const live = Boolean(candidate && liveReceiveCamera());
+    if (live && !message.videoFrame &&
         Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
       const rgba = message.buf;
