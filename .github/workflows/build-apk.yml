@@ -33,6 +33,19 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Apply pending sender developer settings patch
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          if grep -Fq 'APP_VERSION = "0.5.413"' version.js && [ -f benchmark/apply-send-dev-gutter.mjs ]; then
+            node benchmark/apply-send-dev-gutter.mjs
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add receive/runtime.js index.html shared/style.css send/main.js version.js
+            git commit -m "v0.5.414: add sender curved-display gutter"
+            git push origin HEAD:master
+          fi
+
       - name: Read app version
         id: version
         run: |
