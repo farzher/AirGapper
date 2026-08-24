@@ -64,6 +64,7 @@ function installIOSCameraConstraintFallback() {
 installIOSCameraConstraintFallback();
 
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
+const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
 
 function exposureConstraintAlreadySatisfied(track, set) {
   if (!track || !set) return false;
@@ -92,11 +93,17 @@ function withoutExposure(set) {
 
 async function applyConstraint(track, set) {
   if (!Object.keys(set).length) return true;
+  let timer;
   try {
-    await track.applyConstraints({ advanced: [set] });
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Camera constraint write timed out")), CAMERA_CONSTRAINT_TIMEOUT_MS);
+    });
+    await Promise.race([track.applyConstraints({ advanced: [set] }), timeout]);
     return true;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
