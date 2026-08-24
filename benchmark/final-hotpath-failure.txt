@@ -1,15 +1,209 @@
-stage=patch
+stage=policy-regressions
 status=1
 
-file:///home/runner/work/AirGapper/AirGapper/benchmark/apply-final-hotpath-optimizations.mjs:834
-  if (!expected) throw new Error(\`${name}: reference parse failed\`);
-                                     ^
+AIRGAPPER_FINAL_HOTPATH_PATCH_APPLIED
+AIRGAPPER_GUIDED_MOTION_PASS {"trials":257}
+AIRGAPPER_PROTOCOL_PARSE_REUSE_PASS
+AIRGAPPER_RGBA_LUMA_PASS {"cases":175}
+AIRGAPPER_WORKER_POOL_REUSE_PASS {"guardedSubmitPath":true,"completionIdentityReused":true,"preflightIdentityReused":true,"staleGuidedMetricsCleared":true,"reentrantMetadataPreserved":true,"metadataRecordReused":true}
+AIRGAPPER_TRACK_PROCESSOR_PROXY_PASS {"prewarmedWorkers":1,"workerWinsRace":true,"snapshotWinsRace":true,"unsupportedFallsBackToSnapshots":true,"workersCreated":3,"stoppedClones":0}
+[master 42e416e] finish receiver hotpath allocation pass
+ 7 files changed, 385 insertions(+), 373 deletions(-)
+ delete mode 100644 benchmark/final-hotpath-failure.txt
+ create mode 100644 benchmark/protocol-parse-reuse-smoke.mjs
+From https://github.com/zxing-cpp/zxing-cpp
+ * branch              3e09874a9ca7c191d67101f302a1f53c71a118cc -> FETCH_HEAD
+HEAD is now at 3e09874a Log: LogMatrix.h -> Log.h + printf -> log_[t|l|r]
+emcmake: cmake -S . -B build-simd -G Ninja -DCMAKE_BUILD_TYPE=Release -DAIRGAPPER_CODEC_SIMD=ON -DAIRGAPPER_CODEC_VERSION=0.2.1 -DAIRGAPPER_CODEC_BUILD=42e416e-dirty -DCMAKE_TOOLCHAIN_FILE=/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/node/24.19.0_64bit/bin/node in directory /home/runner/work/AirGapper/AirGapper/codec/source
+[1/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/CreateBarcode.cpp.o
+[2/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitMatrixIO.cpp.o
+[3/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Error.cpp.o
+[4/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/cmake_pch.hxx.pch
+[5/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BarcodeFormat.cpp.o
+[6/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GTIN.cpp.o
+[7/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/CharacterSet.cpp.o
+[8/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitMatrix.cpp.o
+[9/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Barcode.cpp.o
+[10/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ZXingCpp.cpp.o
+[11/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/JSON.cpp.o
+[12/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ECI.cpp.o
+[13/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Content.cpp.o
+[14/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitArray.cpp.o
+[15/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Utf.cpp.o
+[16/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/WriteBarcode.cpp.o
+[17/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ReadBarcode.cpp.o
+[18/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BinaryBitmap.cpp.o
+[19/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitSource.cpp.o
+[20/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ReedSolomon.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ReedSolomon.cpp:8:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/librscpp/encode.h:18:13: warning: unused function template 'build_generator' [-Wunused-template]
+   18 | Poly<Field> build_generator(const Field& field, int degree)
+      |             ^~~~~~~~~~~~~~~
+1 warning generated.
+[21/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ConcentricFinder.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.cpp:6:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[22/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GlobalHistogramBinarizer.cpp.o
+[23/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GridSampler.cpp.o
+[24/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/PerspectiveTransform.cpp.o
+[25/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/HybridBinarizer.cpp.o
+[26/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ResultPoint.cpp.o
+[27/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/LocalGrid.cpp.o
+[28/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/TextDecoder.cpp.o
+[29/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/WhiteRectDetector.cpp.o
+[30/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRErrorCorrectionLevel.cpp.o
+[31/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRCodecMode.cpp.o
+[32/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/HRI.cpp.o
+[33/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDataBlock.cpp.o
+[34/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRBitMatrixParser.cpp.o
+[35/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRFormatInformation.cpp.o
+[36/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/MultiFormatReader.cpp.o
+[37/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRVersion.cpp.o
+[38/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDecoder.cpp.o
+[39/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDetector.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRDetector.cpp:9:
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRDetector.h:10:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[40/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRReader.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRReader.cpp:12:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[41/43] Linking CXX static library ZXing/libZXing.a
+[42/43] Building CXX object CMakeFiles/airgapper_codec.dir/wrapper/airgapper_codec.cpp.o
+[43/43] Linking CXX executable airgapper_codec.js
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libembind-rtti.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libembind-rtti.a" for subsequent builds)
+system_libs:INFO: compiled 1 inputs in 1.17s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libGL-getprocaddr.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libGL-getprocaddr.a" for subsequent builds)
+system_libs:INFO: compiled 4 inputs in 0.20s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libal.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libal.a" for subsequent builds)
+system_libs:INFO: compiled 1 inputs in 0.16s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libhtml5.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libhtml5.a" for subsequent builds)
+system_libs:INFO: compiled 5 inputs in 0.33s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libstubs.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libstubs.a" for subsequent builds)
+system_libs:INFO: compiled 2 inputs in 0.16s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libnoexit.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libnoexit.a" for subsequent builds)
+system_libs:INFO: compiled 1 inputs in 0.11s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc.a" for subsequent builds)
+system_libs:INFO: compiled 1075 inputs in 7.87s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libdlmalloc.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libdlmalloc.a" for subsequent builds)
+system_libs:INFO: compiled 2 inputs in 0.36s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libclang_rt.builtins.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libclang_rt.builtins.a" for subsequent builds)
+system_libs:INFO: compiled 184 inputs in 1.76s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc++.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++.a" for subsequent builds)
+system_libs:INFO: compiled 57 inputs in 13.83s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc++abi.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++abi.a" for subsequent builds)
+system_libs:INFO: compiled 17 inputs in 2.02s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libsockets.a... (this will be cached in "/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libsockets.a" for subsequent builds)
+system_libs:INFO: compiled 27 inputs in 0.58s
+cache:INFO:  - ok
+From https://github.com/zxing-cpp/zxing-cpp
+ * branch              3e09874a9ca7c191d67101f302a1f53c71a118cc -> FETCH_HEAD
+HEAD is now at 3e09874a Log: LogMatrix.h -> Log.h + printf -> log_[t|l|r]
+emcmake: cmake -S . -B build-scalar -G Ninja -DCMAKE_BUILD_TYPE=Release -DAIRGAPPER_CODEC_SIMD=OFF -DAIRGAPPER_CODEC_VERSION=0.2.1 -DAIRGAPPER_CODEC_BUILD=42e416e-dirty -DCMAKE_TOOLCHAIN_FILE=/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/home/runner/work/AirGapper/AirGapper/codec/source/emsdk/node/24.19.0_64bit/bin/node in directory /home/runner/work/AirGapper/AirGapper/codec/source
+[1/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Error.cpp.o
+[2/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitMatrixIO.cpp.o
+[3/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/cmake_pch.hxx.pch
+[4/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/CreateBarcode.cpp.o
+[5/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitMatrix.cpp.o
+[6/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Barcode.cpp.o
+[7/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BarcodeFormat.cpp.o
+[8/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/CharacterSet.cpp.o
+[9/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ECI.cpp.o
+[10/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/JSON.cpp.o
+[11/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Content.cpp.o
+[12/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GTIN.cpp.o
+[13/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/Utf.cpp.o
+[14/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitArray.cpp.o
+[15/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/WriteBarcode.cpp.o
+[16/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ReadBarcode.cpp.o
+[17/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ReedSolomon.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ReedSolomon.cpp:8:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/librscpp/encode.h:18:13: warning: unused function template 'build_generator' [-Wunused-template]
+   18 | Poly<Field> build_generator(const Field& field, int degree)
+      |             ^~~~~~~~~~~~~~~
+1 warning generated.
+[18/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BitSource.cpp.o
+[19/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/BinaryBitmap.cpp.o
+[20/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GlobalHistogramBinarizer.cpp.o
+[21/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/GridSampler.cpp.o
+[22/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ConcentricFinder.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.cpp:6:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[23/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ZXingCpp.cpp.o
+[24/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/PerspectiveTransform.cpp.o
+[25/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/HybridBinarizer.cpp.o
+[26/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/ResultPoint.cpp.o
+[27/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/TextDecoder.cpp.o
+[28/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/WhiteRectDetector.cpp.o
+[29/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/LocalGrid.cpp.o
+[30/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRErrorCorrectionLevel.cpp.o
+[31/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/HRI.cpp.o
+[32/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRCodecMode.cpp.o
+[33/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/MultiFormatReader.cpp.o
+[34/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRFormatInformation.cpp.o
+[35/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRBitMatrixParser.cpp.o
+[36/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRVersion.cpp.o
+[37/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDecoder.cpp.o
+[38/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDataBlock.cpp.o
+[39/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRDetector.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRDetector.cpp:9:
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRDetector.h:10:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[40/43] Building CXX object ZXing/CMakeFiles/ZXing.dir/src/qrcode/QRReader.cpp.o
+In file included from /home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/qrcode/QRReader.cpp:12:
+/home/runner/work/AirGapper/AirGapper/codec/source/third_party/zxing-cpp/core/src/ConcentricFinder.h:19:14: warning: unused function template 'CenterFromEnd' [-Wunused-template]
+   19 | static float CenterFromEnd(const std::array<T, N>& pattern, float end)
+      |              ^~~~~~~~~~~~~
+1 warning generated.
+[41/43] Linking CXX static library ZXing/libZXing.a
+[42/43] Building CXX object CMakeFiles/airgapper_codec.dir/wrapper/airgapper_codec.cpp.o
+[43/43] Linking CXX executable airgapper_codec.js
+grid-lattice regression: ok
+AIRGAPPER_BROWSER_POLICY_PASS
+camera-start-guard smoke passed
+simple camera recovery policy smoke passed
+transactional optics guard smoke passed
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
 
-ReferenceError: name is not defined
-    at file:///home/runner/work/AirGapper/AirGapper/benchmark/apply-final-hotpath-optimizations.mjs:834:38
-    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
-    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)
-    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+2 !== 1
+
+    at file:///home/runner/work/AirGapper/AirGapper/benchmark/receiver-recovery-policy-smoke.mjs:50:8 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: 2,
+  expected: 1,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
 
 Node.js v22.23.2
-FINAL HOTPATH FAILURE stage=patch status=1
+FINAL HOTPATH FAILURE stage=policy-regressions status=1
