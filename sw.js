@@ -22,6 +22,7 @@
     "./receive/worker.js",
     "./send/main.js",
     "./send/render-worker.js",
+    "./send/transfer-qr.js",
     "./shared/android.js",
     "./shared/camera-start-guard.js",
     "./shared/native-camera.js",
