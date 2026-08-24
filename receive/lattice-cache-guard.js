@@ -21,6 +21,7 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   const sameFrame = Number.isFinite(at) && priorFrameAt === at;
   const lastFullFit = Number(this.__airgapperLastFullFitAt);
   const refreshDue = sameFrame && this.candidate && this.locked &&
+    this.__airgapperFullFitAttemptAt !== at &&
     (!Number.isFinite(lastFullFit) || at - lastFullFit >= FULL_FIT_REFRESH_MS);
 
   if (refreshDue) {
@@ -28,6 +29,9 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
     // record the QR without another homography. Temporarily withdraw that cache
     // for the first QR of this refresh frame so the original GridLattice.accept
     // performs one real projective fit from the accumulated CRC observations.
+    // Record the attempt even when the fit rejects noisy geometry so the other
+    // 20+ QR results from this same camera frame do not all retry the 8x8 solve.
+    this.__airgapperFullFitAttemptAt = at;
     const cached = this.__airgapperFrameSnapshot;
     this.__airgapperFrameSnapshot = undefined;
     const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
@@ -40,7 +44,10 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   }
 
   const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
-  if (result && Number.isFinite(at) && priorFrameAt !== at) this.__airgapperLastFullFitAt = at;
+  if (result && Number.isFinite(at) && priorFrameAt !== at) {
+    this.__airgapperLastFullFitAt = at;
+    this.__airgapperFullFitAttemptAt = at;
+  }
   return result;
 };
 
