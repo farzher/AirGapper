@@ -2,21 +2,47 @@ import { CAMERA_TUNING, FocusController } from "./focus-controller.js";
 import { GridLattice } from "./grid-lattice.js";
 
 const LATTICE_SOFT_LOSS_MS = 450;
+const LATTICE_DORMANT_MS = 900;
 const TRACK_PROCESSOR_STALL_MS = 900;
 const AUTO_FOCUS_HOLD_DECODE_COUNT = 3;
 
-// A proven lattice is already recovered in parallel by runtime.js. Do not let
-// the lattice object's older 900 ms timer erase the exact geometry that those
-// recovery probes need. Explicit pose invalidations still use the original
-// hard-reacquire path.
+// Keep stale geometry as a fallback, but do not let it own scheduling forever.
+// After a short miss window, recovery probes run beside the hot path. After a
+// true ~1 s decode drought, the old lattice becomes DORMANT: its transform is
+// retained for cheap fallback/re-anchoring, while fresh acquisition becomes the
+// primary scheduler again. Explicit pose invalidations still use the original
+// destructive reacquire path.
+const activeDescriptor = Object.getOwnPropertyDescriptor(GridLattice.prototype, "active");
+if (activeDescriptor?.configurable) {
+  Object.defineProperty(GridLattice.prototype, "active", {
+    configurable: true,
+    get() {
+      return this.state !== "SEARCH" && this.state !== "REACQUIRE" && this.state !== "DORMANT";
+    }
+  });
+}
+
 const baseGridTick = GridLattice.prototype.tick;
 GridLattice.prototype.tick = function(now) {
   if (!this.candidate || this.pendingInvalidationReason) return baseGridTick.call(this, now);
   const staleMs = now - this.lastHitAt;
+  if (staleMs > LATTICE_DORMANT_MS) {
+    this.transition("DORMANT", "whole lattice stale; dormant geometry retained while fresh acquisition owns scanner", now);
+    return this.snapshot();
+  }
   if (staleMs > LATTICE_SOFT_LOSS_MS) {
-    this.transition("PARTIAL_LOSS", "whole lattice stale; proven geometry retained during recovery", now);
+    this.transition("PARTIAL_LOSS", "whole lattice stale; bounded recovery with proven geometry retained", now);
   }
   return this.snapshot();
+};
+
+const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
+GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
+  const accepted = baseNoteValidPacket.call(this, at);
+  if (accepted && this.state === "DORMANT") {
+    this.transition("GRID_LOCK", "valid packet reactivated dormant lattice", at);
+  }
+  return accepted;
 };
 
 function resetAutomaticFocusHold(controller) {
