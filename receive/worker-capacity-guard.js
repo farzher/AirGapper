@@ -1,8 +1,11 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 const PACKED_TRACK_BYTES = 56;
+const PACKED_TRACK_WORDS = PACKED_TRACK_BYTES >> 2;
 const DENSE_REPAIR_MIN_TRACKS = 12;
+const MAX_TRACK_BUFFER_POOL = 16;
 const receiveVideo = document.getElementById("video");
+const packedTrackBufferPool = [];
 
 function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
@@ -14,6 +17,25 @@ function addTransfer(transfer, value) {
   const list = Array.isArray(transfer) ? transfer : [];
   if (value && !list.includes(value)) list.push(value);
   return list;
+}
+
+function recyclePackedTrackBuffer(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_TRACK_BYTES ||
+      packedTrackBufferPool.length >= MAX_TRACK_BUFFER_POOL) return;
+  packedTrackBufferPool.push(buffer);
+}
+
+function takePackedTrackBuffer(bytes) {
+  let bestIndex = -1;
+  let bestSize = Infinity;
+  for (let index = 0; index < packedTrackBufferPool.length; index++) {
+    const size = packedTrackBufferPool[index].byteLength;
+    if (size >= bytes && size < bestSize) {
+      bestIndex = index;
+      bestSize = size;
+    }
+  }
+  return bestIndex >= 0 ? packedTrackBufferPool.splice(bestIndex, 1)[0] : new ArrayBuffer(bytes);
 }
 
 function stripIdentityOutputMap(message) {
@@ -56,27 +78,32 @@ function packTracks(message, transfer) {
   const tracks = message?.tracks;
   if (message?.full || !message?.videoFrame || !Array.isArray(tracks) || tracks.length < 2) return transfer;
   const count = tracks.length;
-  const packed = new ArrayBuffer(count * PACKED_TRACK_BYTES);
-  const view = new DataView(packed);
+  const usedBytes = count * PACKED_TRACK_BYTES;
+  const packed = takePackedTrackBuffer(usedBytes);
+  const i32 = new Int32Array(packed);
+  const f32 = new Float32Array(packed);
   for (let index = 0; index < count; index++) {
     const track = tracks[index];
     const q = track?.quad;
-    if (!q?.topLeft || !q?.topRight || !q?.bottomRight || !q?.bottomLeft) return transfer;
-    const base = index * PACKED_TRACK_BYTES;
-    view.setInt32(base, Math.trunc(Number(track.id) || 0), true);
-    view.setInt32(base + 4, Number.isInteger(track.slot) ? track.slot : -1, true);
-    view.setInt32(base + 8, Math.trunc(Number(track.misses) || 0), true);
-    view.setInt32(base + 12, Math.trunc(Number(track.dim) || 0), true);
-    view.setUint32(base + 16, Number(Boolean(track.crc32)) | (Number(Boolean(track.temporalProbe)) << 1), true);
-    view.setFloat32(base + 20, Number(track.temporalRisk) || 0, true);
-    view.setFloat32(base + 24, Number(q.topLeft.x), true);
-    view.setFloat32(base + 28, Number(q.topLeft.y), true);
-    view.setFloat32(base + 32, Number(q.topRight.x), true);
-    view.setFloat32(base + 36, Number(q.topRight.y), true);
-    view.setFloat32(base + 40, Number(q.bottomRight.x), true);
-    view.setFloat32(base + 44, Number(q.bottomRight.y), true);
-    view.setFloat32(base + 48, Number(q.bottomLeft.x), true);
-    view.setFloat32(base + 52, Number(q.bottomLeft.y), true);
+    if (!q?.topLeft || !q?.topRight || !q?.bottomRight || !q?.bottomLeft) {
+      recyclePackedTrackBuffer(packed);
+      return transfer;
+    }
+    const base = index * PACKED_TRACK_WORDS;
+    i32[base] = Math.trunc(Number(track.id) || 0);
+    i32[base + 1] = Number.isInteger(track.slot) ? track.slot : -1;
+    i32[base + 2] = Math.trunc(Number(track.misses) || 0);
+    i32[base + 3] = Math.trunc(Number(track.dim) || 0);
+    i32[base + 4] = Number(Boolean(track.crc32)) | (Number(Boolean(track.temporalProbe)) << 1);
+    f32[base + 5] = Number(track.temporalRisk) || 0;
+    f32[base + 6] = Number(q.topLeft.x);
+    f32[base + 7] = Number(q.topLeft.y);
+    f32[base + 8] = Number(q.topRight.x);
+    f32[base + 9] = Number(q.topRight.y);
+    f32[base + 10] = Number(q.bottomRight.x);
+    f32[base + 11] = Number(q.bottomRight.y);
+    f32[base + 12] = Number(q.bottomLeft.x);
+    f32[base + 13] = Number(q.bottomLeft.y);
   }
   message.__airgapperPackedTracks = packed;
   message.__airgapperPackedTrackCount = count;
@@ -86,6 +113,29 @@ function packTracks(message, transfer) {
   message.trackCount = count;
   message.tracks = undefined;
   return addTransfer(transfer, packed);
+}
+
+// Packed track descriptors are only needed long enough for worker-rvfc.js to
+// unpack them into its reusable track objects. The worker transfers that tiny
+// buffer back with the final result; keep a bounded best-fit pool so steady live
+// decoding does not allocate a new ~1-7 KB metadata ArrayBuffer every frame.
+const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
+if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedTrackRecycle) {
+  const configureWorker = function(slot, worker) {
+    baseConfigureWorker.call(this, slot, worker);
+    const baseOnMessage = worker.onmessage;
+    worker.onmessage = (event) => {
+      const message = event?.data;
+      const recycled = message?.__airgapperPackedTrackRecycle;
+      if (recycled instanceof ArrayBuffer) {
+        recyclePackedTrackBuffer(recycled);
+        delete message.__airgapperPackedTrackRecycle;
+      }
+      return baseOnMessage?.call(worker, event);
+    };
+  };
+  Object.defineProperty(configureWorker, "__airgapperPackedTrackRecycle", { value: true });
+  DecodeWorkerPool.prototype.configureWorker = configureWorker;
 }
 
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
