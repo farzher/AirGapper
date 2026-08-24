@@ -77,7 +77,16 @@ jobs:
           node --input-type=module --check < receive/optics-guard.js
           node --input-type=module --check < receive/recovery-state.js
           node --input-type=module --check < receive/recovery-policy.js
+          node --input-type=module --check < receive/runtime-guards.js
+          node --input-type=module --check < receive/lattice-cache-guard.js
+          node --input-type=module --check < receive/track-processor-proxy.js
+          node --input-type=module --check < receive/track-processor-watchdog.js
+          node --input-type=module --check < receive/track-processor-worker.js
+          node --input-type=module --check < receive/worker-capacity-guard.js
+          node --input-type=module --check < receive/worker-rvfc.js
+          node --input-type=module --check < receive/worker.js
           node --input-type=module --check < shared/camera-start-guard.js
+          node --input-type=module --check < shared/worker-pool.js
 
       - name: Run grid regression
         run: |
