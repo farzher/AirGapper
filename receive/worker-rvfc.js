@@ -12,12 +12,14 @@ await import(`./worker.js${query}`);
 const baseOnMessage = self.onmessage;
 const nativePostMessage = self.postMessage.bind(self);
 const PACKED_TRACK_BYTES = 56;
+const PACKED_SYMBOL_BYTES = 88;
 const GEOMETRY_REPORTS_PER_FRAME = 4;
 const MAX_GEOMETRY_SYMBOLS = 128;
 const trackPool = [];
 const activeTracks = [];
 let activeSourceSequence = -1;
 let activeLiveTracked = false;
+let activePackedResultEligible = false;
 
 // Geometry thinning runs on every successful dense worker result. Keep its
 // scratch storage worker-local and reusable instead of building filter/map/
@@ -107,11 +109,103 @@ function thinGeometryReports(symbols) {
   for (let index = 0; index < selectedCount; index++) selectedSymbols[index] = undefined;
 }
 
+function decodePathCode(path) {
+  return path === "fallback" ? 3 : path === "sparse" ? 2 : path === "robust" ? 4 : 1;
+}
+
+function modeCode(mode) {
+  return mode === "direct" ? 0 : mode === "mds" ? 1 : mode === "raptorq" ? 2 : 255;
+}
+
+function addTransfer(transfer, value) {
+  const list = Array.isArray(transfer) ? transfer : [];
+  if (value && !list.includes(value)) list.push(value);
+  return list;
+}
+
+function packLiveGuidedSymbols(message, transfer) {
+  const symbols = message?.symbols;
+  if (!activePackedResultEligible || !message?.guidedMetrics || !Array.isArray(symbols) || !symbols.length) return transfer;
+
+  const firstBytes = symbols[0]?.bytes;
+  const payload = firstBytes instanceof Uint8Array ? firstBytes.buffer : null;
+  if (!(payload instanceof ArrayBuffer)) return transfer;
+  for (let index = 0; index < symbols.length; index++) {
+    const bytes = symbols[index]?.bytes;
+    const header = symbols[index]?.header;
+    if (!(bytes instanceof Uint8Array) || bytes.buffer !== payload || !header) return transfer;
+  }
+
+  const meta = new ArrayBuffer(symbols.length * PACKED_SYMBOL_BYTES);
+  const view = new DataView(meta);
+  let wallMotion;
+  for (let index = 0; index < symbols.length; index++) {
+    const symbol = symbols[index];
+    const header = symbol.header;
+    const base = index * PACKED_SYMBOL_BYTES;
+    const measured = symbol.geometryMeasured !== false && validQuad(symbol.quad);
+    let flags = Number(Boolean(symbol.tracked));
+    flags |= Number(measured) << 1;
+    flags |= Number(Boolean(symbol.crc32)) << 2;
+    flags |= Number(Boolean(symbol.verifiedPayload)) << 3;
+    flags |= Number(Boolean(header.extendedGrid)) << 4;
+
+    view.setUint32(base, symbol.bytes.byteOffset, true);
+    view.setUint32(base + 4, symbol.bytes.byteLength, true);
+    view.setUint16(base + 8, Math.max(0, Math.trunc(Number(symbol.modules) || 0)), true);
+    view.setUint8(base + 10, flags);
+    view.setUint8(base + 11, decodePathCode(symbol.decodePath));
+    view.setUint8(base + 12, modeCode(header.mode));
+    view.setUint8(base + 13, Math.max(0, Math.trunc(Number(header.layoutId) || 0)));
+    view.setUint8(base + 14, Math.max(0, Math.trunc(Number(header.gridCols) || 0)));
+    view.setUint8(base + 15, Math.max(0, Math.trunc(Number(header.gridRows) || 0)));
+    view.setUint16(base + 16, Math.max(0, Math.trunc(Number(header.slotIndex) || 0)), true);
+    view.setUint16(base + 18, 0, true);
+    view.setUint32(base + 20, Number(header.seq) >>> 0, true);
+    view.setUint32(base + 24, Number(header.k) >>> 0, true);
+    view.setUint32(base + 28, Number(header.blockLen) >>> 0, true);
+    view.setUint32(base + 32, Number(header.totalLen) >>> 0, true);
+    view.setUint32(base + 36, Number(header.payloadId) >>> 0, true);
+
+    if (measured) {
+      const box = symbol.box;
+      const quad = symbol.quad;
+      view.setFloat32(base + 40, Number(box?.x) || 0, true);
+      view.setFloat32(base + 44, Number(box?.y) || 0, true);
+      view.setFloat32(base + 48, Number(box?.w) || 0, true);
+      view.setFloat32(base + 52, Number(box?.h) || 0, true);
+      view.setFloat32(base + 56, quad.topLeft.x, true);
+      view.setFloat32(base + 60, quad.topLeft.y, true);
+      view.setFloat32(base + 64, quad.topRight.x, true);
+      view.setFloat32(base + 68, quad.topRight.y, true);
+      view.setFloat32(base + 72, quad.bottomRight.x, true);
+      view.setFloat32(base + 76, quad.bottomRight.y, true);
+      view.setFloat32(base + 80, quad.bottomLeft.x, true);
+      view.setFloat32(base + 84, quad.bottomLeft.y, true);
+    }
+    if (!wallMotion && symbol.wallMotion) wallMotion = symbol.wallMotion;
+  }
+
+  // Replace dozens of nested structured-clone records with one tiny fixed
+  // metadata buffer plus the payload buffer Guided was already transferring.
+  // The main thread reconstructs full geometry only for the <=4 authoritative
+  // measurements; ordinary payload hits need only a header and byte view.
+  message.symbols = undefined;
+  message.__airgapperPackedSymbolMeta = meta;
+  message.__airgapperPackedSymbolPayload = payload;
+  message.__airgapperPackedSymbolCount = symbols.length;
+  if (wallMotion) message.__airgapperPackedWallMotion = wallMotion;
+  transfer = addTransfer(transfer, payload);
+  transfer = addTransfer(transfer, meta);
+  return transfer;
+}
+
 // worker.js posts through ctx === self, so this interception applies to its
 // final result without changing the codec. Preflight/signature messages have no
 // symbols and pass straight through.
 self.postMessage = (message, transfer) => {
   thinGeometryReports(message?.symbols);
+  transfer = packLiveGuidedSymbols(message, transfer);
   return nativePostMessage(message, transfer);
 };
 
@@ -178,6 +272,10 @@ self.onmessage = (event) => {
 
   activeSourceSequence = Number(message.sourceSequence);
   activeLiveTracked = Boolean(message.__airgapperLiveTracked);
+  // Normal repeat-filter-eligible live traffic excludes replay, explicit scan
+  // capture and optics tournaments. Keep those diagnostic paths object-rich;
+  // pack only the steady production hot path.
+  activePackedResultEligible = activeLiveTracked && Boolean(message.repeatFilter);
   delete message.__airgapperLiveTracked;
   unpackTracks(message);
 
