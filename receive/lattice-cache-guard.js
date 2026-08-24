@@ -61,6 +61,29 @@ GridLattice.prototype.nudgeFromSightings = function(sightings, at) {
   return remember(this, baseNudgeFromSightings.call(this, sightings, at));
 };
 
+// A recent CRC-valid payload is direct evidence that the same optical wall is
+// still present even when the worker intentionally thinned geometry reports or
+// a projective refit rejected noisy coordinates. Let that payload refresh only
+// liveness; geometry itself still changes only through measured accept/nudge.
+const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
+GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
+  const result = baseNoteValidPacket.call(this, at);
+  const packetAt = Number(at);
+  const now = performance.now();
+  if (this.candidate && !this.pendingInvalidationReason && Number.isFinite(packetAt) &&
+      packetAt <= now + 50 && now - packetAt <= DORMANT_MS) {
+    this.lastHitAt = Math.max(this.lastHitAt, packetAt);
+    if (this.state === "DORMANT") {
+      this.transition("GRID_LOCK", "fresh CRC payload reactivated retained lattice", packetAt);
+      if (this.__airgapperFrameSnapshot) {
+        this.__airgapperFrameSnapshot.state = this.state;
+        this.__airgapperFrameSnapshot.provisional = !this.active;
+      }
+    }
+  }
+  return result;
+};
+
 const baseTick = GridLattice.prototype.tick;
 
 // A lattice snapshot contains the projected quad/box object graph for every QR
