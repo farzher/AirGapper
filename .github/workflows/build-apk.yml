@@ -37,13 +37,21 @@ jobs:
         if: github.event_name == 'push'
         run: |
           set -euo pipefail
-          if ! grep -Fq 'id="send-dev-actions"' index.html && [ -f benchmark/apply-send-dev-gutter.mjs ]; then
-            node benchmark/apply-send-dev-gutter.mjs
+          if ! grep -Fq 'SEND_DEV_TOGGLE_WINDOW_MS' send/main.js && [ -f benchmark/apply-send-gutter-only.mjs ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add receive/runtime.js index.html shared/style.css send/main.js version.js
-            git commit -m "v0.5.414: add sender curved-display gutter"
-            git push origin HEAD:master
+            if node benchmark/apply-send-gutter-only.mjs; then
+              rm -f benchmark/send-gutter-failure.txt
+              git add send/main.js benchmark/send-gutter-failure.txt
+              git commit -m "v0.5.414: add sender curved-display gutter"
+              git push origin HEAD:master
+            else
+              printf 'sender gutter patch failed at %s\n' "$(date -u +%FT%TZ)" > benchmark/send-gutter-failure.txt
+              git add benchmark/send-gutter-failure.txt
+              git commit -m "report sender gutter patch failure"
+              git push origin HEAD:master || true
+              exit 1
+            fi
           fi
 
       - name: Read app version
