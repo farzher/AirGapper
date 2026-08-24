@@ -1,6 +1,7 @@
 const TRACKED_JOB_TIMEOUT_MS = 2200;
 const RECOVERY_JOB_TIMEOUT_MS = 6500;
 const ACQUISITION_JOB_TIMEOUT_MS = 9000;
+const WORKER_WATCHDOG_MS = 250;
 
 function workerJobTimeout(message) {
   if (!message?.full) return TRACKED_JOB_TIMEOUT_MS;
@@ -15,13 +16,18 @@ function liveReceiveCamera() {
     tracks.some((track) => track?.readyState === "live");
 }
 
+function addTransfer(transfer, value) {
+  const list = Array.isArray(transfer) ? transfer : [];
+  if (value && !list.includes(value)) list.push(value);
+  return list;
+}
+
 /** Safari/iOS currently reaches Receive through requestVideoFrameCallback +
  * canvas ImageData rather than the transferable VideoFrame/Y8 camera path.
  * Once geometry is known, keeping those tracked crops as RGBA needlessly locks
- * the worker onto the slower generic decoder. AirGapper QRs are achromatic, so
- * the green channel is a clean luma proxy and is materially cheaper than a
- * weighted RGB conversion. Convert only live tracked batches with 2+ known QRs;
- * full acquisition/recovery images keep their existing robust RGBA path. */
+ * the worker onto the slower generic decoder. The live worker wrapper can
+ * compact green->Y8 in-place after ownership transfer, so this fallback must
+ * never allocate a second full Y plane on the browser main thread. */
 function prepareTrackedBrowserY8(message, transfer) {
   if (!liveReceiveCamera() || message?.full || message?.videoFrame || message?.strictHotPath) return transfer;
   if (!Array.isArray(message?.tracks) || message.tracks.length < 2) return transfer;
@@ -32,26 +38,14 @@ function prepareTrackedBrowserY8(message, transfer) {
   const pixels = width * height;
   if (width <= 0 || height <= 0 || pixels <= 0 || message.buf.byteLength < pixels * 4) return transfer;
 
-  const rgba = new Uint8Array(message.buf, 0, pixels * 4);
-  const y8 = new Uint8Array(pixels);
-  // Camera QR content is black/white; green is both the highest-SNR Bayer
-  // channel and an adequate luminance proxy. One byte read + one byte write per
-  // pixel keeps this fallback cheap enough for iPhone's live tracked crops.
-  for (let dst = 0, src = 1; dst < pixels; dst++, src += 4) y8[dst] = rgba[src];
-
-  // The decode worker deliberately distinguishes a direct camera/Y8 payload
-  // from an ordinary buffered image. Sending this fallback through `buf` made
-  // the pixels Y8 but left `usedDirectFrame` false, so the worker skipped the
-  // Guided tracked lane and spent its time in dense/robust recovery. Route the
-  // packed Y plane through the existing direct-frame ArrayBuffer slot instead.
+  const rgba = message.buf;
   message.buf = void 0;
-  message.videoFrame = y8.buffer;
-  message.pixelFormat = "y8";
-  message.yOffset = 0;
-  message.yStride = width;
+  message.videoFrame = rgba;
+  message.__airgapperWorkerLumaFromRgba = true;
+  message.pixelFormat = "rgba";
   message.payloadBytes = pixels;
   message.guidedDecode = true;
-  return [y8.buffer];
+  return addTransfer(transfer, rgba);
 }
 
 class DecodeWorkerPool {
@@ -68,9 +62,9 @@ class DecodeWorkerPool {
     this.activeIds = [];
     this.activeFull = [];
     this.activeMeta = [];
-    this.jobTimers = [];
     this.resizeGeneration = 0;
     this.lastNonZeroSize = 1;
+    this.watchdog = void 0;
   }
   get size() {
     return this.workers.length;
@@ -98,6 +92,60 @@ class DecodeWorkerPool {
     }
     return oldest;
   }
+  ensureWatchdog() {
+    if (this.watchdog !== void 0 || this.workers.length === 0) return;
+    this.watchdog = setInterval(() => this.checkTimeouts(), WORKER_WATCHDOG_MS);
+  }
+  stopWatchdog() {
+    if (this.watchdog === void 0) return;
+    clearInterval(this.watchdog);
+    this.watchdog = void 0;
+  }
+  checkTimeouts() {
+    if (!this.workers.length) {
+      this.stopWatchdog();
+      return;
+    }
+    const now = performance.now();
+    for (let slot = 0; slot < this.activeMeta.length; slot++) {
+      const meta = this.activeMeta[slot];
+      if (!meta || !this.busy[slot] || !(meta.deadlineAt > 0) || now < meta.deadlineAt) continue;
+      this.timeoutWorker(slot, meta);
+    }
+  }
+  timeoutWorker(slot, meta) {
+    const activeId = this.activeIds[slot];
+    if (activeId === void 0 || activeId !== meta.id || !this.workers[slot]) return;
+    const full = this.activeFull[slot] ?? false;
+    const failed = this.workers[slot];
+    const timeoutMs = meta.timeoutMs;
+    this.busy[slot] = false;
+    this.activeIds[slot] = void 0;
+    this.activeFull[slot] = false;
+    this.activeMeta[slot] = null;
+    this.onCompleted?.(activeId, {
+      full,
+      symbolCount: 0,
+      sightingCount: 0,
+      trackedAttempted: false,
+      trackedHit: false,
+      fallbackAttempted: false,
+      fallbackSucceeded: false,
+      readFullAttempts: 0,
+      workerWaitMs: 0,
+      targetedAttempts: 0,
+      targetedPixels: 0,
+      targetedSuccesses: 0,
+      latencyMs: timeoutMs,
+      symbols: [],
+      sightings: [],
+      error: "Decode worker timed out"
+    });
+    failed.terminate();
+    const replacement = this.create();
+    this.workers[slot] = replacement;
+    this.configureWorker(slot, replacement);
+  }
   configureWorker(slot, worker) {
     worker.onmessage = (event) => {
       if (this.workers[slot] !== worker) return;
@@ -115,8 +163,6 @@ class DecodeWorkerPool {
       const symbols = message.symbols ?? [];
       const sightings = message.sightings ?? [];
       const jobMeta = this.activeMeta[slot];
-      clearTimeout(this.jobTimers[slot]);
-      this.jobTimers[slot] = void 0;
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
@@ -179,8 +225,6 @@ class DecodeWorkerPool {
       if (this.workers[slot] !== worker) return;
       const id = this.activeIds[slot];
       const full = this.activeFull[slot] ?? false;
-      clearTimeout(this.jobTimers[slot]);
-      this.jobTimers[slot] = void 0;
       this.busy[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
@@ -222,7 +266,6 @@ class DecodeWorkerPool {
       this.activeIds.pop();
       this.activeFull.pop();
       this.activeMeta.pop();
-      clearTimeout(this.jobTimers.pop());
     }
     while (this.workers.length < target) {
       const slot = this.workers.length;
@@ -232,9 +275,10 @@ class DecodeWorkerPool {
       this.activeIds.push(void 0);
       this.activeFull.push(false);
       this.activeMeta.push(null);
-      this.jobTimers.push(void 0);
       this.configureWorker(slot, worker);
     }
+    if (target > 0) this.ensureWatchdog();
+    else this.stopWatchdog();
 
     // A live receiver must never remain at 0 workers: captureFrame treats a
     // zero-size pool as fully saturated (0 busy === 0 size), which otherwise
@@ -269,6 +313,7 @@ class DecodeWorkerPool {
     this.activeIds[slot] = typeof id === "number" ? id : void 0;
     this.activeFull[slot] = Boolean(message.full);
     const startedAt = performance.now();
+    const timeoutMs = workerJobTimeout(message);
     this.activeMeta[slot] = {
       id: typeof id === "number" ? id : void 0,
       kind: message.jobKind ?? (message.full ? "full" : "tracked"),
@@ -277,46 +322,14 @@ class DecodeWorkerPool {
       pixels: Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0),
       sourceSequence: typeof message.sourceSequence === "number" ? message.sourceSequence : void 0,
       opticsEpoch: typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0,
-      startedAt
+      startedAt,
+      timeoutMs,
+      deadlineAt: startedAt + timeoutMs
     };
     try {
       if (message && typeof message === "object") message.sentAt = startedAt;
       transfer = prepareTrackedBrowserY8(message, transfer);
       this.workers[slot].postMessage(message, transfer);
-      const timeoutMs = workerJobTimeout(message);
-      this.jobTimers[slot] = setTimeout(() => {
-        const activeId = this.activeIds[slot];
-        if (this.workers[slot] === void 0 || activeId === void 0 || activeId !== id) return;
-        const full = this.activeFull[slot] ?? false;
-        const failed = this.workers[slot];
-        this.busy[slot] = false;
-        this.activeIds[slot] = void 0;
-        this.activeFull[slot] = false;
-        this.activeMeta[slot] = null;
-        this.jobTimers[slot] = void 0;
-        this.onCompleted?.(activeId, {
-          full,
-          symbolCount: 0,
-          sightingCount: 0,
-          trackedAttempted: false,
-          trackedHit: false,
-          fallbackAttempted: false,
-          fallbackSucceeded: false,
-          readFullAttempts: 0,
-          workerWaitMs: 0,
-          targetedAttempts: 0,
-          targetedPixels: 0,
-          targetedSuccesses: 0,
-          latencyMs: timeoutMs,
-          symbols: [],
-          sightings: [],
-          error: "Decode worker timed out"
-        });
-        failed.terminate();
-        const replacement = this.create();
-        this.workers[slot] = replacement;
-        this.configureWorker(slot, replacement);
-      }, timeoutMs);
       return true;
     } catch (error) {
       const full = this.activeFull[slot] ?? false;
