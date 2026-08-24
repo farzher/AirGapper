@@ -93,6 +93,7 @@ jobs:
           node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
           node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
+          node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
           node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Run grid regression
@@ -107,6 +108,7 @@ jobs:
           node benchmark/version-source-smoke.mjs
           node benchmark/guided-motion-smoke.mjs
           node benchmark/rgba-luma-smoke.mjs
+          node benchmark/track-processor-proxy-smoke.mjs
           node benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Install browser benchmark dependency
