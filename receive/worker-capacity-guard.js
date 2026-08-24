@@ -2,10 +2,13 @@ import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 const PACKED_TRACK_BYTES = 56;
 const PACKED_TRACK_WORDS = PACKED_TRACK_BYTES >> 2;
+const PACKED_SYMBOL_BYTES = 88;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
+const MAX_RESULT_BUFFER_POOL = 16;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
+const packedResultBufferPool = [];
 
 function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
@@ -19,23 +22,29 @@ function addTransfer(transfer, value) {
   return list;
 }
 
+function takeBestFitBuffer(pool, bytes) {
+  let bestIndex = -1;
+  let bestSize = Infinity;
+  for (let index = 0; index < pool.length; index++) {
+    const size = pool[index].byteLength;
+    if (size >= bytes && size < bestSize) {
+      bestIndex = index;
+      bestSize = size;
+    }
+  }
+  return bestIndex >= 0 ? pool.splice(bestIndex, 1)[0] : new ArrayBuffer(bytes);
+}
+
 function recyclePackedTrackBuffer(buffer) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_TRACK_BYTES ||
       packedTrackBufferPool.length >= MAX_TRACK_BUFFER_POOL) return;
   packedTrackBufferPool.push(buffer);
 }
 
-function takePackedTrackBuffer(bytes) {
-  let bestIndex = -1;
-  let bestSize = Infinity;
-  for (let index = 0; index < packedTrackBufferPool.length; index++) {
-    const size = packedTrackBufferPool[index].byteLength;
-    if (size >= bytes && size < bestSize) {
-      bestIndex = index;
-      bestSize = size;
-    }
-  }
-  return bestIndex >= 0 ? packedTrackBufferPool.splice(bestIndex, 1)[0] : new ArrayBuffer(bytes);
+function recyclePackedResultBuffer(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_SYMBOL_BYTES ||
+      packedResultBufferPool.length >= MAX_RESULT_BUFFER_POOL) return;
+  packedResultBufferPool.push(buffer);
 }
 
 function stripIdentityOutputMap(message) {
@@ -74,12 +83,21 @@ function capDenseRepairMask(message, live) {
   message.guidedRepairMask = (allowed & -allowed) >>> 0;
 }
 
+function attachPackedResultScratch(message, transfer) {
+  const tracks = message?.tracks;
+  if (!message?.__airgapperLiveTracked || !message?.repeatFilter ||
+      !Array.isArray(tracks) || tracks.length < 2) return transfer;
+  const scratch = takeBestFitBuffer(packedResultBufferPool, tracks.length * PACKED_SYMBOL_BYTES);
+  message.__airgapperPackedSymbolScratch = scratch;
+  return addTransfer(transfer, scratch);
+}
+
 function packTracks(message, transfer) {
   const tracks = message?.tracks;
   if (message?.full || !message?.videoFrame || !Array.isArray(tracks) || tracks.length < 2) return transfer;
   const count = tracks.length;
   const usedBytes = count * PACKED_TRACK_BYTES;
-  const packed = takePackedTrackBuffer(usedBytes);
+  const packed = takeBestFitBuffer(packedTrackBufferPool, usedBytes);
   const i32 = new Int32Array(packed);
   const f32 = new Float32Array(packed);
   for (let index = 0; index < count; index++) {
@@ -117,24 +135,44 @@ function packTracks(message, transfer) {
 
 // Packed track descriptors are only needed long enough for worker-rvfc.js to
 // unpack them into its reusable track objects. The worker transfers that tiny
-// buffer back with the final result; keep a bounded best-fit pool so steady live
-// decoding does not allocate a new ~1-7 KB metadata ArrayBuffer every frame.
+// buffer back with the final result; compact result metadata follows the same
+// ping-pong pattern. After warm-up neither direction allocates a metadata buffer
+// at camera cadence.
 const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
-if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedTrackRecycle) {
+if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedBufferRecycle) {
   const configureWorker = function(slot, worker) {
     baseConfigureWorker.call(this, slot, worker);
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
-      const recycled = message?.__airgapperPackedTrackRecycle;
-      if (recycled instanceof ArrayBuffer) {
-        recyclePackedTrackBuffer(recycled);
+      const recycledTrack = message?.__airgapperPackedTrackRecycle;
+      if (recycledTrack instanceof ArrayBuffer) {
+        recyclePackedTrackBuffer(recycledTrack);
         delete message.__airgapperPackedTrackRecycle;
       }
-      return baseOnMessage?.call(worker, event);
+      const resultMeta = message?.__airgapperPackedSymbolMeta;
+      const unusedScratch = message?.__airgapperPackedSymbolScratchRecycle;
+      let result;
+      try {
+        result = baseOnMessage?.call(worker, event);
+      } finally {
+        // shared/worker-pool.js has synchronously unpacked resultMeta before the
+        // base handler returns, so it can immediately become the next worker's
+        // scratch buffer. If a frame produced no packed result, the worker sends
+        // the unused scratch back under the dedicated recycle field instead.
+        if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
+        if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta)
+          recyclePackedResultBuffer(unusedScratch);
+        if (message) {
+          delete message.__airgapperPackedSymbolScratchRecycle;
+          // Keep no stale event reference to a pooled buffer.
+          delete message.__airgapperPackedSymbolMeta;
+        }
+      }
+      return result;
     };
   };
-  Object.defineProperty(configureWorker, "__airgapperPackedTrackRecycle", { value: true });
+  Object.defineProperty(configureWorker, "__airgapperPackedBufferRecycle", { value: true });
   DecodeWorkerPool.prototype.configureWorker = configureWorker;
 }
 
@@ -160,6 +198,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
     stripIdentityOutputMap(message);
     keepTrackedCameraOnGuided(message, live);
     capDenseRepairMask(message, live);
+    transfer = attachPackedResultScratch(message, transfer);
     transfer = packTracks(message, transfer);
     return baseSubmitAtSlot.call(this, slot, message, transfer);
   };
