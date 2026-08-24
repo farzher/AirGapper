@@ -1,21 +1,29 @@
 import { FocusController } from "./focus-controller.js";
 
 // Native continuous AF is already optimized by the camera HAL for live video.
-// Repeated POI writes and forced single-shot escalation can keep some phones
-// hunting or make them settle on the wrong plane. When continuous AF exists,
-// leave it running untouched; only devices without continuous AF may use the
-// controller's single-shot acquisition fallback.
+// Repeated POI writes, forced single-shot escalation, or switching a QR-proven
+// continuous lens into manual hold can all leave some phones hunting or stuck
+// on the wrong plane after distance changes. When continuous AF exists, leave
+// it running untouched; only devices without continuous AF may use the bounded
+// single-shot acquisition fallback.
+function preserveNativeContinuousAf(controller) {
+  if (!controller.focusModes().includes("continuous")) return;
+  controller.singleShotAfRejected = true;
+  controller.__airgapperFocusHoldRejected = true;
+  controller.__airgapperFocusHeld = false;
+}
+
 const baseAttach = FocusController.prototype.attach;
 FocusController.prototype.attach = function(track) {
   const result = baseAttach.call(this, track);
-  if (this.focusModes().includes("continuous")) this.singleShotAfRejected = true;
+  preserveNativeContinuousAf(this);
   return result;
 };
 
 const baseSetStrategy = FocusController.prototype.setStrategy;
 FocusController.prototype.setStrategy = function(strategy) {
   const result = baseSetStrategy.call(this, strategy);
-  if (strategy === "auto" && this.focusModes().includes("continuous")) this.singleShotAfRejected = true;
+  if (strategy === "auto") preserveNativeContinuousAf(this);
   return result;
 };
 
