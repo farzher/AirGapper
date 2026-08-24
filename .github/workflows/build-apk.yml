@@ -33,7 +33,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Apply v0.5.420 sensor cadence patch
+      - name: Apply v0.5.420 camera cadence patch
         if: github.event_name == 'push'
         shell: bash
         run: |
@@ -67,6 +67,12 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit(f"sourceFrameMeta match count {text.count(old)}")
           text = text.replace(old, new, 1)
+
+          old = '''  void captureFrame(frame).catch((error) => {\n    decodeExceptions++;\n    lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;\n    console.error("AirGapper captureFrame failed", error);\n  }).finally(() => {\n    releaseSourceFrame(frame);\n    if (done || gen !== captureGen) return;\n    queueOverlayDraw();\n  });'''
+          new = '''  // Return to pumpTrackFrames first so it can register the next reader.read()\n  // before geometry/temporal scheduling runs. With maxBufferSize=1, doing the\n  // synchronous captureFrame prefix first made ordinary main-thread work discard\n  // otherwise usable 30 fps camera frames. The frame stays owned here until the\n  // queued scheduler finishes or the generation changes.\n  queueMicrotask(() => {\n    if (done || gen !== captureGen) {\n      releaseSourceFrame(frame);\n      return;\n    }\n    void captureFrame(frame).catch((error) => {\n      decodeExceptions++;\n      lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;\n      console.error("AirGapper captureFrame failed", error);\n    }).finally(() => {\n      releaseSourceFrame(frame);\n      if (done || gen !== captureGen) return;\n      queueOverlayDraw();\n    });\n  });'''
+          if text.count(old) != 1:
+              raise SystemExit(f"processSourceFrame capture match count {text.count(old)}")
+          text = text.replace(old, new, 1)
           p.write_text(text)
           PY
 
@@ -74,7 +80,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add receive/runtime.js .github/workflows/build-apk.yml
-            git commit -m "v0.5.420: track sensor frame cadence"
+            git commit -m "v0.5.420: fix camera and temporal cadence"
             git push origin HEAD:master
             exit 0
           fi
