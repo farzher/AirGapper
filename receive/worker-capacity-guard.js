@@ -6,7 +6,10 @@ const PACKED_SYMBOL_BYTES = 88;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
+const LIVE_TRACKED_TIMEOUT_MS = 1200;
 const receiveVideo = document.getElementById("video");
+const decodeWorkers = document.getElementById("decode-workers");
+const reportedHardwareThreads = Math.max(1, Number(navigator.hardwareConcurrency) || 2);
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
 
@@ -14,6 +17,11 @@ function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
   return document.body?.classList?.contains("receive-mode") === true &&
     cameraStream?.active === true;
+}
+
+function negotiatedCameraFps() {
+  const track = receiveVideo?.srcObject?.getVideoTracks?.()[0];
+  return Number(track?.getSettings?.().frameRate) || 0;
 }
 
 function addTransfer(transfer, value) {
@@ -224,11 +232,51 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
     transfer = packTracks(message, transfer);
 
     const accepted = baseSubmitAtSlot.call(this, slot, message, transfer);
-    if (!accepted) recycleUnsentBuffers(message);
-    return accepted;
+    if (!accepted) {
+      recycleUnsentBuffers(message);
+      return false;
+    }
+    // A tracked camera frame older than a second is dozens of sender frames
+    // behind and has essentially no real-time value. Do not let a rare stuck
+    // VideoFrame/copy/decode monopolize a worker for the old 2.2 second timeout.
+    if (live && !message.full) {
+      const meta = this.activeMeta?.[slot];
+      if (meta && meta.id === message.id && meta.timeoutMs > LIVE_TRACKED_TIMEOUT_MS) {
+        meta.timeoutMs = LIVE_TRACKED_TIMEOUT_MS;
+        meta.deadlineAt = meta.startedAt + LIVE_TRACKED_TIMEOUT_MS;
+      }
+    }
+    return true;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
+}
+
+// The runtime controller deliberately starts at two workers and only asks for
+// three after sustained pressure. On a >=25 fps camera, that first pressure
+// escalation is exactly where a fourth slot is useful: three 80-110 ms jobs can
+// sit on the edge of 30 fps, and one stalled frame then collapses delivery. Jump
+// 3 -> 4 only in Auto mode after the controller has already requested growth;
+// its normal 10-second headroom path can still shrink back to two.
+const baseResize = DecodeWorkerPool.prototype.resize;
+if (typeof baseResize === "function" && !baseResize.__airgapperThirtyFpsHeadroom) {
+  const resize = function(count) {
+    let target = Math.max(0, Math.trunc(Number(count) || 0));
+    if (decodeWorkers?.value === "auto" && target === 3 && reportedHardwareThreads >= 4 &&
+        liveReceiveCamera() && negotiatedCameraFps() >= 25) {
+      target = 4;
+    }
+    const result = baseResize.call(this, target);
+    if (decodeWorkers?.value === "auto") {
+      queueMicrotask(() => {
+        const option = Array.from(decodeWorkers.options).find((candidate) => candidate.value === "auto");
+        if (option && decodeWorkers.value === "auto") option.textContent = `Auto (${this.size})`;
+      });
+    }
+    return result;
+  };
+  Object.defineProperty(resize, "__airgapperThirtyFpsHeadroom", { value: true });
+  DecodeWorkerPool.prototype.resize = resize;
 }
 
 // Every AirGapper decode worker uses the live-camera wrapper. Preserve the
@@ -254,10 +302,3 @@ if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorke
   Object.defineProperty(AirGapperWorker, "__airgapperRvfclumaWorkerGuard", { value: true });
   try { globalThis.Worker = AirGapperWorker; } catch {}
 }
-
-// Do not override DecodeWorkerPool.resize() here. runtime.js owns the adaptive
-// worker controller and intentionally grows/shrinks based on source FPS,
-// measured latency and sustained pressure. A former 8-core guard silently
-// forced Auto to seven workers even while the controller believed its target
-// was 2-5, which defeated feedback, multiplied WASM/cache memory and reduced
-// per-worker temporal locality. Manual worker counts remain untouched.
