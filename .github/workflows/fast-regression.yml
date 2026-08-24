@@ -80,6 +80,7 @@ jobs:
           node --input-type=module --check < receive/runtime-guards.js
           node --input-type=module --check < receive/lattice-cache-guard.js
           node --input-type=module --check < receive/guided-motion.js
+          node --input-type=module --check < receive/rgba-luma.js
           node --input-type=module --check < receive/track-processor-proxy.js
           node --input-type=module --check < receive/track-processor-watchdog.js
           node --input-type=module --check < receive/track-processor-worker.js
@@ -89,6 +90,7 @@ jobs:
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
+          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
           node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
           node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
@@ -104,6 +106,7 @@ jobs:
           node benchmark/receiver-recovery-policy-smoke.mjs
           node benchmark/version-source-smoke.mjs
           node benchmark/guided-motion-smoke.mjs
+          node benchmark/rgba-luma-smoke.mjs
           node benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Install browser benchmark dependency
