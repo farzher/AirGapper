@@ -4,6 +4,8 @@ const ACQUISITION_JOB_TIMEOUT_MS = 9000;
 const WORKER_WATCHDOG_MS = 250;
 const PACKED_SYMBOL_BYTES = 88;
 const PACKED_SYMBOL_WORDS = PACKED_SYMBOL_BYTES >> 2;
+const EMPTY_SYMBOLS = Object.freeze([]);
+const EMPTY_SIGHTINGS = Object.freeze([]);
 let receiveVideo;
 
 function workerJobTimeout(message) {
@@ -83,6 +85,10 @@ class DecodeWorkerPool {
     this.decodeInfo = {};
     this.packedSymbolPools = [];
     this.packedSymbolLists = [];
+    // A worker slot can finish only one job at a time. Runtime consumes the
+    // completion synchronously, so keep one mutable summary per slot instead of
+    // allocating a ~30-property object for every camera frame.
+    this.completions = [];
   }
   get size() {
     return this.workers.length;
@@ -119,6 +125,43 @@ class DecodeWorkerPool {
     clearInterval(this.watchdog);
     this.watchdog = void 0;
   }
+  completionFor(slot) {
+    let completion = this.completions[slot];
+    if (!completion) completion = this.completions[slot] = {};
+    return completion;
+  }
+  failureCompletion(slot, full, latencyMs, error) {
+    const completion = this.completionFor(slot);
+    completion.full = Boolean(full);
+    completion.symbolCount = 0;
+    completion.sightingCount = 0;
+    completion.trackedAttempted = false;
+    completion.trackedHit = false;
+    completion.fallbackAttempted = false;
+    completion.fallbackSucceeded = false;
+    completion.readFullAttempts = 0;
+    completion.workerWaitMs = 0;
+    completion.targetedAttempts = 0;
+    completion.targetedPixels = 0;
+    completion.targetedSuccesses = 0;
+    completion.latencyMs = latencyMs;
+    completion.frameCopyMs = 0;
+    completion.directMetrics = undefined;
+    completion.guidedMetrics = undefined;
+    completion.guidedError = undefined;
+    completion.pixelPath = undefined;
+    completion.robustMs = 0;
+    completion.robustBands = 1;
+    completion.robustSearchMs = 0;
+    completion.exactFastPath = false;
+    completion.directFrameFailed = false;
+    completion.repeatSkipped = false;
+    completion.repeatDistance = NaN;
+    completion.symbols = EMPTY_SYMBOLS;
+    completion.sightings = EMPTY_SIGHTINGS;
+    completion.error = error;
+    return completion;
+  }
   checkTimeouts() {
     if (!this.workers.length) {
       this.stopWatchdog();
@@ -141,24 +184,10 @@ class DecodeWorkerPool {
     this.activeIds[slot] = void 0;
     this.activeFull[slot] = false;
     this.activeMeta[slot] = null;
-    this.onCompleted?.(activeId, {
-      full,
-      symbolCount: 0,
-      sightingCount: 0,
-      trackedAttempted: false,
-      trackedHit: false,
-      fallbackAttempted: false,
-      fallbackSucceeded: false,
-      readFullAttempts: 0,
-      workerWaitMs: 0,
-      targetedAttempts: 0,
-      targetedPixels: 0,
-      targetedSuccesses: 0,
-      latencyMs: timeoutMs,
-      symbols: [],
-      sightings: [],
-      error: "Decode worker timed out"
-    });
+    this.onCompleted?.(
+      activeId,
+      this.failureCompletion(slot, full, timeoutMs, "Decode worker timed out")
+    );
     failed.terminate();
     const replacement = this.create();
     this.workers[slot] = replacement;
@@ -263,36 +292,36 @@ class DecodeWorkerPool {
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
       this.onAvailable?.(slot);
-      const completion = {
-        full: Boolean(message.full),
-        symbolCount: symbols.length,
-        sightingCount: sightings.length,
-        trackedAttempted: Boolean(message.trackedAttempted),
-        trackedHit: Boolean(message.trackedHit),
-        fallbackAttempted: Boolean(message.fallbackAttempted),
-        fallbackSucceeded: Boolean(message.fallbackSucceeded),
-        readFullAttempts: message.readFullAttempts ?? 0,
-        workerWaitMs: message.workerWaitMs ?? 0,
-        targetedAttempts: message.targetedAttempts ?? 0,
-        targetedPixels: message.targetedPixels ?? 0,
-        targetedSuccesses: message.targetedSuccesses ?? 0,
-        latencyMs: message.latencyMs ?? 0,
-        frameCopyMs: message.frameCopyMs ?? 0,
-        directMetrics: message.directMetrics,
-        guidedMetrics: message.guidedMetrics,
-        guidedError: message.guidedError,
-        pixelPath: message.pixelPath,
-        robustMs: message.robustMs ?? 0,
-        robustBands: message.robustBands ?? 1,
-        robustSearchMs: message.robustSearchMs ?? 0,
-        exactFastPath: Boolean(message.exactFastPath),
-        directFrameFailed: Boolean(message.directFrameFailed),
-        repeatSkipped: Boolean(message.repeatSkipped),
-        repeatDistance: Number(message.repeatDistance),
-        symbols,
-        sightings,
-        error: message.error ?? (message.__airgapperPackedSymbolMeta && !packedSymbols ? "Packed worker result was invalid" : undefined)
-      };
+      const completion = this.completionFor(slot);
+      completion.full = Boolean(message.full);
+      completion.symbolCount = symbols.length;
+      completion.sightingCount = sightings.length;
+      completion.trackedAttempted = Boolean(message.trackedAttempted);
+      completion.trackedHit = Boolean(message.trackedHit);
+      completion.fallbackAttempted = Boolean(message.fallbackAttempted);
+      completion.fallbackSucceeded = Boolean(message.fallbackSucceeded);
+      completion.readFullAttempts = message.readFullAttempts ?? 0;
+      completion.workerWaitMs = message.workerWaitMs ?? 0;
+      completion.targetedAttempts = message.targetedAttempts ?? 0;
+      completion.targetedPixels = message.targetedPixels ?? 0;
+      completion.targetedSuccesses = message.targetedSuccesses ?? 0;
+      completion.latencyMs = message.latencyMs ?? 0;
+      completion.frameCopyMs = message.frameCopyMs ?? 0;
+      completion.directMetrics = message.directMetrics;
+      completion.guidedMetrics = message.guidedMetrics;
+      completion.guidedError = message.guidedError;
+      completion.pixelPath = message.pixelPath;
+      completion.robustMs = message.robustMs ?? 0;
+      completion.robustBands = message.robustBands ?? 1;
+      completion.robustSearchMs = message.robustSearchMs ?? 0;
+      completion.exactFastPath = Boolean(message.exactFastPath);
+      completion.directFrameFailed = Boolean(message.directFrameFailed);
+      completion.repeatSkipped = Boolean(message.repeatSkipped);
+      completion.repeatDistance = Number(message.repeatDistance);
+      completion.symbols = symbols;
+      completion.sightings = sightings;
+      completion.error = message.error ??
+        (message.__airgapperPackedSymbolMeta && !packedSymbols ? "Packed worker result was invalid" : undefined);
       try {
         if (message.trackedAttempted) this.onTrackedAttempt?.();
         const reusableInfo = jobMeta?.opticsEpoch === void 0 ? this.decodeInfo : null;
@@ -325,24 +354,10 @@ class DecodeWorkerPool {
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
-      this.onCompleted?.(id ?? -1, {
-        full,
-        symbolCount: 0,
-        sightingCount: 0,
-        trackedAttempted: false,
-        trackedHit: false,
-        fallbackAttempted: false,
-        fallbackSucceeded: false,
-        readFullAttempts: 0,
-        workerWaitMs: 0,
-        targetedAttempts: 0,
-        targetedPixels: 0,
-        targetedSuccesses: 0,
-        latencyMs: 0,
-        symbols: [],
-        sightings: [],
-        error: event.message || "Decode worker failed to start"
-      });
+      this.onCompleted?.(
+        id ?? -1,
+        this.failureCompletion(slot, full, 0, event.message || "Decode worker failed to start")
+      );
       worker.terminate();
       const replacement = this.create();
       this.workers[slot] = replacement;
@@ -364,6 +379,7 @@ class DecodeWorkerPool {
       this.activeMeta.pop();
       this.packedSymbolPools.pop();
       this.packedSymbolLists.pop();
+      this.completions.pop();
     }
     while (this.workers.length < target) {
       const slot = this.workers.length;
@@ -375,6 +391,7 @@ class DecodeWorkerPool {
       this.activeMeta.push(null);
       this.packedSymbolPools.push([]);
       this.packedSymbolLists.push([]);
+      this.completions.push({});
       this.configureWorker(slot, worker);
     }
     if (target > 0) this.ensureWatchdog();
@@ -437,24 +454,10 @@ class DecodeWorkerPool {
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
-      if (typeof id === "number") this.onCompleted?.(id, {
-        full,
-        symbolCount: 0,
-        sightingCount: 0,
-        trackedAttempted: false,
-        trackedHit: false,
-        fallbackAttempted: false,
-        fallbackSucceeded: false,
-        readFullAttempts: 0,
-        workerWaitMs: 0,
-        targetedAttempts: 0,
-        targetedPixels: 0,
-        targetedSuccesses: 0,
-        latencyMs: 0,
-        symbols: [],
-        sightings: [],
-        error: error instanceof Error ? error.message : "Could not send frame to decode worker"
-      });
+      if (typeof id === "number") {
+        const message = error instanceof Error ? error.message : "Could not send frame to decode worker";
+        this.onCompleted?.(id, this.failureCompletion(slot, full, 0, message));
+      }
       return false;
     }
   }
