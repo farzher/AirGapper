@@ -5,7 +5,6 @@ const LATTICE_SOFT_LOSS_MS = 450;
 const LATTICE_DORMANT_MS = 900;
 const LATTICE_OBSERVATION_HISTORY_MS = 2500;
 const LATTICE_CORRECTION_REFRESH_MS = 180;
-const TRACK_PROCESSOR_STALL_MS = 900;
 const AUTO_FOCUS_HOLD_DECODE_COUNT = 3;
 
 // Keep stale geometry as a fallback, but do not let it own scheduling forever.
@@ -282,90 +281,3 @@ FocusController.prototype.noteTargetAbsent = function(now = performance.now()) {
   if (this.isAcquiring()) void this.maybeRetrySeekingAutofocus(now);
   this.changed();
 };
-
-// A timeout must release the native camera read as well as reject our wrapper.
-// Otherwise the late VideoFrame remains owned by an abandoned promise and can
-// pin Chromium camera buffers while the app has already fallen back to rVFC.
-function installTrackProcessorStallGuard() {
-  const NativeTrackProcessor = globalThis.MediaStreamTrackProcessor;
-  if (typeof NativeTrackProcessor !== "function" || NativeTrackProcessor.__airgapperStallGuard) return;
-
-  const guardedReader = (nativeReader) => ({
-    read() {
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        let nativeRead;
-        try {
-          nativeRead = nativeReader.read();
-        } catch (error) {
-          reject(error);
-          return;
-        }
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          const error = typeof DOMException === "function"
-            ? new DOMException("MediaStreamTrackProcessor stalled", "AbortError")
-            : new Error("MediaStreamTrackProcessor stalled");
-          // Cancel resolves the outstanding read and gives the camera pool its
-          // buffer back. Runtime may call releaseLock immediately after reject;
-          // the guarded method below tolerates the pending cancellation.
-          void nativeReader.cancel(error).catch(() => void 0).finally(() => {
-            try { nativeReader.releaseLock(); } catch {}
-          });
-          reject(error);
-        }, TRACK_PROCESSOR_STALL_MS);
-        nativeRead.then((value) => {
-          if (settled) {
-            value?.value?.close?.();
-            return;
-          }
-          settled = true;
-          clearTimeout(timer);
-          resolve(value);
-        }, (error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(error);
-        });
-      });
-    },
-    cancel(reason) {
-      return nativeReader.cancel(reason);
-    },
-    releaseLock() {
-      try { nativeReader.releaseLock(); } catch {}
-    }
-  });
-
-  class GuardedTrackProcessor {
-    constructor(options) {
-      const processor = new NativeTrackProcessor(options);
-      this.readable = {
-        getReader() {
-          return guardedReader(processor.readable.getReader());
-        }
-      };
-      Object.defineProperties(this, {
-        totalFrames: { get: () => processor.totalFrames },
-        discardedFrames: { get: () => processor.discardedFrames }
-      });
-    }
-  }
-  Object.defineProperty(GuardedTrackProcessor, "__airgapperStallGuard", { value: true });
-
-  try {
-    globalThis.MediaStreamTrackProcessor = GuardedTrackProcessor;
-  } catch {
-    try {
-      Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
-        configurable: true,
-        writable: true,
-        value: GuardedTrackProcessor
-      });
-    } catch {}
-  }
-}
-
-installTrackProcessorStallGuard();
