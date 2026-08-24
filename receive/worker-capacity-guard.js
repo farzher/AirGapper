@@ -10,6 +10,43 @@ const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
 
+// A rare damaged optical frame can drive Guided into a very slow path. Until
+// cancellation exists inside the synchronous WASM call, learn from those
+// timeouts and temporarily reduce work on following frames. Healthy completions
+// continuously relax the pressure back to zero, so this adapts to the device
+// and scene rather than a particular camera FPS or core count.
+let trackedTimeoutPressure = 0;
+let trackedTimeoutCount = 0;
+function noteTrackedTimeout() {
+  trackedTimeoutCount++;
+  trackedTimeoutPressure = Math.min(1, trackedTimeoutPressure + (trackedTimeoutPressure ? 0.2 : 0.35));
+}
+function noteHealthyTrackedCompletion(message, meta) {
+  if (!meta || meta.full || message?.error) return;
+  const latency = Number(message?.latencyMs);
+  const timeout = Number(meta.timeoutMs);
+  if (!Number.isFinite(latency) || latency <= 0 || !Number.isFinite(timeout) || timeout <= 0) return;
+  if (latency <= timeout * 0.25) {
+    const useful = Number(message?.__airgapperPackedSymbolCount ?? message?.symbols?.length ?? 0) > 0;
+    trackedTimeoutPressure = Math.max(0, trackedTimeoutPressure - (useful ? 0.08 : 0.04));
+  }
+}
+function applyTimeoutBackpressure(message, live) {
+  const tracks = message?.tracks;
+  if (!live || message?.full || !Array.isArray(tracks) || tracks.length < 4 || trackedTimeoutPressure <= 0) return;
+  const originalCount = tracks.length;
+  const fraction = 1 - 0.6 * trackedTimeoutPressure;
+  const limit = Math.max(4, Math.min(originalCount, Math.ceil(originalCount * fraction)));
+  if (limit < originalCount) message.tracks = tracks.slice(0, limit);
+  if (trackedTimeoutPressure >= 0.5) {
+    // While recovering from repeated cliffs, spend CPU on fresh direct/sparse
+    // attempts instead of salvaging one already-damaged page. Fountain coding
+    // makes a clean QR from the next camera frame more valuable than repair here.
+    message.guidedRepairMask = 0;
+    message.guidedFallbackMask = 0;
+  }
+}
+
 function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
   return document.body?.classList?.contains("receive-mode") === true &&
@@ -156,6 +193,32 @@ function recycleUnsentBuffers(message) {
   if (result instanceof ArrayBuffer && result.byteLength) recyclePackedResultBuffer(result);
 }
 
+const baseFailureCompletion = DecodeWorkerPool.prototype.failureCompletion;
+if (typeof baseFailureCompletion === "function" && !baseFailureCompletion.__airgapperStaleTrackedTimeout) {
+  const failureCompletion = function(slot, full, latencyMs, error) {
+    const completion = baseFailureCompletion.call(this, slot, full, latencyMs, error);
+    if (!full && error === "Decode worker timed out") {
+      completion.timedOut = true;
+      completion.staleFrame = true;
+      completion.error = undefined;
+      completion.guidedError = "stale tracked frame abandoned";
+    }
+    return completion;
+  };
+  Object.defineProperty(failureCompletion, "__airgapperStaleTrackedTimeout", { value: true });
+  DecodeWorkerPool.prototype.failureCompletion = failureCompletion;
+}
+
+const baseTimeoutWorker = DecodeWorkerPool.prototype.timeoutWorker;
+if (typeof baseTimeoutWorker === "function" && !baseTimeoutWorker.__airgapperTimeoutBackpressure) {
+  const timeoutWorker = function(slot, meta) {
+    if (!(this.activeFull?.[slot] ?? false)) noteTrackedTimeout();
+    return baseTimeoutWorker.call(this, slot, meta);
+  };
+  Object.defineProperty(timeoutWorker, "__airgapperTimeoutBackpressure", { value: true });
+  DecodeWorkerPool.prototype.timeoutWorker = timeoutWorker;
+}
+
 const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
 if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedBufferRecycle) {
   const configureWorker = function(slot, worker) {
@@ -163,6 +226,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
+      const activeMeta = this.activeMeta?.[slot];
       const recycledTrack = message?.__airgapperPackedTrackRecycle;
       if (recycledTrack instanceof ArrayBuffer) {
         recyclePackedTrackBuffer(recycledTrack);
@@ -173,6 +237,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
       let result;
       try {
         result = baseOnMessage?.call(worker, event);
+        noteHealthyTrackedCompletion(message, activeMeta);
       } finally {
         if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
         if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta)
@@ -198,6 +263,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
     const candidate = message && !message.full && !message.strictHotPath;
     const live = Boolean(candidate && cameraLive);
     boundLiveAcquisition(message, cameraLive);
+    applyTimeoutBackpressure(message, live);
     if (live && !message.videoFrame &&
         Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
@@ -225,15 +291,15 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
       recycleUnsentBuffers(message);
       return false;
     }
-    // Do not shorten the base tracked deadline here. A timeout currently means
-    // terminating the worker, which discards its warmed WASM/sample-map state.
-    // Stale-frame budgets belong inside cooperative Guided/WASM cancellation;
-    // until that exists, false-positive timeout/restart churn costs more than it saves.
     return true;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
 }
+
+// Expose only aggregate debug state; production policy reads measured behavior,
+// not this value. Developer diagnostics can inspect it without a new hot-path allocation.
+window.airgapperTrackedTimeoutState = () => ({ count: trackedTimeoutCount, pressure: trackedTimeoutPressure });
 
 // Every AirGapper decode worker uses the live-camera wrapper. Preserve the
 // build/scalar query string so it imports the exact same codec variant.
