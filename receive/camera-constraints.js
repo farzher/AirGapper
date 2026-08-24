@@ -8,6 +8,61 @@ import {
 
 installReceiverRecoveryPolicy();
 
+// WebKit can reject otherwise-valid getUserMedia constraint bundles with an
+// OverconstrainedError whose message is only "Invalid constraint". Keep the
+// preferred AirGapper request untouched, but on iPhone/iPad recover locally
+// instead of leaving the receiver unable to start. The first retry preserves a
+// useful 1080p/30 target while dropping deviceId/exact constraints; the final
+// retry asks only for the rear camera and lets Safari choose its safest mode.
+const nav = typeof navigator === "undefined" ? void 0 : navigator;
+const iosSafariCamera = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
+function cameraConstraintFailure(error) {
+  return error?.name === "OverconstrainedError" || /invalid constraint/i.test(String(error?.message || ""));
+}
+function relaxedFacingMode(video) {
+  return video?.facingMode ?? { ideal: "environment" };
+}
+function installIOSCameraConstraintFallback() {
+  const media = nav?.mediaDevices;
+  if (!iosSafariCamera || !media?.getUserMedia || media.getUserMedia.__airgapperIOSFallback) return;
+  const original = media.getUserMedia.bind(media);
+  const wrapped = async (constraints) => {
+    try {
+      return await original(constraints);
+    } catch (error) {
+      const video = constraints?.video;
+      if (!cameraConstraintFailure(error) || !video || typeof video !== "object") throw error;
+      const facingMode = relaxedFacingMode(video);
+      try {
+        return await original({
+          audio: constraints?.audio ?? false,
+          video: {
+            facingMode,
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            frameRate: { ideal: 30 }
+          }
+        });
+      } catch (relaxedError) {
+        if (!cameraConstraintFailure(relaxedError)) throw relaxedError;
+        return original({
+          audio: constraints?.audio ?? false,
+          video: { facingMode }
+        });
+      }
+    }
+  };
+  Object.defineProperty(wrapped, "__airgapperIOSFallback", { value: true });
+  try {
+    media.getUserMedia = wrapped;
+  } catch {
+    // Some WebKit host objects may reject method replacement. In that rare
+    // case startup retains the native behavior rather than risking camera API
+    // corruption.
+  }
+}
+installIOSCameraConstraintFallback();
+
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 
 function exposureConstraintAlreadySatisfied(track, set) {
