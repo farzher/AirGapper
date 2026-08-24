@@ -1,4 +1,4 @@
-import { encodeTransferQr } from "./transfer-qr.js";
+import { encodeTransferQr, transferQrRasterLayout } from "./transfer-qr.js";
 
 const WHITE = 0xffffffff;
 const BLACK = 0xff000000;
@@ -9,21 +9,52 @@ let rasterPixels = null;
 let rasterImage = null;
 let rasterCanvas = null;
 let rasterCtx = null;
+let rasterLayoutKey = "";
+let rasterLayout = null;
 
 function ensureRaster(width, height) {
   if (rasterPixels && rasterWidth === width && rasterHeight === height) return;
   rasterWidth = width;
   rasterHeight = height;
   rasterPixels = new Uint32Array(width * height);
-  rasterPixels.fill(WHITE);
   rasterImage = null;
   rasterCanvas = null;
   rasterCtx = null;
+  rasterLayoutKey = "";
+  rasterLayout = null;
   if (typeof OffscreenCanvas === "function" && typeof ImageData === "function") {
     rasterImage = new ImageData(new Uint8ClampedArray(rasterPixels.buffer), width, height);
     rasterCanvas = new OffscreenCanvas(width, height);
     rasterCtx = rasterCanvas.getContext("2d");
   }
+}
+
+function ensureStaticQrWall(version, cols, rows, margin, width, height) {
+  const key = `${version}:${cols}:${rows}:${margin}:${width}:${height}`;
+  if (rasterLayoutKey === key && rasterLayout) return rasterLayout;
+
+  const layout = transferQrRasterLayout(version, width);
+  const template = layout.template;
+  const modules = template.size;
+  const stride = modules + margin;
+  const fixed = template.staticModules;
+  const pixels = rasterPixels;
+  pixels.fill(WHITE);
+
+  for (let slot = 0; slot < cols * rows; ++slot) {
+    const ox = slot % cols * stride + margin;
+    const oy = Math.floor(slot / cols) * stride + margin;
+    for (let y = 0; y < modules; ++y) {
+      const dst = (oy + y) * width + ox;
+      const src = y * modules;
+      for (let x = 0; x < modules; ++x)
+        pixels[dst + x] = fixed[src + x] ? BLACK : WHITE;
+    }
+  }
+
+  rasterLayoutKey = key;
+  rasterLayout = layout;
+  return layout;
 }
 
 self.onmessage = (event) => {
@@ -36,19 +67,25 @@ self.onmessage = (event) => {
     const width = modules * job.cols + job.margin * (job.cols + 1);
     const height = modules * job.rows + job.margin * (job.rows + 1);
     ensureRaster(width, height);
+    const layout = ensureStaticQrWall(version, job.cols, job.rows, job.margin, width, height);
+    const template = layout.template;
+    const positions = template.positions;
+    const offsets = layout.offsets;
     const pixels = rasterPixels;
     const stride = modules + job.margin;
 
+    // Every page contains exactly one fresh frame for every slot. The fixed QR
+    // geometry was painted once above; from now on only data/remainder modules
+    // can change, so do not rewrite finder/timing/alignment pixels each page.
     for (const frame of job.frames) {
-      const data = encodeTransferQr(new Uint8Array(frame.buffer), version);
+      const encoded = encodeTransferQr(new Uint8Array(frame.buffer), version);
+      if (encoded !== template) throw new Error("Transfer QR workspace changed inside sender page");
       const ox = frame.slotIndex % job.cols * stride + job.margin;
       const oy = Math.floor(frame.slotIndex / job.cols) * stride + job.margin;
-      for (let y = 0; y < modules; ++y) {
-        const dst = (oy + y) * width + ox;
-        const src = y * modules;
-        for (let x = 0; x < modules; ++x)
-          pixels[dst + x] = data[src + x] ? BLACK : WHITE;
-      }
+      const base = oy * width + ox;
+      const data = template.modules;
+      for (let i = 0; i < positions.length; ++i)
+        pixels[base + offsets[i]] = data[positions[i]] ? BLACK : WHITE;
     }
 
     const startOrdinal = Number(job.startOrdinal);
