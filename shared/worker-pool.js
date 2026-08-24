@@ -39,7 +39,13 @@ function prepareTrackedBrowserY8(message, transfer) {
   // pixel keeps this fallback cheap enough for iPhone's live tracked crops.
   for (let dst = 0, src = 1; dst < pixels; dst++, src += 4) y8[dst] = rgba[src];
 
-  message.buf = y8.buffer;
+  // The decode worker deliberately distinguishes a direct camera/Y8 payload
+  // from an ordinary buffered image. Sending this fallback through `buf` made
+  // the pixels Y8 but left `usedDirectFrame` false, so the worker skipped the
+  // Guided tracked lane and spent its time in dense/robust recovery. Route the
+  // packed Y plane through the existing direct-frame ArrayBuffer slot instead.
+  message.buf = void 0;
+  message.videoFrame = y8.buffer;
   message.pixelFormat = "y8";
   message.yOffset = 0;
   message.yStride = width;
