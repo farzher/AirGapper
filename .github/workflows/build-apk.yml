@@ -33,50 +33,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Apply v0.5.416 receive capacity pass
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -Fq 'const autoWorkerMax = Math.max(1, Math.min(5, hardwareThreadCount - 1));' receive/runtime.js; then
-            python3 - <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              if text.count(old) != 1:
-                  raise SystemExit(f"{path}: expected one match, found {text.count(old)}")
-              p.write_text(text.replace(old, new, 1))
-
-          replace_once(
-              "receive/runtime.js",
-              "const autoWorkerMax = Math.max(1, Math.min(5, hardwareThreadCount - 1));",
-              "const autoWorkerMax = Math.max(1, Math.min(5, hardwareThreadCount <= 2 ? 1 : hardwareThreadCount));"
-          )
-
-          replace_once(
-              "receive/runtime.js",
-              '''  const sourceFps = Math.max(8, captureTimes.reduce((count, at) => count + Number(at > now - 1000), 0));\n  const demand = Math.max(1, Math.min(autoWorkerMax, Math.ceil(sourceFps * p50 / 1000) + 1));\n  const pressured = recentTrackPressure(now) || p95 > Math.max(180, 2000 / sourceFps);''',
-              '''  const observedSourceFps = Math.max(1, captureTimes.reduce((count, at) => count + Number(at > now - 1000), 0));\n  const negotiatedSourceFps = Math.max(\n    observedSourceFps,\n    Number(stream?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0\n  );\n  // Capacity must target the camera rate we asked for, not the already-degraded\n  // delivery rate. Otherwise dropped TrackProcessor frames make Auto shrink\n  // exactly when the decoder needs another worker.\n  const sourceFps = Math.max(8, Math.min(120, negotiatedSourceFps));\n  const sourceStarved = negotiatedSourceFps >= 15 && observedSourceFps < negotiatedSourceFps * 0.9;\n  const demand = Math.max(1, Math.min(autoWorkerMax, Math.ceil(sourceFps * p50 / 1000) + 1));\n  const pressured = recentTrackPressure(now) || sourceStarved || p95 > Math.max(180, 2000 / sourceFps);'''
-          )
-
-          replace_once(
-              "shared/worker-pool.js",
-              "const TRACKED_JOB_TIMEOUT_MS = 2200;",
-              "const TRACKED_JOB_TIMEOUT_MS = 1200;"
-          )
-          PY
-
-            # Restore the known clean build-only workflow in the product commit.
-            git show 25d616375ae47dfc8af03896f6924efbe2f0b1e1:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add receive/runtime.js shared/worker-pool.js .github/workflows/build-apk.yml
-            git commit -m "v0.5.416: target full camera throughput"
-            git push origin HEAD:master
-          fi
-
       - name: Read app version
         id: version
         run: |
