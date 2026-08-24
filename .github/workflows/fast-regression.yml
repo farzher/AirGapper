@@ -90,6 +90,7 @@ jobs:
           node --input-type=module --check < shared/worker-pool.js
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
+          node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
           node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Run grid regression
@@ -117,6 +118,7 @@ jobs:
           AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
           node benchmark/direct-y8-worker-smoke.mjs
           node benchmark/repeat-signature-worker-smoke.mjs
+          node benchmark/rvfc-wrapper-smoke.mjs
           node benchmark/corpus-suite.mjs
 
       - name: Build Android app
