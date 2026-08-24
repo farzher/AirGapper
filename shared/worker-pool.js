@@ -3,6 +3,7 @@ const RECOVERY_JOB_TIMEOUT_MS = 6500;
 const ACQUISITION_JOB_TIMEOUT_MS = 9000;
 const WORKER_WATCHDOG_MS = 250;
 const PACKED_SYMBOL_BYTES = 88;
+const PACKED_SYMBOL_WORDS = PACKED_SYMBOL_BYTES >> 2;
 let receiveVideo;
 
 function workerJobTimeout(message) {
@@ -182,33 +183,36 @@ class DecodeWorkerPool {
     let list = this.packedSymbolLists[slot];
     if (!list) list = this.packedSymbolLists[slot] = [];
     list.length = count;
-    const view = new DataView(meta);
+    const u32 = new Uint32Array(meta);
+    const f32 = new Float32Array(meta);
     for (let index = 0; index < count; index++) {
-      const base = index * PACKED_SYMBOL_BYTES;
-      const byteOffset = view.getUint32(base, true);
-      const byteLength = view.getUint32(base + 4, true);
+      const base = index * PACKED_SYMBOL_WORDS;
+      const byteOffset = u32[base];
+      const byteLength = u32[base + 1];
       if (byteLength <= 0 || byteOffset + byteLength > payload.byteLength) return null;
       const symbol = this.packedSymbol(slot, index);
-      const flags = view.getUint8(base + 10);
+      const control0 = u32[base + 3];
+      const control1 = u32[base + 4];
+      const flags = control0 & 255;
       const header = symbol.header;
-      header.mode = packedMode(view.getUint8(base + 12));
-      header.seq = view.getUint32(base + 20, true);
-      header.layoutId = view.getUint8(base + 13);
+      header.mode = packedMode(control0 >>> 16 & 255);
+      header.seq = u32[base + 5];
+      header.layoutId = control0 >>> 24 & 255;
       header.extendedGrid = Boolean(flags & 16);
-      header.gridCols = view.getUint8(base + 14);
-      header.gridRows = view.getUint8(base + 15);
-      header.slotIndex = view.getUint16(base + 16, true);
-      header.k = view.getUint32(base + 24, true);
-      header.blockLen = view.getUint32(base + 28, true);
-      header.totalLen = view.getUint32(base + 32, true);
-      header.payloadId = view.getUint32(base + 36, true);
+      header.gridCols = control1 & 255;
+      header.gridRows = control1 >>> 8 & 255;
+      header.slotIndex = control1 >>> 16 & 0xffff;
+      header.k = u32[base + 6];
+      header.blockLen = u32[base + 7];
+      header.totalLen = u32[base + 8];
+      header.payloadId = u32[base + 9];
       symbol.bytes = new Uint8Array(payload, byteOffset, byteLength);
-      symbol.modules = view.getUint16(base + 8, true);
+      symbol.modules = u32[base + 2];
       symbol.tracked = Boolean(flags & 1);
       symbol.geometryMeasured = Boolean(flags & 2);
       symbol.crc32 = Boolean(flags & 4);
       symbol.verifiedPayload = Boolean(flags & 8);
-      symbol.decodePath = packedDecodePath(view.getUint8(base + 11));
+      symbol.decodePath = packedDecodePath(control0 >>> 8 & 255);
       // Motion is coherent whole-wall evidence; onDecoded consumes at most the
       // first source-sequence report. Carry one object per frame, not per QR.
       symbol.wallMotion = index === 0 ? message.__airgapperPackedWallMotion : undefined;
@@ -217,16 +221,16 @@ class DecodeWorkerPool {
         // these <=4 records deliberately receive fresh point/quad objects. The
         // remaining payload-only QRs allocate none of this geometry graph.
         symbol.box = {
-          x: view.getFloat32(base + 40, true),
-          y: view.getFloat32(base + 44, true),
-          w: view.getFloat32(base + 48, true),
-          h: view.getFloat32(base + 52, true)
+          x: f32[base + 10],
+          y: f32[base + 11],
+          w: f32[base + 12],
+          h: f32[base + 13]
         };
         symbol.quad = {
-          topLeft: { x: view.getFloat32(base + 56, true), y: view.getFloat32(base + 60, true) },
-          topRight: { x: view.getFloat32(base + 64, true), y: view.getFloat32(base + 68, true) },
-          bottomRight: { x: view.getFloat32(base + 72, true), y: view.getFloat32(base + 76, true) },
-          bottomLeft: { x: view.getFloat32(base + 80, true), y: view.getFloat32(base + 84, true) }
+          topLeft: { x: f32[base + 14], y: f32[base + 15] },
+          topRight: { x: f32[base + 16], y: f32[base + 17] },
+          bottomRight: { x: f32[base + 18], y: f32[base + 19] },
+          bottomLeft: { x: f32[base + 20], y: f32[base + 21] }
         };
       } else {
         symbol.box = undefined;
