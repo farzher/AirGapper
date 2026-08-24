@@ -27,14 +27,17 @@ function scheduleAutoCameraReopen(track) {
 
 function installManualToAutoReopenGuard() {
   // Capture runs before runtime.js's checkbox listener. Mark the old track as
-  // untouchable before AutoOptics can enqueue focus/exposure mutations.
+  // untouchable before AutoOptics can enqueue focus/exposure mutations. Some
+  // camera stacks report exposureMode poorly, so the still-visible ManualOptics
+  // panel is also authoritative evidence that this click crosses that boundary.
   document.addEventListener("change", (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.id !== "camera-exposure-auto" || !input.checked) return;
     const track = activeCameraTrack();
     if (!track || track.readyState !== "live") return;
     const actual = track.getSettings?.() ?? {};
-    if (actual.exposureMode === "manual") scheduleAutoCameraReopen(track);
+    const manualPanel = document.getElementById("camera-optics-manual");
+    if (actual.exposureMode === "manual" || manualPanel && !manualPanel.hidden) scheduleAutoCameraReopen(track);
   }, true);
 
   const proto = globalThis.MediaStreamTrack?.prototype;
