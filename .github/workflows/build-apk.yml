@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${AIRGAPPER_ANDROID_KEYSTORE_B64:-}" || { echo "::error::Missing AIRGAPPER_ANDROID_KEYSTORE_B64 repository secret"; exit 1; }
-          test -n "${AIRGAPPER_ANDROID_KEYSTORE_PASSWORD:-}" || { echo "::error::Missing AIRGAPPER_ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "${AIRGAPPER_ANDROID_KEYSTORE_PASSWORD:-}" || { echo "::error::Missing AIRGAPPER_ANDROID_KEYSTORE_PASSWORD repository secret"; exit 1; }
           printf '%s' "$AIRGAPPER_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/airgapper-release.jks"
           chmod 600 "$RUNNER_TEMP/airgapper-release.jks"
           keytool -list \
