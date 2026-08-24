@@ -36,10 +36,31 @@ GridLattice.prototype.tick = function(now) {
   return this.snapshot();
 };
 
+function packetIsStillLive(at) {
+  const packetAt = Number(at);
+  if (!Number.isFinite(packetAt)) return false;
+  return performance.now() - packetAt <= LATTICE_DORMANT_MS;
+}
+
+const baseGridAccept = GridLattice.prototype.accept;
+GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
+  const wasDormant = this.state === "DORMANT";
+  const result = baseGridAccept.call(this, detection, frameWidth, frameHeight);
+  // A measured Guided result can finish out of order. The base lattice rejects
+  // stale geometry for fitting (correctly), but that CRC-valid packet is still
+  // direct liveness evidence. Do not leave fresh decoder progress in DORMANT,
+  // where expensive full acquisition would run beside a working tracked path.
+  if (result && wasDormant && this.state === "DORMANT" && packetIsStillLive(detection?.at)) {
+    this.transition("GRID_LOCK", "fresh measured packet reactivated dormant lattice", detection.at);
+    return this.snapshot();
+  }
+  return result;
+};
+
 const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
 GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
   const accepted = baseNoteValidPacket.call(this, at);
-  if (accepted && this.state === "DORMANT") {
+  if (accepted && this.state === "DORMANT" && packetIsStillLive(at)) {
     this.transition("GRID_LOCK", "valid packet reactivated dormant lattice", at);
   }
   return accepted;
