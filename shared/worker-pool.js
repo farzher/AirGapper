@@ -15,6 +15,39 @@ function liveReceiveCamera() {
     tracks.some((track) => track?.readyState === "live");
 }
 
+/** Safari/iOS currently reaches Receive through requestVideoFrameCallback +
+ * canvas ImageData rather than the transferable VideoFrame/Y8 camera path.
+ * Once geometry is known, keeping those tracked crops as RGBA needlessly locks
+ * the worker onto the slower generic decoder. AirGapper QRs are achromatic, so
+ * the green channel is a clean luma proxy and is materially cheaper than a
+ * weighted RGB conversion. Convert only live tracked batches with 2+ known QRs;
+ * full acquisition/recovery images keep their existing robust RGBA path. */
+function prepareTrackedBrowserY8(message, transfer) {
+  if (!liveReceiveCamera() || message?.full || message?.videoFrame || message?.strictHotPath) return transfer;
+  if (!Array.isArray(message?.tracks) || message.tracks.length < 2) return transfer;
+  if (message.pixelFormat && message.pixelFormat !== "rgba") return transfer;
+  if (!(message.buf instanceof ArrayBuffer)) return transfer;
+  const width = Math.trunc(Number(message.w) || 0);
+  const height = Math.trunc(Number(message.h) || 0);
+  const pixels = width * height;
+  if (width <= 0 || height <= 0 || pixels <= 0 || message.buf.byteLength < pixels * 4) return transfer;
+
+  const rgba = new Uint8Array(message.buf, 0, pixels * 4);
+  const y8 = new Uint8Array(pixels);
+  // Camera QR content is black/white; green is both the highest-SNR Bayer
+  // channel and an adequate luminance proxy. One byte read + one byte write per
+  // pixel keeps this fallback cheap enough for iPhone's live tracked crops.
+  for (let dst = 0, src = 1; dst < pixels; dst++, src += 4) y8[dst] = rgba[src];
+
+  message.buf = y8.buffer;
+  message.pixelFormat = "y8";
+  message.yOffset = 0;
+  message.yStride = width;
+  message.payloadBytes = pixels;
+  message.guidedDecode = true;
+  return [y8.buffer];
+}
+
 class DecodeWorkerPool {
   constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable, onFrameSignature) {
     this.create = create;
@@ -230,6 +263,7 @@ class DecodeWorkerPool {
     };
     try {
       if (message && typeof message === "object") message.sentAt = startedAt;
+      transfer = prepareTrackedBrowserY8(message, transfer);
       this.workers[slot].postMessage(message, transfer);
       const timeoutMs = workerJobTimeout(message);
       this.jobTimers[slot] = setTimeout(() => {
