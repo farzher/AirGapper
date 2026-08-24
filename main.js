@@ -21,7 +21,12 @@ async function prepareServiceWorker() {
 void prepareServiceWorker();
 let sendModulePromise;
 function ensureSendModule() {
-  if (!sendModulePromise) sendModulePromise = import(`./send/main.js?build=${APP_BUILD}`);
+  if (!sendModulePromise) {
+    sendModulePromise = Promise.all([
+      import(`./send/dev-settings.js?build=${APP_BUILD}`),
+      import(`./send/main.js?build=${APP_BUILD}`)
+    ]).then(([, module]) => module);
+  }
   return sendModulePromise;
 }
 let receiveModulePromise;
