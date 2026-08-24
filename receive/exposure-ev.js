@@ -58,8 +58,11 @@ function formatEv(value) {
 
 function syncControl(track = activeTrack()) {
   const range = rangeFor(track);
-  if (!track || track.readyState !== "live" || !range) {
+  // EV is the fallback exposure control. If the browser exposes real shutter
+  // time + ISO, those controls are clearer and more deterministic for QR work.
+  if (!track || track.readyState !== "live" || !range || manualExposureAvailable(track)) {
     control.hidden = true;
+    slider.disabled = true;
     boundTrack = void 0;
     return;
   }
@@ -67,6 +70,7 @@ function syncControl(track = activeTrack()) {
   const changedTrack = boundTrack !== track;
   boundTrack = track;
   control.hidden = false;
+  slider.disabled = false;
   slider.min = String(range.min);
   slider.max = String(range.max);
   slider.step = String(range.step);
@@ -77,10 +81,7 @@ function syncControl(track = activeTrack()) {
     slider.value = String(quantize(preferred, range));
   }
 
-  const actualMode = track.getSettings?.().exposureMode;
-  const trueManual = actualMode === "manual" && manualExposureAvailable(track);
-  slider.disabled = trueManual;
-  control.title = trueManual ? "EV is controlled by manual shutter/ISO" : "Exposure compensation";
+  control.title = "Exposure compensation";
   output.value = formatEv(slider.value);
   output.textContent = output.value;
 }
@@ -103,13 +104,10 @@ async function applyCurrentEv(track = activeTrack()) {
 function syncFreshCamera() {
   const track = activeTrack();
   syncControl(track);
-  if (!track || track.readyState !== "live" || !rangeFor(track)) return;
+  if (!track || track.readyState !== "live" || !rangeFor(track) || manualExposureAvailable(track)) return;
 
-  // Auto AE benefits from a darker QR-specific bias immediately. ManualOptics
-  // uses EV only when native shutter+ISO control is not actually available.
-  if (autoToggle?.checked || !manualExposureAvailable(track)) {
-    void applyCurrentEv(track);
-  }
+  // Devices without native shutter+ISO get a darker QR-specific AE bias.
+  void applyCurrentEv(track);
 }
 
 slider?.addEventListener("input", () => {
