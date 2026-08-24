@@ -80,10 +80,13 @@ edit("send/main.js", [
 ]
 ]);
 
-edit("version.js", [[
-  'export const APP_VERSION = "0.5.413";',
-  'export const APP_VERSION = "0.5.414";',
-  "version bump"
-]]);
+const versionPath = "version.js";
+let versionSource = fs.readFileSync(versionPath, "utf8");
+if (versionSource.includes('export const APP_VERSION = "0.5.413";')) {
+  versionSource = versionSource.replace('export const APP_VERSION = "0.5.413";', 'export const APP_VERSION = "0.5.414";');
+  fs.writeFileSync(versionPath, versionSource);
+} else if (!versionSource.includes('export const APP_VERSION = "0.5.414";')) {
+  throw new Error("version.js: expected 0.5.413 or 0.5.414");
+}
 
 console.log("AIRGAPPER_SEND_DEV_GUTTER_APPLIED");
