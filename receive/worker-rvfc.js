@@ -1,3 +1,5 @@
+import { compactRgbaGreenInPlace } from "./rgba-luma.js";
+
 // Worker wrapper for live camera decode jobs.
 //
 // rVFC/canvas capture arrives as a transferred RGBA ArrayBuffer. Compact the
@@ -330,12 +332,9 @@ self.onmessage = (event) => {
     return baseOnMessage?.call(self, event);
   }
 
-  // Safe forward compaction: for every pixel after the first, the green source
-  // byte (4*n+1) is ahead of destination n, so no future source byte is
-  // overwritten. The original transferred RGBA allocation becomes the Y8 input
-  // with zero additional multi-megabyte allocation and no second frame copy.
-  const bytes = new Uint8Array(rgbaBuffer, 0, pixelCount * 4);
-  for (let dst = 0, src = 1; dst < pixelCount; dst++, src += 4) bytes[dst] = bytes[src];
+  if (!compactRgbaGreenInPlace(rgbaBuffer, pixelCount)) {
+    throw new Error("Could not compact worker RGBA frame to Y8");
+  }
 
   message.buf = undefined;
   message.videoFrame = rgbaBuffer;
