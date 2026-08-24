@@ -17,8 +17,15 @@ const packedResultBufferPool = [];
 // and scene rather than a particular camera FPS or core count.
 let trackedTimeoutPressure = 0;
 let trackedTimeoutCount = 0;
-function noteTrackedTimeout() {
+let trackedDecodeTimeoutCount = 0;
+let trackedPreflightTimeoutCount = 0;
+function noteTrackedTimeout(reachedPreflight) {
   trackedTimeoutCount++;
+  if (!reachedPreflight) {
+    trackedPreflightTimeoutCount++;
+    return;
+  }
+  trackedDecodeTimeoutCount++;
   trackedTimeoutPressure = Math.min(1, trackedTimeoutPressure + (trackedTimeoutPressure ? 0.2 : 0.35));
 }
 function noteHealthyTrackedCompletion(message, meta) {
@@ -39,9 +46,9 @@ function applyTimeoutBackpressure(message, live) {
   const limit = Math.max(4, Math.min(originalCount, Math.ceil(originalCount * fraction)));
   if (limit < originalCount) message.tracks = tracks.slice(0, limit);
   if (trackedTimeoutPressure >= 0.5) {
-    // While recovering from repeated cliffs, spend CPU on fresh direct/sparse
-    // attempts instead of salvaging one already-damaged page. Fountain coding
-    // makes a clean QR from the next camera frame more valuable than repair here.
+    // While recovering from repeated decoder cliffs, spend CPU on fresh
+    // direct/sparse attempts instead of salvaging one already-damaged page.
+    // Fountain coding makes a clean QR from the next frame more valuable.
     message.guidedRepairMask = 0;
     message.guidedFallbackMask = 0;
   }
@@ -198,10 +205,12 @@ if (typeof baseFailureCompletion === "function" && !baseFailureCompletion.__airg
   const failureCompletion = function(slot, full, latencyMs, error) {
     const completion = baseFailureCompletion.call(this, slot, full, latencyMs, error);
     if (!full && error === "Decode worker timed out") {
+      // A live camera frame is disposable. Keep this out of the ordinary user
+      // error channel; full/acquisition failures remain real errors.
       completion.timedOut = true;
       completion.staleFrame = true;
       completion.error = undefined;
-      completion.guidedError = "stale tracked frame abandoned";
+      completion.guidedError = undefined;
     }
     return completion;
   };
@@ -212,7 +221,7 @@ if (typeof baseFailureCompletion === "function" && !baseFailureCompletion.__airg
 const baseTimeoutWorker = DecodeWorkerPool.prototype.timeoutWorker;
 if (typeof baseTimeoutWorker === "function" && !baseTimeoutWorker.__airgapperTimeoutBackpressure) {
   const timeoutWorker = function(slot, meta) {
-    if (!(this.activeFull?.[slot] ?? false)) noteTrackedTimeout();
+    if (!(this.activeFull?.[slot] ?? false)) noteTrackedTimeout(Boolean(meta?.__airgapperPreflight));
     return baseTimeoutWorker.call(this, slot, meta);
   };
   Object.defineProperty(timeoutWorker, "__airgapperTimeoutBackpressure", { value: true });
@@ -227,6 +236,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     worker.onmessage = (event) => {
       const message = event?.data;
       const activeMeta = this.activeMeta?.[slot];
+      if (message?.preflight && activeMeta) activeMeta.__airgapperPreflight = true;
       const recycledTrack = message?.__airgapperPackedTrackRecycle;
       if (recycledTrack instanceof ArrayBuffer) {
         recyclePackedTrackBuffer(recycledTrack);
@@ -237,7 +247,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
       let result;
       try {
         result = baseOnMessage?.call(worker, event);
-        noteHealthyTrackedCompletion(message, activeMeta);
+        if (!message?.preflight) noteHealthyTrackedCompletion(message, activeMeta);
       } finally {
         if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
         if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta)
@@ -291,15 +301,22 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
       recycleUnsentBuffers(message);
       return false;
     }
+    const meta = this.activeMeta?.[slot];
+    if (meta && meta.id === message.id) meta.__airgapperPreflight = false;
     return true;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
 }
 
-// Expose only aggregate debug state; production policy reads measured behavior,
-// not this value. Developer diagnostics can inspect it without a new hot-path allocation.
-window.airgapperTrackedTimeoutState = () => ({ count: trackedTimeoutCount, pressure: trackedTimeoutPressure });
+// Aggregate debug state only. Production decisions are driven by measured
+// completions, not these counters.
+window.airgapperTrackedTimeoutState = () => ({
+  count: trackedTimeoutCount,
+  decode: trackedDecodeTimeoutCount,
+  preflight: trackedPreflightTimeoutCount,
+  pressure: trackedTimeoutPressure
+});
 
 // Every AirGapper decode worker uses the live-camera wrapper. Preserve the
 // build/scalar query string so it imports the exact same codec variant.
