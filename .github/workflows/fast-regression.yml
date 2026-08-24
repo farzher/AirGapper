@@ -88,6 +88,7 @@ jobs:
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
+          node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Run grid regression
         run: |
@@ -99,6 +100,7 @@ jobs:
           node benchmark/optics-guard-smoke.mjs
           node benchmark/receiver-recovery-policy-smoke.mjs
           node benchmark/version-source-smoke.mjs
+          node benchmark/worker-pool-reuse-smoke.mjs
 
       - name: Install browser benchmark dependency
         run: npm install --no-save --package-lock=false playwright@1.55.0
