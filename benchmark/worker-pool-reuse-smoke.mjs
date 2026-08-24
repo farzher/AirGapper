@@ -18,16 +18,26 @@ class FakeWorker {
 const created = [];
 const completions = [];
 const preflights = [];
+const decodedInfos = [];
 let firstCompletion;
 let firstPreflight;
+let pool;
+let autoSubmittedSecond = false;
+let secondMeta;
 
-const pool = new DecodeWorkerPool(
+pool = new DecodeWorkerPool(
   () => {
     const worker = new FakeWorker();
     created.push(worker);
     return worker;
   },
-  () => void 0,
+  (_bytes, _box, info) => {
+    decodedInfos.push({
+      scanId: info.scanId,
+      sourceSequence: info.sourceSequence,
+      opticsEpoch: info.opticsEpoch
+    });
+  },
   () => void 0,
   () => void 0,
   (_id, completion) => {
@@ -41,7 +51,23 @@ const pool = new DecodeWorkerPool(
       error: completion.error
     });
   },
-  () => void 0,
+  () => {
+    // DecodeWorkerPool intentionally calls onAvailable before it finishes
+    // consuming the just-completed jobMeta. Re-enter submit() here to prove the
+    // ping-pong metadata records keep the old sourceSequence/opticsEpoch intact.
+    if (autoSubmittedSecond) return;
+    autoSubmittedSecond = true;
+    if (!pool.submit({
+      id: 2,
+      full: false,
+      w: 32,
+      h: 32,
+      tracks: [],
+      sourceSequence: 202,
+      opticsEpoch: 22
+    }, [])) throw new Error("reentrant second worker submit failed");
+    secondMeta = pool.activeMeta[0];
+  },
   (info) => {
     const sameIdentity = firstPreflight ? info === firstPreflight : true;
     firstPreflight ??= info;
@@ -58,8 +84,17 @@ pool.resize(1);
 const worker = created[0];
 if (!worker) throw new Error("pool did not create worker");
 
-if (!pool.submit({ id: 1, full: false, w: 32, h: 32, tracks: [] }, []))
-  throw new Error("first worker submit failed");
+if (!pool.submit({
+  id: 1,
+  full: false,
+  w: 32,
+  h: 32,
+  tracks: [],
+  sourceSequence: 101,
+  opticsEpoch: 11
+}, [])) throw new Error("first worker submit failed");
+const firstMeta = pool.activeMeta[0];
+
 worker.onmessage({ data: {
   id: 1,
   preflight: true,
@@ -69,17 +104,25 @@ worker.onmessage({ data: {
 worker.onmessage({ data: {
   id: 1,
   full: false,
-  symbols: [],
+  symbols: [{
+    bytes: new Uint8Array([1]),
+    header: { slotIndex: 0 },
+    tracked: true,
+    geometryMeasured: false
+  }],
   sightings: [],
   trackedAttempted: true,
-  trackedHit: false,
+  trackedHit: true,
   guidedMetrics: { totalMs: 7 },
   repeatSkipped: false,
   latencyMs: 9
 } });
 
-if (!pool.submit({ id: 2, full: false, w: 32, h: 32, tracks: [] }, []))
-  throw new Error("second worker submit failed");
+if (!secondMeta) throw new Error("onAvailable did not reentrantly schedule second job");
+if (secondMeta === firstMeta) throw new Error("reentrant submit reused metadata record before prior completion consumed it");
+if (decodedInfos.length !== 1 || decodedInfos[0].sourceSequence !== 101 || decodedInfos[0].opticsEpoch !== 11)
+  throw new Error(`prior job metadata was corrupted by reentrant submit: ${JSON.stringify(decodedInfos)}`);
+
 worker.onmessage({ data: {
   id: 2,
   preflight: true,
@@ -98,12 +141,39 @@ worker.onmessage({ data: {
   latencyMs: 1
 } });
 
-if (completions.length !== 2) throw new Error(`expected 2 completions, got ${completions.length}`);
-if (!completions[1].sameIdentity) throw new Error("completion object was not reused for the worker slot");
+// The third job should wrap back to the first metadata record: two records are
+// sufficient because a worker message cannot finish the newly posted job before
+// the current message callback returns.
+if (!pool.submit({
+  id: 3,
+  full: false,
+  w: 32,
+  h: 32,
+  tracks: [],
+  sourceSequence: 303,
+  opticsEpoch: 33
+}, [])) throw new Error("third worker submit failed");
+const thirdMeta = pool.activeMeta[0];
+if (thirdMeta !== firstMeta) throw new Error("metadata ping-pong did not reuse the first record on third submit");
+worker.onmessage({ data: {
+  id: 3,
+  full: false,
+  symbols: [],
+  sightings: [],
+  trackedAttempted: false,
+  trackedHit: false,
+  repeatSkipped: false,
+  latencyMs: 2
+} });
+
+if (completions.length !== 3) throw new Error(`expected 3 completions, got ${completions.length}`);
+if (!completions[1].sameIdentity || !completions[2].sameIdentity)
+  throw new Error("completion object was not reused for the worker slot");
 if (completions[1].guidedMetrics !== undefined)
   throw new Error("stale guidedMetrics leaked into reused completion");
 if (!completions[1].repeatSkipped) throw new Error("second completion did not receive fresh repeatSkipped state");
 if (completions[1].error !== undefined) throw new Error("stale completion error leaked into success");
+if (completions[2].repeatSkipped) throw new Error("third completion retained stale repeatSkipped state");
 
 if (preflights.length !== 2) throw new Error(`expected 2 preflights, got ${preflights.length}`);
 if (!preflights[1].sameIdentity) throw new Error("preflight envelope was not reused for the worker slot");
@@ -112,7 +182,9 @@ if (preflights[1].id !== 2 || preflights[1].sourceSequence !== 18 || preflights[
 
 pool.resize(0);
 console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
-  completionIdentityReused: completions[1].sameIdentity,
+  completionIdentityReused: completions[1].sameIdentity && completions[2].sameIdentity,
   preflightIdentityReused: preflights[1].sameIdentity,
-  staleGuidedMetricsCleared: completions[1].guidedMetrics === undefined
+  staleGuidedMetricsCleared: completions[1].guidedMetrics === undefined,
+  reentrantMetadataPreserved: decodedInfos[0]?.sourceSequence === 101 && decodedInfos[0]?.opticsEpoch === 11,
+  metadataRecordReused: thirdMeta === firstMeta
 }));
