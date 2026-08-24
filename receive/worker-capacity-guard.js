@@ -18,6 +18,20 @@ function addTransfer(transfer, value) {
   return list.includes(value) ? list : [...list, value];
 }
 
+function keepTrackedCameraOnGuided(message) {
+  // The old rollout scheduler still injects a dense robust scout every ~30
+  // tracked jobs. Guided is no longer experimental: it has cached Turbo,
+  // Sparse, generic per-track fallback and dedicated whole-lattice recovery.
+  // A full-crop robust scout can cost hundreds of milliseconds and duplicates
+  // work without improving healthy throughput. Keep ordinary multi-QR camera
+  // frames on Guided; explicit full/recovery jobs remain untouched.
+  if (liveReceiveCamera() && message && !message.full && !message.strictHotPath &&
+      message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
+      (message.pixelFormat === "y8" || message.__airgapperWorkerLumaFromRgba)) {
+    message.guidedDecode = true;
+  }
+}
+
 function capDenseRepairMask(message) {
   const tracks = message?.tracks;
   if (!liveReceiveCamera() || message?.full || !message?.guidedDecode ||
@@ -92,6 +106,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
         transfer = addTransfer(transfer, rgba);
       }
     }
+    keepTrackedCameraOnGuided(message);
     capDenseRepairMask(message);
     transfer = packTracks(message, transfer);
     return baseSubmitAtSlot.call(this, slot, message, transfer);
