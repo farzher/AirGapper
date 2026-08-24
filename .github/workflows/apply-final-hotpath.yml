@@ -71,6 +71,17 @@ jobs:
 
           rm -f benchmark/final-hotpath-failure.txt
 
+          STAGE=generator-fix
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("benchmark/apply-final-hotpath-optimizations.mjs")
+          source = path.read_text()
+          start = source.index('write("benchmark/protocol-parse-reuse-smoke.mjs"')
+          end = source.index('// Keep the final regression permanent', start)
+          block = source[start:end].replace('${', r'\${')
+          path.write_text(source[:start] + block + source[end:])
+          PY
+
           STAGE=patch
           node benchmark/apply-final-hotpath-optimizations.mjs
           git diff --check
