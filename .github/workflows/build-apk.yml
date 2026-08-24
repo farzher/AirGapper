@@ -4,37 +4,121 @@ on:
   push:
     branches: [master]
     paths:
+      - android/**
+      - codec/**
+      - receive/**
+      - send/**
+      - shared/**
+      - version.js
+      - main.js
+      - index.html
+      - manifest.webmanifest
+      - sw.js
+      - icon-*.png
       - .github/workflows/build-apk.yml
-      - .github/cleanup-v392-trigger
-      - .github/CLEANUP_V392_TRIGGER
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-master
+  cancel-in-progress: true
 
 jobs:
-  cleanup:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: master
           fetch-depth: 1
-      - name: Finish v0.5.392 cleanup
+
+      - name: Read app version
+        id: version
         run: |
           set -euo pipefail
-          test -f .github/cleanup-v392-trigger
-          python3 .github/scripts/strip-native-runtime-v392.py
-          git config user.name "AirGapper Cleanup"
+          VERSION="$(sed -n 's/^export const APP_VERSION = "\([^"]*\)";$/\1/p' version.js | head -1)"
+          test -n "$VERSION" || { echo "::error::Could not read APP_VERSION from version.js"; exit 1; }
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_BUILD=v$VERSION" >> "$GITHUB_ENV"
+          echo "build=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Prepare release signing
+        env:
+          AIRGAPPER_ANDROID_KEYSTORE_B64: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_B64 }}
+          AIRGAPPER_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${AIRGAPPER_ANDROID_KEYSTORE_B64:-}" || { echo "::error::Missing AIRGAPPER_ANDROID_KEYSTORE_B64 repository secret"; exit 1; }
+          test -n "${AIRGAPPER_ANDROID_KEYSTORE_PASSWORD:-}" || { echo "::error::Missing AIRGAPPER_ANDROID_KEYSTORE_PASSWORD repository secret"; exit 1; }
+          printf '%s' "$AIRGAPPER_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/airgapper-release.jks"
+          chmod 600 "$RUNNER_TEMP/airgapper-release.jks"
+          keytool -list \
+            -keystore "$RUNNER_TEMP/airgapper-release.jks" \
+            -storepass "$AIRGAPPER_ANDROID_KEYSTORE_PASSWORD" \
+            -alias airgapper >/dev/null
+
+      - name: Build release APK
+        env:
+          AIRGAPPER_RELEASE_KEYSTORE: ${{ runner.temp }}/airgapper-release.jks
+          AIRGAPPER_RELEASE_PASSWORD: ${{ secrets.AIRGAPPER_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew --no-daemon clean assembleRelease
+          cd ..
+          APK="$(find android/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)"
+          test -n "$APK"
+          cp "$APK" AirGapper.apk
+
+      - name: Verify packaged app and signer
+        run: |
+          set -euo pipefail
+          unzip -p AirGapper.apk assets/version.js | grep -Fq "APP_VERSION = \"$APP_VERSION\""
+          unzip -p AirGapper.apk assets/main.js | grep -Fq 'from "./version.js"'
+          unzip -l AirGapper.apk | grep -q 'assets/shared/camera-start-guard.js'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.js'
+          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.wasm'
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs AirGapper.apk | tee /tmp/airgapper-apksigner.txt
+          ACTUAL_CERT="$(sed -n 's/^.*certificate SHA-256 digest: //p' /tmp/airgapper-apksigner.txt | head -1 | tr '[:lower:]' '[:upper:]')"
+          EXPECTED_CERT="6B75F5F6021C56E1598180D1318807EF84DF757FA7E0A59D019F83C07F9CFB24"
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT" || { echo "::error::Unexpected AirGapper signing certificate: $ACTUAL_CERT"; exit 1; }
+          ls -lh AirGapper.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirGapper-${{ steps.version.outputs.build }}
+          path: AirGapper.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish AirGapper.apk
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          if [ "$(git rev-parse origin/master)" != "$GITHUB_SHA" ]; then
+            echo "master moved while building; its push will produce the newer APK"
+            exit 0
+          fi
+          git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm \
-            shared/native-camera.js \
-            shared/native-camera-v2.js \
-            benchmark/native-camera-bridge-smoke.mjs \
-            benchmark/native-camera-v2-bridge-smoke.mjs \
-            .github/workflows/strip-native-runtime-v392.yml \
-            .github/scripts/strip-native-runtime-v392.py \
-            .github/cleanup-v392-trigger \
-            .github/CLEANUP_V392_TRIGGER
-          git add receive/runtime.js
-          git commit -m "v0.5.392: remove retired native camera runtime"
+          git add AirGapper.apk
+          if git diff --cached --quiet; then
+            echo "AirGapper.apk is already current"
+            exit 0
+          fi
+          git commit -m "build AirGapper.apk $APP_BUILD"
           git push origin HEAD:master
-          git push origin --delete cleanup-v392-trigger || true
