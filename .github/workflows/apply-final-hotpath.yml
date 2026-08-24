@@ -74,12 +74,59 @@ jobs:
           STAGE=generator-fix
           python3 - <<'PY'
           from pathlib import Path
+
+          # The temporary hotpath generator emits a JS template containing its
+          # own `${...}` expressions. Escape them for the outer generator.
           path = Path("benchmark/apply-final-hotpath-optimizations.mjs")
           source = path.read_text()
           start = source.index('write("benchmark/protocol-parse-reuse-smoke.mjs"')
           end = source.index('// Keep the final regression permanent', start)
           block = source[start:end].replace('${', r'\${')
           path.write_text(source[:start] + block + source[end:])
+
+          # Exposure writes used to try an exact constraint and then an
+          # advanced[] fallback. On browsers that reject exact exposure keys,
+          # one logical request became two native camera/HAL mutations. Use one
+          # advanced transaction; callers already verify actual settings.
+          path = Path("receive/camera-constraints.js")
+          source = path.read_text()
+          old = '''function exactExposureConstraints(set) {
+            const exact = {};
+            for (const key of EXPOSURE_KEYS) if (set[key] !== void 0) exact[key] = { exact: set[key] };
+            return exact;
+          }
+          function noteConstraintTimeout(track) {
+            constraintBlockedUntil.set(track, performance.now() + CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS);
+          }
+          async function applyConstraint(track, set) {
+            if (!Object.keys(set).length) return false;
+            if ((constraintBlockedUntil.get(track) ?? 0) > performance.now()) return false;
+            const exposureOnly = Object.keys(set).every((key) => EXPOSURE_KEYS.includes(key));
+            if (exposureOnly) {
+              const strict = await awaitConstraint(track.applyConstraints(exactExposureConstraints(set)));
+              if (strict.ok) return true;
+              if (strict.timedOut) {
+                noteConstraintTimeout(track);
+                return false;
+              }
+            }
+            const fallback = await awaitConstraint(track.applyConstraints({ advanced: [set] }));
+            if (fallback.timedOut) noteConstraintTimeout(track);
+            return fallback.ok;
+          }'''
+          new = '''function noteConstraintTimeout(track) {
+            constraintBlockedUntil.set(track, performance.now() + CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS);
+          }
+          async function applyConstraint(track, set) {
+            if (!Object.keys(set).length) return false;
+            if ((constraintBlockedUntil.get(track) ?? 0) > performance.now()) return false;
+            const result = await awaitConstraint(track.applyConstraints({ advanced: [set] }));
+            if (result.timedOut) noteConstraintTimeout(track);
+            return result.ok;
+          }'''
+          if old not in source:
+            raise SystemExit("camera-constraints applyConstraint marker drifted")
+          path.write_text(source.replace(old, new, 1))
           PY
 
           STAGE=patch
@@ -88,6 +135,10 @@ jobs:
           node --input-type=module --check < shared/protocol.js
           node --input-type=module --check < receive/runtime.js
           node --input-type=module --check < receive/worker.js
+          node --input-type=module --check < receive/camera-constraints.js
+          node --input-type=module --check < receive/camera-constraint-guard.js
+          node --input-type=module --check < receive/exposure-ev.js
+          node --input-type=module --check < receive/acquisition-focus-recovery.js
           node --input-type=module --check < receive/guided-motion.js
           node --input-type=module --check < receive/track-processor-proxy.js
           node --input-type=module --check < benchmark/protocol-parse-reuse-smoke.mjs
@@ -98,11 +149,12 @@ jobs:
           node benchmark/rgba-luma-smoke.mjs
           node benchmark/worker-pool-reuse-smoke.mjs
           node benchmark/track-processor-proxy-smoke.mjs
+          node benchmark/receiver-recovery-policy-smoke.mjs
 
           STAGE=source-commit
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add shared/protocol.js receive/runtime.js receive/worker.js codec/source/wrapper/airgapper_codec.cpp benchmark/protocol-parse-reuse-smoke.mjs .github/workflows/fast-regression.yml benchmark/final-hotpath-failure.txt
+          git add shared/protocol.js receive/runtime.js receive/worker.js receive/camera-constraints.js codec/source/wrapper/airgapper_codec.cpp benchmark/protocol-parse-reuse-smoke.mjs .github/workflows/fast-regression.yml benchmark/final-hotpath-failure.txt
           git commit -m "finish receiver hotpath allocation pass"
 
           STAGE=codec-build
