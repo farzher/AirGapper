@@ -3,6 +3,7 @@ import { DecodeWorkerPool } from "../shared/worker-pool.js";
 const threads = Math.max(1, Number(navigator.hardwareConcurrency) || 2);
 const autoWorkerFloor = threads >= 8 ? Math.min(7, threads - 1) : 0;
 const PACKED_TRACK_BYTES = 56;
+const DENSE_REPAIR_MIN_TRACKS = 12;
 
 function liveReceiveCamera() {
   const video = document.getElementById("video");
@@ -15,6 +16,26 @@ function addTransfer(transfer, value) {
   if (!value) return Array.isArray(transfer) ? transfer : [];
   const list = Array.isArray(transfer) ? transfer : [];
   return list.includes(value) ? list : [...list, value];
+}
+
+function capDenseRepairMask(message) {
+  const tracks = message?.tracks;
+  if (!liveReceiveCamera() || message?.full || !message?.guidedDecode ||
+      !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
+  const laneMask = tracks.length >= 32 ? 0xffffffff : (2 ** tracks.length - 1) >>> 0;
+  const requested = message.guidedRepairMask === undefined
+    ? laneMask
+    : Number(message.guidedRepairMask) >>> 0;
+  const allowed = requested & laneMask;
+  if (!allowed || (allowed & (allowed - 1)) === 0) return;
+
+  // Dense-wall transport prefers a fresh camera frame over heroic salvage of a
+  // badly damaged QR. RaptorQ already treats missing symbols as erasures. Keep
+  // one explicit repair lane so a borderline QR can still self-heal, but never
+  // let a single frame spend two long ambiguity-repair passes while newer
+  // camera frames are waiting. Runtime orders the tracked batch by usefulness,
+  // so the lowest surviving lane is the best repair candidate it supplied.
+  message.guidedRepairMask = (allowed & -allowed) >>> 0;
 }
 
 function packTracks(message, transfer) {
@@ -71,6 +92,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
         transfer = addTransfer(transfer, rgba);
       }
     }
+    capDenseRepairMask(message);
     transfer = packTracks(message, transfer);
     return baseSubmitAtSlot.call(this, slot, message, transfer);
   };
