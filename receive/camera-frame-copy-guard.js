@@ -1,13 +1,18 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 // Native VideoFrames hold scarce camera buffers until copyTo() finishes in the
-// decode worker. Keep exactly one native copy in flight; copyTo() is only the
-// short transport prefix, while Guided decoding remains parallel after the
-// worker reports copy-complete and releases the camera buffer.
-const MAX_CONCURRENT_NATIVE_COPIES = 1;
+// decode worker. Keep a tiny amount of copy-stage parallelism so a fast camera
+// never stalls behind message/worker handoff latency, while still bounding the
+// number of native camera buffers owned by decode workers. Guided decoding stays
+// fully parallel after copy-complete releases the native frame.
+const MAX_CONCURRENT_NATIVE_COPIES = 2;
 
 function isNativeVideoFrame(value) {
   return typeof VideoFrame === "function" && value instanceof VideoFrame;
+}
+
+function closeNativeFrame(value) {
+  try { value?.close?.(); } catch {}
 }
 
 function activeNativeCopies(pool) {
@@ -76,11 +81,27 @@ const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperCameraCopyGuard) {
   const submitAtSlot = function(slot, message, transfer) {
     const nativeFrame = isNativeVideoFrame(message?.videoFrame);
-    if (nativeFrame && activeNativeCopies(this) >= MAX_CONCURRENT_NATIVE_COPIES) return false;
+    if (nativeFrame && activeNativeCopies(this) >= MAX_CONCURRENT_NATIVE_COPIES) {
+      // Ownership has not been transferred when we reject here. Closing is
+      // mandatory: leaving even a few rejected VideoFrames alive can exhaust
+      // the camera's native buffer pool and make TrackProcessor delivery fall
+      // from camera rate to a few frames/second until GC eventually runs.
+      closeNativeFrame(message.videoFrame);
+      message.videoFrame = void 0;
+      return false;
+    }
 
     const worker = this.workers?.[slot];
     const accepted = baseSubmitAtSlot.call(this, slot, message, transfer);
-    if (!accepted) return false;
+    if (!accepted) {
+      // The pool also rejects an invalid/busy affinity slot before postMessage,
+      // so the page still owns this native frame on every false return.
+      if (nativeFrame) {
+        closeNativeFrame(message.videoFrame);
+        message.videoFrame = void 0;
+      }
+      return false;
+    }
 
     if (nativeFrame) {
       const meta = this.activeMeta?.[slot];
