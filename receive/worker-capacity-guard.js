@@ -6,9 +6,6 @@ const PACKED_SYMBOL_BYTES = 88;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
-const TRACKED_JOB_TIMEOUT_MS = 2200;
-const RECOVERY_JOB_TIMEOUT_MS = 6500;
-const ACQUISITION_JOB_TIMEOUT_MS = 9000;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
@@ -17,11 +14,6 @@ function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
   return document.body?.classList?.contains("receive-mode") === true &&
     cameraStream?.active === true;
-}
-
-function workerJobTimeout(message) {
-  if (!message?.full) return TRACKED_JOB_TIMEOUT_MS;
-  return message.acquisitionMode === "thorough" ? ACQUISITION_JOB_TIMEOUT_MS : RECOVERY_JOB_TIMEOUT_MS;
 }
 
 function addTransfer(transfer, value) {
@@ -153,14 +145,6 @@ function recycleUnsentBuffers(message) {
   if (result instanceof ArrayBuffer && result.byteLength) recyclePackedResultBuffer(result);
 }
 
-function reusableJobMeta(pool, slot) {
-  let metas = pool.__airgapperJobMetaReuse;
-  if (!metas) metas = pool.__airgapperJobMetaReuse = [];
-  let meta = metas[slot];
-  if (!meta) meta = metas[slot] = {};
-  return meta;
-}
-
 // Packed track descriptors are only needed long enough for worker-rvfc.js to
 // unpack them into its reusable track objects. The worker transfers that tiny
 // buffer back with the final result; compact result metadata follows the same
@@ -204,11 +188,12 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
   DecodeWorkerPool.prototype.configureWorker = configureWorker;
 }
 
-// Replace the pool's submission body rather than wrapping it at the end. The
-// stock implementation creates a fresh activeMeta object for every camera job;
-// one worker slot can only own one job at a time, so reuse one record per slot.
-// This duplicates only the small public bookkeeping contract of worker-pool.js;
-// timeout values intentionally match that module exactly.
+// Preprocess live-camera jobs here, then delegate ownership/bookkeeping to the
+// pool itself. The pool now keeps ping-pong activeMeta records per slot so an
+// onAvailable() callback can schedule the next frame without mutating metadata
+// still being consumed by the previous completion. Keeping a second copy of the
+// submission state machine here previously bypassed that fix and could corrupt
+// sourceSequence/opticsEpoch on re-entrant scheduling.
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
   const submitAtSlot = function(slot, message, transfer) {
@@ -238,57 +223,9 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
     transfer = attachPackedResultScratch(message, transfer);
     transfer = packTracks(message, transfer);
 
-    const id = message.id;
-    const numericId = typeof id === "number" ? id : void 0;
-    const full = Boolean(message.full);
-    const startedAt = performance.now();
-    const timeoutMs = workerJobTimeout(message);
-    const meta = reusableJobMeta(this, slot);
-    meta.id = numericId;
-    meta.kind = message.jobKind ?? (full ? "full" : "tracked");
-    meta.full = full;
-    meta.tracks = Number(message.trackCount ?? message.tracks?.length ?? 0);
-    meta.pixels = Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0);
-    meta.sourceSequence = typeof message.sourceSequence === "number" ? message.sourceSequence : void 0;
-    meta.opticsEpoch = typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0;
-    meta.startedAt = startedAt;
-    meta.timeoutMs = timeoutMs;
-    meta.deadlineAt = startedAt + timeoutMs;
-
-    this.busy[slot] = true;
-    this.activeIds[slot] = numericId;
-    this.activeFull[slot] = full;
-    this.activeMeta[slot] = meta;
-    try {
-      if (message && typeof message === "object") message.sentAt = startedAt;
-      this.workers[slot].postMessage(message, transfer);
-      return true;
-    } catch (error) {
-      this.busy[slot] = false;
-      this.activeIds[slot] = void 0;
-      this.activeFull[slot] = false;
-      this.activeMeta[slot] = null;
-      recycleUnsentBuffers(message);
-      if (numericId !== void 0) this.onCompleted?.(numericId, {
-        full,
-        symbolCount: 0,
-        sightingCount: 0,
-        trackedAttempted: false,
-        trackedHit: false,
-        fallbackAttempted: false,
-        fallbackSucceeded: false,
-        readFullAttempts: 0,
-        workerWaitMs: 0,
-        targetedAttempts: 0,
-        targetedPixels: 0,
-        targetedSuccesses: 0,
-        latencyMs: 0,
-        symbols: [],
-        sightings: [],
-        error: error instanceof Error ? error.message : "Could not send frame to decode worker"
-      });
-      return false;
-    }
+    const accepted = baseSubmitAtSlot.call(this, slot, message, transfer);
+    if (!accepted) recycleUnsentBuffers(message);
+    return accepted;
   };
   Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
