@@ -32,7 +32,6 @@ async function startSource(track, maxBufferSize = 1) {
   await stopSource();
   stopped = false;
   sourceTrack = track;
-  wantsFrame = false;
   totalFrames = 0;
   discardedFrames = 0;
 
