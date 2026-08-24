@@ -19,12 +19,6 @@ function addTransfer(transfer, value) {
 }
 
 function keepTrackedCameraOnGuided(message, live) {
-  // The old rollout scheduler still injects a dense robust scout every ~30
-  // tracked jobs. Guided is no longer experimental: it has cached Turbo,
-  // Sparse, generic per-track fallback and dedicated whole-lattice recovery.
-  // A full-crop robust scout can cost hundreds of milliseconds and duplicates
-  // work without improving healthy throughput. Keep ordinary multi-QR camera
-  // frames on Guided; explicit full/recovery jobs remain untouched.
   if (live && message && !message.full && !message.strictHotPath &&
       message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
       (message.pixelFormat === "y8" || message.__airgapperWorkerLumaFromRgba)) {
@@ -43,20 +37,14 @@ function capDenseRepairMask(message, live) {
     : Number(message.guidedRepairMask) >>> 0;
   const allowed = requested & laneMask;
   if (!allowed || (allowed & (allowed - 1)) === 0) return;
-
-  // Dense-wall transport prefers a fresh camera frame over heroic salvage of a
-  // badly damaged QR. RaptorQ already treats missing symbols as erasures. Keep
-  // one explicit repair lane so a borderline QR can still self-heal, but never
-  // let a single frame spend two long ambiguity-repair passes while newer
-  // camera frames are waiting. Runtime orders the tracked batch by usefulness,
-  // so the lowest surviving lane is the best repair candidate it supplied.
+  // RaptorQ already treats a missing QR as an erasure. On a dense wall, bound
+  // expensive ambiguity repair to one best candidate and spend the rest of the
+  // budget on the next fresh camera frame.
   message.guidedRepairMask = (allowed & -allowed) >>> 0;
 }
 
 function packTracks(message, transfer) {
   const tracks = message?.tracks;
-  // Only live camera tracked batches use the pooled worker descriptors. Replay,
-  // full acquisition and one-off developer paths keep their ordinary objects.
   if (message?.full || !message?.videoFrame || !Array.isArray(tracks) || tracks.length < 2) return transfer;
   const count = tracks.length;
   const packed = new ArrayBuffer(count * PACKED_TRACK_BYTES);
@@ -83,13 +71,14 @@ function packTracks(message, transfer) {
   }
   message.__airgapperPackedTracks = packed;
   message.__airgapperPackedTrackCount = count;
+  // DecodeWorkerPool records this after our wrapper runs. Preserve the count so
+  // latency/cost samples and the adaptive track-budget controller do not see a
+  // packed job as a zero-track job.
+  message.trackCount = count;
   message.tracks = undefined;
   return addTransfer(transfer, packed);
 }
 
-// rVFC/canvas capture arrives as a transferable RGBA ArrayBuffer. Do not pack
-// all 3.7M 1440p pixels to Y8 on the browser main thread: transfer ownership to
-// the worker immediately. worker-rvfc.js compacts green->Y8 in place there.
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
   const submitAtSlot = function(slot, message, transfer) {
@@ -117,8 +106,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
 }
 
-// Every AirGapper decode worker uses the wrapper. Preserve the build/scalar
-// query string so it imports the exact same codec variant.
 const NativeWorker = globalThis.Worker;
 if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorkerGuard) {
   const rewriteWorkerUrl = (input) => {
