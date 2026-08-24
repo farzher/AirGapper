@@ -1,4 +1,4 @@
-import QRCode from "../vendor/qrcode.js";
+import { createTransferQr } from "./transfer-qr.js";
 
 const WHITE = 0xffffffff;
 const BLACK = 0xff000000;
@@ -40,11 +40,7 @@ self.onmessage = (event) => {
     const stride = modules + job.margin;
 
     for (const frame of job.frames) {
-      const qr = QRCode.create([{ data: new Uint8Array(frame.buffer), mode: "byte" }], {
-        errorCorrectionLevel: "L",
-        version,
-        maskPattern: 4
-      });
+      const qr = createTransferQr(new Uint8Array(frame.buffer), version);
       if (modules !== qr.modules.size) throw new Error("QR version changed inside sender page");
       const ox = frame.slotIndex % job.cols * stride + job.margin;
       const oy = Math.floor(frame.slotIndex / job.cols) * stride + job.margin;
