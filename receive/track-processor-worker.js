@@ -8,13 +8,20 @@ let discardedFrames = 0;
 let expectedWidth = 0;
 let expectedHeight = 0;
 let expectedFrameRate = 0;
+const frameMessage = { type: "frame", frame: null, totalFrames: 0, discardedFrames: 0 };
 
 function publishLatest() {
   if (!wantsFrame || !pendingFrame) return;
   wantsFrame = false;
   const frame = pendingFrame;
   pendingFrame = null;
-  postMessage({ type: "frame", frame, totalFrames, discardedFrames }, [frame]);
+  // postMessage clones the envelope synchronously and transfers frame ownership,
+  // so one reusable envelope removes a tiny object allocation per camera frame.
+  frameMessage.frame = frame;
+  frameMessage.totalFrames = totalFrames;
+  frameMessage.discardedFrames = discardedFrames;
+  postMessage(frameMessage, [frame]);
+  frameMessage.frame = null;
 }
 
 async function stopSource() {
@@ -32,17 +39,17 @@ async function stopSource() {
   sourceTrack = null;
 }
 
-function frameSize(frame) {
-  return {
-    width: Number(frame?.displayWidth || frame?.visibleRect?.width || frame?.codedWidth || 0),
-    height: Number(frame?.displayHeight || frame?.visibleRect?.height || frame?.codedHeight || 0)
-  };
+function frameWidth(frame) {
+  return Number(frame?.displayWidth || frame?.visibleRect?.width || frame?.codedWidth || 0);
+}
+
+function frameHeight(frame) {
+  return Number(frame?.displayHeight || frame?.visibleRect?.height || frame?.codedHeight || 0);
 }
 
 function frameMatchesExpected(frame) {
   if (!(expectedWidth > 0) || !(expectedHeight > 0)) return true;
-  const size = frameSize(frame);
-  return size.width === expectedWidth && size.height === expectedHeight;
+  return frameWidth(frame) === expectedWidth && frameHeight(frame) === expectedHeight;
 }
 
 function trackAlreadyMatchesExpected(track) {
@@ -115,19 +122,19 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
       // <video>. One mismatched Safari worker frame is enough to seed lattice
       // geometry that is wrong for every following rVFC frame and overlay.
       if (!frameMatchesExpected(value)) {
-        const size = frameSize(value);
+        const width = frameWidth(value);
+        const height = frameHeight(value);
         value.close?.();
         postMessage({
           type: "error",
-          message: `Worker camera frame ${size.width}×${size.height} does not match preview ${expectedWidth}×${expectedHeight}`
+          message: `Worker camera frame ${width}×${height} does not match preview ${expectedWidth}×${expectedHeight}`
         });
         stopped = true;
         break;
       }
 
-      totalFrames = Number.isFinite(Number(processor.totalFrames))
-        ? Number(processor.totalFrames)
-        : totalFrames + 1;
+      const processorTotal = Number(processor.totalFrames);
+      totalFrames = Number.isFinite(processorTotal) ? processorTotal : totalFrames + 1;
       const processorDrops = Number(processor.discardedFrames);
       if (Number.isFinite(processorDrops)) discardedFrames = Math.max(discardedFrames, processorDrops);
 
@@ -155,25 +162,26 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
 }
 
 self.onmessage = (event) => {
-  const message = event.data ?? {};
-  if (message.type === "start") {
-    void startSource(
-      message.track,
-      Math.max(1, Math.trunc(Number(message.maxBufferSize) || 1)),
-      {
-        width: message.expectedWidth,
-        height: message.expectedHeight,
-        frameRate: message.expectedFrameRate
-      }
-    );
-    return;
-  }
-  if (message.type === "pull") {
+  const message = event.data;
+  if (message === "pull") {
     wantsFrame = true;
     publishLatest();
     return;
   }
-  if (message.type === "stop") {
+  const command = message ?? {};
+  if (command.type === "start") {
+    void startSource(
+      command.track,
+      Math.max(1, Math.trunc(Number(command.maxBufferSize) || 1)),
+      {
+        width: command.expectedWidth,
+        height: command.expectedHeight,
+        frameRate: command.expectedFrameRate
+      }
+    );
+    return;
+  }
+  if (command.type === "stop") {
     void stopSource().finally(() => postMessage({ type: "stopped", totalFrames, discardedFrames }));
   }
 };
