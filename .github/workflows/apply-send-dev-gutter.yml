@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - .github/workflows/apply-send-dev-gutter.yml
+      - benchmark/apply-send-dev-gutter.mjs
   workflow_dispatch:
 
 permissions:
