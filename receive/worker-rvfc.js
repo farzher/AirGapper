@@ -22,6 +22,7 @@ let activeSourceSequence = -1;
 let activeLiveTracked = false;
 let activePackedResultEligible = false;
 let activePackedTrackBuffer = null;
+let activePackedSymbolScratch = null;
 
 // Geometry thinning runs on every successful dense worker result. Keep its
 // scratch storage worker-local and reusable instead of building filter/map/
@@ -138,7 +139,12 @@ function packLiveGuidedSymbols(message, transfer) {
     if (!(bytes instanceof Uint8Array) || bytes.buffer !== payload || !header) return transfer;
   }
 
-  const meta = new ArrayBuffer(symbols.length * PACKED_SYMBOL_BYTES);
+  const requiredBytes = symbols.length * PACKED_SYMBOL_BYTES;
+  const meta = activePackedSymbolScratch instanceof ArrayBuffer &&
+      activePackedSymbolScratch.byteLength >= requiredBytes
+    ? activePackedSymbolScratch
+    : new ArrayBuffer(requiredBytes);
+  if (meta === activePackedSymbolScratch) activePackedSymbolScratch = null;
   const view = new DataView(meta);
   let wallMotion;
   for (let index = 0; index < symbols.length; index++) {
@@ -204,9 +210,9 @@ function packLiveGuidedSymbols(message, transfer) {
 
 // worker.js posts through ctx === self, so this interception applies to its
 // final result without changing the codec. Preflight/signature messages have no
-// symbols and pass straight through. The packed input descriptor is already
-// unpacked by this point; return it with the final message so the page can reuse
-// the allocation on another camera frame.
+// symbols and pass straight through. Input and result metadata buffers are
+// returned to the page on the final result so both directions can ping-pong the
+// same small allocations indefinitely after warm-up.
 self.postMessage = (message, transfer) => {
   thinGeometryReports(message?.symbols);
   transfer = packLiveGuidedSymbols(message, transfer);
@@ -214,6 +220,11 @@ self.postMessage = (message, transfer) => {
     message.__airgapperPackedTrackRecycle = activePackedTrackBuffer;
     transfer = addTransfer(transfer, activePackedTrackBuffer);
     activePackedTrackBuffer = null;
+  }
+  if (!message?.preflight && activePackedSymbolScratch instanceof ArrayBuffer) {
+    message.__airgapperPackedSymbolScratchRecycle = activePackedSymbolScratch;
+    transfer = addTransfer(transfer, activePackedSymbolScratch);
+    activePackedSymbolScratch = null;
   }
   return nativePostMessage(message, transfer);
 };
@@ -284,11 +295,15 @@ self.onmessage = (event) => {
   activeSourceSequence = Number(message.sourceSequence);
   activeLiveTracked = Boolean(message.__airgapperLiveTracked);
   activePackedTrackBuffer = null;
+  activePackedSymbolScratch = message.__airgapperPackedSymbolScratch instanceof ArrayBuffer
+    ? message.__airgapperPackedSymbolScratch
+    : null;
   // Normal repeat-filter-eligible live traffic excludes replay, explicit scan
   // capture and optics tournaments. Keep those diagnostic paths object-rich;
   // pack only the steady production hot path.
   activePackedResultEligible = activeLiveTracked && Boolean(message.repeatFilter);
   delete message.__airgapperLiveTracked;
+  delete message.__airgapperPackedSymbolScratch;
   unpackTracks(message);
 
   if (!message.__airgapperWorkerLumaFromRgba) {
