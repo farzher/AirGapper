@@ -1,47 +1,40 @@
-let reopenAutoRequested = false;
+const blockedForReopen = new WeakSet();
 let reopenScheduled = false;
 
-function requestedScalar(value) {
-  if (value && typeof value === "object") return value.exact ?? value.ideal;
-  return value;
-}
-
-function requestedExposureMode(constraints) {
-  if (!constraints || typeof constraints !== "object") return void 0;
-  const direct = requestedScalar(constraints.exposureMode);
-  if (direct !== void 0) return direct;
-  if (!Array.isArray(constraints.advanced)) return void 0;
-  for (const set of constraints.advanced) {
-    const value = requestedScalar(set?.exposureMode);
-    if (value !== void 0) return value;
-  }
-  return void 0;
+function activeCameraTrack() {
+  const source = document.getElementById("video")?.srcObject;
+  return source?.getVideoTracks?.()[0];
 }
 
 function scheduleAutoCameraReopen(track) {
+  if (!track || blockedForReopen.has(track)) return;
+  blockedForReopen.add(track);
   if (reopenScheduled) return;
   reopenScheduled = true;
-  reopenAutoRequested = false;
+
+  // Do not touch the old manual camera again. Some Android camera HALs can
+  // synchronously block Chromium's main thread on *any* focus/exposure write
+  // while the sensor is transitioning out of manual exposure. Reopen the
+  // camera instead; pause/resume preserves the transport/decoder session.
   setTimeout(() => {
     reopenScheduled = false;
-    if (track?.readyState !== "live") return;
     const receiveView = document.getElementById("receiveView");
     if (!receiveView?.classList.contains("active")) return;
-
-    // Some Android camera stacks synchronously block the browser main thread
-    // when an already-manual sensor is switched back to continuous AE. Reopen
-    // the camera instead. AirGapper's pause/resume path preserves the transfer
-    // decoder/session while replacing the live camera track and frame pump.
     window.dispatchEvent(new Event("airgapper:pause-mode"));
     queueMicrotask(() => window.dispatchEvent(new Event("airgapper:resume-mode")));
   }, 0);
 }
 
 function installManualToAutoReopenGuard() {
+  // Capture runs before runtime.js's checkbox listener. Mark the old track as
+  // untouchable before AutoOptics can enqueue focus/exposure mutations.
   document.addEventListener("change", (event) => {
     const input = event.target;
-    if (!(input instanceof HTMLInputElement) || input.id !== "camera-exposure-auto") return;
-    reopenAutoRequested = input.checked;
+    if (!(input instanceof HTMLInputElement) || input.id !== "camera-exposure-auto" || !input.checked) return;
+    const track = activeCameraTrack();
+    if (!track || track.readyState !== "live") return;
+    const actual = track.getSettings?.() ?? {};
+    if (actual.exposureMode === "manual") scheduleAutoCameraReopen(track);
   }, true);
 
   const proto = globalThis.MediaStreamTrack?.prototype;
@@ -49,16 +42,10 @@ function installManualToAutoReopenGuard() {
   if (typeof nativeApply !== "function" || nativeApply.__airgapperManualToAutoGuard) return;
 
   const guardedApply = function(constraints) {
-    if (reopenAutoRequested && requestedExposureMode(constraints) === "continuous") {
-      const actual = this.getSettings?.() ?? {};
-      if (actual.exposureMode === "manual") {
-        scheduleAutoCameraReopen(this);
-        // The runtime has already switched its AutoOptics state before this
-        // write. Treat the dangerous in-place write as accepted; the fresh
-        // camera track opened on the next task starts in native hardware auto.
-        return Promise.resolve();
-      }
-      reopenAutoRequested = false;
+    if (blockedForReopen.has(this)) {
+      // Runtime state may continue advancing while the replacement track opens,
+      // but no native mutation is allowed to reach the old camera HAL.
+      return Promise.resolve();
     }
     return nativeApply.call(this, constraints);
   };
