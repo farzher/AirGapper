@@ -193,7 +193,7 @@ function selectedFps() {
 }
 function selectedUpdatePattern() {
   const value = cfgUpdatePattern?.value;
-  return value === "synchronous" || value === "fixed" || value === "fixed-columns" || value === "dispersed" ? value : "dispersed";
+  return value === "synchronous" || value === "fixed" || value === "fixed-columns" || value === "dispersed" ? value : "synchronous";
 }
 function selectFps(fps) {
   var _a;
