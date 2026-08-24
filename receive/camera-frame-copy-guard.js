@@ -1,12 +1,10 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 // Native VideoFrames hold scarce camera buffers until copyTo() finishes in the
-// decode worker. A few simultaneous slow copies can pin the whole camera buffer
-// pool and collapse TrackProcessor delivery even though QR decoding itself is
-// healthy. Keep decode parallelism, but bound only the copy stage: once the
-// worker reports copy-complete it has released the native frame and the normal
-// decoder timeout takes over.
-const MAX_CONCURRENT_NATIVE_COPIES = 2;
+// decode worker. Keep exactly one native copy in flight; copyTo() is only the
+// short transport prefix, while Guided decoding remains parallel after the
+// worker reports copy-complete and releases the camera buffer.
+const MAX_CONCURRENT_NATIVE_COPIES = 1;
 
 function isNativeVideoFrame(value) {
   return typeof VideoFrame === "function" && value instanceof VideoFrame;
