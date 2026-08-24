@@ -1,16 +1,16 @@
 name: strip native runtime v392
 
 on:
-  issue_comment:
-    types: [created]
+  push:
+    branches: [master]
+    paths:
+      - .github/cleanup-v392-trigger
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   patch:
-    if: github.event.issue.pull_request && github.event.issue.number == 31 && github.event.comment.body == '/cleanup-v392'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,8 @@ jobs:
             benchmark/native-camera-bridge-smoke.mjs \
             benchmark/native-camera-v2-bridge-smoke.mjs \
             .github/workflows/strip-native-runtime-v392.yml \
-            .github/scripts/strip-native-runtime-v392.py
+            .github/scripts/strip-native-runtime-v392.py \
+            .github/cleanup-v392-trigger
           git add receive/runtime.js
           git commit -m "v0.5.392: remove retired native camera runtime"
           git push origin HEAD:master
