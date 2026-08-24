@@ -13,6 +13,37 @@
 if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
     typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
+  let prewarmedWorker = null;
+
+  function createProcessorWorker() {
+    return new Worker(workerUrl, { type: "module" });
+  }
+
+  // runtime.js gives a processor only 250 ms to produce its first frame before
+  // falling back to rVFC/canvas. On Safari, starting a module worker can consume
+  // a meaningful fraction of that budget. Start one idle worker while the
+  // receiver UI is loading; track access and camera ownership still begin only
+  // when WorkerTrackProcessor later posts the explicit "start" command.
+  try {
+    const worker = createProcessorWorker();
+    prewarmedWorker = worker;
+    worker.onerror = () => {
+      if (prewarmedWorker !== worker) return;
+      prewarmedWorker = null;
+      try { worker.terminate(); } catch {}
+    };
+  } catch {}
+
+  function takeProcessorWorker() {
+    const worker = prewarmedWorker;
+    prewarmedWorker = null;
+    if (worker) {
+      // Constructor installs the real handlers immediately after taking it.
+      worker.onerror = null;
+      return worker;
+    }
+    return createProcessorWorker();
+  }
 
   class WorkerTrackProcessor {
     constructor({ track, maxBufferSize = 1 } = {}) {
@@ -20,7 +51,7 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
         throw new TypeError("MediaStreamTrackProcessor requires a video MediaStreamTrack");
       }
 
-      this._worker = new Worker(workerUrl, { type: "module" });
+      this._worker = takeProcessorWorker();
       this._readerTaken = false;
       this._closed = false;
       this._terminalError = null;
