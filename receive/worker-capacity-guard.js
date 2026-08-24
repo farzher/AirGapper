@@ -16,6 +16,17 @@ function addTransfer(transfer, value) {
   return list;
 }
 
+function stripIdentityOutputMap(message) {
+  const map = message?.outputMap;
+  if (!map) return;
+  if (Number(map.offsetX) === 0 && Number(map.offsetY) === 0 &&
+      Number(map.scaleX) === 1 && Number(map.scaleY) === 1) {
+    // worker.js otherwise rebuilds a quad (four point objects) and a box for
+    // every decoded QR just to apply this no-op transform.
+    message.outputMap = undefined;
+  }
+}
+
 function keepTrackedCameraOnGuided(message, live) {
   if (live && message && !message.full && !message.strictHotPath &&
       message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
@@ -96,6 +107,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
         transfer = addTransfer(transfer, rgba);
       }
     }
+    stripIdentityOutputMap(message);
     keepTrackedCameraOnGuided(message, live);
     capDenseRepairMask(message, live);
     transfer = packTracks(message, transfer);
