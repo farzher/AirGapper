@@ -234,11 +234,13 @@ function buildTemplate(version) {
   const blockOffsets = new Uint16Array(blockCount);
   const blockSizes = new Uint16Array(blockCount);
   let offset = 0;
+  let maxDataBlock = 0;
   for (let block = 0; block < blockCount; ++block) {
     const length = block < group1 ? dataInGroup1 : dataInGroup2;
     blockOffsets[block] = offset;
     blockSizes[block] = length;
     offset += length;
+    if (length > maxDataBlock) maxDataBlock = length;
   }
   if (offset !== dataTotalCodewords) throw new Error("Invalid QR-L block layout");
 
@@ -256,13 +258,13 @@ function buildTemplate(version) {
     blockCount,
     blockOffsets,
     blockSizes,
-    maxDataBlock: dataInGroup2,
+    maxDataBlock,
     ecPerBlock,
     generator: generatorPolynomial(ecPerBlock),
     dataBytes: new Uint8Array(dataTotalCodewords),
     codewords: new Uint8Array(totalCodewords),
     parity: new Uint8Array(blockCount * ecPerBlock),
-    rsScratch: new Uint8Array(dataInGroup2 + ecPerBlock)
+    rsScratch: new Uint8Array(maxDataBlock + ecPerBlock)
   };
 }
 
@@ -275,27 +277,27 @@ function templateFor(version) {
   return template;
 }
 
-function putBits(out, state, value, width) {
+function putBits(out, bitOffset, value, width) {
   for (let bit = width - 1; bit >= 0; --bit) {
-    if ((value >>> bit) & 1) out[state.bit >>> 3] |= 0x80 >>> (state.bit & 7);
-    ++state.bit;
+    if ((value >>> bit) & 1) out[bitOffset >>> 3] |= 0x80 >>> (bitOffset & 7);
+    ++bitOffset;
   }
+  return bitOffset;
 }
 
-function putBytes(out, state, bytes) {
-  const used = state.bit & 7;
-  let dst = state.bit >>> 3;
+function putBytes(out, bitOffset, bytes) {
+  const used = bitOffset & 7;
+  let dst = bitOffset >>> 3;
   if (used === 0) {
     out.set(bytes, dst);
-    state.bit += bytes.length * 8;
-    return;
+    return bitOffset + bytes.length * 8;
   }
   for (let i = 0; i < bytes.length; ++i) {
     const value = bytes[i];
     out[dst] |= value >>> used;
     out[++dst] = (value << (8 - used)) & 0xff;
   }
-  state.bit += bytes.length * 8;
+  return bitOffset + bytes.length * 8;
 }
 
 function buildDataBytes(template, payload) {
@@ -306,16 +308,15 @@ function buildDataBytes(template, payload) {
   const requiredBits = 4 + countBits + payload.length * 8;
   if (requiredBits > capacityBits) throw new Error("Transfer frame exceeds QR-L capacity");
 
-  const state = { bit: 0 };
-  putBits(out, state, 4, 4); // byte mode
-  putBits(out, state, payload.length, countBits);
-  putBytes(out, state, payload);
-  state.bit += Math.min(4, capacityBits - state.bit); // zero terminator
-  state.bit = Math.min(capacityBits, (state.bit + 7) & ~7); // zero byte alignment
+  let bit = putBits(out, 0, 4, 4); // byte mode
+  bit = putBits(out, bit, payload.length, countBits);
+  bit = putBytes(out, bit, payload);
+  bit += Math.min(4, capacityBits - bit); // zero terminator
+  bit = Math.min(capacityBits, (bit + 7) & ~7); // zero byte alignment
   let pad = 0;
-  while (state.bit < capacityBits) {
-    out[state.bit >>> 3] = pad++ & 1 ? 0x11 : 0xec;
-    state.bit += 8;
+  while (bit < capacityBits) {
+    out[bit >>> 3] = pad++ & 1 ? 0x11 : 0xec;
+    bit += 8;
   }
 }
 
@@ -323,7 +324,7 @@ function encodeParity(template, dataOffset, dataLength, parityOffset) {
   const scratch = template.rsScratch;
   const used = dataLength + template.ecPerBlock;
   scratch.fill(0, 0, used);
-  scratch.set(template.dataBytes.subarray(dataOffset, dataOffset + dataLength));
+  for (let i = 0; i < dataLength; ++i) scratch[i] = template.dataBytes[dataOffset + i];
   const generator = template.generator;
   for (let i = 0; i < dataLength; ++i) {
     const factor = scratch[i];
@@ -331,10 +332,8 @@ function encodeParity(template, dataOffset, dataLength, parityOffset) {
     for (let j = 0; j < generator.length; ++j)
       scratch[i + j] ^= gfMul(generator[j], factor);
   }
-  template.parity.set(
-    scratch.subarray(dataLength, dataLength + template.ecPerBlock),
-    parityOffset
-  );
+  for (let i = 0; i < template.ecPerBlock; ++i)
+    template.parity[parityOffset + i] = scratch[dataLength + i];
 }
 
 function buildCodewords(template) {
@@ -370,17 +369,13 @@ function writeMaskedModules(template) {
   }
 }
 
-function createTransferQr(payload, version) {
+function encodeTransferQr(payload, version) {
   if (!(payload instanceof Uint8Array)) payload = new Uint8Array(payload);
   const template = templateFor(version);
   buildDataBytes(template, payload);
   buildCodewords(template);
   writeMaskedModules(template);
-  return {
-    modules: { size: template.size, data: template.modules },
-    version: template.version,
-    maskPattern: 4
-  };
+  return template.modules;
 }
 
-export { createTransferQr };
+export { encodeTransferQr };
