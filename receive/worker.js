@@ -29,13 +29,33 @@ function shifted(p, ox, oy) {
 }
 let inputPtr = 0;
 let inputCapacity = 0;
+const INPUT_GROW_PAGE = 64 * 1024;
+const INPUT_GROW_MIN_HEADROOM = 256 * 1024;
+const INPUT_GROW_MAX_HEADROOM = 4 * 1024 * 1024;
 function inputBuffer(zx, bytes) {
-  if (inputPtr && bytes <= inputCapacity) return inputPtr;
-  const next = zx._malloc(bytes);
+  const required = Math.max(0, Math.ceil(Number(bytes) || 0));
+  if (!required) return inputPtr;
+  if (inputPtr && required <= inputCapacity) return inputPtr;
+  // Camera crops breathe by a few scanlines as the tracked wall moves. Exact-
+  // size malloc/free on every new high-water mark needlessly fragments the WASM
+  // heap and can force memory growth. Reserve bounded geometric headroom and
+  // round to a WASM page so ordinary crop jitter reuses the same allocation.
+  const headroom = Math.max(
+    INPUT_GROW_MIN_HEADROOM,
+    Math.min(INPUT_GROW_MAX_HEADROOM, Math.ceil(required * 0.20))
+  );
+  let capacity = Math.ceil((required + headroom) / INPUT_GROW_PAGE) * INPUT_GROW_PAGE;
+  let next = zx._malloc(capacity);
+  // Headroom is only a performance optimization. Under memory pressure retry
+  // with the smallest page-rounded allocation that can satisfy this frame.
+  if (!next && capacity > required) {
+    capacity = Math.ceil(required / INPUT_GROW_PAGE) * INPUT_GROW_PAGE;
+    next = zx._malloc(capacity);
+  }
   if (!next) return 0;
   if (inputPtr) zx._free(inputPtr);
   inputPtr = next;
-  inputCapacity = bytes;
+  inputCapacity = capacity;
   return inputPtr;
 }
 const DIRECT_BATCH_MAX_TRACKS = 32;
@@ -678,75 +698,126 @@ const REPEAT_SIGNATURE_X = 8;
 const REPEAT_SIGNATURE_Y = 6;
 const REPEAT_SIGNATURE_INTERIOR_TRACKS = 3;
 const REPEAT_SIGNATURE_MAX_BITS = 6;
+const REPEAT_SIGNATURE_SAMPLES = REPEAT_SIGNATURE_X * REPEAT_SIGNATURE_Y;
+const REPEAT_SIGNATURE_MAX_SELECTED = REPEAT_SIGNATURE_INTERIOR_TRACKS + 2;
+const repeatOrderedTracks = new Array(GUIDED_BATCH_MAX_TRACKS);
+const repeatSelectedIndices = new Uint16Array(REPEAT_SIGNATURE_MAX_SELECTED);
+const repeatValues = new Uint8Array(REPEAT_SIGNATURE_SAMPLES);
+const repeatRanked = new Uint8Array(REPEAT_SIGNATURE_SAMPLES);
+const repeatBits = new Uint8Array(Math.ceil(REPEAT_SIGNATURE_MAX_SELECTED * REPEAT_SIGNATURE_SAMPLES / 8));
+const repeatSignatureResult = { key: "", bits: repeatBits, bitCount: 0 };
+const repeatDistanceResult = { different: 0, fraction: 0 };
+
+function insertRepeatSelectedIndex(index, count) {
+  for (let i = 0; i < count; i++) if (repeatSelectedIndices[i] === index) return count;
+  let at = count;
+  while (at > 0 && repeatSelectedIndices[at - 1] > index) {
+    repeatSelectedIndices[at] = repeatSelectedIndices[at - 1];
+    at--;
+  }
+  repeatSelectedIndices[at] = index;
+  return count + 1;
+}
 
 function repeatPageSignature(heap, yPtr, width, height, stride, ox, oy, tracks) {
   if (!Array.isArray(tracks) || tracks.length < 2 || stride < width) return null;
-  const ordered = tracks
-    .filter((track) => validQuad(track.quad) && Number.isFinite(track.dim) && track.dim >= 21)
-    .sort((a, b) => (a.slot ?? a.id ?? 0) - (b.slot ?? b.id ?? 0));
-  if (ordered.length < 2) return null;
-  // Include both spatial extremes as well as interior quantiles. On a 7x4 wall
-  // the former three quantiles all missed at least one edge row, allowing a
-  // rolling transition there to masquerade as a whole-page duplicate.
-  const pickIndices = [0, ordered.length - 1];
-  for (let i = 1; i <= REPEAT_SIGNATURE_INTERIOR_TRACKS; i++) {
-    const index = Math.round((ordered.length - 1) * i / (REPEAT_SIGNATURE_INTERIOR_TRACKS + 1));
-    if (!pickIndices.includes(index)) pickIndices.push(index);
+  let orderedCount = 0;
+  for (let sourceIndex = 0; sourceIndex < tracks.length && orderedCount < GUIDED_BATCH_MAX_TRACKS; sourceIndex++) {
+    const track = tracks[sourceIndex];
+    if (!validQuad(track?.quad) || !Number.isFinite(track.dim) || track.dim < 21) continue;
+    const sortKey = Number(track.slot ?? track.id ?? 0) || 0;
+    let at = orderedCount;
+    while (at > 0) {
+      const previous = repeatOrderedTracks[at - 1];
+      const previousKey = Number(previous?.slot ?? previous?.id ?? 0) || 0;
+      if (previousKey <= sortKey) break;
+      repeatOrderedTracks[at] = previous;
+      at--;
+    }
+    repeatOrderedTracks[at] = track;
+    orderedCount++;
   }
-  pickIndices.sort((a, b) => a - b);
-  const selected = pickIndices.map((index) => ordered[index]).filter(Boolean);
-  if (selected.length < 2) return null;
+  if (orderedCount < 2) return null;
 
-  const bits = new Uint8Array(Math.ceil(selected.length * REPEAT_SIGNATURE_X * REPEAT_SIGNATURE_Y / 8));
+  // Preserve the original spatial extremes + three interior quantiles exactly,
+  // but keep selection indices in fixed worker-local scratch.
+  let selectedCount = 0;
+  selectedCount = insertRepeatSelectedIndex(0, selectedCount);
+  selectedCount = insertRepeatSelectedIndex(orderedCount - 1, selectedCount);
+  for (let i = 1; i <= REPEAT_SIGNATURE_INTERIOR_TRACKS; i++) {
+    selectedCount = insertRepeatSelectedIndex(
+      Math.round((orderedCount - 1) * i / (REPEAT_SIGNATURE_INTERIOR_TRACKS + 1)),
+      selectedCount
+    );
+  }
+  if (selectedCount < 2) return null;
+
+  repeatBits.fill(0);
   let bitIndex = 0;
-  const keys = [];
-  const project = (q, u, v) => ({
-    x: (1 - u) * (1 - v) * q.topLeft.x + u * (1 - v) * q.topRight.x + u * v * q.bottomRight.x + (1 - u) * v * q.bottomLeft.x - ox,
-    y: (1 - u) * (1 - v) * q.topLeft.y + u * (1 - v) * q.topRight.y + u * v * q.bottomRight.y + (1 - u) * v * q.bottomLeft.y - oy
-  });
-
-  for (const track of selected) {
-    const values = [];
+  let key = "";
+  for (let selectedIndex = 0; selectedIndex < selectedCount; selectedIndex++) {
+    const track = repeatOrderedTracks[repeatSelectedIndices[selectedIndex]];
     const dim = Math.round(track.dim);
-    keys.push(`${track.slot ?? track.id ?? 0}:${dim}`);
+    key += `${selectedIndex ? "|" : ""}${track.slot ?? track.id ?? 0}:${dim}`;
+    const q = track.quad;
+    let sampleIndex = 0;
     for (let gy = 0; gy < REPEAT_SIGNATURE_Y; gy++) {
+      const my = Math.max(0, Math.min(dim - 1,
+        Math.round(dim * (0.20 + (gy + 0.5) / REPEAT_SIGNATURE_Y * 0.60))));
+      const v = (my + 0.5) / dim;
+      const iv = 1 - v;
       for (let gx = 0; gx < REPEAT_SIGNATURE_X; gx++) {
-        // Interior module centers avoid the three fixed finder patterns. The
-        // exact samples need not decode QR; they only need to change strongly
-        // when the sender paints a different random-looking data matrix.
-        const mx = Math.max(0, Math.min(dim - 1, Math.round(dim * (0.20 + (gx + 0.5) / REPEAT_SIGNATURE_X * 0.60))));
-        const my = Math.max(0, Math.min(dim - 1, Math.round(dim * (0.20 + (gy + 0.5) / REPEAT_SIGNATURE_Y * 0.60))));
-        const p = project(track.quad, (mx + 0.5) / dim, (my + 0.5) / dim);
-        const x = Math.round(p.x), y = Math.round(p.y);
+        // Interior module centers avoid the three fixed finder patterns. These
+        // are the same bilinear samples as before, calculated as scalars rather
+        // than allocating a temporary {x,y} point for every sample.
+        const mx = Math.max(0, Math.min(dim - 1,
+          Math.round(dim * (0.20 + (gx + 0.5) / REPEAT_SIGNATURE_X * 0.60))));
+        const u = (mx + 0.5) / dim;
+        const iu = 1 - u;
+        const x = Math.round(
+          iu * iv * q.topLeft.x + u * iv * q.topRight.x +
+          u * v * q.bottomRight.x + iu * v * q.bottomLeft.x - ox
+        );
+        const y = Math.round(
+          iu * iv * q.topLeft.y + u * iv * q.topRight.y +
+          u * v * q.bottomRight.y + iu * v * q.bottomLeft.y - oy
+        );
         if (x < 0 || y < 0 || x >= width || y >= height) return null;
-        values.push(heap[yPtr + y * stride + x]);
+        repeatValues[sampleIndex++] = heap[yPtr + y * stride + x];
       }
     }
-    const ranked = [...values].sort((a, b) => a - b);
-    const lo = ranked[Math.floor(ranked.length * 0.12)];
-    const hi = ranked[Math.floor(ranked.length * 0.88)];
+    repeatRanked.set(repeatValues);
+    repeatRanked.sort();
+    const lo = repeatRanked[Math.floor(REPEAT_SIGNATURE_SAMPLES * 0.12)];
+    const hi = repeatRanked[Math.floor(REPEAT_SIGNATURE_SAMPLES * 0.88)];
     if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi - lo < 36) return null;
     const threshold = (lo + hi) * 0.5;
-    for (const value of values) {
-      if (value < threshold) bits[bitIndex >> 3] |= 1 << (bitIndex & 7);
+    for (let i = 0; i < REPEAT_SIGNATURE_SAMPLES; i++) {
+      if (repeatValues[i] < threshold) repeatBits[bitIndex >> 3] |= 1 << (bitIndex & 7);
       bitIndex++;
     }
   }
-  return { key: keys.join('|'), bits: Array.from(bits), bitCount: bitIndex };
+  repeatSignatureResult.key = key;
+  repeatSignatureResult.bitCount = bitIndex;
+  return repeatSignatureResult;
 }
 
 function repeatSignatureDistance(current, previous) {
+  const currentBits = current?.bits;
+  const previousBits = previous?.bits;
   if (!current || !previous || current.key !== previous.key || current.bitCount !== previous.bitCount ||
-      !Array.isArray(current.bits) || !Array.isArray(previous.bits) || current.bits.length !== previous.bits.length) return null;
+      !currentBits || !previousBits || currentBits.length !== previousBits.length) return null;
   let different = 0;
-  for (let i = 0; i < current.bits.length; i++) {
-    let value = (current.bits[i] ^ previous.bits[i]) & 255;
+  for (let i = 0; i < currentBits.length; i++) {
+    let value = (currentBits[i] ^ previousBits[i]) & 255;
     while (value) {
       value &= value - 1;
       different++;
     }
   }
-  return { different, fraction: different / Math.max(1, current.bitCount) };
+  repeatDistanceResult.different = different;
+  repeatDistanceResult.fraction = different / Math.max(1, current.bitCount);
+  return repeatDistanceResult;
 }
 
 ctx.onmessage = async (e) => {
