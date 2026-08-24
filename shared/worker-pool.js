@@ -74,6 +74,24 @@ class DecodeWorkerPool {
     for (let index = 0; index < this.busy.length; index++) count += Number(this.busy[index]);
     return count;
   }
+  get activeCount() {
+    return this.busyCount;
+  }
+  get activeFullCount() {
+    let count = 0;
+    for (let index = 0; index < this.busy.length; index++) {
+      if (this.busy[index] && this.activeFull[index]) count++;
+    }
+    return count;
+  }
+  get oldestActiveAgeMs() {
+    const now = performance.now();
+    let oldest = 0;
+    for (const meta of this.activeMeta) {
+      if (meta) oldest = Math.max(oldest, now - meta.startedAt);
+    }
+    return oldest;
+  }
   configureWorker(slot, worker) {
     worker.onmessage = (event) => {
       if (this.workers[slot] !== worker) return;

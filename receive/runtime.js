@@ -44,7 +44,12 @@ import {
   saveFileOnAndroid,
   showScanCaptureMenuOnAndroid
 } from "../shared/android.js";
-import { readStoredZip } from "../shared/zip.js";
+import {
+  clearReceivedResult,
+  showReceivedFile,
+  showReceivedSnippet,
+  showReceiveFailure
+} from "./result.js";
 let agcapModulePromise;
 function loadAgcap() {
   if (!agcapModulePromise) agcapModulePromise = import("./agcap.js");
@@ -138,7 +143,6 @@ const progressStatus = document.getElementById("progress-status");
 const progressLabel = document.getElementById("progress-label");
 const transferSizeLabel = document.getElementById("transfer-size-label");
 const etaLabel = document.getElementById("eta-label");
-const result = document.getElementById("result");
 const metricsEl = document.getElementById("metrics");
 metricsEl.addEventListener("click", (event) => {
   const target = event.target;
@@ -1026,21 +1030,6 @@ let transferFinalizing = false;
 let statsTimer;
 const plainQrDecoder = new TextDecoder("utf-8", { fatal: true });
 const plainQrPolicy = new PlainQrPolicy();
-const RECEIVED_MEDIA_CACHE = "received-media";
-const receivedObjectUrls = /* @__PURE__ */ new Set();
-let receivedDataGeneration = 0;
-function receivedObjectUrl(blob) {
-  const url = URL.createObjectURL(blob);
-  receivedObjectUrls.add(url);
-  return url;
-}
-function purgeReceivedData() {
-  receivedDataGeneration++;
-  for (const url of receivedObjectUrls) URL.revokeObjectURL(url);
-  receivedObjectUrls.clear();
-  if ("caches" in window) void caches.delete(RECEIVED_MEDIA_CACHE).catch(() => void 0);
-}
-purgeReceivedData();
 const pendingGridLanes = [null, null, null];
 const lockedLaneCrops = [null, null, null];
 let laneCropRecentersTotal = 0;
@@ -5396,8 +5385,7 @@ function stopReceiver() {
   opticalAnalyzeMaxMs = 0;
   opticalTimingStartedAt = performance.now();
   plainQrPolicy.reset();
-  result.replaceChildren();
-  purgeReceivedData();
+  clearReceivedResult();
   preview.style.display = "none";
   preview.classList.remove("camera-loading");
   cameraActual.textContent = "";
@@ -6892,7 +6880,7 @@ async function captureFrame(source) {
   const provisionalUnknownVisible = acquisitionDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
     !region.decoded && region.quad && region.dim && isGridDecodeCandidate(region) && validTrackedQuad(region, vw, vh)
   ) : [];
-  const acquisitionInFlight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
+  const acquisitionInFlight = pool.activeFullCount;
   const acquisitionLimit = captureHasTrackedWork ? 1 : 3;
   // SEARCH/REACQUIRE has a hard liveness invariant: if the camera is producing
   // frames and an acquisition worker is free, stale scheduler bookkeeping may
@@ -6939,7 +6927,7 @@ async function captureFrame(source) {
   const localRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
     geometryProbeDue && !globalRecoverySeedScan && lockedGeometryCandidates.length > 0;
   if (globalRecoverySeedScan) {
-    const recoveryInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
+    const recoveryInflight = pool.activeFullCount;
     if (recoveryInflight >= 1) {
       if (trace) {
         trace.decision = "global recovery seed already in flight";
@@ -6950,7 +6938,7 @@ async function captureFrame(source) {
     }
   }
   if (acquisitionSeedScan) {
-    const acquisitionInflight = pool.activeJobs.reduce((count, job) => count + Number(job.full), 0);
+    const acquisitionInflight = pool.activeFullCount;
     const acquisitionInflightLimit = Math.min(acquisitionLimit, pool.size);
     if (acquisitionInflight >= acquisitionInflightLimit) {
       capturesDropped++;
@@ -7985,7 +7973,7 @@ function finishPlainQr(text) {
   document.body.classList.add("receive-complete");
   document.body.classList.remove("receive-mode");
   setStatus("");
-  showSnippet(text);
+  showReceivedSnippet(text);
 }
 function liveGoodputKbs(now) {
   pruneTimestampSamples(usefulFrameTimes, now - STATS_WINDOW_MS);
@@ -8035,36 +8023,13 @@ async function finish(container, hashOk, seconds) {
     etaLabel.textContent = `${formatBytes(file.transmittedSize)} in ${formatDuration(seconds)}`;
     if (isSnippet(file)) {
       setStatus("");
-      showSnippet(snippetText(file));
+      showReceivedSnippet(snippetText(file));
       return;
     }
     setStatus("");
-    result.replaceChildren();
-    if (file.type === "application/vnd.airgapper.files+zip") {
-      const entries = readStoredZip(file.bytes);
-      for (const entry of entries) {
-        if (finishGen !== captureGen) {
-          file.bytes.fill(0);
-          return;
-        }
-        await appendReceivedFile(entry, result);
-      }
-      const archive = document.createElement("section");
-      archive.className = "received-file received-archive";
-      const archiveType = document.createElement("span");
-      archiveType.className = "received-file-type";
-      archiveType.textContent = "ZIP";
-      const archiveRow = document.createElement("div");
-      archiveRow.className = "received-file-download";
-      const archiveLink = downloadLink(file.name, "application/zip", file.bytes, file.name);
-      archiveLink.title = file.name;
-      const archiveSize = document.createElement("span");
-      archiveSize.textContent = formatBytes(file.bytes.length);
-      archiveRow.append(archiveLink, archiveSize);
-      archive.append(archiveType, archiveRow);
-      result.append(archive);
-    } else {
-      await appendReceivedFile({ name: file.name, bytes: file.bytes }, result, file.type, true);
+    if (!await showReceivedFile(file, () => finishGen === captureGen)) {
+      file.bytes.fill(0);
+      return;
     }
   } catch (error) {
     if (finishGen !== captureGen) return;
@@ -8072,290 +8037,11 @@ async function finish(container, hashOk, seconds) {
     etaLabel.textContent = "Transfer failed";
     speedFeedback.className = "speed-feedback speed-low";
     showError(error instanceof Error ? error.message : String(error));
-    const heading = document.createElement("div");
-    heading.className = "failed";
-    heading.textContent = "Transfer failed";
-    const detail = document.createElement("p");
-    detail.className = "received-note";
-    detail.textContent = "Nothing usable came out of that stream. Restart the sender, then scan it again — a partial transfer costs nothing but the time.";
-    result.replaceChildren(heading, detail, restartButton("Try again"));
+    showReceiveFailure(restartButton("Try again"));
   } finally {
     releaseTransportDecoder();
     if (!retainContainer) container.fill(0);
   }
-}
-const MIME_BY_EXTENSION = {
-  apng: "image/apng",
-  gif: "image/gif",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  png: "image/png",
-  svg: "image/svg+xml",
-  webp: "image/webp",
-  mp3: "audio/mpeg",
-  m4a: "audio/mp4",
-  oga: "audio/ogg",
-  ogg: "audio/ogg",
-  wav: "audio/wav",
-  m4v: "video/mp4",
-  mov: "video/quicktime",
-  mp4: "video/mp4",
-  ogv: "video/ogg",
-  webm: "video/webm",
-  css: "text/css",
-  csv: "text/csv",
-  html: "text/html",
-  json: "application/json",
-  md: "text/markdown",
-  pdf: "application/pdf",
-  txt: "text/plain",
-  zip: "application/zip"
-};
-function inferredType(name) {
-  var _a;
-  const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
-  return (_a = MIME_BY_EXTENSION[extension]) != null ? _a : "application/octet-stream";
-}
-function downloadLink(name, type, bytes, label = `Save ${name}`, blobUrl) {
-  const link = document.createElement("a");
-  link.className = "download";
-  link.href = blobUrl || receivedObjectUrl(new Blob([bytes], { type }));
-  link.download = name;
-  link.textContent = label;
-  // Browser downloads only need the Blob URL. Do not close over a 64 MB
-  // Uint8Array forever just to discover that the Android bridge is absent.
-  if (isAndroidApp()) link.addEventListener("click", (event) => {
-    if (!saveFileOnAndroid(name, type, bytes)) return;
-    event.preventDefault();
-  });
-  return link;
-}
-async function appendReceivedFile(entry, parent, declaredType, autoplayVideo = false) {
-  const dataGeneration = receivedDataGeneration;
-  const type = declaredType || inferredType(entry.name);
-  const container = document.createElement("section");
-  container.className = "received-file";
-  const blob = new Blob([entry.bytes], { type });
-  const url = receivedObjectUrl(blob);
-  let receivedVideo;
-  if (type.startsWith("image/")) {
-    const image = document.createElement("img");
-    image.className = "received";
-    image.alt = `Received file preview: ${entry.name}`;
-    image.src = url;
-    enableMediaInspection(image);
-    container.append(image);
-  } else if (type.startsWith("video/") || type.startsWith("audio/")) {
-    const player = document.createElement(type.startsWith("video/") ? "video" : "audio");
-    player.className = "received";
-    player.controls = true;
-    player.preload = "metadata";
-    player.setAttribute("aria-label", `Received file: ${entry.name}`);
-    if (player instanceof HTMLVideoElement) {
-      player.playsInline = true;
-      if (autoplayVideo) {
-        player.autoplay = true;
-        receivedVideo = player;
-      }
-    }
-    const src = await servableMediaUrl(blob, type, url);
-    if (dataGeneration !== receivedDataGeneration) {
-      purgeReceivedData();
-      return;
-    }
-    if (src !== url) player.addEventListener("error", () => {
-      player.src = url;
-    }, { once: true });
-    player.src = src;
-    if (player instanceof HTMLVideoElement) enableMediaInspection(player);
-    container.append(player);
-  }
-  const downloadRow = document.createElement("div");
-  downloadRow.className = "received-file-download";
-  const link = downloadLink(entry.name, type, entry.bytes, entry.name, url);
-  link.title = entry.name;
-  const fileSize = document.createElement("span");
-  fileSize.textContent = formatBytes(entry.bytes.length);
-  downloadRow.append(link, fileSize);
-  container.append(downloadRow);
-  parent.append(container);
-  if (receivedVideo) {
-    void receivedVideo.play().catch(async () => {
-      receivedVideo.muted = true;
-      await receivedVideo.play().catch(() => void 0);
-    });
-  }
-}
-function enableMediaInspection(media) {
-  media.classList.add("inspectable");
-  media.tabIndex = 0;
-  media.title = media instanceof HTMLImageElement ? "Tap to view and zoom" : "Tap to view full screen";
-  const open = async () => {
-    if (media instanceof HTMLVideoElement) {
-      const iosVideo = media;
-      if (!media.requestFullscreen && iosVideo.webkitEnterFullscreen) iosVideo.webkitEnterFullscreen();
-      else if (media.requestFullscreen) await media.requestFullscreen().catch(() => void 0);
-      else window.open(media.currentSrc || media.src, "_blank", "noopener");
-      void media.play();
-      return;
-    }
-    const placeholder = document.createComment("received image");
-    media.replaceWith(placeholder);
-    const inspector = document.createElement("div");
-    inspector.className = "media-inspector";
-    inspector.setAttribute("role", "dialog");
-    inspector.setAttribute("aria-label", "Image viewer");
-    const closeButton = document.createElement("button");
-    closeButton.className = "media-inspector-close";
-    closeButton.type = "button";
-    closeButton.setAttribute("aria-label", "Close image");
-    closeButton.textContent = "×";
-    inspector.append(media, closeButton);
-    document.body.append(inspector);
-    document.body.classList.add("media-inspecting");
-    let scale = 1;
-    let x = 0;
-    let y = 0;
-    const pointers = /* @__PURE__ */ new Map();
-    const render = () => {
-      media.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`;
-    };
-    const zoomAt = (nextScale, clientX, clientY) => {
-      const clamped = Math.max(1, Math.min(6, nextScale));
-      const ratio = clamped / scale;
-      x = clientX - innerWidth / 2 - (clientX - innerWidth / 2 - x) * ratio;
-      y = clientY - innerHeight / 2 - (clientY - innerHeight / 2 - y) * ratio;
-      scale = clamped;
-      if (scale === 1) x = y = 0;
-      render();
-    };
-    const close = () => {
-      if (!inspector.isConnected) return;
-      inspector.remove();
-      media.removeAttribute("style");
-      placeholder.replaceWith(media);
-      document.body.classList.remove("media-inspecting");
-      media.focus();
-    };
-    closeButton.addEventListener("click", close);
-    inspector.addEventListener("pointerdown", (event) => {
-      if (event.target === closeButton) return;
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      inspector.setPointerCapture(event.pointerId);
-      media.classList.add("dragging");
-    });
-    inspector.addEventListener("pointermove", (event) => {
-      var _a;
-      const previous = pointers.get(event.pointerId);
-      if (!previous) return;
-      if (pointers.size === 1) {
-        if (scale > 1) {
-          x += event.clientX - previous.x;
-          y += event.clientY - previous.y;
-          render();
-        }
-      } else {
-        const other = (_a = [...pointers.entries()].find(([id]) => id !== event.pointerId)) == null ? void 0 : _a[1];
-        if (other) {
-          const oldDistance = Math.hypot(previous.x - other.x, previous.y - other.y);
-          const newDistance = Math.hypot(event.clientX - other.x, event.clientY - other.y);
-          zoomAt(scale * newDistance / Math.max(1, oldDistance), (event.clientX + other.x) / 2, (event.clientY + other.y) / 2);
-        }
-      }
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    });
-    const releasePointer = (event) => {
-      pointers.delete(event.pointerId);
-      if (!pointers.size) media.classList.remove("dragging");
-    };
-    inspector.addEventListener("pointerup", releasePointer);
-    inspector.addEventListener("pointercancel", releasePointer);
-    inspector.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      zoomAt(scale * Math.exp(-event.deltaY * 2e-3), event.clientX, event.clientY);
-    }, { passive: false });
-    inspector.addEventListener("dblclick", (event) => zoomAt(scale > 1 ? 1 : 2.5, event.clientX, event.clientY));
-  };
-  media.addEventListener("click", () => void open());
-  media.addEventListener("keydown", (event) => {
-    if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    void open();
-  });
-}
-async function servableMediaUrl(blob, type, blobUrl) {
-  var _a;
-  try {
-    if (!((_a = navigator.serviceWorker) == null ? void 0 : _a.controller)) return blobUrl;
-    const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href;
-    const cache = await caches.open(RECEIVED_MEDIA_CACHE);
-    await cache.put(
-      target,
-      new Response(blob, {
-        headers: {
-          "Content-Type": type,
-          "Content-Length": String(blob.size)
-        }
-      })
-    );
-    return `${target}?v=${Date.now()}`;
-  } catch {
-    return blobUrl;
-  }
-}
-const SNIPPET_LINK = /(?:https?:\/\/|www\.)[^\s<>]+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gi;
-const TRAILING_LINK_PUNCTUATION = /[.,;:!?\])}]+$/;
-function appendLinkifiedText(parent, text) {
-  SNIPPET_LINK.lastIndex = 0;
-  let cursor = 0;
-  for (let match = SNIPPET_LINK.exec(text); match; match = SNIPPET_LINK.exec(text)) {
-    const candidate = match[0].replace(TRAILING_LINK_PUNCTUATION, "");
-    if (!candidate) continue;
-    parent.append(document.createTextNode(text.slice(cursor, match.index)));
-    const isEmail = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/.test(candidate);
-    const href = isEmail ? `mailto:${candidate}` : candidate.toLowerCase().startsWith("www.") ? `https://${candidate}` : candidate;
-    try {
-      const url = new URL(href);
-      if (!["http:", "https:", "mailto:"].includes(url.protocol)) throw new Error("unsupported link");
-      const link = document.createElement("a");
-      link.href = url.href;
-      link.textContent = candidate;
-      link.className = "snippet-link";
-      if (url.protocol !== "mailto:") {
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-      }
-      parent.append(link);
-    } catch {
-      parent.append(document.createTextNode(candidate));
-    }
-    cursor = match.index + candidate.length;
-  }
-  parent.append(document.createTextNode(text.slice(cursor)));
-}
-function showSnippet(text) {
-  const body = document.createElement("p");
-  body.className = "received-note";
-  appendLinkifiedText(body, text);
-  const actions = document.createElement("div");
-  actions.className = "note-actions";
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "download";
-  copy.textContent = "Copy";
-  copy.addEventListener("click", async () => {
-    try {
-      if (!copyTextOnAndroid(text)) await navigator.clipboard.writeText(text);
-      copy.textContent = "Copied";
-      setTimeout(() => {
-        copy.textContent = "Copy";
-      }, 1500);
-    } catch {
-      copy.textContent = "Copy failed";
-    }
-  });
-  actions.append(copy);
-  result.replaceChildren(body, actions);
 }
 function speedQualityClass(rate) {
   return rate < 5 ? "speed-low" : rate < 25 ? "speed-mid" : rate < 75 ? "speed-good" : "speed-high";
@@ -9134,7 +8820,7 @@ if (paintDiagnostics && transportDiagnostics) {
   const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
   const pipelineSeconds = livePipeline.startedAt ? Math.max(1e-3, (now - livePipeline.startedAt) / 1e3) : 0;
   const activeJobs = pool.activeJobs;
-  const oldestActiveMs = activeJobs.length ? Math.max(...activeJobs.map((job) => job.ageMs)) : 0;
+  const oldestActiveMs = pool.oldestActiveAgeMs;
   const trackedP50 = livePercentile(livePipeline.trackedLatencies, 0.5);
   const trackedP95 = livePercentile(livePipeline.trackedLatencies, 0.95);
   const fullP50 = livePercentile(livePipeline.fullLatencies, 0.5);
@@ -9201,12 +8887,12 @@ Generic full ${hotPathAudit.fullScanSuccesses}/${hotPathAudit.fullScanJobs} · a
   // Intentionally CPU/decoder throughput, not camera capture rate.
   metric("m-cap").textContent = `${completionRate.toFixed(1)} fps`;
   metric("m-dec").textContent = `${qrRate.toFixed(1)} QR/s`;
-  const activeJobs = pool.activeJobs;
-  const oldestActiveMs = activeJobs.length ? Math.max(...activeJobs.map((job) => job.ageMs)) : 0;
+  const activeCount = pool.activeCount;
+  const oldestActiveMs = pool.oldestActiveAgeMs;
   const observedP95Ms = Math.max(livePercentile(livePipeline.trackedLatencies, 0.95), livePercentile(livePipeline.fullLatencies, 0.95));
   const stallThresholdMs = Math.max(5e3, Math.min(9e3, observedP95Ms * 4 || 5e3));
   const completionSilenceMs = livePipeline.lastCompletedAt ? now - livePipeline.lastCompletedAt : now - cameraStartedTs;
-  const stalled = activeJobs.length > 0 && oldestActiveMs >= stallThresholdMs && completionSilenceMs >= stallThresholdMs;
+  const stalled = activeCount > 0 && oldestActiveMs >= stallThresholdMs && completionSilenceMs >= stallThresholdMs;
   const saturated = !stalled && cameraRate > 0 && pool.size > 0 && pool.busyCount === pool.size;
   const limit = metric("m-limit");
   limit.textContent = lastDecodeError

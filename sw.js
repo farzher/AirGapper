@@ -18,6 +18,7 @@
     "./receive/qr-optics.js",
     "./receive/recovery-policy.js",
     "./receive/recovery-state.js",
+    "./receive/result.js",
     "./receive/runtime.js",
     "./receive/worker.js",
     "./send/main.js",
