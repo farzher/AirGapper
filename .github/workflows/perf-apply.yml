@@ -1,0 +1,384 @@
+name: apply generic receive performance
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - version.js
+      - .github/workflows/perf-apply.yml
+  workflow_dispatch:
+
+concurrency:
+  group: perf-apply-master
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Apply source patch
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! grep -Fq 'APP_VERSION = "0.5.422"' version.js; then
+            echo "not the target source revision"
+            exit 0
+          fi
+          if grep -Fq 'AUTO_WORKER_LATENCY_WINDOW = 40' receive/runtime.js; then
+            echo "generic performance patch is already applied"
+            exit 0
+          fi
+
+          set +e
+          python3 - <<'PY' > /tmp/perf-apply.log 2>&1
+          from pathlib import Path
+
+          runtime = Path("receive/runtime.js")
+          text = runtime.read_text()
+
+          old = "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet benchmarkTraces = [];"
+          if old in text:
+              text = text.replace(old,
+                  "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet sourceFrameCameraTimestampUs = NaN;\nlet sourceFrameRate = 0;\nlet benchmarkTraces = [];", 1)
+
+          old = "  framePumpStartedAt = 0;\n  framePumpFirstFrameAt = 0;\n  rvfcLastPresentedFrames = 0;"
+          if old in text:
+              text = text.replace(old,
+                  "  framePumpStartedAt = 0;\n  framePumpFirstFrameAt = 0;\n  sourceFrameCameraTimestampUs = NaN;\n  sourceFrameRate = 0;\n  rvfcLastPresentedFrames = 0;", 1)
+
+          old = "function startFramePump(gen, track) {\n  stopFramePump();\n  framePumpStartedAt = receiverNow();"
+          if old in text:
+              text = text.replace(old,
+                  "function startFramePump(gen, track) {\n  stopFramePump();\n  framePumpStartedAt = receiverNow();\n  sourceFrameRate = Math.max(0, Number(track?.getSettings?.().frameRate) || 0);", 1)
+
+          old = "  const sequence = sourceFrameSequence++;\n  latestSourceFrameSequence = sequence;"
+          if old in text:
+              text = text.replace(old, '''  // sourceSequence is also the temporal camera-frame clock. Preserve elapsed
+  // sensor cadence when the processor intentionally discards intermediate
+  // frames, so rolling-shutter velocity remains in real camera-frame units.
+  let sequenceStep = 1;
+  if (videoFrame && Number.isFinite(timestamp) && sourceFrameRate > 0) {
+    if (Number.isFinite(sourceFrameCameraTimestampUs) && timestamp > sourceFrameCameraTimestampUs) {
+      const elapsedFrames = (timestamp - sourceFrameCameraTimestampUs) * sourceFrameRate / 1e6;
+      if (Number.isFinite(elapsedFrames) && elapsedFrames > 1.5)
+        sequenceStep = Math.max(1, Math.min(8, Math.round(elapsedFrames)));
+    }
+    sourceFrameCameraTimestampUs = timestamp;
+  } else if (!videoFrame) {
+    sourceFrameCameraTimestampUs = NaN;
+  }
+  const sequence = sourceFrameSequence;
+  sourceFrameSequence += sequenceStep;
+  latestSourceFrameSequence = sequence;''', 1)
+
+          old = '''  void captureFrame(frame).catch((error) => {
+    decodeExceptions++;
+    lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
+    console.error("AirGapper captureFrame failed", error);
+  }).finally(() => {
+    releaseSourceFrame(frame);
+    if (done || gen !== captureGen) return;
+    queueOverlayDraw();
+  });'''
+          if old in text:
+              text = text.replace(old, '''  // Register the next camera read before running captureFrame's synchronous
+  // scheduling prefix. This protects any one-frame native queue from ordinary
+  // main-thread scheduling jitter without buffering stale camera pages.
+  queueMicrotask(() => {
+    if (done || gen !== captureGen) {
+      releaseSourceFrame(frame);
+      return;
+    }
+    void captureFrame(frame).catch((error) => {
+      decodeExceptions++;
+      lastDecodeError = `captureFrame: ${error instanceof Error ? error.message : String(error)}`;
+      console.error("AirGapper captureFrame failed", error);
+    }).finally(() => {
+      releaseSourceFrame(frame);
+      if (done || gen !== captureGen) return;
+      queueOverlayDraw();
+    });
+  });''', 1)
+
+          start = text.find("const autoWorkerMax =")
+          end = text.find('const TRACKS_PER_FRAME_KEY =', start)
+          if start < 0 or end < 0:
+              raise SystemExit("auto worker controller markers not found")
+          auto = '''const autoWorkerMax = Math.max(1, hardwareThreadCount);
+let autoWorkerTarget = Math.min(autoWorkerMax, hardwareThreadCount <= 2 ? 1 : 2);
+let autoWorkerPressureSince = 0;
+let autoWorkerHeadroomSince = 0;
+let autoWorkerLastUpdate = -Infinity;
+const AUTO_WORKER_LATENCY_WINDOW = 40;
+const autoWorkerLatencies = new Float64Array(AUTO_WORKER_LATENCY_WINDOW);
+const autoWorkerLatencySort = new Float64Array(AUTO_WORKER_LATENCY_WINDOW);
+let autoWorkerLatencyCount = 0;
+let autoWorkerLatencyCursor = 0;
+let autoWorkerSourceTotal = NaN;
+let autoWorkerSourceAt = 0;
+let autoWorkerSourceRate = 0;
+const autoWorkerOption = decodeWorkers.querySelector('option[value="auto"]');
+function syncAutoWorkerLabel() {
+  autoWorkerOption.textContent = `Auto (${autoWorkerTarget})`;
+}
+syncAutoWorkerLabel();
+for (let count = 1; count <= hardwareThreadCount; count++) {
+  decodeWorkers.add(new Option(String(count), String(count)));
+}
+function selectedWorkerCount() {
+  return decodeWorkers.value === "auto" ? autoWorkerTarget : Math.max(1, Math.min(hardwareThreadCount, Number(decodeWorkers.value) || autoWorkerTarget));
+}
+function noteAutoWorkerLatency(completion) {
+  if (completion?.full) return;
+  const latency = Number(completion?.latencyMs);
+  if (!Number.isFinite(latency) || latency <= 0 || latency >= 10e3) return;
+  autoWorkerLatencies[autoWorkerLatencyCursor] = latency;
+  autoWorkerLatencyCursor = (autoWorkerLatencyCursor + 1) % AUTO_WORKER_LATENCY_WINDOW;
+  autoWorkerLatencyCount = Math.min(AUTO_WORKER_LATENCY_WINDOW, autoWorkerLatencyCount + 1);
+}
+function autoWorkerLatencyPercentiles() {
+  const count = autoWorkerLatencyCount;
+  for (let index = 0; index < count; index++) autoWorkerLatencySort[index] = autoWorkerLatencies[index];
+  const sorted = autoWorkerLatencySort.subarray(0, count);
+  sorted.sort();
+  return {
+    p50: sorted[Math.floor(count * 0.5)],
+    p95: sorted[Math.min(count - 1, Math.floor(count * 0.95))]
+  };
+}
+function measuredCameraSourceRate(now, deliveredFps) {
+  const total = framePumpMode === "MediaStreamTrackProcessor" ? Number(framePumpProcessorTotal) : NaN;
+  if (Number.isFinite(total) && total >= 0) {
+    if (Number.isFinite(autoWorkerSourceTotal) && total >= autoWorkerSourceTotal && autoWorkerSourceAt > 0) {
+      const elapsed = now - autoWorkerSourceAt;
+      if (elapsed >= 250) {
+        const instantaneous = (total - autoWorkerSourceTotal) * 1000 / elapsed;
+        if (Number.isFinite(instantaneous) && instantaneous > 0) {
+          autoWorkerSourceRate = autoWorkerSourceRate > 0
+            ? autoWorkerSourceRate * 0.7 + instantaneous * 0.3
+            : instantaneous;
+        }
+        autoWorkerSourceTotal = total;
+        autoWorkerSourceAt = now;
+      }
+    } else {
+      autoWorkerSourceTotal = total;
+      autoWorkerSourceAt = now;
+    }
+  } else {
+    autoWorkerSourceTotal = NaN;
+    autoWorkerSourceAt = now;
+    autoWorkerSourceRate = 0;
+  }
+  if (autoWorkerSourceRate > 0) return Math.max(1, deliveredFps, autoWorkerSourceRate);
+  const negotiated = Number(stream?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0;
+  return Math.max(1, deliveredFps, negotiated);
+}
+function updateAutoWorkerController(completion) {
+  if (decodeWorkers.value !== "auto" || replayRunning || !stream || done) return;
+  noteAutoWorkerLatency(completion);
+  const now = receiverNow();
+  if (now - autoWorkerLastUpdate < 750 || autoWorkerLatencyCount < 5) return;
+  autoWorkerLastUpdate = now;
+  const { p50, p95 } = autoWorkerLatencyPercentiles();
+  const deliveredFps = captureTimes.reduce((count, at) => count + Number(at > now - 1000), 0);
+  const sourceFps = measuredCameraSourceRate(now, deliveredFps);
+  const serviceDemand = sourceFps * p50 / 1000;
+  const jitterHeadroom = Math.max(0, Math.min(1.5, p95 / Math.max(1, p50) - 1));
+  const demand = Math.max(1, Math.min(autoWorkerMax, Math.ceil(serviceDemand + jitterHeadroom)));
+  const framePeriodMs = 1000 / Math.max(1, sourceFps);
+  const pressured = recentTrackPressure(now) || p95 > Math.max(p50 * 1.75, framePeriodMs * 4);
+  if (autoOpticsControllerState === "HOLD" && !pressured) return;
+  if (pressured && demand > autoWorkerTarget) {
+    if (!autoWorkerPressureSince) autoWorkerPressureSince = now;
+    autoWorkerHeadroomSince = 0;
+    if (now - autoWorkerPressureSince >= 1200) {
+      autoWorkerTarget = Math.min(autoWorkerMax, autoWorkerTarget + 1, demand);
+      autoWorkerPressureSince = now;
+      pool.resize(autoWorkerTarget);
+      syncAutoWorkerLabel();
+    }
+  } else {
+    autoWorkerPressureSince = 0;
+    if (!autoWorkerHeadroomSince) autoWorkerHeadroomSince = now;
+    if (demand < autoWorkerTarget && now - autoWorkerHeadroomSince >= 10e3 && pool.busyCount === 0) {
+      autoWorkerTarget = Math.max(1, autoWorkerTarget - 1, demand);
+      pool.resize(autoWorkerTarget);
+      syncAutoWorkerLabel();
+      autoWorkerHeadroomSince = now;
+    }
+  }
+}
+'''
+          text = text[:start] + auto + text[end:]
+          runtime.write_text(text)
+
+          guard = Path("receive/worker-capacity-guard.js")
+          text = guard.read_text()
+          text = text.replace("const LIVE_TRACKED_TIMEOUT_MS = 1200;\n", "")
+          text = text.replace("const decodeWorkers = document.getElementById(\"decode-workers\");\n", "")
+          text = text.replace("const reportedHardwareThreads = Math.max(1, Number(navigator.hardwareConcurrency) || 2);\n", "")
+          text = text.replace('''function negotiatedCameraFps() {
+  const track = receiveVideo?.srcObject?.getVideoTracks?.()[0];
+  return Number(track?.getSettings?.().frameRate) || 0;
+}
+
+''', "", 1)
+
+          live_marker = '''function liveReceiveCamera() {
+  const cameraStream = receiveVideo?.srcObject;
+  return document.body?.classList?.contains("receive-mode") === true &&
+    cameraStream?.active === true;
+}
+'''
+          adaptive = live_marker + '''
+const TRACKED_LATENCY_BUCKETS = 3;
+const TRACKED_LATENCY_MIN_SAMPLES = 5;
+const trackedLatencyEwma = new Float64Array(TRACKED_LATENCY_BUCKETS);
+const trackedLatencySamples = new Uint16Array(TRACKED_LATENCY_BUCKETS);
+function trackedLatencyBucket(trackCount) {
+  const count = Math.max(0, Math.trunc(Number(trackCount) || 0));
+  return count <= 4 ? 0 : count <= 12 ? 1 : 2;
+}
+function noteTrackedLatency(trackCount, latencyMs) {
+  const latency = Number(latencyMs);
+  if (!Number.isFinite(latency) || latency <= 0) return;
+  const bucket = trackedLatencyBucket(trackCount);
+  const samples = trackedLatencySamples[bucket];
+  const previous = trackedLatencyEwma[bucket];
+  const weight = samples < 8 ? 0.25 : 0.12;
+  trackedLatencyEwma[bucket] = previous > 0 ? previous * (1 - weight) + latency * weight : latency;
+  trackedLatencySamples[bucket] = Math.min(65535, samples + 1);
+}
+function adaptiveTrackedTimeoutMs(trackCount, baseTimeoutMs) {
+  const base = Math.max(1, Number(baseTimeoutMs) || 1);
+  const bucket = trackedLatencyBucket(trackCount);
+  if (trackedLatencySamples[bucket] < TRACKED_LATENCY_MIN_SAMPLES) return base;
+  const latencyBudget = trackedLatencyEwma[bucket] * 6;
+  const fps = Number(receiveVideo?.srcObject?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0;
+  const freshnessBudget = fps > 0 ? 12 * 1000 / fps : 0;
+  return Math.min(base, Math.max(400, latencyBudget, freshnessBudget));
+}
+'''
+          if live_marker not in text:
+              raise SystemExit("guard liveReceiveCamera marker not found")
+          text = text.replace(live_marker, adaptive, 1)
+
+          old = '''  // RaptorQ already treats a missing QR as an erasure. On a dense wall, bound
+  // expensive ambiguity repair to one best candidate and spend the rest of the
+  // budget on the next fresh camera frame.
+  message.guidedRepairMask = (allowed & -allowed) >>> 0;
+}'''
+          new = '''  // RaptorQ already treats a missing QR as an erasure. On a dense wall, bound
+  // expensive ambiguity repair and full fallback to the same single candidate;
+  // otherwise a precomputed fallback mask can silently bypass the repair cap.
+  const chosen = (allowed & -allowed) >>> 0;
+  message.guidedRepairMask = chosen;
+  if (message.guidedFallbackMask !== undefined)
+    message.guidedFallbackMask = (Number(message.guidedFallbackMask) >>> 0) & chosen;
+}'''
+          if old not in text:
+              raise SystemExit("dense repair marker not found")
+          text = text.replace(old, new, 1)
+
+          old = '''      const message = event?.data;
+      const recycledTrack = message?.__airgapperPackedTrackRecycle;'''
+          new = '''      const message = event?.data;
+      const activeMeta = this.activeMeta?.[slot];
+      if (activeMeta && !activeMeta.full && !message?.error)
+        noteTrackedLatency(activeMeta.trackCount, message?.latencyMs);
+      const recycledTrack = message?.__airgapperPackedTrackRecycle;'''
+          if old not in text:
+              raise SystemExit("configure worker marker not found")
+          text = text.replace(old, new, 1)
+
+          old_start = text.find("    // A tracked camera frame older than a second")
+          old_end = text.find("    return true;", old_start)
+          if old_start < 0 or old_end < 0:
+              raise SystemExit("fixed tracked timeout block not found")
+          timeout = '''    // A live tracked frame has value only while it is fresh. Learn a deadline
+    // from this density bucket's observed latency and the camera frame period;
+    // slow devices keep longer jobs while fast devices abandon true outliers.
+    if (live && !message.full) {
+      const meta = this.activeMeta?.[slot];
+      if (meta && meta.id === message.id) {
+        const adaptive = adaptiveTrackedTimeoutMs(meta.trackCount, meta.timeoutMs);
+        if (adaptive < meta.timeoutMs) {
+          meta.timeoutMs = adaptive;
+          meta.deadlineAt = meta.startedAt + adaptive;
+        }
+      }
+    }
+'''
+          text = text[:old_start] + timeout + text[old_end:]
+
+          resize_start = text.find("// The runtime controller deliberately starts at two workers")
+          resize_end = text.find("// Every AirGapper decode worker uses the live-camera wrapper.", resize_start)
+          if resize_start < 0 or resize_end < 0:
+              raise SystemExit("goal-specific worker override markers not found")
+          text = text[:resize_start] + text[resize_end:]
+          guard.write_text(text)
+
+          proxy = Path("receive/track-processor-proxy.js")
+          text = proxy.read_text()
+          old = '''import { isAndroid } from "../shared/platform.js";
+
+// Prefer a DedicatedWorker camera drain on Android as well as on Safari/WebKit.
+//
+// A Window-side MediaStreamTrackProcessor still depends on the browser main
+// thread servicing reader.read() frequently enough. At 30 fps, one >33 ms UI /
+// geometry/completion burst can overflow maxBufferSize=1 and discard a sensor
+// frame. The worker processor below continuously drains the camera off-thread
+// and retains only the newest pending VideoFrame, so main-thread jitter drops
+// stale optical pages intentionally instead of starving the camera processor.
+//
+// Safari/WebKit also needs this proxy on releases where the constructor is absent
+// from Window. During worker startup, bridge from the already playing <video>
+// with a transferable WebCodecs VideoFrame so Receive never has to wait on a
+// canvas/RGBA capture just to get its first frame.
+const preferWorkerProcessor = isAndroid;
+'''
+          new = '''// Prefer a DedicatedWorker camera drain on mobile/coarse-pointer devices.
+// The worker continuously drains the camera and retains only the freshest
+// pending VideoFrame, so main-thread scheduling jitter cannot starve the native
+// processor or build a stale queue. Browsers without a Window-side processor use
+// the same compatibility path regardless of device class.
+const preferWorkerProcessor = navigator.userAgentData?.mobile === true ||
+  globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+'''
+          if old not in text:
+              raise SystemExit("track processor proxy header marker not found")
+          proxy.write_text(text.replace(old, new, 1))
+          PY
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "generic performance patch failed with status $status"
+              echo
+              tail -200 /tmp/perf-apply.log
+            } > perf-apply-failure.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add perf-apply-failure.txt
+            git commit -m "report generic performance patch failure"
+            git pull --rebase origin master
+            git push origin HEAD:master
+            exit "$status"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/perf-apply.yml
+          rm -f perf-apply-failure.txt
+          git add receive/runtime.js receive/worker-capacity-guard.js receive/track-processor-proxy.js
+          git commit -m "v0.5.422: generic receive performance"
+          git pull --rebase origin master
+          git push origin HEAD:master
