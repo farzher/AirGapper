@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 20
       - name: Finish receiver cleanup
         run: |
           set -euo pipefail
@@ -23,7 +23,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # platform.js is shared again; receiver camera policy is imported directly.
+          # platform.js is genuinely shared again; receiver camera policy is direct.
           p = Path('shared/platform.js')
           s = p.read_text()
           start = s.find('let cameraConstraintApply;')
@@ -35,6 +35,17 @@ jobs:
               raise SystemExit('missing platform constraint export')
           s = s.replace('  applyAdvancedConstraint,\n', '', 1)
           p.write_text(s)
+
+          # RaptorQ repair(requestId) owns the serialized FEC ESI. The lean
+          # envelope may derive the receiver sequence from that packet ID, but
+          # must not require it to equal our repair request ordinal.
+          p = Path('shared/protocol.js')
+          s = p.read_text()
+          old = '      h.mode === "raptorq" && (!fitsBits(h.seq, 24) || raptorPacketEsi(block) !== h.seq) ||\n'
+          new = '      h.mode === "raptorq" && raptorPacketEsi(block) < 0 ||\n'
+          if old not in s:
+              raise SystemExit('missing invalid RaptorQ ESI equality guard')
+          p.write_text(s.replace(old, new, 1))
 
           # Native camera adapters are gone; they must not remain offline dependencies.
           p = Path('sw.js')
@@ -65,14 +76,13 @@ jobs:
           PY
 
           git rm shared/native-camera.js shared/native-camera-v2.js
-          rm -f .github/CLEANUP_V392_TRIGGER
-          git rm -f .github/workflows/cleanup-native-v398.yml .github/scripts/strip-native-runtime-v398.py .github/cleanup-native-v398.trigger
+          git rm -f .github/workflows/cleanup-native-v398.yml .github/scripts/strip-native-runtime-v398.py .github/cleanup-native-v398.trigger .github/CLEANUP_V392_TRIGGER
 
-          # Restore the permanent APK workflow exactly as it was before this one-shot run.
-          git show "$GITHUB_SHA^:.github/workflows/build-apk.yml" > .github/workflows/build-apk.yml
+          # Restore the known-good permanent APK workflow after this one-shot executor.
+          git show 49f780f9e29a9cb3adeb3040574da2d7b26ac2df:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
 
           git config user.name "AirGapper Cleanup"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "v0.5.398: finish receiver native cleanup"
+          git commit -m "v0.5.398: finish cleanup and fix RaptorQ send"
           git push origin HEAD:master
