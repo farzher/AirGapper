@@ -6,6 +6,7 @@ import "./track-processor-watchdog.js";
 import "./runtime-guards.js";
 import "./acquisition-focus-recovery.js";
 import "./lattice-cache-guard.js";
+import "./lattice-liveness-guard.js";
 import "./worker-capacity-guard.js";
 import "./camera-frame-copy-guard.js";
 import "./stale-timeout-latency-guard.js";
