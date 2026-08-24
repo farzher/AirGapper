@@ -2,6 +2,7 @@ import { GridLattice } from "./grid-lattice.js";
 
 const SOFT_LOSS_MS = 450;
 const DORMANT_MS = 900;
+const FULL_FIT_REFRESH_MS = 160;
 
 function remember(lattice, snapshot) {
   if (snapshot) {
@@ -12,6 +13,36 @@ function remember(lattice, snapshot) {
   }
   return snapshot;
 }
+
+const coalescedAccept = GridLattice.prototype.accept;
+GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
+  const at = Number(detection?.at);
+  const priorFrameAt = this.__airgapperFrameAt;
+  const sameFrame = Number.isFinite(at) && priorFrameAt === at;
+  const lastFullFit = Number(this.__airgapperLastFullFitAt);
+  const refreshDue = sameFrame && this.candidate && this.locked &&
+    (!Number.isFinite(lastFullFit) || at - lastFullFit >= FULL_FIT_REFRESH_MS);
+
+  if (refreshDue) {
+    // runtime-guards interprets a same-frame cached snapshot as permission to
+    // record the QR without another homography. Temporarily withdraw that cache
+    // for the first QR of this refresh frame so the original GridLattice.accept
+    // performs one real projective fit from the accumulated CRC observations.
+    const cached = this.__airgapperFrameSnapshot;
+    this.__airgapperFrameSnapshot = undefined;
+    const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
+    if (result) {
+      this.__airgapperLastFullFitAt = at;
+      return result;
+    }
+    this.__airgapperFrameSnapshot = cached;
+    return cached ?? result;
+  }
+
+  const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
+  if (result && Number.isFinite(at) && priorFrameAt !== at) this.__airgapperLastFullFitAt = at;
+  return result;
+};
 
 const baseDropSlotCorrection = GridLattice.prototype.dropSlotCorrection;
 GridLattice.prototype.dropSlotCorrection = function(slot, at) {
