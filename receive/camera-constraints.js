@@ -65,6 +65,8 @@ installIOSCameraConstraintFallback();
 
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
+const CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS = 3000;
+const constraintBlockedUntil = new WeakMap();
 
 function supportedExposureSet(track, set) {
   const out = { ...set };
@@ -131,17 +133,24 @@ function exactExposureConstraints(set) {
   return exact;
 }
 
+function noteConstraintTimeout(track) {
+  constraintBlockedUntil.set(track, performance.now() + CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS);
+}
+
 async function applyConstraint(track, set) {
   if (!Object.keys(set).length) return false;
+  if ((constraintBlockedUntil.get(track) ?? 0) > performance.now()) return false;
   const exposureOnly = Object.keys(set).every((key) => EXPOSURE_KEYS.includes(key));
   if (exposureOnly) {
     const strict = await awaitConstraint(track.applyConstraints(exactExposureConstraints(set)));
     if (strict.ok) return true;
-    // A hung camera transaction is the failure mode we are protecting against;
-    // do not immediately issue a second write into the same driver queue.
-    if (strict.timedOut) return false;
+    if (strict.timedOut) {
+      noteConstraintTimeout(track);
+      return false;
+    }
   }
   const fallback = await awaitConstraint(track.applyConstraints({ advanced: [set] }));
+  if (fallback.timedOut) noteConstraintTimeout(track);
   return fallback.ok;
 }
 
