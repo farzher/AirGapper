@@ -1,6 +1,5 @@
-// Receive status messages can be transient camera/runtime notices rather than
-// fatal errors. Keep them visible without flashing a red failure state under
-// the receiver diagnostics.
+// Receive runtime/camera notices remain available through diagnostics, but the
+// standalone status row must not consume space or shift the receive UI.
 const style = document.createElement("style");
-style.textContent = "#stats.error{color:var(--muted);font-weight:400}";
+style.textContent = "#stats,.receiver-heading{display:none!important}";
 document.head.append(style);
