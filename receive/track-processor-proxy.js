@@ -1,15 +1,20 @@
-// Safari/WebKit exposes MediaStreamTrackProcessor in a DedicatedWorker even on
-// releases where the constructor is absent from Window. AirGapper's receiver
-// historically feature-tested only Window and therefore fell all the way back
-// to <video> -> canvas -> RGBA readback on those browsers.
-//
-// Install a Window-side compatibility proxy only when the native constructor is
-// missing. Prefer the worker processor, but bridge its startup from the already
-// playing <video> with a transferable WebCodecs VideoFrame. This keeps Safari
-// off the canvas/getImageData path even when worker startup misses runtime.js's
-// 250 ms first-frame deadline or the worker-side processor is unsupported.
+import { isAndroid } from "../shared/platform.js";
 
-if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
+// Prefer a DedicatedWorker camera drain on Android as well as on Safari/WebKit.
+//
+// A Window-side MediaStreamTrackProcessor still depends on the browser main
+// thread servicing reader.read() frequently enough. At 30 fps, one >33 ms UI /
+// geometry/completion burst can overflow maxBufferSize=1 and discard a sensor
+// frame. The worker processor below continuously drains the camera off-thread
+// and retains only the newest pending VideoFrame, so main-thread jitter drops
+// stale optical pages intentionally instead of starving the camera processor.
+//
+// Safari/WebKit also needs this proxy on releases where the constructor is absent
+// from Window. During worker startup, bridge from the already playing <video>
+// with a transferable WebCodecs VideoFrame so Receive never has to wait on a
+// canvas/RGBA capture just to get its first frame.
+const preferWorkerProcessor = isAndroid;
+if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "function") &&
     typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
   let prewarmedWorker = null;
