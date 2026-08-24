@@ -1,4 +1,4 @@
-import { createTransferQr } from "./transfer-qr.js";
+import { encodeTransferQr } from "./transfer-qr.js";
 
 const WHITE = 0xffffffff;
 const BLACK = 0xff000000;
@@ -40,11 +40,9 @@ self.onmessage = (event) => {
     const stride = modules + job.margin;
 
     for (const frame of job.frames) {
-      const qr = createTransferQr(new Uint8Array(frame.buffer), version);
-      if (modules !== qr.modules.size) throw new Error("QR version changed inside sender page");
+      const data = encodeTransferQr(new Uint8Array(frame.buffer), version);
       const ox = frame.slotIndex % job.cols * stride + job.margin;
       const oy = Math.floor(frame.slotIndex / job.cols) * stride + job.margin;
-      const data = qr.modules.data;
       for (let y = 0; y < modules; ++y) {
         const dst = (oy + y) * width + ox;
         const src = y * modules;
