@@ -1,0 +1,28 @@
+name: cleanup native receiver v398
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/scripts/strip-native-runtime-v398.py
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Strip retired native receiver branches
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/strip-native-runtime-v398.py
+          git config user.name "AirGapper Cleanup"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/cleanup-native-v398.yml .github/scripts/strip-native-runtime-v398.py
+          git add -A
+          git commit -m "v0.5.398: remove retired native receiver branches"
+          git push origin HEAD:master
