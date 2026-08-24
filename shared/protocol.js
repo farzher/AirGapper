@@ -1,18 +1,17 @@
-import { codingMode, RAPTOR_MAX_K, RAPTOR_PACKET_ID_BYTES } from "./coding-mode.js";
+import { codingMode, RAPTOR_MAX_K, RAPTOR_PACKET_ID_BYTES, raptorPacketEsi } from "./coding-mode.js";
 import { gridLayoutById } from "./grid-layout.js";
 const DIRECT_MAGIC = 211;
 const MDS_MAGIC = 212;
 const RAPTORQ_MAGIC = 213;
-// Extended-grid packets deliberately use new magic bytes. Legacy 5-bit-slot
-// captures remain byte-for-byte parseable, while Auto can carry a dynamic
-// rectangular wall with up to 128 physical slots.
 const EXT_MDS_MAGIC = 214;
 const EXT_RAPTORQ_MAGIC = 215;
 const DIRECT_HEADER_LEN = 7;
 const MDS_HEADER_LEN = 11;
-const RAPTORQ_HEADER_LEN = 14;
+// RaptorQ already serializes SBN + 24-bit ESI in every encoding packet.
+// Do not repeat the same 24-bit sequence in the AirGapper envelope.
+const RAPTORQ_HEADER_LEN = 11;
 const EXT_MDS_HEADER_LEN = 12;
-const EXT_RAPTORQ_HEADER_LEN = 15;
+const EXT_RAPTORQ_HEADER_LEN = 12;
 const FRAME_CRC_LEN = 4;
 const EXT_GRID_DIM_BITS = 5;
 const EXT_GRID_SLOT_BITS = 7;
@@ -229,7 +228,7 @@ function packFrame(h, block) {
       !fitsBits(h.totalLen - 1, h.mode === "direct" ? DIRECT_TOTAL_BITS : h.mode === "mds" ? MDS_TOTAL_BITS : RAPTORQ_TOTAL_BITS) ||
       h.mode === "direct" && (h.seq !== 0 || h.layoutId !== 0 || h.slotIndex !== 0 || h.blockLen !== h.totalLen) ||
       h.mode === "mds" && !fitsBits(h.seq, 8) ||
-      h.mode === "raptorq" && !fitsBits(h.seq, 24) ||
+      h.mode === "raptorq" && (!fitsBits(h.seq, 24) || raptorPacketEsi(block) !== h.seq) ||
       !validExtendedGrid || !validLegacyGrid)
     throw new Error("Frame metadata exceeds its packed field.");
 
@@ -239,7 +238,7 @@ function packFrame(h, block) {
   if (h.mode === "direct") {
     bit = writeBits(out, bit, h.totalLen - 1, DIRECT_TOTAL_BITS);
   } else {
-    bit = writeBits(out, bit, h.seq, h.mode === "mds" ? 8 : 24);
+    if (h.mode === "mds") bit = writeBits(out, bit, h.seq, 8);
     if (extendedGrid) {
       bit = writeBits(out, bit, gridCols - 1, EXT_GRID_DIM_BITS);
       bit = writeBits(out, bit, gridRows - 1, EXT_GRID_DIM_BITS);
@@ -282,9 +281,11 @@ function parseFrameBody(bytes, hasCrc) {
     totalLen = total.value + 1;
     blockLen = totalLen;
   } else {
-    const sequence = readBits(bytes, bit, mode === "mds" ? 8 : 24);
-    seq = sequence.value;
-    bit = sequence.next;
+    if (mode === "mds") {
+      const sequence = readBits(bytes, bit, 8);
+      seq = sequence.value;
+      bit = sequence.next;
+    }
     if (extendedGrid) {
       const cols = readBits(bytes, bit, EXT_GRID_DIM_BITS);
       gridCols = cols.value + 1;
@@ -336,6 +337,11 @@ function parseFrameBody(bytes, hasCrc) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (view.getUint32(packetLength, true) !== crc32(bytes.subarray(0, packetLength))) return null;
   }
+  const block = bytes.subarray(headerLen, packetLength);
+  if (mode === "raptorq") {
+    seq = raptorPacketEsi(block);
+    if (seq < 0) return null;
+  }
   const header = {
     mode,
     seq,
@@ -349,7 +355,7 @@ function parseFrameBody(bytes, hasCrc) {
     totalLen,
     payloadId: identity.value >>> 0
   };
-  return { header, block: bytes.subarray(headerLen, packetLength) };
+  return { header, block };
 }
 function parseFrame(bytes) {
   return parseFrameBody(bytes, true);
