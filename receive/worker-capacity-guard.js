@@ -40,7 +40,12 @@ function takeBestFitBuffer(pool, bytes) {
       bestSize = size;
     }
   }
-  return bestIndex >= 0 ? pool.splice(bestIndex, 1)[0] : new ArrayBuffer(bytes);
+  if (bestIndex < 0) return new ArrayBuffer(bytes);
+  const lastIndex = pool.length - 1;
+  const buffer = pool[bestIndex];
+  if (bestIndex !== lastIndex) pool[bestIndex] = pool[lastIndex];
+  pool.pop();
+  return buffer;
 }
 
 function recyclePackedTrackBuffer(buffer) {
