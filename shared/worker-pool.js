@@ -85,10 +85,11 @@ class DecodeWorkerPool {
     this.decodeInfo = {};
     this.packedSymbolPools = [];
     this.packedSymbolLists = [];
-    // A worker slot can finish only one job at a time. Runtime consumes the
-    // completion synchronously, so keep one mutable summary per slot instead of
-    // allocating a ~30-property object for every camera frame.
+    // A worker slot can finish only one job at a time. Runtime consumes these
+    // synchronously, so keep mutable summary/preflight records per slot instead
+    // of allocating callback envelopes at camera cadence.
     this.completions = [];
+    this.frameSignatureInfos = [];
   }
   get size() {
     return this.workers.length;
@@ -276,11 +277,11 @@ class DecodeWorkerPool {
       if (message.id === -1) return;
       if (this.activeIds[slot] !== message.id) return;
       if (message.preflight) {
-        this.onFrameSignature?.({
-          id: message.id,
-          sourceSequence: message.sourceSequence,
-          signature: message.frameSignature
-        });
+        const info = this.frameSignatureInfos[slot];
+        info.id = message.id;
+        info.sourceSequence = message.sourceSequence;
+        info.signature = message.frameSignature;
+        this.onFrameSignature?.(info);
         return;
       }
       const packedSymbols = this.unpackPackedSymbols(slot, message);
@@ -380,6 +381,7 @@ class DecodeWorkerPool {
       this.packedSymbolPools.pop();
       this.packedSymbolLists.pop();
       this.completions.pop();
+      this.frameSignatureInfos.pop();
     }
     while (this.workers.length < target) {
       const slot = this.workers.length;
@@ -392,6 +394,7 @@ class DecodeWorkerPool {
       this.packedSymbolPools.push([]);
       this.packedSymbolLists.push([]);
       this.completions.push({});
+      this.frameSignatureInfos.push({});
       this.configureWorker(slot, worker);
     }
     if (target > 0) this.ensureWatchdog();
