@@ -86,14 +86,20 @@ const recordCorpusBtn = document.getElementById("record-corpus");
 const loadCorpusBtn = document.getElementById("load-corpus");
 const receiverSettings = document.querySelector(".receiver-settings");
 const receiverDevActions = document.querySelector(".receiver-dev-actions");
+let devToolsPromise;
+function loadDevTools() {
+  if (!devToolsPromise) devToolsPromise = import("./dev-tools.js");
+  return devToolsPromise;
+}
 let receiverDevToolsPromise;
 function loadReceiverDevTools() {
   if (!receiverDevToolsPromise) {
     // auto-phase reads controls created by phase-nudge, so preserve order.
-    // AGCAP is developer/benchmark tooling too; normal receivers never fetch it.
+    // Developer modules are never fetched during normal receiving.
     receiverDevToolsPromise = Promise.all([
       import("./phase-nudge.js").then(() => import("./auto-phase.js")),
-      loadAgcap()
+      loadAgcap(),
+      loadDevTools()
     ]);
   }
   return receiverDevToolsPromise;
@@ -5604,23 +5610,6 @@ async function start() {
   if (activeTrack && !automaticOptics) void reapplyManualOpticsAfterFreshFrames(activeTrack, "camera started");
   await requestScreenWakeLock();
 }
-const CORPUS_DEVICE_NAMES = {
-  "0dc8b7d5f6e84e81cf126349d821a9d948a6db87ea4a810c04a51aec6999401c": "OP5",
-  "5e792630f18c1d6bc5fc26e8ce6d90a27163fd50f32c7631256aa9e7bc7b193e": "OP12R"
-};
-function compactDeviceName(header) {
-  var _a, _b;
-  const id = String((_a = header.cameraSettings.deviceId) != null ? _a : "");
-  return (_b = CORPUS_DEVICE_NAMES[id]) != null ? _b : `D${id.slice(0, 4) || "unk"}`;
-}
-function compactVersionName(version) {
-  return version.replace(/^v?0\./, "v").replace(/^([^v])/, "v$1");
-}
-function compactTimeName(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  const two = (number) => String(number).padStart(2, "0");
-  return `${two(date.getUTCMonth() + 1)}${two(date.getUTCDate())}-${two(date.getUTCHours())}${two(date.getUTCMinutes())}`;
-}
 async function finishCorpusRecording(recorder) {
   if (benchmarkRecorder !== recorder) return;
   benchmarkRecorder = void 0;
@@ -5632,6 +5621,7 @@ async function finishCorpusRecording(recorder) {
     benchmarkCorpus = corpus;
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
+    const { compactDeviceName, compactVersionName, compactTimeName } = await loadDevTools();
     link.download = `cap-${compactDeviceName(header)}-${compactVersionName(header.airgapperVersion)}-${compactTimeName(header.startedAt)}.agcap`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 2e3);
@@ -8103,13 +8093,14 @@ window.__airgapperRunLoadedCorpus = async ({ mode = "performance", productionOnl
 window.__airgapperLoadedCorpusHeader = () => benchmarkCorpus ? structuredClone(benchmarkCorpus.header) : null;
 closeBenchmarkBtn.addEventListener("click", () => benchmarkDialog.close());
 runBenchmarkBtn.addEventListener("click", () => void runReceiverBenchmark());
-saveBenchmarkBtn.addEventListener("click", () => {
+saveBenchmarkBtn.addEventListener("click", async () => {
   var _a;
   if (!benchmarkResult) return;
   const blob = new Blob([JSON.stringify(benchmarkResult, null, 2)], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   const header = benchmarkCorpus == null ? void 0 : benchmarkCorpus.header;
+  const { compactDeviceName, compactVersionName, compactTimeName } = await loadDevTools();
   const device = header ? compactDeviceName(header) : "Dunk";
   const mode = replayMode.value === "maximum" ? "max" : "dp";
   const version = compactVersionName(String((_a = benchmarkResult.version) != null ? _a : "v0"));
@@ -8552,221 +8543,24 @@ misses        ${failures.length}`;
   }
 }
 
-async function fastRegressionImage(url) {
-  const response = await fetch(url);
-  if (!response.ok && !url.startsWith("data:")) throw new Error(`Benchmark image failed: ${response.status}`);
-  const bitmap = await createImageBitmap(await response.blob());
-  try {
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    context.drawImage(bitmap, 0, 0);
-    return context.getImageData(0, 0, canvas.width, canvas.height);
-  } finally {
-    bitmap.close();
-  }
-}
-function fastRegressionResult(result, expectedFrames) {
-  const frames = result?.frames ?? [];
-  const jobs = frames.flatMap((frame) => frame.jobs ?? []);
-  const decoded = frames.flatMap((frame) => frame.decoded ?? []);
-  const unique = new Set(decoded.map((packet) => packet.esi));
-  const slotCounts = {};
-  for (const packet of decoded) {
-    const slot = Number(packet.slot);
-    if (Number.isInteger(slot) && slot >= 0) slotCounts[slot] = (slotCounts[slot] ?? 0) + 1;
-  }
-  const guidedMetrics = jobs.flatMap((job) => job.guidedMetrics ? [job.guidedMetrics] : []);
-  const guidedJobs = guidedMetrics.length;
-  const sumGuided = (key) => guidedMetrics.reduce((sum, metrics) => sum + (Number(metrics[key]) || 0), 0);
-  const guidedTracks = sumGuided("tracks");
-  const guidedOutputs = sumGuided("successful");
-  const moduleWeighted = guidedMetrics.reduce((sum, metrics) => sum + (Number(metrics.moduleSizeAvg) || 0) * (Number(metrics.tracks) || 0), 0);
-  const moduleMins = guidedMetrics.map((metrics) => Number(metrics.moduleSizeMin) || 0).filter((value) => value > 0);
-  const moduleMaxes = guidedMetrics.map((metrics) => Number(metrics.moduleSizeMax) || 0).filter((value) => value > 0);
-  const guided = {
-    jobs: guidedJobs,
-    moduleSizeAvg: guidedTracks ? moduleWeighted / guidedTracks : 0,
-    moduleSizeMin: moduleMins.length ? Math.min(...moduleMins) : 0,
-    moduleSizeMax: moduleMaxes.length ? Math.max(...moduleMaxes) : 0,
-    tracks: guidedTracks,
-    outputs: guidedOutputs,
-    turboAttempts: sumGuided("turboAttempts"),
-    turboSuccesses: sumGuided("turboSuccesses"),
-    stableEligibleTracks: sumGuided("stableEligibleTracks"),
-    stableRsAttempts: sumGuided("stableRsAttempts"),
-    stableRsSuccesses: sumGuided("stableRsSuccesses"),
-    sparseProfileAttempts: sumGuided("sparseProfileAttempts"),
-    sparseProfileSuccesses: sumGuided("sparseProfileSuccesses"),
-    dataOnlyAttempts: sumGuided("sparseNoRsAttempts"),
-    dataOnlySuccesses: sumGuided("sparseNoRsSuccesses"),
-    rsFallbacks: sumGuided("sparseRsFallbacks"),
-    sparseAttempts: sumGuided("fastDecodeAttempts"),
-    sparseSuccesses: sumGuided("fastDecodeSuccesses"),
-    genericFallbackTracks: sumGuided("genericFallbackTracks"),
-    genericFallbackSuccesses: sumGuided("genericFallbackSuccesses"),
-    genericDecodeAttempts: sumGuided("genericDecodeAttempts"),
-    binarizeMs: sumGuided("binarizeMs"),
-    finderMs: sumGuided("finderMs"),
-    sampleMs: sumGuided("sampleMs"),
-    decodeMs: sumGuided("decodeMs"),
-    totalMs: sumGuided("totalMs")
-  };
-  const fullJobs = jobs.filter((job) => job.full).length;
-  const trackedJobs = jobs.length - fullJobs;
-  const decodeErrors = jobs.filter((job) => job.error).map((job) => String(job.error));
-  const lockedStates = new Set(["GRID_LOCK", "TRACK", "PARTIAL_LOSS"]);
-  // stateAfter can be updated asynchronously by a decode job whose source was
-  // captured several frames earlier. Use stateBefore for wall-clock lock
-  // observation; keep acquisition.firstGridLockFrame separately as the source
-  // frame whose decode triggered the transition.
-  const firstLockedStateFrame = frames.findIndex((frame) => lockedStates.has(frame.stateBefore));
-  const stateCounts = {};
-  for (const frame of frames) {
-    const state = frame.stateBefore ?? "unknown";
-    stateCounts[state] = (stateCounts[state] ?? 0) + 1;
-  }
-  const tail = frames.slice(Math.floor(frames.length / 2));
-  const tailJobs = tail.flatMap((frame) => frame.jobs ?? []);
-  const tailFullJobs = tailJobs.filter((job) => job.full).length;
-  const tailTrackedJobs = tailJobs.length - tailFullJobs;
-  const resultObject = {
-    version: result?.version,
-    productionOnly: result?.productionOnly === true,
-    frames: frames.length,
-    expectedFrames,
-    decodedPackets: decoded.length,
-    uniqueSymbols: unique.size,
-    decodedSlots: Object.keys(slotCounts).map(Number).sort((a, b) => a - b),
-    slotCounts,
-    qrPerSecond: result?.throughput?.qrPerSecond ?? 0,
-    uniqueUsefulQrPerSecond: result?.throughput?.uniqueUsefulQrPerSecond ?? 0,
-    verifiedKBPerSecond: result?.throughput?.verifiedKBPerSecond ?? 0,
-    firstProductionFrame: result?.acquisition?.firstProductionFrame,
-    lockTriggerSourceFrame: result?.acquisition?.firstGridLockFrame,
-    firstGridLockFrame: firstLockedStateFrame >= 0 ? (frames[firstLockedStateFrame]?.sequence ?? firstLockedStateFrame) : null,
-    firstLockedStateFrame: firstLockedStateFrame >= 0 ? (frames[firstLockedStateFrame]?.sequence ?? firstLockedStateFrame) : null,
-    stateCounts,
-    finalState: frames.at(-1)?.stateAfter ?? frames.at(-1)?.stateBefore ?? null,
-    transitions: result?.transitions?.length ?? 0,
-    jobs: jobs.length,
-    fullJobs,
-    trackedJobs,
-    guidedJobs,
-    guidedTracks,
-    guidedOutputs,
-    guided,
-    tailFullJobs,
-    tailTrackedJobs,
-    decodeP50Ms: result?.performance?.decodeP50Ms ?? 0,
-    decodeP95Ms: result?.performance?.decodeP95Ms ?? 0,
-    workerBusyPercent: result?.performance?.workerBusyPercent ?? 0,
-    hotPath: result?.hotPath,
-    byKind: result?.performance?.byKind ?? {},
-    decodeErrors
-  };
-  resultObject.checks = {
-    productionOnly: resultObject.productionOnly,
-    allFramesReplayed: resultObject.frames === expectedFrames,
-    decodedSomething: resultObject.decodedPackets > 0,
-    discoveredLayout: resultObject.firstProductionFrame !== null && resultObject.firstProductionFrame !== void 0,
-    scheduledWork: resultObject.jobs > 0,
-    noDecodeErrors: resultObject.decodeErrors.length === 0,
-    oracleSkipped: result?.performance?.oracleP50Ms === null
-  };
-  resultObject.ok = Object.values(resultObject.checks).every(Boolean);
-  return resultObject;
-}
-function fastRegressionI420(image) {
-  const width = image.width;
-  const height = image.height;
-  if (width & 1 || height & 1) throw new Error("I420 fast regression requires even image dimensions");
-  const yBytes = width * height;
-  const uvBytes = (width >> 1) * (height >> 1);
-  const out = new Uint8Array(yBytes + uvBytes * 2);
-  const rgba = image.data;
-  // Integer BT.601-ish luminance. The fixture is an emissive black/white QR
-  // wall, but using real RGB weights keeps this transport valid for future
-  // colored/photographic regression frames too.
-  for (let pixel = 0, src = 0; pixel < yBytes; pixel++, src += 4)
-    out[pixel] = (77 * rgba[src] + 150 * rgba[src + 1] + 29 * rgba[src + 2] + 128) >> 8;
-  out.fill(128, yBytes); // neutral chroma; the receiver consumes plane 0 only
-  return out;
-}
-window.__airgapperRunFastRegression = async ({ urls, order, repeats = 1, fps = 30, mode = "performance", cameraPath = false }) => {
-  if (!Array.isArray(urls) || !urls.length) throw new Error("Fast regression needs images");
-  const { AgcapCorpus } = await loadAgcap();
-  const images = [];
-  for (const url of urls) images.push(await fastRegressionImage(url));
-  const width = images[0].width;
-  const height = images[0].height;
-  if (images.some((image) => image.width !== width || image.height !== height))
-    throw new Error("Fast regression images must have matching dimensions");
-  let frameOrder;
-  if (Array.isArray(order) && order.length) {
-    frameOrder = order.map((index) => {
-      if (!Number.isInteger(index) || index < 0 || index >= images.length) throw new Error(`Invalid fast regression frame index ${index}`);
-      return index;
-    });
-  } else {
-    frameOrder = [];
-    for (let repeat = 0; repeat < Math.max(1, repeats); repeat++)
-      for (let index = 0; index < images.length; index++) frameOrder.push(index);
-  }
-  const frameMs = 1000 / Math.max(1, fps);
-  const records = [];
-  for (let sequence = 0; sequence < frameOrder.length; sequence++) {
-    const image = images[frameOrder[sequence]];
-    const at = sequence * frameMs;
-    records.push({
-      meta: {
-        sequence,
-        width,
-        height,
-        stride: width * 4,
-        callbackTimeMs: at,
-        mediaTimeMs: at,
-        presentationTimeMs: at,
-        expectedDisplayTimeMs: at
-      },
-      pixels: new Uint8ClampedArray(image.data)
-    });
-  }
-  fastRegressionCameraFrames = cameraPath
-    ? (() => {
-        const i420 = images.map(fastRegressionI420);
-        return frameOrder.map((index) => i420[index]);
-      })()
-    : void 0;
-  benchmarkCorpus = AgcapCorpus.fromRecords({
-    format: "AirGapper fast production regression corpus",
-    formatVersion: 4,
-    pixelFormat: "RGBA8888",
-    compression: "raw",
-    width,
-    height,
-    stride: width * 4,
-    framesStored: records.length,
-    recorderDrops: 0,
-    estimatedCameraDrops: 0,
-    cameraSettings: { width, height, frameRate: fps },
-    startedAt: `fast-${width}x${height}-${images.length}-${records.length}`
-  }, records);
-  benchmarkPendingBlob = void 0;
-  replayMode.value = mode;
-  try {
-    await runReceiverBenchmark({ productionOnly: true });
-  } finally {
-    fastRegressionCameraFrames = void 0;
-  }
-  if (!benchmarkResult) throw new Error(benchmarkStatus.textContent || "Fast regression failed to produce a result");
-  const summary = fastRegressionResult(benchmarkResult, records.length);
-  if (!summary.ok) {
-    const failed = Object.entries(summary.checks).filter(([, ok]) => !ok).map(([name]) => name).join(", ");
-    throw new Error(`Fast regression invariant failed: ${failed} · ${JSON.stringify(summary)}`);
-  }
-  return summary;
+window.__airgapperRunFastRegression = async (options) => {
+  const { runFastRegression } = await loadDevTools();
+  return runFastRegression(options, {
+    loadAgcap,
+    run: async ({ corpus, cameraFrames, mode }) => {
+      benchmarkCorpus = corpus;
+      benchmarkPendingBlob = void 0;
+      fastRegressionCameraFrames = cameraFrames;
+      replayMode.value = mode;
+      try {
+        await runReceiverBenchmark({ productionOnly: true });
+      } finally {
+        fastRegressionCameraFrames = void 0;
+      }
+      if (!benchmarkResult) throw new Error(benchmarkStatus.textContent || "Fast regression failed to produce a result");
+      return benchmarkResult;
+    }
+  });
 };
 
 function updateStats(forceDiagnostics = false) {
