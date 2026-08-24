@@ -14,23 +14,17 @@ const gutterLabel = document.createElement("label");
 gutterLabel.style.cssText = "display:grid;grid-template-columns:1fr auto;gap:4px 10px;align-items:center;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em";
 const gutterName = document.createElement("span");
 gutterName.textContent = "Side gutter";
-const gutterValue = document.createElement("span");
-gutterValue.style.cssText = "color:var(--muted);font-size:10px;font-weight:500;letter-spacing:0;text-transform:none";
-const gutter = document.createElement("input");
-gutter.type = "range";
-gutter.min = "0";
-gutter.max = "96";
-gutter.step = "4";
-gutter.value = "0";
+const gutter = document.createElement("select");
+gutter.id = "cfg-side-gutter";
 gutter.setAttribute("aria-label", "Side gutter for curved displays");
-gutter.style.cssText = "grid-column:1/-1;width:100%;margin:2px 0 0";
-gutterLabel.append(gutterName, gutterValue, gutter);
+for (let px = 0; px <= 6; px++) gutter.add(new Option(`${px} px`, String(px)));
+gutterLabel.append(gutterName, gutter);
 sendDevActions.append(gutterLabel);
 sendSettingsPanel?.append(sendDevActions);
 
 function clampGutter(value) {
   const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.min(96, Math.round(number / 4) * 4)) : 0;
+  return Number.isFinite(number) ? Math.max(0, Math.min(6, Math.round(number))) : 0;
 }
 
 let sideGutter = 0;
@@ -65,7 +59,6 @@ if (viewport) {
 
 let resizeQueued = false;
 function applyGutter() {
-  gutterValue.textContent = `${sideGutter} px / side`;
   if (stage) stage.style.paddingInline = sideGutter ? `${sideGutter}px` : "";
   if (resizeQueued) return;
   resizeQueued = true;
@@ -76,13 +69,11 @@ function applyGutter() {
 }
 applyGutter();
 
-gutter.addEventListener("input", () => {
+gutter.addEventListener("change", () => {
   sideGutter = clampGutter(gutter.value);
   gutter.value = String(sideGutter);
-  applyGutter();
-});
-gutter.addEventListener("change", () => {
   try { localStorage.setItem(SIDE_GUTTER_KEY, String(sideGutter)); } catch {}
+  applyGutter();
 });
 
 const toggleTimes = [];
