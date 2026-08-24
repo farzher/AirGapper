@@ -31,7 +31,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 2
+
+      - name: Apply v0.5.418 temporal camera cadence
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Fq 'APP_VERSION = "0.5.418"' version.js && grep -Fq 'const sequence = sourceFrameSequence++;' receive/runtime.js; then
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("receive/runtime.js")
+          text = p.read_text()
+          old_decl = "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet benchmarkTraces = [];"
+          new_decl = "let benchmarkRecorder;\nlet sourceFrameSequence = 0;\nlet sourceFrameCameraTimestampUs = NaN;\nlet benchmarkTraces = [];"
+          if text.count(old_decl) != 1:
+              raise SystemExit(f"runtime declaration match count {text.count(old_decl)}")
+          text = text.replace(old_decl, new_decl, 1)
+
+          old_seq = "  const sequence = sourceFrameSequence++;\n  latestSourceFrameSequence = sequence;"
+          new_seq = '''  // TrackProcessor may discard sensor frames before JS sees them. Preserve that\n  // elapsed camera cadence in sourceSequence so rolling-shutter band velocity,\n  // exposure settling and temporal fences advance by real sensor frames rather\n  // than pretending every delivered VideoFrame was consecutive.\n  let sequenceStep = 1;\n  if (videoFrame && Number.isFinite(timestamp)) {\n    const cameraFps = Number(stream?.getVideoTracks?.()[0]?.getSettings?.().frameRate) || 0;\n    if (Number.isFinite(sourceFrameCameraTimestampUs) && timestamp > sourceFrameCameraTimestampUs && cameraFps > 0) {\n      const elapsedFrames = (timestamp - sourceFrameCameraTimestampUs) * cameraFps / 1e6;\n      if (Number.isFinite(elapsedFrames) && elapsedFrames > 1.5)\n        sequenceStep = Math.max(1, Math.min(8, Math.round(elapsedFrames)));\n    }\n    sourceFrameCameraTimestampUs = timestamp;\n  } else {\n    // rVFC has no transferable VideoFrame timestamp. Do not let a later\n    // TrackProcessor recovery compare against a stale timestamp from before the\n    // fallback interval.\n    sourceFrameCameraTimestampUs = NaN;\n  }\n  const sequence = sourceFrameSequence;\n  sourceFrameSequence += sequenceStep;\n  latestSourceFrameSequence = sequence;'''
+          if text.count(old_seq) != 1:
+              raise SystemExit(f"runtime sequence match count {text.count(old_seq)}")
+          p.write_text(text.replace(old_seq, new_seq, 1))
+          PY
+
+            git show b0702d551286df0014d10222c707b6d30ef130bf:.github/workflows/build-apk.yml > .github/workflows/build-apk.yml
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add receive/runtime.js .github/workflows/build-apk.yml
+            git commit -m "v0.5.418: track real camera cadence"
+            git push origin HEAD:master
+            exit 0
+          fi
 
       - name: Read app version
         id: version
