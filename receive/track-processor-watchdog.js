@@ -1,9 +1,9 @@
 // Low-allocation MediaStreamTrackProcessor stall guard.
 //
-// The previous guard created a fresh setTimeout for every reader.read(). At
-// camera cadence that meant 30-60 native timer allocations/clears per second on
-// top of the unavoidable read Promise. A reader can only have one outstanding
-// read in AirGapper, so one coarse watchdog per reader is enough.
+// A reader can only have one outstanding read in AirGapper, so one coarse
+// watchdog per reader is enough. The guard tracks that one native read with a
+// generation token and returns its .then() chain directly; there is no extra
+// manually-constructed Promise at camera cadence.
 
 const TRACK_PROCESSOR_STALL_MS = 900;
 const TRACK_PROCESSOR_WATCHDOG_MS = 200;
@@ -27,34 +27,34 @@ function installTrackProcessorWatchdog() {
 
   const guardedReader = (nativeReader) => {
     let generation = 0;
-    let pendingReject = null;
+    let pending = false;
     let pendingSince = 0;
     let closed = false;
+    let terminalError = null;
 
-    const clearPending = () => {
-      pendingReject = null;
+    const clearPending = (token) => {
+      if (token !== generation) return;
+      pending = false;
       pendingSince = 0;
     };
 
-    const rejectPending = (error) => {
-      const reject = pendingReject;
-      if (!reject) return false;
+    const invalidatePending = (error) => {
+      terminalError = error;
       ++generation;
-      clearPending();
-      reject(error);
-      return true;
+      pending = false;
+      pendingSince = 0;
     };
 
     // One reader-wide timer replaces one timeout per camera frame. 200 ms
     // granularity is immaterial against a 900 ms genuine-stall threshold.
     const watchdog = setInterval(() => {
-      if (closed || !pendingReject || !pendingSince ||
+      if (closed || !pending || !pendingSince ||
           performance.now() - pendingSince < TRACK_PROCESSOR_STALL_MS) return;
       closed = true;
       const error = stallError();
-      rejectPending(error);
-      // Cancel the native pending read too. If it resolves late, the generation
-      // check below closes the returned VideoFrame instead of leaking it.
+      invalidatePending(error);
+      // Cancel settles the native read. Its derived promise below turns any
+      // late frame into the same AbortError and closes that frame first.
       void nativeReader.cancel(error).catch(() => void 0).finally(() => {
         clearInterval(watchdog);
         try { nativeReader.releaseLock(); } catch {}
@@ -63,43 +63,47 @@ function installTrackProcessorWatchdog() {
 
     return {
       read() {
-        if (closed) return Promise.reject(cancelError());
+        if (closed) return Promise.reject(terminalError ?? cancelError());
         const token = ++generation;
+        pending = true;
         pendingSince = performance.now();
-        return new Promise((resolve, reject) => {
-          pendingReject = reject;
-          let nativeRead;
-          try {
-            nativeRead = nativeReader.read();
-          } catch (error) {
-            if (token === generation) clearPending();
-            reject(error);
-            return;
+        let nativeRead;
+        try {
+          nativeRead = nativeReader.read();
+        } catch (error) {
+          clearPending(token);
+          return Promise.reject(error);
+        }
+        // Returning this chain directly removes the old outer new Promise().
+        // The native read plus this one derived promise are the minimum needed
+        // to close/reject a frame that resolves after watchdog cancellation.
+        return nativeRead.then((value) => {
+          if (token !== generation || closed) {
+            value?.value?.close?.();
+            throw terminalError ?? cancelError();
           }
-          nativeRead.then((value) => {
-            if (token !== generation || pendingReject !== reject) {
-              value?.value?.close?.();
-              return;
-            }
-            clearPending();
-            resolve(value);
-          }, (error) => {
-            if (token !== generation || pendingReject !== reject) return;
-            clearPending();
-            reject(error);
-          });
+          clearPending(token);
+          return value;
+        }, (error) => {
+          if (token === generation) clearPending(token);
+          if (token !== generation && terminalError) throw terminalError;
+          throw error;
         });
       },
       cancel(reason) {
-        closed = true;
+        if (!closed) {
+          closed = true;
+          invalidatePending(cancelError(reason));
+        }
         clearInterval(watchdog);
-        rejectPending(cancelError(reason));
         return nativeReader.cancel(reason);
       },
       releaseLock() {
-        closed = true;
+        if (!closed) {
+          closed = true;
+          invalidatePending(cancelError());
+        }
         clearInterval(watchdog);
-        rejectPending(cancelError());
         try { nativeReader.releaseLock(); } catch {}
       }
     };
