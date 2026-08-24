@@ -14,6 +14,7 @@ const nativePostMessage = self.postMessage.bind(self);
 const PACKED_TRACK_BYTES = 56;
 const PACKED_TRACK_WORDS = PACKED_TRACK_BYTES >> 2;
 const PACKED_SYMBOL_BYTES = 88;
+const PACKED_SYMBOL_WORDS = PACKED_SYMBOL_BYTES >> 2;
 const GEOMETRY_REPORTS_PER_FRAME = 4;
 const MAX_GEOMETRY_SYMBOLS = 128;
 const trackPool = [];
@@ -145,51 +146,55 @@ function packLiveGuidedSymbols(message, transfer) {
     ? activePackedSymbolScratch
     : new ArrayBuffer(requiredBytes);
   if (meta === activePackedSymbolScratch) activePackedSymbolScratch = null;
-  const view = new DataView(meta);
+  // 88 bytes is exactly 22 aligned 32-bit words. Keep the same wire size while
+  // replacing dozens of DataView getter/setter calls per QR with direct typed
+  // array indexing. Words 0-9 are integer metadata; 10-21 are optional geometry.
+  const u32 = new Uint32Array(meta);
+  const f32 = new Float32Array(meta);
   let wallMotion;
   for (let index = 0; index < symbols.length; index++) {
     const symbol = symbols[index];
     const header = symbol.header;
-    const base = index * PACKED_SYMBOL_BYTES;
+    const base = index * PACKED_SYMBOL_WORDS;
     const measured = symbol.geometryMeasured !== false && validQuad(symbol.quad);
     let flags = Number(Boolean(symbol.tracked));
     flags |= Number(measured) << 1;
     flags |= Number(Boolean(symbol.crc32)) << 2;
     flags |= Number(Boolean(symbol.verifiedPayload)) << 3;
     flags |= Number(Boolean(header.extendedGrid)) << 4;
+    const path = decodePathCode(symbol.decodePath) & 255;
+    const mode = modeCode(header.mode) & 255;
+    const layout = Math.max(0, Math.trunc(Number(header.layoutId) || 0)) & 255;
+    const gridCols = Math.max(0, Math.trunc(Number(header.gridCols) || 0)) & 255;
+    const gridRows = Math.max(0, Math.trunc(Number(header.gridRows) || 0)) & 255;
+    const slot = Math.max(0, Math.trunc(Number(header.slotIndex) || 0)) & 0xffff;
 
-    view.setUint32(base, symbol.bytes.byteOffset, true);
-    view.setUint32(base + 4, symbol.bytes.byteLength, true);
-    view.setUint16(base + 8, Math.max(0, Math.trunc(Number(symbol.modules) || 0)), true);
-    view.setUint8(base + 10, flags);
-    view.setUint8(base + 11, decodePathCode(symbol.decodePath));
-    view.setUint8(base + 12, modeCode(header.mode));
-    view.setUint8(base + 13, Math.max(0, Math.trunc(Number(header.layoutId) || 0)));
-    view.setUint8(base + 14, Math.max(0, Math.trunc(Number(header.gridCols) || 0)));
-    view.setUint8(base + 15, Math.max(0, Math.trunc(Number(header.gridRows) || 0)));
-    view.setUint16(base + 16, Math.max(0, Math.trunc(Number(header.slotIndex) || 0)), true);
-    view.setUint16(base + 18, 0, true);
-    view.setUint32(base + 20, Number(header.seq) >>> 0, true);
-    view.setUint32(base + 24, Number(header.k) >>> 0, true);
-    view.setUint32(base + 28, Number(header.blockLen) >>> 0, true);
-    view.setUint32(base + 32, Number(header.totalLen) >>> 0, true);
-    view.setUint32(base + 36, Number(header.payloadId) >>> 0, true);
+    u32[base] = symbol.bytes.byteOffset >>> 0;
+    u32[base + 1] = symbol.bytes.byteLength >>> 0;
+    u32[base + 2] = Math.max(0, Math.trunc(Number(symbol.modules) || 0)) >>> 0;
+    u32[base + 3] = (flags | (path << 8) | (mode << 16) | (layout << 24)) >>> 0;
+    u32[base + 4] = (gridCols | (gridRows << 8) | (slot << 16)) >>> 0;
+    u32[base + 5] = Number(header.seq) >>> 0;
+    u32[base + 6] = Number(header.k) >>> 0;
+    u32[base + 7] = Number(header.blockLen) >>> 0;
+    u32[base + 8] = Number(header.totalLen) >>> 0;
+    u32[base + 9] = Number(header.payloadId) >>> 0;
 
     if (measured) {
       const box = symbol.box;
       const quad = symbol.quad;
-      view.setFloat32(base + 40, Number(box?.x) || 0, true);
-      view.setFloat32(base + 44, Number(box?.y) || 0, true);
-      view.setFloat32(base + 48, Number(box?.w) || 0, true);
-      view.setFloat32(base + 52, Number(box?.h) || 0, true);
-      view.setFloat32(base + 56, quad.topLeft.x, true);
-      view.setFloat32(base + 60, quad.topLeft.y, true);
-      view.setFloat32(base + 64, quad.topRight.x, true);
-      view.setFloat32(base + 68, quad.topRight.y, true);
-      view.setFloat32(base + 72, quad.bottomRight.x, true);
-      view.setFloat32(base + 76, quad.bottomRight.y, true);
-      view.setFloat32(base + 80, quad.bottomLeft.x, true);
-      view.setFloat32(base + 84, quad.bottomLeft.y, true);
+      f32[base + 10] = Number(box?.x) || 0;
+      f32[base + 11] = Number(box?.y) || 0;
+      f32[base + 12] = Number(box?.w) || 0;
+      f32[base + 13] = Number(box?.h) || 0;
+      f32[base + 14] = quad.topLeft.x;
+      f32[base + 15] = quad.topLeft.y;
+      f32[base + 16] = quad.topRight.x;
+      f32[base + 17] = quad.topRight.y;
+      f32[base + 18] = quad.bottomRight.x;
+      f32[base + 19] = quad.bottomRight.y;
+      f32[base + 20] = quad.bottomLeft.x;
+      f32[base + 21] = quad.bottomLeft.y;
     }
     if (!wallMotion && symbol.wallMotion) wallMotion = symbol.wallMotion;
   }
