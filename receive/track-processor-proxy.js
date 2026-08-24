@@ -24,7 +24,8 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
       this._readerTaken = false;
       this._closed = false;
       this._terminalError = null;
-      this._pending = null;
+      this._pendingResolve = null;
+      this._pendingReject = null;
       this._totalFrames = 0;
       this._discardedFrames = 0;
       this._terminateTimer = 0;
@@ -75,13 +76,17 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
           if (released) return Promise.reject(new TypeError("Reader lock released"));
           if (this._terminalError) return Promise.reject(this._terminalError);
           if (this._closed) return Promise.resolve({ value: undefined, done: true });
-          if (this._pending) return Promise.reject(new TypeError("Concurrent TrackProcessor reads are unsupported"));
+          if (this._pendingResolve) return Promise.reject(new TypeError("Concurrent TrackProcessor reads are unsupported"));
           return new Promise((resolve, reject) => {
-            this._pending = { resolve, reject };
+            this._pendingResolve = resolve;
+            this._pendingReject = reject;
             try {
-              this._worker.postMessage({ type: "pull" });
+              // A string avoids allocating/cloning a one-property command object
+              // for every camera frame.
+              this._worker.postMessage("pull");
             } catch (error) {
-              this._pending = null;
+              this._pendingResolve = null;
+              this._pendingReject = null;
               reject(error);
             }
           });
@@ -114,13 +119,14 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
       this._updateCounters(message);
       if (message.type === "frame") {
         const frame = message.frame;
-        if (this._closed || this._terminalError || !this._pending) {
+        const resolve = this._pendingResolve;
+        if (this._closed || this._terminalError || !resolve) {
           frame?.close?.();
           return;
         }
-        const pending = this._pending;
-        this._pending = null;
-        pending.resolve({ value: frame, done: false });
+        this._pendingResolve = null;
+        this._pendingReject = null;
+        resolve({ value: frame, done: false });
         return;
       }
       if (message.type === "unsupported") {
@@ -133,11 +139,10 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
       }
       if (message.type === "stopped") {
         this._closed = true;
-        if (this._pending) {
-          const pending = this._pending;
-          this._pending = null;
-          pending.resolve({ value: undefined, done: true });
-        }
+        const resolve = this._pendingResolve;
+        this._pendingResolve = null;
+        this._pendingReject = null;
+        if (resolve) resolve({ value: undefined, done: true });
         this._terminateNow();
       }
     }
@@ -145,22 +150,23 @@ if (typeof globalThis.MediaStreamTrackProcessor !== "function" &&
     _fail(error) {
       if (this._terminalError || this._closed) return;
       this._terminalError = error;
-      if (this._pending) {
-        const pending = this._pending;
-        this._pending = null;
-        pending.reject(error);
-      }
+      const reject = this._pendingReject;
+      this._pendingResolve = null;
+      this._pendingReject = null;
+      if (reject) reject(error);
       void this._shutdown(error);
     }
 
     _shutdown(reason) {
       if (this._closed) return Promise.resolve();
       this._closed = true;
-      if (this._pending) {
-        const pending = this._pending;
-        this._pending = null;
-        if (reason instanceof Error) pending.reject(reason);
-        else pending.resolve({ value: undefined, done: true });
+      const resolve = this._pendingResolve;
+      const reject = this._pendingReject;
+      this._pendingResolve = null;
+      this._pendingReject = null;
+      if (reject || resolve) {
+        if (reason instanceof Error) reject?.(reason);
+        else resolve?.({ value: undefined, done: true });
       }
       try { this._worker.postMessage({ type: "stop" }); } catch {}
       // Give the worker a chance to stop its transferred track explicitly. A
