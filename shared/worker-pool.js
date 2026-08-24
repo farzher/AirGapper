@@ -2,6 +2,7 @@ const TRACKED_JOB_TIMEOUT_MS = 2200;
 const RECOVERY_JOB_TIMEOUT_MS = 6500;
 const ACQUISITION_JOB_TIMEOUT_MS = 9000;
 const WORKER_WATCHDOG_MS = 250;
+const PACKED_SYMBOL_BYTES = 88;
 let receiveVideo;
 
 function workerJobTimeout(message) {
@@ -20,6 +21,14 @@ function addTransfer(transfer, value) {
   const list = Array.isArray(transfer) ? transfer : [];
   if (value && !list.includes(value)) list.push(value);
   return list;
+}
+
+function packedMode(code) {
+  return code === 0 ? "direct" : code === 1 ? "mds" : code === 2 ? "raptorq" : "";
+}
+
+function packedDecodePath(code) {
+  return code === 3 ? "fallback" : code === 2 ? "sparse" : code === 4 ? "robust" : "hot";
 }
 
 /** Safari/iOS currently reaches Receive through requestVideoFrameCallback +
@@ -71,6 +80,8 @@ class DecodeWorkerPool {
     // instead of allocating one metadata object per QR. Optimizer-attributed jobs
     // use a dedicated object because runtime may intentionally retain it.
     this.decodeInfo = {};
+    this.packedSymbolPools = [];
+    this.packedSymbolLists = [];
   }
   get size() {
     return this.workers.length;
@@ -152,6 +163,79 @@ class DecodeWorkerPool {
     this.workers[slot] = replacement;
     this.configureWorker(slot, replacement);
   }
+  packedSymbol(slot, index) {
+    let pool = this.packedSymbolPools[slot];
+    if (!pool) pool = this.packedSymbolPools[slot] = [];
+    let symbol = pool[index];
+    if (!symbol) {
+      symbol = { header: {} };
+      pool[index] = symbol;
+    }
+    return symbol;
+  }
+  unpackPackedSymbols(slot, message) {
+    const meta = message.__airgapperPackedSymbolMeta;
+    const payload = message.__airgapperPackedSymbolPayload;
+    const count = Math.trunc(Number(message.__airgapperPackedSymbolCount) || 0);
+    if (!(meta instanceof ArrayBuffer) || !(payload instanceof ArrayBuffer) || count <= 0 ||
+        meta.byteLength < count * PACKED_SYMBOL_BYTES) return null;
+    let list = this.packedSymbolLists[slot];
+    if (!list) list = this.packedSymbolLists[slot] = [];
+    list.length = count;
+    const view = new DataView(meta);
+    for (let index = 0; index < count; index++) {
+      const base = index * PACKED_SYMBOL_BYTES;
+      const byteOffset = view.getUint32(base, true);
+      const byteLength = view.getUint32(base + 4, true);
+      if (byteLength <= 0 || byteOffset + byteLength > payload.byteLength) return null;
+      const symbol = this.packedSymbol(slot, index);
+      const flags = view.getUint8(base + 10);
+      const header = symbol.header;
+      header.mode = packedMode(view.getUint8(base + 12));
+      header.seq = view.getUint32(base + 20, true);
+      header.layoutId = view.getUint8(base + 13);
+      header.extendedGrid = Boolean(flags & 16);
+      header.gridCols = view.getUint8(base + 14);
+      header.gridRows = view.getUint8(base + 15);
+      header.slotIndex = view.getUint16(base + 16, true);
+      header.k = view.getUint32(base + 24, true);
+      header.blockLen = view.getUint32(base + 28, true);
+      header.totalLen = view.getUint32(base + 32, true);
+      header.payloadId = view.getUint32(base + 36, true);
+      symbol.bytes = new Uint8Array(payload, byteOffset, byteLength);
+      symbol.modules = view.getUint16(base + 8, true);
+      symbol.tracked = Boolean(flags & 1);
+      symbol.geometryMeasured = Boolean(flags & 2);
+      symbol.crc32 = Boolean(flags & 4);
+      symbol.verifiedPayload = Boolean(flags & 8);
+      symbol.decodePath = packedDecodePath(view.getUint8(base + 11));
+      // Motion is coherent whole-wall evidence; onDecoded consumes at most the
+      // first source-sequence report. Carry one object per frame, not per QR.
+      symbol.wallMotion = index === 0 ? message.__airgapperPackedWallMotion : undefined;
+      if (symbol.geometryMeasured) {
+        // Measured geometry can be retained by GridLattice observations, so
+        // these <=4 records deliberately receive fresh point/quad objects. The
+        // remaining payload-only QRs allocate none of this geometry graph.
+        symbol.box = {
+          x: view.getFloat32(base + 40, true),
+          y: view.getFloat32(base + 44, true),
+          w: view.getFloat32(base + 48, true),
+          h: view.getFloat32(base + 52, true)
+        };
+        symbol.quad = {
+          topLeft: { x: view.getFloat32(base + 56, true), y: view.getFloat32(base + 60, true) },
+          topRight: { x: view.getFloat32(base + 64, true), y: view.getFloat32(base + 68, true) },
+          bottomRight: { x: view.getFloat32(base + 72, true), y: view.getFloat32(base + 76, true) },
+          bottomLeft: { x: view.getFloat32(base + 80, true), y: view.getFloat32(base + 84, true) }
+        };
+      } else {
+        symbol.box = undefined;
+        symbol.quad = undefined;
+      }
+      list[index] = symbol;
+    }
+    return list;
+  }
   configureWorker(slot, worker) {
     worker.onmessage = (event) => {
       if (this.workers[slot] !== worker) return;
@@ -166,7 +250,8 @@ class DecodeWorkerPool {
         });
         return;
       }
-      const symbols = message.symbols ?? [];
+      const packedSymbols = this.unpackPackedSymbols(slot, message);
+      const symbols = packedSymbols ?? message.symbols ?? [];
       const sightings = message.sightings ?? [];
       const jobMeta = this.activeMeta[slot];
       this.busy[slot] = false;
@@ -202,7 +287,7 @@ class DecodeWorkerPool {
         repeatDistance: Number(message.repeatDistance),
         symbols,
         sightings,
-        error: message.error
+        error: message.error ?? (message.__airgapperPackedSymbolMeta && !packedSymbols ? "Packed worker result was invalid" : undefined)
       };
       try {
         if (message.trackedAttempted) this.onTrackedAttempt?.();
@@ -273,6 +358,8 @@ class DecodeWorkerPool {
       this.activeIds.pop();
       this.activeFull.pop();
       this.activeMeta.pop();
+      this.packedSymbolPools.pop();
+      this.packedSymbolLists.pop();
     }
     while (this.workers.length < target) {
       const slot = this.workers.length;
@@ -282,6 +369,8 @@ class DecodeWorkerPool {
       this.activeIds.push(void 0);
       this.activeFull.push(false);
       this.activeMeta.push(null);
+      this.packedSymbolPools.push([]);
+      this.packedSymbolLists.push([]);
       this.configureWorker(slot, worker);
     }
     if (target > 0) this.ensureWatchdog();
