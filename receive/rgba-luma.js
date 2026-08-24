@@ -18,12 +18,11 @@ function greenByte(word) {
 }
 
 function compactRgbaGreenInPlace(buffer, pixelCount) {
-  if (!(buffer instanceof ArrayBuffer)) return null;
+  if (!(buffer instanceof ArrayBuffer)) return false;
   const count = Math.max(0, Math.trunc(Number(pixelCount) || 0));
-  if (!count || buffer.byteLength < count * 4) return null;
+  if (!count || buffer.byteLength < count * 4) return false;
 
   const words = new Uint32Array(buffer, 0, count);
-  const bytes = new Uint8Array(buffer);
   const groups = count >> 2;
   for (let group = 0; group < groups; group++) {
     const source = group << 2;
@@ -38,12 +37,16 @@ function compactRgbaGreenInPlace(buffer, pixelCount) {
       : (g0 << 24 | g1 << 16 | g2 << 8 | g3) >>> 0;
   }
 
-  // At most three pixels remain. Their source words are still far ahead of the
-  // compact destination bytes, so scalar cleanup preserves the same overlap rule.
-  for (let pixel = groups << 2; pixel < count; pixel++) {
-    bytes[pixel] = greenByte(words[pixel]);
+  // At most three pixels remain. Typical camera resolutions are divisible by
+  // four, so avoid even constructing a byte view unless scalar cleanup exists.
+  const packedPixels = groups << 2;
+  if (packedPixels < count) {
+    const bytes = new Uint8Array(buffer);
+    for (let pixel = packedPixels; pixel < count; pixel++) {
+      bytes[pixel] = greenByte(words[pixel]);
+    }
   }
-  return bytes.subarray(0, count);
+  return true;
 }
 
 export { compactRgbaGreenInPlace };
