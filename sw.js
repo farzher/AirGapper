@@ -14,6 +14,7 @@
     "./receive/auto-phase-policy.js",
     "./receive/auto-phase.js",
     "./receive/camera-constraints.js",
+    "./receive/camera-ui.js",
     "./receive/dev-tools.js",
     "./receive/focus-controller.js",
     "./receive/grid-lattice.js",

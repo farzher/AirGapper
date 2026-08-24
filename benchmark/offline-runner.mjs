@@ -365,11 +365,11 @@ function assertScenario(name, result) {
     if (result.decodeP95Ms > 420) failures.push(`camera-dense p95 ${result.decodeP95Ms.toFixed(1)}ms > 420ms`);
   }
     // Keep a short buffered-path guard because corpus replay and non-TrackProcessor
-  // inputs are real product paths too. Geometry-aware native decode should win
+  // inputs are real product paths too. Geometry-aware direct decode should win
   // decisively before generic recovery on this clean stable wall.
   if (name === "buffered-rgba") {
-    if ((result.hotPath?.nativeTracks ?? 0) < 80) failures.push("buffered path did not exercise native tracked decode");
-    if ((result.hotPath?.crcFastPercent ?? 0) < 80) failures.push(`buffered native CRC yield ${(result.hotPath?.crcFastPercent ?? 0).toFixed(1)}% < 80%`);
+    if ((result.hotPath?.directTracks ?? 0) < 80) failures.push("buffered path did not exercise direct tracked decode");
+    if ((result.hotPath?.crcFastPercent ?? 0) < 80) failures.push(`buffered direct CRC yield ${(result.hotPath?.crcFastPercent ?? 0).toFixed(1)}% < 80%`);
     if ((result.hotPath?.localRecoveryAttempts ?? 0) > 4) failures.push(`buffered path used ${result.hotPath.localRecoveryAttempts} local recoveries (>4)`);
   }
   if (failures.length) throw new Error(`${name}: ${failures.join("; ")} · ${JSON.stringify(result)}`);

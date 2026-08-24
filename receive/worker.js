@@ -38,13 +38,13 @@ function inputBuffer(zx, bytes) {
   inputCapacity = bytes;
   return inputPtr;
 }
-const NATIVE_BATCH_MAX_TRACKS = 32;
+const DIRECT_BATCH_MAX_TRACKS = 32;
 const GUIDED_BATCH_MAX_TRACKS = 128;
 const ROBUST_BATCH_MAX_RESULTS = 8;
-const NATIVE_TRACK_RESULT_BYTES = 32;
-const NATIVE_BATCH_METRICS_BYTES = 128;
-const NATIVE_BATCH_OUTPUT_BYTES = 128 * 1024;
-const NATIVE_TRACK_OK = 1;
+const DIRECT_TRACK_RESULT_BYTES = 32;
+const DIRECT_BATCH_METRICS_BYTES = 128;
+const DIRECT_BATCH_OUTPUT_BYTES = 128 * 1024;
+const DIRECT_TRACK_OK = 1;
 const GUIDED_TRACK_PREDICTED = 3;
 const GUIDED_TRACK_BYTES = 40;
 const GUIDED_RESULT_BYTES = 52;
@@ -54,14 +54,14 @@ let guidedTracksPtr = 0;
 let guidedResultsPtr = 0;
 let guidedMetricsPtr = 0;
 let guidedOutputPtr = 0;
-let nativeBatchHandle = 0;
-let nativeResultsPtr = 0;
-let nativeOutputPtr = 0;
-let nativeMetricsPtr = 0;
-let nativeConfigured = [];
-let nativeCropX = NaN;
-let nativeCropY = NaN;
-const nativeRefresh = /* @__PURE__ */ new Set();
+let directBatchHandle = 0;
+let directResultsPtr = 0;
+let directOutputPtr = 0;
+let directMetricsPtr = 0;
+let directConfigured = [];
+let directCropX = NaN;
+let directCropY = NaN;
+const directRefresh = /* @__PURE__ */ new Set();
 function ensureGuidedBatch(zx) {
   if (!guidedTracksPtr) guidedTracksPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_TRACK_BYTES);
   if (!guidedResultsPtr) guidedResultsPtr = zx._malloc(GUIDED_BATCH_MAX_TRACKS * GUIDED_RESULT_BYTES);
@@ -197,7 +197,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   for (let i = 0; i < count; i++) {
     const base = i * GUIDED_RESULT_BYTES;
     const status = view.getInt32(base + 4, true);
-    if (status !== NATIVE_TRACK_OK && status !== GUIDED_TRACK_PREDICTED) continue;
+    if (status !== DIRECT_TRACK_OK && status !== GUIDED_TRACK_PREDICTED) continue;
     const outputOffset = view.getInt32(base + 8, true);
     const outputLength = view.getInt32(base + 12, true);
     const modules = view.getInt32(base + 16, true);
@@ -227,7 +227,7 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
     };
     if (!validQuad(quad)) continue;
     const outputQuad = shifted(quad, ox, oy);
-    const geometryMeasured = status === NATIVE_TRACK_OK;
+    const geometryMeasured = status === DIRECT_TRACK_OK;
     const input = Number.isInteger(trackIndex) ? tracks[trackIndex] : void 0;
     if (input?.quad && validQuad(input.quad)) {
       const iq = input.quad, oq = outputQuad;
@@ -443,14 +443,14 @@ function decodeGuidedBatch(zx, yPtr, width, height, stride, ox, oy, tracks, fall
   }
   return { symbols, metrics, outputBuffer: output.buffer };
 }
-function ensureNativeBatch(zx) {
-  if (!nativeBatchHandle) nativeBatchHandle = zx._createTrackedDecoder(NATIVE_BATCH_MAX_TRACKS, 177);
-  if (!nativeBatchHandle) return false;
-  if (!nativeResultsPtr) nativeResultsPtr = zx._malloc(NATIVE_BATCH_MAX_TRACKS * NATIVE_TRACK_RESULT_BYTES);
-  if (!nativeOutputPtr) nativeOutputPtr = zx._malloc(NATIVE_BATCH_OUTPUT_BYTES);
-  if (!nativeMetricsPtr) nativeMetricsPtr = zx._malloc(NATIVE_BATCH_METRICS_BYTES);
-  if (!nativeResultsPtr || !nativeOutputPtr || !nativeMetricsPtr) return false;
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
+function ensureDirectBatch(zx) {
+  if (!directBatchHandle) directBatchHandle = zx._createTrackedDecoder(DIRECT_BATCH_MAX_TRACKS, 177);
+  if (!directBatchHandle) return false;
+  if (!directResultsPtr) directResultsPtr = zx._malloc(DIRECT_BATCH_MAX_TRACKS * DIRECT_TRACK_RESULT_BYTES);
+  if (!directOutputPtr) directOutputPtr = zx._malloc(DIRECT_BATCH_OUTPUT_BYTES);
+  if (!directMetricsPtr) directMetricsPtr = zx._malloc(DIRECT_BATCH_METRICS_BYTES);
+  if (!directResultsPtr || !directOutputPtr || !directMetricsPtr) return false;
+  zx._setTrackedDecoderFallbackBudget(directBatchHandle, 0);
   return true;
 }
 function translatedQuad(q, dx, dy) {
@@ -483,21 +483,21 @@ function quadModuleSize(q, dim) {
     edge(q.bottomLeft, q.topLeft)
   ) / dim;
 }
-function configureNativeBatch(zx, tracks, ox, oy) {
+function configureDirectBatch(zx, tracks, ox, oy) {
   var _a;
-  if (!ensureNativeBatch(zx) || tracks.length > NATIVE_BATCH_MAX_TRACKS) return void 0;
-  const originChanged = ox !== nativeCropX || oy !== nativeCropY;
+  if (!ensureDirectBatch(zx) || tracks.length > DIRECT_BATCH_MAX_TRACKS) return void 0;
+  const originChanged = ox !== directCropX || oy !== directCropY;
   const byId = /* @__PURE__ */ new Map();
   for (let slot = 0; slot < tracks.length; slot++) {
     const track = tracks[slot];
     const id = (_a = track.slot) != null ? _a : track.id;
-    const previous = nativeConfigured[slot];
-    const mustConfigure = originChanged || nativeRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
+    const previous = directConfigured[slot];
+    const mustConfigure = originChanged || directRefresh.has(slot) || !previous || previous.id !== id || previous.dim !== track.dim || previous.crc32 !== track.crc32;
     if (mustConfigure) {
       const q = track.quad;
       if (!validQuad(q)) return void 0;
       const accepted = zx._setTrackedDecoderTrack(
-        nativeBatchHandle,
+        directBatchHandle,
         slot,
         id,
         track.dim,
@@ -511,71 +511,71 @@ function configureNativeBatch(zx, tracks, ox, oy) {
         q.bottomLeft.y - oy
       );
       if (!accepted) return void 0;
-      zx._setTrackedDecoderTrackCRC32(nativeBatchHandle, slot, track.crc32 ? 1 : 0);
-      nativeConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad };
-      nativeRefresh.delete(slot);
+      zx._setTrackedDecoderTrackCRC32(directBatchHandle, slot, track.crc32 ? 1 : 0);
+      directConfigured[slot] = { id, dim: track.dim, crc32: track.crc32, baseQuad: track.quad };
+      directRefresh.delete(slot);
     }
-    byId.set(id, { input: track, configured: nativeConfigured[slot], nativeSlot: slot });
+    byId.set(id, { input: track, configured: directConfigured[slot], directSlot: slot });
   }
-  for (let slot = tracks.length; slot < nativeConfigured.length; slot++) {
-    if (nativeConfigured[slot]) zx._clearTrackedDecoderTrack(nativeBatchHandle, slot);
+  for (let slot = tracks.length; slot < directConfigured.length; slot++) {
+    if (directConfigured[slot]) zx._clearTrackedDecoderTrack(directBatchHandle, slot);
   }
-  nativeConfigured.length = tracks.length;
-  nativeCropX = ox;
-  nativeCropY = oy;
+  directConfigured.length = tracks.length;
+  directCropX = ox;
+  directCropY = oy;
   return byId;
 }
-function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
-  const byId = configureNativeBatch(zx, tracks, ox, oy);
+function decodeDirectBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat = "rgba", stride = width * 4) {
+  const byId = configureDirectBatch(zx, tracks, ox, oy);
   if (!byId) return void 0;
   const decode = pixelFormat === "y8" ? zx._decodeTrackedBatchY : zx._decodeTrackedBatchRGBA;
-  zx._setTrackedDecoderFallbackBudget(nativeBatchHandle, 0);
+  zx._setTrackedDecoderFallbackBudget(directBatchHandle, 0);
   const count = decode(
-    nativeBatchHandle,
+    directBatchHandle,
     ptr,
     width,
     height,
     stride,
-    nativeResultsPtr,
+    directResultsPtr,
     tracks.length,
-    nativeOutputPtr,
-    NATIVE_BATCH_OUTPUT_BYTES,
-    nativeMetricsPtr
+    directOutputPtr,
+    DIRECT_BATCH_OUTPUT_BYTES,
+    directMetricsPtr
   );
   if (count < 0) return void 0;
   const view = new DataView(zx.HEAPU8.buffer);
   const metrics = {
-    anchorMs: view.getFloat64(nativeMetricsPtr, true),
-    samplingMs: view.getFloat64(nativeMetricsPtr + 8, true),
-    bitExtractionMs: view.getFloat64(nativeMetricsPtr + 16, true),
-    crcMs: view.getFloat64(nativeMetricsPtr + 24, true),
-    rsFallbackMs: view.getFloat64(nativeMetricsPtr + 32, true),
-    totalMs: view.getFloat64(nativeMetricsPtr + 40, true),
-    tracks: view.getUint32(nativeMetricsPtr + 48, true),
-    samples: view.getUint32(nativeMetricsPtr + 52, true),
-    successful: view.getUint32(nativeMetricsPtr + 56, true),
-    misses: view.getUint32(nativeMetricsPtr + 60, true),
-    crcFastSuccesses: view.getUint32(nativeMetricsPtr + 64, true),
-    rsFallbacks: view.getUint32(nativeMetricsPtr + 68, true),
-    anchorSuccesses: view.getUint32(nativeMetricsPtr + 72, true),
-    anchorMisses: view.getUint32(nativeMetricsPtr + 76, true),
-    fastSamplerAttempts: view.getUint32(nativeMetricsPtr + 80, true),
-    outOfFrameMisses: view.getUint32(nativeMetricsPtr + 84, true),
-    bitstreamFailures: view.getUint32(nativeMetricsPtr + 88, true),
-    crcFailures: view.getUint32(nativeMetricsPtr + 92, true),
-    fastSamplerSuccesses: view.getUint32(nativeMetricsPtr + 96, true),
-    anchorBypassAttempts: view.getUint32(nativeMetricsPtr + 100, true),
-    anchorBypassSuccesses: view.getUint32(nativeMetricsPtr + 104, true),
-    translationAttempts: view.getUint32(nativeMetricsPtr + 108, true),
-    translationSuccesses: view.getUint32(nativeMetricsPtr + 112, true),
-    calibrationAttempts: view.getUint32(nativeMetricsPtr + 116, true),
-    calibrationSuccesses: view.getUint32(nativeMetricsPtr + 120, true)
+    anchorMs: view.getFloat64(directMetricsPtr, true),
+    samplingMs: view.getFloat64(directMetricsPtr + 8, true),
+    bitExtractionMs: view.getFloat64(directMetricsPtr + 16, true),
+    crcMs: view.getFloat64(directMetricsPtr + 24, true),
+    rsFallbackMs: view.getFloat64(directMetricsPtr + 32, true),
+    totalMs: view.getFloat64(directMetricsPtr + 40, true),
+    tracks: view.getUint32(directMetricsPtr + 48, true),
+    samples: view.getUint32(directMetricsPtr + 52, true),
+    successful: view.getUint32(directMetricsPtr + 56, true),
+    misses: view.getUint32(directMetricsPtr + 60, true),
+    crcFastSuccesses: view.getUint32(directMetricsPtr + 64, true),
+    rsFallbacks: view.getUint32(directMetricsPtr + 68, true),
+    anchorSuccesses: view.getUint32(directMetricsPtr + 72, true),
+    anchorMisses: view.getUint32(directMetricsPtr + 76, true),
+    fastSamplerAttempts: view.getUint32(directMetricsPtr + 80, true),
+    outOfFrameMisses: view.getUint32(directMetricsPtr + 84, true),
+    bitstreamFailures: view.getUint32(directMetricsPtr + 88, true),
+    crcFailures: view.getUint32(directMetricsPtr + 92, true),
+    fastSamplerSuccesses: view.getUint32(directMetricsPtr + 96, true),
+    anchorBypassAttempts: view.getUint32(directMetricsPtr + 100, true),
+    anchorBypassSuccesses: view.getUint32(directMetricsPtr + 104, true),
+    translationAttempts: view.getUint32(directMetricsPtr + 108, true),
+    translationSuccesses: view.getUint32(directMetricsPtr + 112, true),
+    calibrationAttempts: view.getUint32(directMetricsPtr + 116, true),
+    calibrationSuccesses: view.getUint32(directMetricsPtr + 120, true)
   };
   const pending = [];
   const decodedSlots = new Set();
   let outputEnd = 0;
   for (let index = 0; index < count; index++) {
-    const at = nativeResultsPtr + index * NATIVE_TRACK_RESULT_BYTES;
+    const at = directResultsPtr + index * DIRECT_TRACK_RESULT_BYTES;
     const id = view.getInt32(at, true);
     const status = view.getInt32(at + 4, true);
     const bytesOffset = view.getInt32(at + 8, true);
@@ -584,24 +584,24 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     const dy = view.getFloat32(at + 28, true);
     const mapped = byId.get(id);
     if (!mapped) continue;
-    const slot = mapped.nativeSlot;
-    if (status !== NATIVE_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
-    const rawView = zx.HEAPU8.subarray(nativeOutputPtr + bytesOffset, nativeOutputPtr + bytesOffset + bytesLength);
+    const slot = mapped.directSlot;
+    if (status !== DIRECT_TRACK_OK || bytesOffset < 0 || bytesLength <= 0) continue;
+    const rawView = zx.HEAPU8.subarray(directOutputPtr + bytesOffset, directOutputPtr + bytesOffset + bytesLength);
     const packet = mapped.input.crc32 ? parseVerifiedFrame(rawView, false) : parseFrame(rawView);
     if (!packet) {
-      if (slot >= 0) nativeRefresh.add(slot);
+      if (slot >= 0) directRefresh.add(slot);
       continue;
     }
     const packetSlot = Number(packet.header.slotIndex);
     let outputMapped = mapped;
     let geometryMeasured = true;
     if (mapped.input.slot !== void 0 && packetSlot !== Number(mapped.input.slot)) {
-      // CRC-valid AirGapper bytes are stronger identity evidence than the native
-      // track result id. A stale native sample map can land on a neighboring QR
+      // CRC-valid AirGapper bytes are stronger identity evidence than the direct
+      // track result id. A stale direct sample map can land on a neighboring QR
       // and still decode it perfectly. Keep the bytes, but never attach the
       // stale track geometry to that packet: remap to the packet's scheduled
       // physical slot and reuse only that slot's already-trusted lattice quad.
-      if (slot >= 0) nativeRefresh.add(slot);
+      if (slot >= 0) directRefresh.add(slot);
       if (!mapped.input.crc32) continue;
       outputMapped = void 0;
       for (const candidate of byId.values()) {
@@ -620,7 +620,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
     outputEnd = Math.max(outputEnd, bytesOffset + bytesLength);
     pending.push({ mapped: outputMapped, bytesOffset, bytesLength, dx, dy, header: packet.header, geometryMeasured });
   }
-  const output = outputEnd ? zx.HEAPU8.slice(nativeOutputPtr, nativeOutputPtr + outputEnd) : new Uint8Array(0);
+  const output = outputEnd ? zx.HEAPU8.slice(directOutputPtr, directOutputPtr + outputEnd) : new Uint8Array(0);
   const symbols = pending.map(({ mapped, bytesOffset, bytesLength, dx, dy, header, geometryMeasured }) => {
     const quad = geometryMeasured
       ? translatedQuad(mapped.configured.baseQuad, dx, dy)
@@ -632,7 +632,7 @@ function decodeNativeBatch(zx, ptr, width, height, ox, oy, tracks, pixelFormat =
       modules: mapped.input.dim,
       tracked: true,
       geometryMeasured,
-      decodePath: geometryMeasured ? "native" : "native-remap",
+      decodePath: geometryMeasured ? "direct" : "direct-remap",
       crc32: mapped.input.crc32,
       verifiedPayload: mapped.input.crc32,
       header
@@ -760,12 +760,12 @@ ctx.onmessage = async (e) => {
   let ownedVideoFrame = videoFrame;
   try {
     const usedDirectFrame = Boolean(ownedVideoFrame);
-    const usedNativeYBuffer = ownedVideoFrame instanceof ArrayBuffer;
+    const usedDirectYBuffer = ownedVideoFrame instanceof ArrayBuffer;
     // Direct camera frames use the Y8 Guided lane first. Buffered RGBA frames
     // (corpus replay, benchmark images, legacy/canvas inputs) already have
     // trusted lattice geometry, so do not throw that information away by
     // running the generic finder before the persistent tracked decoder. Try
-    // native tracked sampling first; the existing cold-track recovery below
+    // direct tracked sampling first; the existing cold-track recovery below
     // still wakes robust detection when geometry genuinely stops working.
     const robustLaneFirst = !strictHotPath && !full && Array.isArray(tracks) && tracks.length > 0 && usedDirectFrame;
     let coldTrackCount = 0;
@@ -784,17 +784,17 @@ ctx.onmessage = async (e) => {
     let pixels;
     const zx = await ready;
     let ptr;
-    if (usedNativeYBuffer) {
-      if (inputStride < w) throw new Error("Native camera Y stride is invalid");
+    if (usedDirectYBuffer) {
+      if (inputStride < w) throw new Error("Direct camera Y stride is invalid");
       const available = Math.min(ownedVideoFrame.byteLength, payloadBytes || ownedVideoFrame.byteLength);
       const requiredEnd = inputOffset + Math.max(0, h - 1) * inputStride + w;
-      if (inputOffset < 0 || requiredEnd > available) throw new Error("Native camera Y crop is out of range");
+      if (inputOffset < 0 || requiredEnd > available) throw new Error("Direct camera Y crop is out of range");
       const packedBytes = w * h;
       const packCrop = h > 0 && packedBytes < available * 0.72;
       const copyStarted = performance.now();
       if (packCrop) {
         ptr = inputBuffer(zx, packedBytes);
-        if (!ptr) throw new Error("Could not allocate WASM native Y crop");
+        if (!ptr) throw new Error("Could not allocate WASM direct Y crop");
         const source = new Uint8Array(ownedVideoFrame);
         for (let row = 0; row < h; row++) {
           const start = inputOffset + row * inputStride;
@@ -805,7 +805,7 @@ ctx.onmessage = async (e) => {
       } else {
         pixels = new Uint8Array(ownedVideoFrame, 0, requiredEnd);
         ptr = inputBuffer(zx, pixels.byteLength);
-        if (!ptr) throw new Error("Could not allocate WASM native Y input buffer");
+        if (!ptr) throw new Error("Could not allocate WASM direct Y input buffer");
         zx.HEAPU8.set(pixels, ptr);
       }
       frameCopyMs = performance.now() - copyStarted;
@@ -1040,7 +1040,7 @@ ctx.onmessage = async (e) => {
       if (guidedDecode && decodePixelFormat === "y8" && tracks.length >= 2) {
         // Guided remains the production tracked decoder. v194 proved cached
         // module maps can work on the better camera, but calibrating a second
-        // native tracker before Guided added ~105 ms/job and reduced scheduled
+        // direct tracker before Guided added ~105 ms/job and reduced scheduled
         // camera frames. The next cache path must reuse Guided's successful
         // geometry instead of duplicating localization work.
         const guided = decodeGuidedBatch(
@@ -1061,8 +1061,8 @@ ctx.onmessage = async (e) => {
           workerWaitMs,
           frameCopyMs,
           guidedMetrics: guided?.metrics,
-          nativeAssistTracks: 0,
-          nativeAssistHits: 0,
+          directAssistTracks: 0,
+          directAssistHits: 0,
           guidedAssistTracks: Math.max(0, tracks.length - (guided?.metrics?.turboSuccesses ?? 0)),
           pixelPath: guided?.metrics?.turboSuccesses === tracks.length
             ? "y8-turbo"
@@ -1125,7 +1125,7 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (!full && tracks?.length) {
-      const native = decodeNativeBatch(
+      const direct = decodeDirectBatch(
         zx,
         ptr + inputOffset,
         pw,
@@ -1136,20 +1136,20 @@ ctx.onmessage = async (e) => {
         decodePixelFormat,
         inputStride
       );
-      const nativeSymbols = native?.symbols ?? [];
-      const robustFallback = robustTrackedRecovery && nativeSymbols.length < tracks.length;
-      if (!robustFallback && (native || usedDirectFrame)) {
+      const directSymbols = direct?.symbols ?? [];
+      const robustFallback = robustTrackedRecovery && directSymbols.length < tracks.length;
+      if (!robustFallback && (direct || usedDirectFrame)) {
         ownedVideoFrame?.close();
         ownedVideoFrame = null;
-        const directFrameFailed = usedDirectFrame && !native;
-        mapOutputToDisplay(nativeSymbols);
+        const directFrameFailed = usedDirectFrame && !direct;
+        mapOutputToDisplay(directSymbols);
         const reply = {
           id,
-          symbols: nativeSymbols,
+          symbols: directSymbols,
           sightings,
           full: false,
-          trackedAttempted: native?.attempted ?? true,
-          trackedHit: nativeSymbols.length > 0,
+          trackedAttempted: direct?.attempted ?? true,
+          trackedHit: directSymbols.length > 0,
           fallbackAttempted: false,
           fallbackSucceeded: false,
           readFullAttempts: 0,
@@ -1158,16 +1158,16 @@ ctx.onmessage = async (e) => {
           targetedPixels: 0,
           targetedSuccesses: 0,
           frameCopyMs,
-          nativeMetrics: native?.metrics,
+          directMetrics: direct?.metrics,
           pixelPath: decodePixelFormat,
           directFrameFailed,
           latencyMs: performance.now() - startedAt
         };
-        const transfer = native?.outputBuffer && nativeSymbols.length ? [native.outputBuffer] : [];
+        const transfer = direct?.outputBuffer && directSymbols.length ? [direct.outputBuffer] : [];
         ctx.postMessage(reply, transfer);
         return;
       }
-      symbols.push(...nativeSymbols);
+      symbols.push(...directSymbols);
       // Recovery uses the pixels already copied out of the camera frame. For
       // direct camera input this is Y8, so keep recovery luminance-only instead
       // of retaining/re-reading the live VideoFrame as RGBA.
@@ -1178,7 +1178,7 @@ ctx.onmessage = async (e) => {
         : zx.readFull(ptr + inputOffset, pw, ph, true, recoveryMax, false);
       try {
         const expectedSlots = new Set(tracks.flatMap((track) => track.slot === void 0 ? [] : [track.slot]));
-        const decodedSlots = /* @__PURE__ */ new Set(nativeSymbols.flatMap((symbol) => symbol.header?.slotIndex === void 0 ? [] : [symbol.header.slotIndex]));
+        const decodedSlots = /* @__PURE__ */ new Set(directSymbols.flatMap((symbol) => symbol.header?.slotIndex === void 0 ? [] : [symbol.header.slotIndex]));
         for (let i = 0; i < decoded.size(); i++) {
           const result = decoded.get(i);
           if (!result.valid || !result.bytes.length) continue;
@@ -1196,7 +1196,7 @@ ctx.onmessage = async (e) => {
             const moduleSize = quadModuleSize(currentLocal, tracks[trackIndex].dim);
             const refreshThreshold = Math.max(0.75, moduleSize * 0.45);
             if (quadShapeResidual(currentLocal, result.position) > refreshThreshold)
-              nativeRefresh.add(trackIndex);
+              directRefresh.add(trackIndex);
           }
           symbols.push({
             bytes: result.bytes,
@@ -1218,13 +1218,13 @@ ctx.onmessage = async (e) => {
         sightings,
         full: false,
         trackedAttempted: true,
-        trackedHit: nativeSymbols.length > 0,
+        trackedHit: directSymbols.length > 0,
         fallbackAttempted: true,
-        fallbackSucceeded: symbols.length > nativeSymbols.length,
+        fallbackSucceeded: symbols.length > directSymbols.length,
         readFullAttempts,
         workerWaitMs,
         frameCopyMs,
-        nativeMetrics: native?.metrics,
+        directMetrics: direct?.metrics,
         pixelPath: decodePixelFormat,
         latencyMs: performance.now() - startedAt
       });
@@ -1258,7 +1258,7 @@ ctx.onmessage = async (e) => {
             quad: shifted(trackedPosition, ox, oy),
             modules: r.modules,
             tracked: true,
-            decodePath: "native"
+            decodePath: "direct"
           });
           trackedHit = true;
         }

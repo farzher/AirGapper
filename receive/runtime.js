@@ -50,6 +50,7 @@ import {
   showReceivedSnippet,
   showReceiveFailure
 } from "./result.js";
+import { CameraUiStore, formatCameraMode, formatCameraSize } from "./camera-ui.js";
 let agcapModulePromise;
 function loadAgcap() {
   if (!agcapModulePromise) agcapModulePromise = import("./agcap.js");
@@ -86,9 +87,10 @@ const recordCorpusBtn = document.getElementById("record-corpus");
 const loadCorpusBtn = document.getElementById("load-corpus");
 const receiverSettings = document.querySelector(".receiver-settings");
 const receiverDevActions = document.querySelector(".receiver-dev-actions");
+let devTools;
 let devToolsPromise;
 function loadDevTools() {
-  if (!devToolsPromise) devToolsPromise = import("./dev-tools.js");
+  if (!devToolsPromise) devToolsPromise = import("./dev-tools.js").then((module) => (devTools = module));
   return devToolsPromise;
 }
 let receiverDevToolsPromise;
@@ -275,7 +277,7 @@ strictHotPathToggle.addEventListener("change", () => {
     if (regions[i].gridSlot === void 0) regions.splice(i, 1);
   }
   strictHotPathLockSeen = Boolean(gridLattice.locked);
-  // Worker-local native geometry and direct pixel-mode adaptation are session state.
+  // Worker-local direct geometry and direct pixel-mode adaptation are session state.
   // Recreate workers at this mode boundary so the audit starts from a known state.
   pool.resize(0);
   if (stream && !done) pool.resize(selectedWorkerCount());
@@ -296,8 +298,6 @@ if (deviceLabel) {
     } catch {}
   });
 }
-const BROWSER_MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
-const CAMERA_PERFORMANCE_KEY = "airgapper:camera-performance:v1";
 const STANDARD_RESOLUTIONS = [
   [640, 480],
   [960, 720],
@@ -596,129 +596,29 @@ function applyCameraConstraint(track, patch) {
   }).then(() => accepted);
 }
 let exposureApplyTimer;
-function formatCameraSize(width, height) {
-  return `${Math.max(width, height)}×${Math.min(width, height)}`;
-}
-function formatCameraMode(width, height, fps) {
-  return `${formatCameraSize(width, height)} · ${fps} fps`;
-}
-const browserModeResults = loadBrowserModeResults();
+const cameraUiStore = new CameraUiStore();
 let browserModes = [];
 let automaticBrowserMode;
 let preferredCameraDeviceId = "";
 let automaticCameraDeviceId = "";
 let automaticCameraUpgradeAttempted = false;
-let cameraPerformanceSaveAt = 0;
-function loadCameraPerformance() {
-  try {
-    return JSON.parse(localStorage.getItem(CAMERA_PERFORMANCE_KEY) ?? "{}") ?? {};
-  } catch {
-    return {};
-  }
-}
-const cameraPerformance = loadCameraPerformance();
-function saveCameraPerformance() {
-  try {
-    localStorage.setItem(CAMERA_PERFORMANCE_KEY, JSON.stringify(cameraPerformance));
-  } catch {}
-}
 function learnedAutomaticCameraId() {
-  let bestId = "";
-  let best = -1;
-  for (const [id, record] of Object.entries(cameraPerformance)) {
-    const goodput = Math.max(Number(record?.bestGoodputKbs) || 0, Number(record?.lastGoodputKbs) || 0);
-    if (goodput > best) {
-      best = goodput;
-      bestId = id;
-    }
-  }
-  return bestId;
-}
-function inputDeviceCapabilities(device) {
-  try {
-    return device?.getCapabilities?.() ?? {};
-  } catch {
-    return {};
-  }
-}
-function cameraFacingHint(device, caps) {
-  const modes = Array.isArray(caps?.facingMode) ? caps.facingMode : caps?.facingMode ? [caps.facingMode] : [];
-  const label = String(device?.label ?? "").toLowerCase();
-  if (modes.includes("environment") || /back|rear|environment/.test(label)) return "rear";
-  if (modes.includes("user") || /front|user|selfie/.test(label)) return "front";
-  return "unknown";
-}
-function automaticCameraScore(device, index) {
-  const caps = inputDeviceCapabilities(device);
-  const record = cameraPerformance[device.deviceId] ?? {};
-  const width = Number(caps?.width?.max) || Number(record.maxWidth) || 0;
-  const height = Number(caps?.height?.max) || Number(record.maxHeight) || 0;
-  const area = width * height;
-  const fps = Number(caps?.frameRate?.max) || Number(record.maxFps) || 0;
-  const goodput = Math.max(Number(record.bestGoodputKbs) || 0, Number(record.lastGoodputKbs) || 0);
-  const focusModes = Array.isArray(caps?.focusMode) ? caps.focusMode : [];
-  const af = focusModes.includes("continuous") ? 1 : 0;
-  const mainHint = /camera(?:2)?\s*0(?:\D|$)|\bmain\b|\bprimary\b/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
-  // The phone's primary rear sensor is the compatibility default even when an
-  // auxiliary rear lens advertises a higher browser FPS. If labels do not
-  // identify the main sensor, keep the existing cadence/resolution ranking.
-  const cadenceTier = fps >= 36 ? 1 : 0;
-  return mainHint * 1e12 + cadenceTier * 1e9 + area + fps * 10000 + goodput * 1000 + af * 50000 - index;
+  return cameraUiStore.learnedAutomaticCameraId();
 }
 function bestAutomaticCameraDevice(devices) {
-  if (!devices.length) return undefined;
-  const tagged = devices.map((device, index) => ({ device, index, caps: inputDeviceCapabilities(device) }));
-  const rear = tagged.filter(({ device, caps }) => cameraFacingHint(device, caps) === "rear");
-  const candidates = rear.length ? rear : tagged.filter(({ device, caps }) => cameraFacingHint(device, caps) !== "front");
-  const pool = candidates.length ? candidates : tagged;
-  return pool.reduce((best, candidate) =>
-    !best || automaticCameraScore(candidate.device, candidate.index) > automaticCameraScore(best.device, best.index)
-      ? candidate : best, undefined)?.device;
+  return cameraUiStore.bestAutomaticDevice(devices);
 }
 function noteCameraPerformance(goodputKbs, uniqueRate, runSeconds) {
-  if (runSeconds < 3 || goodputKbs <= 0 || performance.now() < cameraPerformanceSaveAt) return;
-  const track = stream?.getVideoTracks?.()[0];
-  const settings = track?.getSettings?.();
-  const id = String(settings?.deviceId ?? "");
-  if (!id) return;
-  cameraPerformanceSaveAt = performance.now() + 2000;
-  const record = cameraPerformance[id] ?? {};
-  record.bestGoodputKbs = Math.max(Number(record.bestGoodputKbs) || 0, goodputKbs);
-  record.lastGoodputKbs = goodputKbs;
-  record.bestUniqueQrPerSecond = Math.max(Number(record.bestUniqueQrPerSecond) || 0, uniqueRate);
-  record.maxWidth = Math.max(Number(record.maxWidth) || 0, Number(settings.width) || 0);
-  record.maxHeight = Math.max(Number(record.maxHeight) || 0, Number(settings.height) || 0);
-  record.maxFps = Math.max(Number(record.maxFps) || 0, Number(settings.frameRate) || 0);
-  record.updatedAt = Date.now();
-  cameraPerformance[id] = record;
-  saveCameraPerformance();
-}
-function loadBrowserModeResults() {
-  var _a;
-  try {
-    return JSON.parse((_a = localStorage.getItem(BROWSER_MODE_RESULTS_KEY)) != null ? _a : "{}");
-  } catch {
-    return {};
-  }
+  cameraUiStore.notePerformance(stream?.getVideoTracks?.()[0], goodputKbs, uniqueRate, runSeconds);
 }
 function saveBrowserModeResult(key, supported) {
-  browserModeResults[key] = supported;
-  try {
-    localStorage.setItem(BROWSER_MODE_RESULTS_KEY, JSON.stringify(browserModeResults));
-  } catch {
-  }
+  cameraUiStore.noteModeResult(key, supported);
 }
 function standardBrowserModes() {
-  return STANDARD_RESOLUTIONS.flatMap(([width, height]) => [30, 60].map((fps) => ({
-    key: `${width}x${height}@${fps}`,
-    width,
-    height,
-    fps,
-    label: formatCameraMode(width, height, fps)
-  }))).sort((a, b) => a.width - b.width || a.height - b.height || a.fps - b.fps);
+  return cameraUiStore.standardModes(STANDARD_RESOLUTIONS);
 }
 function browserModeSuffix(key) {
-  return browserModeResults[key] === true ? "" : browserModeResults[key] === false ? " · Retry" : " · Try";
+  return cameraUiStore.modeSuffix(key);
 }
 function populateCameraOptions() {
   browserModes = standardBrowserModes();
@@ -951,6 +851,7 @@ const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
 const DEVELOPER_MODE_EVER_KEY = "airgapper:developer-mode-ever:v1";
 let developerModeEverUsed = false;
 try { developerModeEverUsed = localStorage.getItem(DEVELOPER_MODE_EVER_KEY) === "1"; } catch {}
+if (developerModeEverUsed) void loadDevTools();
 function rememberDeveloperModeUse() {
   if (developerModeEverUsed) return;
   developerModeEverUsed = true;
@@ -1724,7 +1625,7 @@ function guidedRepairMaskForTracks(tracks, sourceSequence, now = receiverNow()) 
   let mask = 0;
   const list = tracks ?? [];
   const sequence = Number(sourceSequence);
-  // Native salvage has 32 bits. They address batch lanes, not physical slots.
+  // Direct salvage has 32 bits. They address batch lanes, not physical slots.
   // Lanes >=32 still run the cheap tracked/sparse path but cannot enter
   // ambiguity repair or generic SampleQR fallback.
   for (let lane = 0; lane < Math.min(32, list.length); lane++) {
@@ -2140,7 +2041,7 @@ const livePipeline = {
   robustMs: 0,
   trackedRobustMs: 0,
   fullRobustMs: 0,
-  nativeMs: 0,
+  directMs: 0,
   guidedMs: 0,
   guidedBinarizeMs: 0,
   guidedFinderMs: 0,
@@ -2193,7 +2094,7 @@ function resetLivePipeline(now = receiverNow()) {
     submittedAcquisition: 0, submittedReacquire: 0, submittedTracks: 0, submittedPixels: 0,
     submittedTrackedPixels: 0, submittedFullPixels: 0, submittedFrames: 0, lastSubmittedSourceSequence: -1,
     lastSubmittedAt: 0, completedJobs: 0, completedTracked: 0, completedFull: 0, trackedOutputSymbols: 0, fullOutputSymbols: 0,
-    latencyMs: 0, trackedLatencyMs: 0, fullLatencyMs: 0, copyMs: 0, robustMs: 0, trackedRobustMs: 0, fullRobustMs: 0, nativeMs: 0,
+    latencyMs: 0, trackedLatencyMs: 0, fullLatencyMs: 0, copyMs: 0, robustMs: 0, trackedRobustMs: 0, fullRobustMs: 0, directMs: 0,
     guidedMs: 0, guidedBinarizeMs: 0, guidedFinderMs: 0, guidedSampleMs: 0, guidedDecodeMs: 0,
     guidedFastDecodeMs: 0, guidedGenericDecodeMs: 0, guidedFastDecodeAttempts: 0, guidedFastDecodeSuccesses: 0, guidedGenericDecodeAttempts: 0,
     guidedGenericFallbackTracks: 0, guidedGenericFallbackSuccesses: 0, guidedGenericFallbackSkipped: 0,
@@ -2230,8 +2131,6 @@ let peakRegions = 0;
 let capturesDropped = 0;
 const candidateEvidenceWindows = /* @__PURE__ */ new Map();
 const scanCandidateEpoch = /* @__PURE__ */ new Map();
-const optimizerTrace = [];
-const OPTIMIZER_TRACE_LIMIT = 1200;
 let optimizerJobsSubmittedTotal = 0;
 let optimizerJobsMappedTotal = 0;
 let optimizerCompletionsMappedTotal = 0;
@@ -2253,8 +2152,7 @@ let optimizerDiscoveryMode = false;
 const optimizerOverlayHits = [];
 let optimizerBootstrapDecode;
 function traceOptimizer(event) {
-  optimizerTrace.push(event);
-  if (optimizerTrace.length > OPTIMIZER_TRACE_LIMIT) optimizerTrace.splice(0, optimizerTrace.length - OPTIMIZER_TRACE_LIMIT);
+  devTools?.noteOptimizerTrace(event);
 }
 function refreshCandidateEvidence(evidence) {
   if (!evidence.closedAt) return evidence.performance;
@@ -2520,7 +2418,7 @@ function beginOptimizeWhenReady() {
   optimizePassBaseline = { exposure: passDiagnostic.committedExposureTime, iso: passDiagnostic.committedIso };
   optimizeRunning = true;
   optimizeMeasureToken++;
-  optimizerTrace.length = 0;
+  devTools?.resetOptimizerTrace();
   optimizerJobsSubmittedTotal = 0;
   optimizerJobsMappedTotal = 0;
   optimizerCompletionsMappedTotal = 0;
@@ -2682,49 +2580,9 @@ function diagnosticsText() {
   return [focusDiagnostics.textContent ?? "", transportDiagnostics?.textContent ?? ""]
     .filter(Boolean).join("\n\n");
 }
-function legacyClipboardCopy(text) {
-  try {
-    const input = document.createElement("textarea");
-    input.value = text;
-    input.readOnly = true;
-    input.style.position = "fixed";
-    input.style.opacity = "0";
-    input.style.pointerEvents = "none";
-    document.body.append(input);
-    input.select();
-    input.setSelectionRange(0, input.value.length);
-    const copied = document.execCommand("copy");
-    input.remove();
-    return copied;
-  } catch {
-    return false;
-  }
-}
 async function copyDiagnosticsToClipboard(text, automatic = false) {
-  if (!text) return false;
-  try {
-    if (!copyTextOnAndroid(text)) {
-      try {
-        if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
-        await navigator.clipboard.writeText(text);
-      } catch (error) {
-        if (!legacyClipboardCopy(text)) throw error;
-      }
-    }
-    copyDiagnostics.textContent = automatic ? "Diagnostics copied" : "Copied";
-    setTimeout(() => {
-      copyDiagnostics.textContent = "Copy diagnostics";
-    }, 1500);
-    return true;
-  } catch {
-    if (!automatic) {
-      copyDiagnostics.textContent = "Copy failed";
-      setTimeout(() => {
-        copyDiagnostics.textContent = "Copy diagnostics";
-      }, 1500);
-    }
-    return false;
-  }
+  const tools = await loadDevTools();
+  return tools.copyDiagnostics(copyDiagnostics, text, automatic, copyTextOnAndroid);
 }
 copyDiagnostics.addEventListener("click", () => {
   void copyDiagnosticsToClipboard(completionDiagnosticsText || diagnosticsText());
@@ -2768,15 +2626,15 @@ function regionInflightCount(region) {
 }
 let decodeExceptions = 0;
 let lastDecodeError = "";
-let lastNativeMetrics;
+let lastDirectMetrics;
 let lastGuidedMetrics;
 let lastDirectPixelPath = "—";
 const hotPathAudit = {
   trackedJobs: 0,
-  nativeTracks: 0,
-  nativeSuccessful: 0,
+  directTracks: 0,
+  directSuccessful: 0,
   crcFastSuccesses: 0,
-  nativeMisses: 0,
+  directMisses: 0,
   rsFallbacks: 0,
   anchorSuccesses: 0,
   anchorMisses: 0,
@@ -2803,7 +2661,6 @@ function resetHotPathAudit() {
   for (const key of Object.keys(hotPathAudit)) hotPathAudit[key] = 0;
 }
 let trackingInvalidations = 0;
-let workerLatencyMaxMs = 0;
 let lastDistinctArrivalAt = 0;
 let lastStreamDecodeAt = 0;
 let geometryRecoveryProbes = 0;
@@ -2891,9 +2748,9 @@ function noteDecodeCompleted(id, completion) {
   if (!replayRunning && livePipeline.startedAt && auditMode) {
     const latencyMs = Math.max(0, Number(completion.latencyMs) || 0);
     const copyMs = Math.max(0, Number(completion.frameCopyMs) || 0);
-    const nativeMs = Math.max(0, Number(completion.nativeMetrics?.totalMs ?? completion.nativeMs) || 0);
+    const directMs = Math.max(0, Number(completion.directMetrics?.totalMs) || 0);
     const reportedRobustMs = Math.max(0, Number(completion.robustMs) || 0);
-    const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - nativeMs) : 0);
+    const robustMs = reportedRobustMs || (completion.readFullAttempts ? Math.max(0, latencyMs - copyMs - directMs) : 0);
     const workerWaitMs = Math.max(0, Number(completion.workerWaitMs) || 0);
     const guided = completion.guidedMetrics;
     if (guided && !auditMode?.autoOpticsProbe) noteGuidedFallbackMetrics(guided, auditMode?.trackSlots ?? []);
@@ -2923,7 +2780,7 @@ function noteDecodeCompleted(id, completion) {
     livePipeline.latencyMs += latencyMs;
     livePipeline.copyMs += copyMs;
     livePipeline.robustMs += robustMs;
-    livePipeline.nativeMs += nativeMs;
+    livePipeline.directMs += directMs;
     livePipeline.guidedMs += guidedMs;
     if (guided) {
       livePipeline.guidedJobs++;
@@ -2964,7 +2821,7 @@ function noteDecodeCompleted(id, completion) {
       livePipeline.guidedFinderSuccesses += Math.max(0, Number(guided.finderSuccesses) || 0);
     }
     livePipeline.workerWaitMs += workerWaitMs;
-    livePipeline.otherMs += Math.max(0, latencyMs - copyMs - robustMs - nativeMs - guidedMs);
+    livePipeline.otherMs += Math.max(0, latencyMs - copyMs - robustMs - directMs - guidedMs);
     livePipeline.readFullAttempts += Math.max(0, Number(completion.readFullAttempts) || 0);
     livePipeline.lastCompletedAt = receiverNow();
     if (auditMode.full) {
@@ -2999,10 +2856,10 @@ function noteDecodeCompleted(id, completion) {
       tracks: auditMode.tracks || 0,
       full: auditMode.full,
       latencyMs: completion.latencyMs || 0,
-      nativeMs: completion.nativeMetrics?.totalMs || 0,
+      directMs: completion.directMetrics?.totalMs || 0,
       copyMs: completion.frameCopyMs || 0,
       robustBands: completion.robustBands || (completion.readFullAttempts ? 1 : 0),
-      robustSearchMs: completion.robustMs || completion.robustSearchMs || (completion.readFullAttempts ? Math.max(0, (completion.latencyMs || 0) - (completion.frameCopyMs || 0) - (completion.nativeMetrics?.totalMs || 0)) : 0),
+      robustSearchMs: completion.robustMs || completion.robustSearchMs || (completion.readFullAttempts ? Math.max(0, (completion.latencyMs || 0) - (completion.frameCopyMs || 0) - (completion.directMetrics?.totalMs || 0)) : 0),
       guidedMs: completion.guidedMetrics?.totalMs || 0,
       guidedSampleMs: completion.guidedMetrics?.sampleMs || 0,
       guidedDecodeMs: completion.guidedMetrics?.decodeMs || 0
@@ -3060,7 +2917,7 @@ function noteDecodeCompleted(id, completion) {
     benchmarkJob.readFullAttempts = completion.readFullAttempts;
     benchmarkJob.fallbackAttempts = Number(completion.fallbackAttempted);
     benchmarkJob.fallbackSuccesses = Number(completion.fallbackSucceeded);
-    benchmarkJob.nativeMetrics = completion.nativeMetrics ? { ...completion.nativeMetrics } : null;
+    benchmarkJob.directMetrics = completion.directMetrics ? { ...completion.directMetrics } : null;
     benchmarkJob.guidedMetrics = completion.guidedMetrics ? { ...completion.guidedMetrics } : null;
   }
   benchmarkJobFrames.delete(id);
@@ -3130,39 +2987,38 @@ function noteDecodeCompleted(id, completion) {
       traceOptimizer({ time: receiverNow(), event: "ATTRIBUTION_BUG", scanId: id, candidateEpoch: attribution == null ? void 0 : attribution.epoch.id });
     }
   }
-  workerLatencyMaxMs = Math.max(workerLatencyMaxMs, completion.latencyMs);
-  if (completion.nativeMetrics) {
-    lastNativeMetrics = { ...completion.nativeMetrics, frameCopyMs: completion.frameCopyMs };
+  if (devTools && completion.directMetrics) {
+    lastDirectMetrics = { ...completion.directMetrics, frameCopyMs: completion.frameCopyMs };
   }
-  if (completion.guidedMetrics) {
+  if (devTools && completion.guidedMetrics) {
     lastGuidedMetrics = { ...completion.guidedMetrics, frameCopyMs: completion.frameCopyMs };
   }
-  if (completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
+  if (devTools && completion.pixelPath) lastDirectPixelPath = completion.pixelPath;
   if (completion.repeatSkipped) {
     const skippedAt = receiverNow();
     repeatSkipTimes.push(skippedAt);
     pruneTimestampSamples(repeatSkipTimes, skippedAt - STATS_WINDOW_MS);
   }
-  if (auditThisCompletion && completion.nativeMetrics) {
+  if (auditThisCompletion && completion.directMetrics) {
     hotPathAudit.trackedJobs++;
-    hotPathAudit.nativeTracks += completion.nativeMetrics.tracks ?? 0;
-    hotPathAudit.nativeSuccessful += completion.nativeMetrics.successful ?? 0;
-    hotPathAudit.crcFastSuccesses += completion.nativeMetrics.crcFastSuccesses ?? 0;
-    hotPathAudit.nativeMisses += completion.nativeMetrics.misses ?? 0;
-    hotPathAudit.rsFallbacks += completion.nativeMetrics.rsFallbacks ?? 0;
-    hotPathAudit.anchorSuccesses += completion.nativeMetrics.anchorSuccesses ?? 0;
-    hotPathAudit.anchorMisses += completion.nativeMetrics.anchorMisses ?? 0;
-    hotPathAudit.fastSamplerAttempts += completion.nativeMetrics.fastSamplerAttempts ?? 0;
-    hotPathAudit.fastSamplerSuccesses += completion.nativeMetrics.fastSamplerSuccesses ?? 0;
-    hotPathAudit.outOfFrameMisses += completion.nativeMetrics.outOfFrameMisses ?? 0;
-    hotPathAudit.bitstreamFailures += completion.nativeMetrics.bitstreamFailures ?? 0;
-    hotPathAudit.crcFailures += completion.nativeMetrics.crcFailures ?? 0;
-    hotPathAudit.anchorBypassAttempts += completion.nativeMetrics.anchorBypassAttempts ?? 0;
-    hotPathAudit.anchorBypassSuccesses += completion.nativeMetrics.anchorBypassSuccesses ?? 0;
-    hotPathAudit.translationAttempts += completion.nativeMetrics.translationAttempts ?? 0;
-    hotPathAudit.translationSuccesses += completion.nativeMetrics.translationSuccesses ?? 0;
-    hotPathAudit.calibrationAttempts += completion.nativeMetrics.calibrationAttempts ?? 0;
-    hotPathAudit.calibrationSuccesses += completion.nativeMetrics.calibrationSuccesses ?? 0;
+    hotPathAudit.directTracks += completion.directMetrics.tracks ?? 0;
+    hotPathAudit.directSuccessful += completion.directMetrics.successful ?? 0;
+    hotPathAudit.crcFastSuccesses += completion.directMetrics.crcFastSuccesses ?? 0;
+    hotPathAudit.directMisses += completion.directMetrics.misses ?? 0;
+    hotPathAudit.rsFallbacks += completion.directMetrics.rsFallbacks ?? 0;
+    hotPathAudit.anchorSuccesses += completion.directMetrics.anchorSuccesses ?? 0;
+    hotPathAudit.anchorMisses += completion.directMetrics.anchorMisses ?? 0;
+    hotPathAudit.fastSamplerAttempts += completion.directMetrics.fastSamplerAttempts ?? 0;
+    hotPathAudit.fastSamplerSuccesses += completion.directMetrics.fastSamplerSuccesses ?? 0;
+    hotPathAudit.outOfFrameMisses += completion.directMetrics.outOfFrameMisses ?? 0;
+    hotPathAudit.bitstreamFailures += completion.directMetrics.bitstreamFailures ?? 0;
+    hotPathAudit.crcFailures += completion.directMetrics.crcFailures ?? 0;
+    hotPathAudit.anchorBypassAttempts += completion.directMetrics.anchorBypassAttempts ?? 0;
+    hotPathAudit.anchorBypassSuccesses += completion.directMetrics.anchorBypassSuccesses ?? 0;
+    hotPathAudit.translationAttempts += completion.directMetrics.translationAttempts ?? 0;
+    hotPathAudit.translationSuccesses += completion.directMetrics.translationSuccesses ?? 0;
+    hotPathAudit.calibrationAttempts += completion.directMetrics.calibrationAttempts ?? 0;
+    hotPathAudit.calibrationSuccesses += completion.directMetrics.calibrationSuccesses ?? 0;
   }
   if (auditThisCompletion) hotPathAudit.readFullAttempts += completion.readFullAttempts ?? 0;
   if (auditThisCompletion && !auditMode?.full && completion.fallbackAttempted) {
@@ -4576,7 +4432,7 @@ const INDICATOR_FADE_MS = 700;
 const SIGHTING_FADE_MS = 450;
 const OVERLAY_PATH_COLORS = {
   hot: "#00efff",
-  native: "#42a5ff",
+  direct: "#42a5ff",
   sparse: "#35d66f",
   fallback: "#ffb23e",
   robust: "#ff735c",
@@ -4584,7 +4440,7 @@ const OVERLAY_PATH_COLORS = {
 };
 const OVERLAY_PATH_LABELS = {
   hot: "H",
-  native: "N",
+  direct: "D",
   sparse: "S",
   fallback: "F",
   robust: "R",
@@ -4660,7 +4516,7 @@ function drawOverlayDevBadge(region, x, y, w, h, dpr) {
   overlayCtx.fillText(line2, bx + padX, by + padY * 2 + font1 + font2 * 0.82);
 }
 function drawOverlayDevLegend(dpr) {
-  const legend = "H hot   S sparse   F fallback   R robust   A acquire   N native";
+  const legend = "H hot   S sparse   F fallback   R robust   A acquire   D direct";
   const font = 9 * dpr;
   const padX = 6 * dpr;
   const padY = 4 * dpr;
@@ -4927,7 +4783,7 @@ function renderFocusDiagnostics() {
     ? workerLoadSamples.reduce((sum, sample) => sum + (sample.size ? sample.busy / sample.size : 0), 0) / workerLoadSamples.length
     : 0;
   const averageJobMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.latencyMs, 0) / trackedCompletions.length : 0;
-  const averageNativeMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.nativeMs, 0) / trackedCompletions.length : 0;
+  const averageDirectMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.directMs, 0) / trackedCompletions.length : 0;
   const averageGuidedMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + (sample.guidedMs || 0), 0) / trackedCompletions.length : 0;
   const averageCopyMs = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.copyMs, 0) / trackedCompletions.length : 0;
   const averageRobustBands = trackedCompletions.length ? trackedCompletions.reduce((sum, sample) => sum + sample.robustBands, 0) / trackedCompletions.length : 0;
@@ -4976,7 +4832,7 @@ function renderFocusDiagnostics() {
     `Output   valid ${validQrRate.toFixed(1)} · unique ${uniqueQrRate.toFixed(1)} · duplicate ${duplicateQrRate.toFixed(1)} QR/s · useful ${liveGoodputKbs(perfNow).toFixed(1)} KB/s`,
     senderRateEstimate ? `Sender   ~${senderRateEstimate.fps.toFixed(senderRateEstimate.snapped ? 0 : 1)} fps · ${senderRateEstimate.samples} sequence intervals` : "",
     cornerSlotMetrics(),
-    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${unlimitedTracksPerFrame() ? `unlimited ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"}` : Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · salvage ${lastGuidedRepairAllowed}/${lastGuidedRepairCandidates} · fences ${guidedRepairTemporalFences} seam/${guidedRepairPressureFences} CPU · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · native ${averageNativeMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
+    `Pressure worker-busy ${workerBusyEventRate.toFixed(1)}/s · latest replacements ${(pendingLaneReplaceTimes.length / (STATS_WINDOW_MS / 1e3)).toFixed(1)}/s · repeat skips ${repeatSkipRate.toFixed(1)}/s · crop recenters ${laneCropRecentersTotal} · tracks ${unlimitedTracksPerFrame() ? `unlimited ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"}` : Number.isFinite(selectedTracksPerFrameLimit()) ? `manual ${selectedTracksPerFrameLimit()}` : `auto ${lastTrackBudgetSelected || "—"}/${lastTrackBudgetCandidates || "—"} ${autoTrackBudgetReason}`} · budget drops ${trackBudgetDroppedTracks} · probes ${trackBudgetProbeTracks} · band avoids ${trackBudgetTemporalAvoided} · salvage ${lastGuidedRepairAllowed}/${lastGuidedRepairCandidates} · fences ${guidedRepairTemporalFences} seam/${guidedRepairPressureFences} CPU · avg job ${averageJobMs.toFixed(1)}ms · robust ${averageRobustSearchMs.toFixed(1)}ms/${averageRobustBands.toFixed(1)} bands · guided ${averageGuidedMs.toFixed(1)}ms · direct ${averageDirectMs.toFixed(1)}ms · copy ${averageCopyMs.toFixed(1)}ms`,
     (() => {
       const band = predictedTemporalBand(Math.max(temporalBandLastSource, 0) + 1, perfNow);
       return band ? `Rolling  ${band.axis === "r" ? "row" : "col"} ${band.position.toFixed(2)}/${band.span} · width ${band.width.toFixed(2)} · velocity ${band.velocity >= 0 ? "+" : ""}${band.velocity.toFixed(2)} slots/frame · confidence ${(band.confidence * 100).toFixed(0)}%` : "Rolling  —";
@@ -5004,17 +4860,11 @@ function renderFocusDiagnostics() {
     `Attribution submitted ${optimizerJobsSubmittedTotal} · mapped ${optimizerJobsMappedTotal} · completions mapped ${optimizerCompletionsMappedTotal} · unattributed ${optimizerUnattributedResults} · epoch mismatches ${optimizerEpochMismatches} · duplicate valid events ${optimizerDuplicateValidEvents} · transition frames ${optimizerTransitionFramesDiscarded}`,
     candidateTable ? `Candidates
 ${candidateTable}` : "",
-    optimizerTrace.length ? `Optimizer trace
-${optimizerTrace.slice(-20).map(
-      (event) => {
-        var _a2, _b2, _c2, _d2, _e2, _f2, _g2, _h2;
-        return `${event.time.toFixed(0)} ${event.event} ${(_a2 = event.candidateId) != null ? _a2 : "—"} ep${(_b2 = event.candidateEpoch) != null ? _b2 : "—"} src${(_c2 = event.sourceSequence) != null ? _c2 : "—"} scan${(_d2 = event.scanId) != null ? _d2 : "—"} E${(_f2 = (_e2 = event.actualExposure) != null ? _e2 : event.requestedExposure) != null ? _f2 : "—"} ISO${(_h2 = (_g2 = event.actualIso) != null ? _g2 : event.requestedIso) != null ? _h2 : "—"} valid:${event.validDecode === void 0 ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === void 0 ? "—" : event.usefulSymbol ? "yes" : "no"}`;
-      }
-    ).join("\n")}` : "",
+    devTools?.optimizerTraceText() ?? "",
     manualCandidate ? `Current manual ${formatExposureMs(diagnostic.actualExposure)} · ISO ${diagnostic.actualIso} · ${manualMeasured ? `${(manualMeasured.performance.perQrAttemptSuccessRate * 100).toFixed(0)}%/opportunity · ${manualMeasured.performance.validDecodesPerSecond.toFixed(1)} QR/s` : `${manualQrRate.toFixed(1)} live QR/s · controlled measurement pending`}
 Closest Optimize ${formatExposureMs(manualCandidate.candidate.exposure)} · ISO ${manualCandidate.candidate.iso} · distance ${manualCandidate.distance.toFixed(2)} EV · ${(manualCandidate.candidate.successRate * 100).toFixed(0)}%/opportunity · ${manualCandidate.candidate.normalizedQrRate.toFixed(1)} QR/s
 ${manualVerdict}` : "",
-    lastNativeMetrics ? `Native   ${lastNativeMetrics.totalMs.toFixed(1)}ms · copy ${(lastNativeMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastNativeMetrics.anchorMs.toFixed(1)} · sample ${lastNativeMetrics.samplingMs.toFixed(1)} · bits ${lastNativeMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastNativeMetrics.crcMs.toFixed(1)} · RS ${lastNativeMetrics.rsFallbackMs.toFixed(1)} · maps ${lastNativeMetrics.calibratedTracks ?? 0}/${lastNativeMetrics.activeTracks ?? 0} · pose ${lastNativeMetrics.translationSuccesses ?? 0}/${lastNativeMetrics.translationAttempts ?? 0} · ${lastNativeMetrics.samples} samples · ${lastNativeMetrics.successful}/${lastNativeMetrics.tracks} QR` : "",
+    lastDirectMetrics ? `Direct   ${lastDirectMetrics.totalMs.toFixed(1)}ms · copy ${(lastDirectMetrics.frameCopyMs ?? 0).toFixed(1)} · anchor ${lastDirectMetrics.anchorMs.toFixed(1)} · sample ${lastDirectMetrics.samplingMs.toFixed(1)} · bits ${lastDirectMetrics.bitExtractionMs.toFixed(1)} · CRC ${lastDirectMetrics.crcMs.toFixed(1)} · RS ${lastDirectMetrics.rsFallbackMs.toFixed(1)} · maps ${lastDirectMetrics.calibratedTracks ?? 0}/${lastDirectMetrics.activeTracks ?? 0} · pose ${lastDirectMetrics.translationSuccesses ?? 0}/${lastDirectMetrics.translationAttempts ?? 0} · ${lastDirectMetrics.samples} samples · ${lastDirectMetrics.successful}/${lastDirectMetrics.tracks} QR` : "",
     lastGuidedMetrics ? `Guided   state ${guidedRollout.state} · ${lastGuidedMetrics.totalMs.toFixed(1)}ms · bin ${lastGuidedMetrics.binarizeMs.toFixed(1)} · finder ${lastGuidedMetrics.finderMs.toFixed(1)} · sample ${lastGuidedMetrics.sampleMs.toFixed(1)} · decode ${lastGuidedMetrics.decodeMs.toFixed(1)} [sparse ${lastGuidedMetrics.fastDecodeMs.toFixed(1)} ${lastGuidedMetrics.fastDecodeSuccesses}/${lastGuidedMetrics.fastDecodeAttempts} · noRS ${lastGuidedMetrics.sparseNoRsSuccesses}/${lastGuidedMetrics.sparseNoRsAttempts} · stableRS ${lastGuidedMetrics.stableRsSuccesses ?? 0}/${lastGuidedMetrics.stableRsAttempts ?? 0} stable ${lastGuidedMetrics.stableEligibleTracks ?? 0} · warp T/A/M/P ${lastGuidedMetrics.translationWarpTracks ?? 0}/${lastGuidedMetrics.affineWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveMeshWarpTracks ?? 0}/${lastGuidedMetrics.perspectiveWarpTracks ?? 0} · erasure ${lastGuidedMetrics.erasureRsSuccesses ?? 0}/${lastGuidedMetrics.erasureRsAttempts ?? 0} repair ${lastGuidedMetrics.erasureRepairCodewords ?? 0} salvage ${countMaskBits(Number(lastGuidedMetrics.erasureRepairSuccessMask) >>> 0)}/${countMaskBits(Number(lastGuidedMetrics.erasureRepairAttemptMask) >>> 0)} suppress ${countMaskBits(Number(lastGuidedMetrics.erasureRepairSuppressedMask) >>> 0)} · profile ${lastGuidedMetrics.sparseProfileSuccesses ?? 0}/${lastGuidedMetrics.sparseProfileAttempts ?? 0} · module ${(lastGuidedMetrics.moduleSizeAvg ?? 0).toFixed(2)}px [${(lastGuidedMetrics.moduleSizeMin ?? 0).toFixed(2)}–${(lastGuidedMetrics.moduleSizeMax ?? 0).toFixed(2)}] · RS ${lastGuidedMetrics.sparseRsFallbacks} · sparse-skip ${lastGuidedMetrics.sparseSkipped} · fallback ${lastGuidedMetrics.genericDecodeMs.toFixed(1)} ${lastGuidedMetrics.genericDecodeAttempts} · hit ${lastGuidedMetrics.genericFallbackSuccesses}/${lastGuidedMetrics.genericFallbackTracks} skip ${lastGuidedMetrics.genericFallbackSkipped}] · finders ${lastGuidedMetrics.finderSuccesses}/${lastGuidedMetrics.finderAttempts} · triplets ${lastGuidedMetrics.finderTriplets} · ${lastGuidedMetrics.successful}/${lastGuidedMetrics.tracks} QR` : `Guided   state ${guidedRollout.state} · baseline p50 ${guidedBaselineP50().toFixed(1)}ms`,
     `Analyzer ${(opticalAnalyzeCount / Math.max(1e-3, (performance.now() - opticalTimingStartedAt) / 1e3)).toFixed(1)}/s · avg ${(opticalAnalyzeTotalMs / Math.max(1, opticalAnalyzeCount)).toFixed(2)}ms · max ${opticalAnalyzeMaxMs.toFixed(2)}ms`,
     `Reason   ${diagnostic.lastReason}`,
@@ -5342,13 +5192,12 @@ function stopReceiver() {
   cropRotate = 0;
   decodeExceptions = 0;
   lastDecodeError = "";
-  lastNativeMetrics = void 0;
+  lastDirectMetrics = void 0;
   lastGuidedMetrics = void 0;
   lastDirectPixelPath = "—";
   resetHotPathAudit();
   strictHotPathLockSeen = false;
   trackingInvalidations = 0;
-  workerLatencyMaxMs = 0;
   lastDistinctArrivalAt = 0;
   lastStreamDecodeAt = 0;
   geometryRecoveryProbes = 0;
@@ -6256,7 +6105,6 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
     if (message.full) {
       fullScanJobs.set(message.id, {
         thorough: Boolean(message.thorough),
-        native: true,
         reacquire: gridLattice.locked,
         acquisition: !gridLattice.locked,
         acquisitionMode: message.acquisitionMode
@@ -7335,7 +7183,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
       const accepted = submitReceiverJob(
         laneMessage,
         laneTransfer,
-        direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
+        direct ? direct.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "BUFFERED TRACKED GRID",
         trace,
         source.sequence,
         source.callbackTimeMs,
@@ -7425,7 +7273,7 @@ if (healthyTrackedGrid && lockedLayout && laneCount >= 1 && batchTracks.length >
         if (!submitReceiverJob(
           sharedMessage,
           sharedTransfer,
-          sharedDirect ? sharedDirect.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "NATIVE TRACKED GRID",
+          sharedDirect ? sharedDirect.pixelFormat === "y8" ? "Y8 TRACKED GRID" : "DIRECT TRACKED GRID" : "BUFFERED TRACKED GRID",
           trace,
           source.sequence,
           source.callbackTimeMs,
@@ -8395,29 +8243,29 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
     });
     const extraUniqueSymbols = new Set(extraPackets.map((item) => item.esi)).size;
     const workerCpuSeconds = Math.max(1e-3, decodeLatencies.reduce((sum, value) => sum + value, 0) / 1e3);
-    const benchmarkNative = jobs.flatMap((job) => job.nativeMetrics ? [job.nativeMetrics] : []);
-    const benchmarkNativeTracks = benchmarkNative.reduce((sum, metrics) => sum + (metrics.tracks ?? 0), 0);
-    const benchmarkCrcFast = benchmarkNative.reduce((sum, metrics) => sum + (metrics.crcFastSuccesses ?? 0), 0);
-    const benchmarkNativeMisses = benchmarkNative.reduce((sum, metrics) => sum + (metrics.misses ?? 0), 0);
-    const benchmarkRsFallbacks = benchmarkNative.reduce((sum, metrics) => sum + (metrics.rsFallbacks ?? 0), 0);
-    const sumNative = (key) => benchmarkNative.reduce((sum, metrics) => sum + (metrics[key] ?? 0), 0);
+    const benchmarkDirect = jobs.flatMap((job) => job.directMetrics ? [job.directMetrics] : []);
+    const benchmarkDirectTracks = benchmarkDirect.reduce((sum, metrics) => sum + (metrics.tracks ?? 0), 0);
+    const benchmarkCrcFast = benchmarkDirect.reduce((sum, metrics) => sum + (metrics.crcFastSuccesses ?? 0), 0);
+    const benchmarkDirectMisses = benchmarkDirect.reduce((sum, metrics) => sum + (metrics.misses ?? 0), 0);
+    const benchmarkRsFallbacks = benchmarkDirect.reduce((sum, metrics) => sum + (metrics.rsFallbacks ?? 0), 0);
+    const sumDirect = (key) => benchmarkDirect.reduce((sum, metrics) => sum + (metrics[key] ?? 0), 0);
     const benchmarkFallbackAttempts = jobs.reduce((sum, job) => sum + (job.fallbackAttempts ?? 0), 0);
     const benchmarkFallbackSuccesses = jobs.reduce((sum, job) => sum + (job.fallbackSuccesses ?? 0), 0);
     const hotPath = {
       strict: replayMode.value === "correctness",
       postLockRecoverySuppressed: replayMode.value === "correctness",
-      nativeTracks: benchmarkNativeTracks,
+      directTracks: benchmarkDirectTracks,
       crcFastSuccesses: benchmarkCrcFast,
-      crcFastPercent: benchmarkNativeTracks ? benchmarkCrcFast / benchmarkNativeTracks * 100 : 0,
-      nativeMisses: benchmarkNativeMisses,
+      crcFastPercent: benchmarkDirectTracks ? benchmarkCrcFast / benchmarkDirectTracks * 100 : 0,
+      directMisses: benchmarkDirectMisses,
       qrRsFallbacks: benchmarkRsFallbacks,
-      anchorSuccesses: sumNative("anchorSuccesses"),
-      anchorMisses: sumNative("anchorMisses"),
-      thresholdFallbacks: sumNative("thresholdFallbacks"),
-      outOfFrameMisses: sumNative("outOfFrameMisses"),
-      bitstreamFailures: sumNative("bitstreamFailures"),
-      crcFailures: sumNative("crcFailures"),
-      multiSampleRetries: sumNative("multiSampleRetries"),
+      anchorSuccesses: sumDirect("anchorSuccesses"),
+      anchorMisses: sumDirect("anchorMisses"),
+      thresholdFallbacks: sumDirect("thresholdFallbacks"),
+      outOfFrameMisses: sumDirect("outOfFrameMisses"),
+      bitstreamFailures: sumDirect("bitstreamFailures"),
+      crcFailures: sumDirect("crcFailures"),
+      multiSampleRetries: sumDirect("multiSampleRetries"),
       localRecoveryAttempts: benchmarkFallbackAttempts,
       localRecoverySuccesses: benchmarkFallbackSuccesses,
       readFullAttempts: jobs.reduce((sum, job) => sum + (job.readFullAttempts ?? 0), 0),
@@ -8509,7 +8357,7 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
 QR/s           ${(productionPackets.length / durationSeconds).toFixed(1)}
 useful QR/s    ${(uniqueUseful / durationSeconds).toFixed(1)}
 verified KB/s ${(benchmarkVerifiedBytes / 1024 / durationSeconds).toFixed(1)}
-hot CRC       ${hotPath.crcFastSuccesses}/${hotPath.nativeTracks} (${hotPath.crcFastPercent.toFixed(1)}%)
+hot CRC       ${hotPath.crcFastSuccesses}/${hotPath.directTracks} (${hotPath.crcFastPercent.toFixed(1)}%)
 QR-RS/local   ${hotPath.qrRsFallbacks} / ${hotPath.localRecoverySuccesses}/${hotPath.localRecoveryAttempts}
 decode p50/95 ${percentile(decodeLatencies, 0.5).toFixed(1)} / ${percentile(decodeLatencies, 0.95).toFixed(1)} ms
 busy drops    ${capturesDropped}
@@ -8611,7 +8459,7 @@ if (paintDiagnostics && transportDiagnostics) {
   const runDuplicatePercent = runTransportRate > 0 ? runDuplicateRate / runTransportRate * 100 : 0;
   const runGoodputKbs = decoder && runSeconds ? decoder.usefulSymbols * decoder.blockLen / expectedCodingOverhead() / 1024 / runSeconds : 0;
   noteCameraPerformance(runGoodputKbs, runUniqueRate, runSeconds);
-  const fastPercent = hotPathAudit.nativeTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.nativeTracks * 100 : 0;
+  const fastPercent = hotPathAudit.directTracks ? hotPathAudit.crcFastSuccesses / hotPathAudit.directTracks * 100 : 0;
   const pipelineSeconds = livePipeline.startedAt ? Math.max(1e-3, (now - livePipeline.startedAt) / 1e3) : 0;
   const activeJobs = pool.activeJobs;
   const oldestActiveMs = pool.oldestActiveAgeMs;
@@ -8661,7 +8509,7 @@ Schedule ${livePipeline.submittedFrames} frames · ${livePipeline.submittedJobs}
 Work    ${livePipeline.submittedTracks} tracked QR attempts → ${livePipeline.trackedOutputSymbols} tracked outputs (${trackedYield.toFixed(1)}%) · full outputs ${livePipeline.fullOutputSymbols} · ${livePipeline.readFullAttempts} readFull calls
 Pixels  tracked ${trackedMpPerJob.toFixed(2)} MP/job · full ${fullMpPerJob.toFixed(2)} MP/job · submitted ${mpPerSecond.toFixed(1)} MP/s
 CPU     ${workerSeconds.toFixed(1)} completed worker-s + ${activeWorkerSeconds.toFixed(1)} active / ${workerCapacitySeconds.toFixed(1)} available (${workerCpuPercent.toFixed(0)}%)
-Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · native ${(livePipeline.nativeMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
+Phases  robust ${(livePipeline.robustMs / 1e3).toFixed(1)}s (${(livePipeline.robustMs / phaseTotalMs * 100).toFixed(0)}%; tracked ${(livePipeline.trackedRobustMs / 1e3).toFixed(1)} / full ${(livePipeline.fullRobustMs / 1e3).toFixed(1)}) · guided ${(livePipeline.guidedMs / 1e3).toFixed(1)}s (${(livePipeline.guidedMs / phaseTotalMs * 100).toFixed(0)}%; bin ${(livePipeline.guidedBinarizeMs / 1e3).toFixed(1)} / finder ${(livePipeline.guidedFinderMs / 1e3).toFixed(1)} / sample ${(livePipeline.guidedSampleMs / 1e3).toFixed(1)} / decode ${(livePipeline.guidedDecodeMs / 1e3).toFixed(1)} [sparse ${(livePipeline.guidedFastDecodeMs / 1e3).toFixed(1)} / fallback ${(livePipeline.guidedGenericDecodeMs / 1e3).toFixed(1)}]) · copy ${(livePipeline.copyMs / 1e3).toFixed(2)}s (${(livePipeline.copyMs / phaseTotalMs * 100).toFixed(1)}%) · direct ${(livePipeline.directMs / 1e3).toFixed(1)}s · other ${(livePipeline.otherMs / 1e3).toFixed(1)}s · dispatch wait ${(livePipeline.workerWaitMs / 1e3).toFixed(2)}s
 Guided  ${guidedRollout.state} · ${livePipeline.guidedJobs} jobs · ${livePipeline.guidedOutputs} outputs · turbo ${livePipeline.guidedTurboSuccesses}/${livePipeline.guidedTurboAttempts} · turbo cost ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedTurboAttempts)).toFixed(2)}ms/attempt · stableRS ${livePipeline.guidedStableRsSuccesses}/${livePipeline.guidedStableRsAttempts} · stable ${livePipeline.guidedStableEligibleTracks} · warp T/A/M/P ${livePipeline.guidedTranslationWarpTracks}/${livePipeline.guidedAffineWarpTracks}/${livePipeline.guidedPerspectiveMeshWarpTracks}/${livePipeline.guidedPerspectiveWarpTracks} · erasure ${livePipeline.guidedErasureRsSuccesses}/${livePipeline.guidedErasureRsAttempts} repair ${livePipeline.guidedErasureRepairCodewords} salvage ${livePipeline.guidedErasureRepairSuccesses}/${livePipeline.guidedErasureRepairAttempts} suppress ${livePipeline.guidedErasureRepairSuppressed} · finders ${livePipeline.guidedFinderSuccesses}/${livePipeline.guidedFinderAttempts} · sparse ${livePipeline.guidedFastDecodeSuccesses}/${livePipeline.guidedFastDecodeAttempts} · noRS ${livePipeline.guidedSparseNoRsSuccesses}/${livePipeline.guidedSparseNoRsAttempts} · sparseRS ${livePipeline.guidedSparseRsFallbacks} · sparse skip ${livePipeline.guidedSparseSkipped} · fallback ${livePipeline.guidedGenericFallbackSuccesses}/${livePipeline.guidedGenericFallbackTracks} slots · ${livePipeline.guidedGenericDecodeAttempts} decodes · skip ${livePipeline.guidedGenericFallbackSkipped} · decode cost sparse ${(livePipeline.guidedFastDecodeMs / Math.max(1, livePipeline.guidedSparseNoRsAttempts + livePipeline.guidedSparseRsFallbacks)).toFixed(2)}ms/op · fallback ${(livePipeline.guidedGenericDecodeMs / Math.max(1, livePipeline.guidedGenericDecodeAttempts)).toFixed(2)}ms/call · baseline p50 ${guidedBaselineP50().toFixed(1)}ms · in flight ${guidedRollout.inFlight} · failures ${guidedRollout.failures}
 Latency tracked avg ${livePipeline.completedTracked ? (livePipeline.trackedLatencyMs / livePipeline.completedTracked).toFixed(1) : "0.0"} · p50 ${trackedP50.toFixed(1)} · p95 ${trackedP95.toFixed(1)} · max ${trackedMax.toFixed(1)} ms · full avg ${livePipeline.completedFull ? (livePipeline.fullLatencyMs / livePipeline.completedFull).toFixed(1) : "0.0"} · p50 ${fullP50.toFixed(1)} · p95 ${fullP95.toFixed(1)} · max ${fullMax.toFixed(1)} ms
 Workers ${activeJobs.length}/${pool.size} active · oldest ${(oldestActiveMs / 1e3).toFixed(1)}s · last submit ${(lastSubmitAgeMs / 1e3).toFixed(1)}s · last completion ${(lastCompletionAgeMs / 1e3).toFixed(1)}s · timeouts ${livePipeline.timeouts} · errors ${livePipeline.errors}
@@ -8669,7 +8517,7 @@ Active  ${activeSummary}
 
 Runtime ${RECEIVER_RUNTIME_BUILD}
 Hot path ${strictHotPathActive() ? `STRICT · lock ${strictHotPathLockSeen ? "established" : "acquiring"}` : "LIVE"}
-Native CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.nativeTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.nativeSuccessful} · misses ${hotPathAudit.nativeMisses}
+Direct CRC ${hotPathAudit.crcFastSuccesses}/${hotPathAudit.directTracks} (${fastPercent.toFixed(1)}%) · successful ${hotPathAudit.directSuccessful} · misses ${hotPathAudit.directMisses}
 QR-RS ${hotPathAudit.rsFallbacks} · local robust ${hotPathAudit.localRecoverySuccesses}/${hotPathAudit.localRecoveryAttempts} · readFull ${hotPathAudit.readFullAttempts}
 Motion ${hotPathAudit.translationSuccesses}/${hotPathAudit.translationAttempts} · calibration ${hotPathAudit.calibrationSuccesses}/${hotPathAudit.calibrationAttempts} · frame misses ${hotPathAudit.outOfFrameMisses}
 Cached map CRC ${hotPathAudit.fastSamplerSuccesses}/${hotPathAudit.fastSamplerAttempts} · bitstream ${hotPathAudit.bitstreamFailures} · CRC ${hotPathAudit.crcFailures} · Hybrid fallback ${hotPathAudit.anchorBypassSuccesses}/${hotPathAudit.anchorBypassAttempts}

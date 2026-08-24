@@ -1,7 +1,68 @@
+const OPTIMIZER_TRACE_LIMIT = 200;
+const optimizerTrace = [];
+
+export function noteOptimizerTrace(event) {
+  optimizerTrace.push(event);
+  if (optimizerTrace.length > OPTIMIZER_TRACE_LIMIT) optimizerTrace.splice(0, optimizerTrace.length - OPTIMIZER_TRACE_LIMIT);
+}
+
+export function resetOptimizerTrace() {
+  optimizerTrace.length = 0;
+}
+
+export function optimizerTraceText() {
+  if (!optimizerTrace.length) return "";
+  return `Optimizer trace\n${optimizerTrace.slice(-20).map((event) =>
+    `${event.time.toFixed(0)} ${event.event} ${event.candidateId ?? "—"} ep${event.candidateEpoch ?? "—"} src${event.sourceSequence ?? "—"} scan${event.scanId ?? "—"} E${event.actualExposure ?? event.requestedExposure ?? "—"} ISO${event.actualIso ?? event.requestedIso ?? "—"} valid:${event.validDecode === undefined ? "—" : event.validDecode ? "yes" : "no"} useful:${event.usefulSymbol === undefined ? "—" : event.usefulSymbol ? "yes" : "no"}`
+  ).join("\n")}`;
+}
+
 const CORPUS_DEVICE_NAMES = {
   "0dc8b7d5f6e84e81cf126349d821a9d948a6db87ea4a810c04a51aec6999401c": "OP5",
   "5e792630f18c1d6bc5fc26e8ce6d90a27163fd50f32c7631256aa9e7bc7b193e": "OP12R"
 };
+
+function legacyClipboardCopy(text) {
+  try {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.readOnly = true;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    input.style.pointerEvents = "none";
+    document.body.append(input);
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    const copied = document.execCommand("copy");
+    input.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
+export async function copyDiagnostics(button, text, automatic = false, copyPlatform) {
+  if (!text) return false;
+  try {
+    if (!copyPlatform(text)) {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        if (!legacyClipboardCopy(text)) throw error;
+      }
+    }
+    button.textContent = automatic ? "Diagnostics copied" : "Copied";
+    setTimeout(() => { button.textContent = "Copy diagnostics"; }, 1500);
+    return true;
+  } catch {
+    if (!automatic) {
+      button.textContent = "Copy failed";
+      setTimeout(() => { button.textContent = "Copy diagnostics"; }, 1500);
+    }
+    return false;
+  }
+}
 
 export function compactDeviceName(header) {
   const id = String(header.cameraSettings.deviceId ?? "");

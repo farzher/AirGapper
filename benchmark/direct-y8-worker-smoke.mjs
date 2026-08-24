@@ -15,12 +15,12 @@ try {
     const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
     const timer = setTimeout(() => {
       worker.terminate();
-      reject(new Error("native Y8 worker smoke test timed out"));
+      reject(new Error("direct Y8 worker smoke test timed out"));
     }, 15_000);
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
-      reject(new Error(event.message || "native Y8 worker failed"));
+      reject(new Error(event.message || "direct Y8 worker failed"));
     };
     worker.onmessage = (event) => {
       if (event.data?.id !== jobId) return;
@@ -59,10 +59,10 @@ try {
   }));
 
   if (result?.id !== 991351) throw new Error(`unexpected worker reply id: ${result?.id}`);
-  if (result?.error) throw new Error(`native Y8 worker error: ${result.error}`);
-  if (result?.directFrameFailed) throw new Error("native Y8 ArrayBuffer was rejected as a direct frame");
-  if (!Array.isArray(result?.symbols)) throw new Error("native Y8 worker reply has no symbols array");
-  console.log("AIRGAPPER_NATIVE_Y8_WORKER_PASS", JSON.stringify({
+  if (result?.error) throw new Error(`direct Y8 worker error: ${result.error}`);
+  if (result?.directFrameFailed) throw new Error("direct Y8 ArrayBuffer was rejected as a direct frame");
+  if (!Array.isArray(result?.symbols)) throw new Error("direct Y8 worker reply has no symbols array");
+  console.log("AIRGAPPER_DIRECT_Y8_WORKER_PASS", JSON.stringify({
     symbols: result.symbols.length,
     readFullAttempts: result.readFullAttempts,
     latencyMs: result.latencyMs
