@@ -44,6 +44,41 @@ export class CameraUiStore {
     this.modeResults = loadJson(MODE_RESULTS_KEY);
     this.performance = loadJson(PERFORMANCE_KEY);
     this.performanceSaveAt = 0;
+    this.performancePersistPending = false;
+    this.performancePersistHandle = 0;
+    this.performancePersistUsesIdle = false;
+    window.addEventListener("pagehide", () => this.flushPerformance(), { passive: true });
+  }
+
+  schedulePerformanceSave() {
+    if (this.performancePersistPending) return;
+    this.performancePersistPending = true;
+    const persist = () => {
+      this.performancePersistPending = false;
+      this.performancePersistHandle = 0;
+      this.performancePersistUsesIdle = false;
+      saveJson(PERFORMANCE_KEY, this.performance);
+    };
+    if (typeof requestIdleCallback === "function") {
+      this.performancePersistUsesIdle = true;
+      this.performancePersistHandle = requestIdleCallback(persist, { timeout: 5000 });
+    } else {
+      this.performancePersistHandle = setTimeout(persist, 1000);
+    }
+  }
+
+  flushPerformance() {
+    if (!this.performancePersistPending) return;
+    if (this.performancePersistHandle) {
+      if (this.performancePersistUsesIdle && typeof cancelIdleCallback === "function")
+        cancelIdleCallback(this.performancePersistHandle);
+      else
+        clearTimeout(this.performancePersistHandle);
+    }
+    this.performancePersistPending = false;
+    this.performancePersistHandle = 0;
+    this.performancePersistUsesIdle = false;
+    saveJson(PERFORMANCE_KEY, this.performance);
   }
 
   standardModes(resolutions) {
@@ -119,6 +154,6 @@ export class CameraUiStore {
     record.maxFps = Math.max(Number(record.maxFps) || 0, Number(settings.frameRate) || 0);
     record.updatedAt = Date.now();
     this.performance[id] = record;
-    saveJson(PERFORMANCE_KEY, this.performance);
+    this.schedulePerformanceSave();
   }
 }
