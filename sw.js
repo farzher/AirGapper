@@ -33,6 +33,7 @@
     "./receive/result.js",
     "./receive/rgba-luma.js",
     "./receive/runtime.js",
+    "./receive/startup-throughput.js",
     "./receive/timeout-diagnostics.js",
     "./receive/track-processor-proxy.js",
     "./receive/track-processor-worker-proxy.js",
