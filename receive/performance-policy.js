@@ -15,8 +15,6 @@ export const ACQUISITION_ESCALATE_MS = 180;
 export const ACQUISITION_HUNT_AFTER_MS = 900;
 export const ACQUISITION_HUNT_EVERY_SCANS = 12;
 export const ACQUISITION_SIGHTING_EVERY_SCANS = 4;
-export const TEMPORAL_HARD_SKIP_CONFIDENCE = 0.62;
-export const TEMPORAL_HARD_SKIP_RISK = 0.48;
 
 const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([
   // Default QR seed: short enough to avoid rolling-shutter smear and darker
@@ -187,12 +185,6 @@ export function automaticOpticsHoldEligible(sample, {
   const enoughEvidence = attempts >= Math.max(1, Number(minAttempts) || 1) &&
     outputs >= Math.max(1, Number(minOutputs) || 1);
   return enoughEvidence && (poseUnstable ? movingProof : (standardProof || broadProof));
-}
-
-export function temporalHardSkip({ explicitSkip = false, risk = 0, confidence = 0, measurement = false }) {
-  if (measurement) return false;
-  if (explicitSkip) return true;
-  return Number(confidence) >= TEMPORAL_HARD_SKIP_CONFIDENCE && Number(risk) >= TEMPORAL_HARD_SKIP_RISK;
 }
 
 export function legacyTemporalRiskWeight(confidence) {
