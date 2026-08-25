@@ -10,6 +10,7 @@ const EXPOSURE_TRANSITION_GUARD_MS = 100;
 
 const slotSuccessAt = new Float64Array(SLOT_CAPACITY);
 const eventSuccessAt = new Float64Array(EVENT_CAPACITY);
+const latticeStateSubscribers = new Set();
 let eventWrite = 0;
 let eventCount = 0;
 let lastSuccessAt = 0;
@@ -84,11 +85,21 @@ export function noteDecodeGeometry(snapshot, frameWidth, frameHeight) {
   geometrySlotCount = Math.min(SLOT_CAPACITY, visible);
 }
 
+export function subscribeDecodeLatticeState(listener) {
+  if (typeof listener !== "function") return () => {};
+  latticeStateSubscribers.add(listener);
+  try { listener(latticeState); } catch {}
+  return () => latticeStateSubscribers.delete(listener);
+}
+
 export function noteDecodeLatticeState(state) {
   latticeState = String(state || "SEARCH");
   if (latticeState === "SEARCH" || latticeState === "REACQUIRE" || latticeState === "DORMANT") {
     geometrySlotCount = 0;
     clearRecentDecodeHealth();
+  }
+  for (const listener of latticeStateSubscribers) {
+    try { listener(latticeState); } catch {}
   }
 }
 
@@ -97,6 +108,9 @@ export function resetDecodeHealth() {
   geometrySlotCount = 0;
   exposureTransitionAt = -Infinity;
   clearRecentDecodeHealth();
+  for (const listener of latticeStateSubscribers) {
+    try { listener(latticeState); } catch {}
+  }
 }
 
 // Acquisition feedback reaches the camera mutation queue asynchronously. A
