@@ -1,0 +1,315 @@
+name: receiver convergence once
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/receiver-convergence-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+
+      - name: Patch receiver control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("receive/runtime.js")
+          source = path.read_text()
+
+          def replace_once(old, new, label):
+              global source
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              source = source.replace(old, new, 1)
+
+          replace_once(
+          '''import {
+            acquisitionRacePolicy,
+            automaticOpticsHoldThreshold,
+            legacyTemporalRiskWeight
+          } from "./performance-policy.js";''',
+          '''import {
+            acquisitionRacePolicy,
+            automaticOpticsAcquisitionSeed,
+            automaticOpticsHasAnotherAcquisitionSeed,
+            automaticOpticsHoldThreshold,
+            legacyTemporalRiskWeight,
+            lockedRecoveryPolicy
+          } from "./performance-policy.js";''',
+          "performance policy imports")
+
+          replace_once(
+          '''const AUTO_QR_EV_BIAS = -0.75;
+          const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);''',
+          '''const AUTO_QR_EV_BIAS = -0.75;''',
+          "obsolete fixed optics light scale")
+
+          replace_once(
+          '''const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
+          const AUTO_OPTICS_MAX_SHORT_EXPOSURE = 35; // 3.5 ms; exposureTime uses 0.1 ms units
+          // After the motion-safe shutter handoff, tune gain against the decoder itself.''',
+          '''// After the motion-safe shutter handoff, tune gain against the decoder itself.''',
+          "obsolete fixed short-shutter constants")
+
+          replace_once(
+          '''let autoOpticsAeRescueStep = 0;
+          let autoOpticsAeBias = 0;''',
+          '''let autoOpticsAeRescueStep = 0;
+          let autoOpticsSeedAttempt = 0;
+          let autoOpticsAeBias = 0;''',
+          "auto optics seed state")
+
+          reset_pair = '''  autoOpticsAeRescueStep = 0;
+            autoOpticsAeBias = 0;'''
+          reset_replacement = '''  autoOpticsAeRescueStep = 0;
+            autoOpticsSeedAttempt = 0;
+            autoOpticsAeBias = 0;'''
+          reset_count = source.count(reset_pair)
+          if reset_count < 2:
+              raise SystemExit(f"auto optics reset sites: expected at least two matches, found {reset_count}")
+          source = source.replace(reset_pair, reset_replacement)
+
+          replace_once(
+          '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
+            const aeProduct = baseline.exposure * baseline.iso;
+            // readAutomaticAeBaseline() is neutral. Apply AirGapper's deliberate darkness
+            // preference exactly once here; remembered/manual winners bypass this meter.
+            const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * AUTO_QR_LIGHT_SCALE);
+            let exposure = quantizeCameraRange(
+              Math.min(exposureRange.max, AUTO_OPTICS_MAX_SHORT_EXPOSURE, 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION),
+              exposureRange
+            );''',
+          '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
+            const aeProduct = baseline.exposure * baseline.iso;
+            const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
+            // Keep the acquisition shutter motion-safe, but allow a tiny bounded
+            // QR-specific light ladder before giving photographic AE control back.
+            const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);
+            let exposure = quantizeCameraRange(
+              Math.min(exposureRange.max, seedPolicy.maxExposure, 1e4 / fps * seedPolicy.frameFraction),
+              exposureRange
+            );''',
+          "short shutter seed policy")
+
+          replace_once(
+          '''  return { exposure, iso, aeProduct, targetProduct };
+          }''',
+          '''  return { exposure, iso, aeProduct, targetProduct, seedPolicy };
+          }''',
+          "short shutter seed metadata")
+
+          replace_once(
+          '''  autoOpticsTuneSummary = `${reason} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;''',
+          '''  autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;''',
+          "short shutter diagnostics")
+
+          replace_once(
+          '''async function abandonAutomaticShortSeed(track, reason = "fast-dark seed produced no QR") {
+            if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
+            autoOpticsMutationRunning = true;
+            try {
+              const baseline = await readAutomaticAeBaseline(track);
+              if (!automaticOpticsSessionAlive(track)) return;
+              const now = receiverNow();
+              autoOpticsAeBaseline = baseline;
+              autoOpticsRuntimeState = "ae";
+              autoOpticsMemoryBootAt = 0;
+              autoOpticsMemoryBoot = void 0;
+              autoOpticsLockSince = 0;
+              autoOpticsAcquisitionSince = now;
+              autoOpticsRetryAt = 0;
+              autoOpticsRescueRetryAt = now + 300;
+              autoOpticsHoldSample = void 0;
+              autoOpticsHoldCollapseSince = 0;
+              autoOpticsHeldYield = 0;
+              autoOpticsTuneSummary = `${reason} · neutral AE rescue`;
+              focusController.adoptAutomaticCameraState("fast-dark startup failed; hardware AE rescue enabled");
+            } finally {
+              autoOpticsMutationRunning = false;
+            }
+          }''',
+          '''async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
+            if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
+            autoOpticsMutationRunning = true;
+            try {
+              // Acquisition may spend optics. Exhaust the tiny QR-specific short-
+              // shutter ladder before returning control to photographic AE.
+              if (automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt) && autoOpticsAeBaseline) {
+                autoOpticsSeedAttempt++;
+                const next = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
+                if (await applyAutomaticShortSeed(track, autoOpticsAeBaseline, `${reason} · trying ${next.label}`)) return;
+              }
+
+              const baseline = await readAutomaticAeBaseline(track);
+              if (!automaticOpticsSessionAlive(track)) return;
+              const now = receiverNow();
+              autoOpticsAeBaseline = baseline;
+              autoOpticsSeedAttempt = 0;
+              autoOpticsRuntimeState = "ae";
+              autoOpticsMemoryBootAt = 0;
+              autoOpticsMemoryBoot = void 0;
+              autoOpticsLockSince = 0;
+              autoOpticsAcquisitionSince = now;
+              autoOpticsRetryAt = 0;
+              autoOpticsRescueRetryAt = now + 300;
+              autoOpticsHoldSample = void 0;
+              autoOpticsHoldCollapseSince = 0;
+              autoOpticsHeldYield = 0;
+              autoOpticsTuneSummary = `${reason} · QR seed ladder exhausted · neutral AE rescue`;
+              focusController.adoptAutomaticCameraState("QR-specific short-shutter acquisition exhausted; hardware AE rescue enabled");
+            } finally {
+              autoOpticsMutationRunning = false;
+            }
+          }''',
+          "bounded auto optics acquisition ladder")
+
+          replace_once(
+          '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
+                        const healed = gridLattice.dropSlotCorrection(slot);
+                        resetSlotSchedulingHistory(slot, recoveryNow);
+                        slotGeometryProbeUntil[slot] = recoveryNow + 900;
+                        slotGeometryRetryAt[slot] = recoveryNow + 3000;
+                        region.consecutiveMisses = 0;
+                        region.decodeConfidence = Math.max(region.decodeConfidence, 0.65);
+                        resetTrackBudgetController();
+                        geometrySlotCorrectionResets++;
+                        if (healed) syncGrid(healed, recoveryNow);
+                        const refreshed = regions.find((item) => Number(item.gridSlot) === slot);
+                        if (refreshed) {
+                          refreshed.consecutiveMisses = 0;
+                          refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
+                        }
+                        lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
+                      }''',
+          '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
+                        const healed = gridLattice.dropSlotCorrection(slot);
+                        // A miss streak is not itself proof that a local lens residual
+                        // exists or is bad. If there was nothing to remove, leave hot
+                        // scheduling/history alone and only rate-limit the next check.
+                        slotGeometryRetryAt[slot] = recoveryNow + 3000;
+                        if (healed) {
+                          resetSlotSchedulingHistory(slot, recoveryNow);
+                          slotGeometryProbeUntil[slot] = recoveryNow + 900;
+                          region.consecutiveMisses = 0;
+                          region.decodeConfidence = Math.max(region.decodeConfidence, 0.65);
+                          resetTrackBudgetController();
+                          geometrySlotCorrectionResets++;
+                          syncGrid(healed, recoveryNow);
+                          const refreshed = regions.find((item) => Number(item.gridSlot) === slot);
+                          if (refreshed) {
+                            refreshed.consecutiveMisses = 0;
+                            refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
+                          }
+                          lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
+                        }
+                      }''',
+          "slot self-heal no-op churn")
+
+          replace_once(
+          '''  const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
+            lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
+            // Three tracked misses are evidence for a rescue probe, not evidence that the
+            // wall geometry vanished. Previously this destroyed a good lattice after
+            // roughly 0.9 s of optical misses and forced dense generic reacquisition.
+            // Preserve the hot geometry while rescue scans run in parallel; only abandon
+            // it after sustained decoder silence.
+            // A proven lattice is sticky for the life of this receive session.
+            // `allLockedCandidatesCold` escalates to bounded full-frame recovery below,
+            // but ordinary decoder silence must never destroy stream identity/geometry.
+            // A newly found CRC-valid QR will reject stale pose anchors and re-anchor the
+            // existing wall in place, even when only that one QR is visible.''',
+          '''  const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
+            lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
+            const lockedRecovery = lockedRecoveryPolicy({
+              geometryProbeDue,
+              allCandidatesCold: allLockedCandidatesCold,
+              decodeSilenceMs: lockedDecodeSilenceMs,
+              globalSilenceMs: GEOMETRY_PROBE_SILENCE_MS,
+              hasCandidates: lockedGeometryCandidates.length > 0
+            });
+            // Three tracked misses are evidence for local predicted-slot repair, not
+            // evidence that the wall vanished. Full-frame reacquisition is reserved
+            // for sustained payload silence; valid stream traffic keeps global finder
+            // work out of the hot locked path.''',
+          "locked recovery policy wiring")
+
+          replace_once(
+          '''  const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
+            ? geometryProbeDue || allLockedCandidatesCold
+            : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;''',
+          '''  const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
+            ? lockedRecovery.needsRecovery
+            : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;''',
+          "locked recovery scheduling")
+
+          replace_once(
+          '''  const globalRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
+            (allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS);
+            const localRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
+              geometryProbeDue && !globalRecoverySeedScan && lockedGeometryCandidates.length > 0;''',
+          '''  const globalRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
+            lockedRecovery.globalRecovery;
+            const localRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
+              lockedRecovery.localRecovery;''',
+          "local versus global recovery split")
+
+          replace_once(
+          '''  geometryRecoveryProbes = 0;
+            geometryRecoveryResets = 0;
+            geometryMotionNudges = 0;''',
+          '''  geometryRecoveryProbes = 0;
+            geometryRecoveryResets = 0;
+            geometrySlotCorrectionResets = 0;
+            geometrySightingNudges = 0;
+            geometryMotionNudges = 0;''',
+          "receiver diagnostic reset")
+
+          path.write_text(source)
+          PY
+
+      - name: Verify convergence patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node benchmark/browser-performance-policy-smoke.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path("receive/runtime.js").read_text()
+          heal = s.index("const healed = gridLattice.dropSlotCorrection(slot);")
+          guard = s.index("if (healed) {", heal)
+          reset = s.index("resetSlotSchedulingHistory(slot, recoveryNow);", heal)
+          assert heal < guard < reset, "slot scheduler reset is not guarded by a real correction removal"
+          assert "lockedRecovery.globalRecovery" in s
+          assert "lockedRecovery.localRecovery" in s
+          assert "allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS" not in s
+          assert "automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt)" in s
+          print("receiver convergence invariants: ok")
+          PY
+          git diff --check
+
+      - name: Commit source patch and remove one-time workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/receiver-convergence-once.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/runtime.js .github/workflows/receiver-convergence-once.yml
+          git diff --cached --check
+          git commit -m "Converge locked recovery and Auto Optics acquisition"
+          git push origin HEAD:master
