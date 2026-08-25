@@ -1,10 +1,6 @@
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const iosSafariCamera = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 
-// WebKit can reject otherwise-valid getUserMedia constraint bundles with an
-// OverconstrainedError whose message is only "Invalid constraint". Keep the
-// preferred AirGapper request untouched, but on iPhone/iPad recover locally
-// instead of leaving the receiver unable to start.
 function cameraConstraintFailure(error) {
   return error?.name === "OverconstrainedError" || /invalid constraint/i.test(String(error?.message || ""));
 }
@@ -42,6 +38,102 @@ function installIOSCameraConstraintFallback() {
   try { media.getUserMedia = wrapped; } catch {}
 }
 installIOSCameraConstraintFallback();
+
+const blockedForReopen = new WeakSet();
+let reopenScheduled = false;
+let reopenGeneration = 0;
+
+function activeCameraTrack() {
+  const source = document.getElementById("video")?.srcObject;
+  return source?.getVideoTracks?.()[0];
+}
+
+function cameraReleaseBarrier(ms = 120) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scheduleAutoCameraReopen(track) {
+  if (!track || blockedForReopen.has(track)) return;
+  blockedForReopen.add(track);
+  if (reopenScheduled) return;
+  reopenScheduled = true;
+  const generation = ++reopenGeneration;
+
+  setTimeout(async () => {
+    try {
+      const receiveView = document.getElementById("receiveView");
+      if (!receiveView?.classList.contains("active")) return;
+
+      window.dispatchEvent(new Event("airgapper:pause-mode"));
+      await cameraReleaseBarrier();
+
+      if (generation !== reopenGeneration) return;
+      if (!receiveView.classList.contains("active")) return;
+      window.dispatchEvent(new Event("airgapper:resume-mode"));
+    } finally {
+      if (generation === reopenGeneration) reopenScheduled = false;
+    }
+  }, 0);
+}
+
+function installManualToAutoReopenGuard() {
+  document.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.id !== "camera-exposure-auto" || !input.checked) return;
+    const track = activeCameraTrack();
+    if (!track || track.readyState !== "live") return;
+    const actual = track.getSettings?.() ?? {};
+    const manualPanel = document.getElementById("camera-optics-manual");
+    if (actual.exposureMode === "manual" || manualPanel && !manualPanel.hidden) scheduleAutoCameraReopen(track);
+  }, true);
+
+  const proto = globalThis.MediaStreamTrack?.prototype;
+  const nativeApply = proto?.applyConstraints;
+  if (typeof nativeApply !== "function" || nativeApply.__airgapperManualToAutoGuard) return;
+
+  const guardedApply = function(constraints) {
+    if (blockedForReopen.has(this)) return Promise.resolve();
+    return nativeApply.call(this, constraints);
+  };
+  Object.defineProperty(guardedApply, "__airgapperManualToAutoGuard", { value: true });
+  try { proto.applyConstraints = guardedApply; } catch {}
+}
+
+function closeNumber(a, b, ratio = 0.02) {
+  a = Number(a);
+  b = Number(b);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * ratio);
+}
+
+function syncManualAxis(id, autoId, actual) {
+  const input = document.getElementById(id);
+  const automatic = document.getElementById(autoId);
+  const value = Number(actual);
+  if (!(input instanceof HTMLInputElement) || automatic?.checked || !Number.isFinite(value)) return false;
+  if (closeNumber(input.value, value)) return false;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const clamped = Math.max(Number.isFinite(min) ? min : -Infinity, Math.min(Number.isFinite(max) ? max : Infinity, value));
+  input.value = String(clamped);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
+}
+
+function installSettledExposureSync() {
+  window.addEventListener("airgapper:exposure-settled", (event) => {
+    const detail = event?.detail;
+    const track = activeCameraTrack();
+    if (!track || detail?.track !== track || track.readyState !== "live") return;
+    if (document.getElementById("camera-exposure-auto")?.checked) return;
+    const requested = detail.requested ?? {};
+    const actual = detail.actual ?? {};
+
+    if (requested.exposureTime !== undefined)
+      syncManualAxis("camera-exposure", "exposure-axis-auto", actual.exposureTime);
+    if (requested.iso !== undefined)
+      syncManualAxis("camera-iso", "iso-axis-auto", actual.iso);
+  });
+}
 
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
@@ -210,4 +302,7 @@ async function applyAdvancedConstraint(track, set) {
   return applied;
 }
 
-export { applyAdvancedConstraint };
+installManualToAutoReopenGuard();
+installSettledExposureSync();
+
+export { applyAdvancedConstraint }; 
