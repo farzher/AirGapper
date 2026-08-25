@@ -151,13 +151,11 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   return cacheFrameSnapshot(this, at, result);
 };
 
-// A decode miss is not a whole-wall failure, but a repeatedly bad local residual
-// is allowed to heal locally. New CRC-backed corners can learn the correction
-// again immediately. Runtime already rate-limits these per-slot repair attempts.
-GridLattice.prototype.dropSlotCorrection = function(slot) {
-  if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
-  this.slotCorrections.delete(slot);
-  return cacheOutOfBandSnapshot(this, this.candidate ? this.snapshot() : null);
+// Slot-repair policy belongs to GridLattice; this layer only invalidates the
+// same-frame cache after geometry changes outside normal accept/nudge flow.
+const baseDropSlotCorrection = GridLattice.prototype.dropSlotCorrection;
+GridLattice.prototype.dropSlotCorrection = function(slot, at) {
+  return cacheOutOfBandSnapshot(this, baseDropSlotCorrection.call(this, slot, at));
 };
 
 const baseNudgeFromSightings = GridLattice.prototype.nudgeFromSightings;
