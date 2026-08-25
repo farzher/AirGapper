@@ -1,5 +1,6 @@
 const MODE_RESULTS_KEY = "airgapper:browser-camera-modes:v1";
 const PERFORMANCE_KEY = "airgapper:camera-performance:v1";
+const PERFORMANCE_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
 
 function loadJson(key) {
   try {
@@ -13,6 +14,11 @@ function saveJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {}
+}
+
+function freshPerformance(record, now = Date.now()) {
+  const updatedAt = Number(record?.updatedAt);
+  return Number.isFinite(updatedAt) && updatedAt > 0 && now - updatedAt <= PERFORMANCE_FRESH_MS;
 }
 
 export function formatCameraSize(width, height) {
@@ -104,6 +110,7 @@ export class CameraUiStore {
     let bestId = "";
     let best = -1;
     for (const [id, record] of Object.entries(this.performance)) {
+      if (!freshPerformance(record)) continue;
       const goodput = Math.max(Number(record?.bestGoodputKbs) || 0, Number(record?.lastGoodputKbs) || 0);
       if (goodput > best) {
         best = goodput;
@@ -120,7 +127,9 @@ export class CameraUiStore {
     const height = Number(caps?.height?.max) || Number(record.maxHeight) || 0;
     const area = width * height;
     const fps = Number(caps?.frameRate?.max) || Number(record.maxFps) || 0;
-    const goodput = Math.max(Number(record.bestGoodputKbs) || 0, Number(record.lastGoodputKbs) || 0);
+    const goodput = freshPerformance(record)
+      ? Math.max(Number(record.bestGoodputKbs) || 0, Number(record.lastGoodputKbs) || 0)
+      : 0;
     const focusModes = Array.isArray(caps?.focusMode) ? caps.focusMode : [];
     const autofocus = focusModes.includes("continuous") ? 1 : 0;
     const main = /camera(?:2)?\s*0(?:\D|$)|\bmain\b|\bprimary\b/.test(String(device.label ?? "").toLowerCase()) ? 1 : 0;
@@ -145,7 +154,15 @@ export class CameraUiStore {
     const id = String(settings?.deviceId ?? "");
     if (!id) return;
     this.performanceSaveAt = performance.now() + 2000;
-    const record = this.performance[id] ?? {};
+    const previous = this.performance[id] ?? {};
+    // Throughput is a starting prior, not permanent hardware truth. After the
+    // record ages out, relearn speed from the current AirGapper/camera behavior
+    // instead of reviving an ancient all-time best by merely refreshing updatedAt.
+    const record = freshPerformance(previous) ? previous : {
+      maxWidth: Number(previous.maxWidth) || 0,
+      maxHeight: Number(previous.maxHeight) || 0,
+      maxFps: Number(previous.maxFps) || 0
+    };
     record.bestGoodputKbs = Math.max(Number(record.bestGoodputKbs) || 0, goodputKbs);
     record.lastGoodputKbs = goodputKbs;
     record.bestUniqueQrPerSecond = Math.max(Number(record.bestUniqueQrPerSecond) || 0, uniqueRate);
