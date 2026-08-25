@@ -12,21 +12,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply lattice cleanup without overwriting concurrent work
+      - name: Extract lattice patch
         shell: bash
         run: |
-          awk '/python - <<'\''PY'\''/{capture=1; next} /^          PY$/{capture=0} capture{sub(/^          /, ""); print}' .github/workflows/lattice-owner-v467-once.yml > /tmp/lattice_patch.py
-          for attempt in 1 2 3; do
-            git fetch origin master
-            git reset --hard origin/master
-            python /tmp/lattice_patch.py
-            rm -f .github/workflows/lattice-owner-v467-once.yml .github/workflows/lattice-owner-retry-once.yml
-            git config user.name "AirGapper Build"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add receive/grid-lattice.js receive/main.js receive/lattice-cache-guard.js version.js .github/workflows/lattice-owner-v467-once.yml .github/workflows/lattice-owner-retry-once.yml
-            git commit -m "Consolidate lattice liveness ownership v0.5.467"
-            if git push origin HEAD:master; then
-              exit 0
-            fi
-          done
-          exit 1
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/lattice-owner-v467-once.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n          PY", start)
+          lines = source[start:end].splitlines()
+          code = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
+          code = code.replace('0.5.467', '0.5.466')
+          Path('/tmp/lattice_patch.py').write_text(code)
+          PY
+      - name: Apply lattice ownership patch
+        shell: bash
+        run: python /tmp/lattice_patch.py
+      - name: Commit lattice ownership patch
+        shell: bash
+        run: |
+          rm -f .github/workflows/lattice-owner-v467-once.yml .github/workflows/lattice-owner-retry-once.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/grid-lattice.js receive/main.js receive/lattice-cache-guard.js version.js .github/workflows/lattice-owner-v467-once.yml .github/workflows/lattice-owner-retry-once.yml
+          git commit -m "Consolidate lattice liveness ownership v0.5.466"
+          git push
