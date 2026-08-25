@@ -911,6 +911,7 @@ let lastVideoFrameInfo;
 function noteGridTransition(from, to, reason, at) {
   const trace = activeBenchmarkFrame != null ? activeBenchmarkFrame : benchmarkTraces.at(-1);
   trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
+  globalThis.__airgapperUserOverlay?.latticeState(to);
 }
 const STATS_WINDOW_MS = 1e3;
 // Visible rolling throughput/progress repaints at 5 Hz; measurements still use the trailing 1-second window.
@@ -2932,6 +2933,9 @@ function noteDecodeCompleted(id, completion) {
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
   const capturedAt = scanCapturedAt.get(id) ?? receiverNow();
+  if (!replayRunning && fullJob?.acquisitionMode === "recovery" && fullJob.targets?.length) {
+    globalThis.__airgapperUserOverlay?.recovery(fullJob.targets, completion.symbols ?? [], completion.sightings ?? []);
+  }
   if (completion.sightings?.length) lastFinderEvidenceAt = receiverNow();
   if (fullJob?.acquisition && !gridLattice.active && completion.symbolCount === 0 && completion.sightings?.length) {
     for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, capturedAt, false);
@@ -3315,6 +3319,7 @@ function syncGrid(snapshot, now, decodedSlot, info) {
   expectedRegions = snapshot.slots.length;
   expectedRegionsAt = now;
   peakRegions = Math.max(peakRegions, snapshot.slots.length);
+  globalThis.__airgapperUserOverlay?.geometry(snapshot, gridLattice.active && Boolean(snapshot.distributedFit));
   return decodedRegion;
 }
 function classifyGridSlots(vw, vh) {
@@ -5304,7 +5309,8 @@ let frameModeSyncTimeouts = 0;
 const FRAME_MODE_SYNC_TIMEOUT_MS = 900;
 let overlayDrawQueued = false;
 function queueOverlayDraw() {
-  if (overlayDrawQueued) return;
+  // Legacy diagnostics render only when Developer Mode is visible.
+  if (receiverDevActions.hidden || overlayDrawQueued) return;
   overlayDrawQueued = true;
   requestAnimationFrame(() => {
     overlayDrawQueued = false;
@@ -6308,7 +6314,22 @@ function submitReceiverJob(message, transfer, kind, trace, sourceSequence, sourc
         thorough: Boolean(message.thorough),
         reacquire: gridLattice.locked,
         acquisition: !gridLattice.locked,
-        acquisitionMode: message.acquisitionMode
+        acquisitionMode: message.acquisitionMode,
+        targets: message.acquisitionMode === "recovery" ? (message.tracks ?? []).map((track) => {
+          const map = message.outputMap;
+          const unmap = (point) => map && Number(map.scaleX) > 0 && Number(map.scaleY) > 0 ? {
+            x: (point.x - Number(map.offsetX || 0)) / Number(map.scaleX),
+            y: (point.y - Number(map.offsetY || 0)) / Number(map.scaleY)
+          } : point;
+          const quad = track?.quad;
+          return {
+            slot: Number(track?.slot ?? track?.id),
+            quad: validQuadObject(quad) ? {
+              topLeft: unmap(quad.topLeft), topRight: unmap(quad.topRight),
+              bottomRight: unmap(quad.bottomRight), bottomLeft: unmap(quad.bottomLeft)
+            } : undefined
+          };
+        }).filter((target) => Number.isInteger(target.slot) && validQuadObject(target.quad)) : undefined
       });
     }
   }
@@ -7828,6 +7849,15 @@ function onDecoded(bytes, box, info) {
   if (decodedRegion && info?.decodePath) {
     decodedRegion.decodePath = info.decodePath;
     decodedRegion.decodePathAt = decodedAt;
+  }
+  if (!optimizerAttribution && !replayRunning) {
+    const measuredQuad = info?.geometryMeasured !== false && validQuadObject(info?.quad) ? info.quad : void 0;
+    const overlayQuad = measuredQuad ?? (validQuadObject(decodedRegion?.quad) ? decodedRegion.quad : void 0);
+    if (overlayQuad) {
+      const fullJob = info?.scanId === void 0 ? void 0 : fullScanJobs.get(info.scanId);
+      const path = fullJob?.acquisition && fullJob?.acquisitionMode !== "recovery" ? "acquire" : info?.decodePath || decodedRegion?.decodePath || "hot";
+      globalThis.__airgapperUserOverlay?.success(header.slotIndex, overlayQuad, path);
+    }
   }
   if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);
   if (!decoder) {
