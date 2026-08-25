@@ -6,12 +6,15 @@ export const TEMPORAL_HARD_SKIP_CONFIDENCE = 0.62;
 export const TEMPORAL_HARD_SKIP_RISK = 0.48;
 
 const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([
-  // Fast/default: deliberately dark and very short for rolling-shutter safety.
+  // Default QR seed: short enough to avoid rolling-shutter smear and darker
+  // than photographic AE so white modules do not bloom into their neighbors.
   Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),
-  // If the first QR-specific seed is too dark, spend ISO/light before giving
-  // photographic AE control back. Shutter remains tightly bounded.
+  // A noisy/max-ISO camera can still be much too bright for a binary modem.
+  // Explore the darker direction before assuming the first miss meant "more light".
+  Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),
+  // Then try neutral short-shutter exposure if the darker seeds were starved.
   Object.freeze({ lightScale: 1, maxExposure: 45, frameFraction: 0.14, label: "neutral-short" }),
-  // Last QR-specific rescue: modestly brighter with a still motion-safe ceiling.
+  // Last QR-specific rescue before handing control back to hardware AE.
   Object.freeze({ lightScale: Math.pow(2, 0.5), maxExposure: 55, frameFraction: 0.18, label: "bright-short" })
 ]);
 
@@ -93,6 +96,33 @@ export function automaticOpticsAcquisitionSeed(attempt = 0) {
 
 export function automaticOpticsHasAnotherAcquisitionSeed(attempt = 0) {
   return Math.trunc(Number(attempt) || 0) + 1 < AUTO_OPTICS_ACQUISITION_SEEDS.length;
+}
+
+// HOLD is a production state, not a guess. A setting must prove that it can
+// repeatedly decode a meaningful fraction of the measured physical cohort.
+// This deliberately rejects the old "0 outputs => pretend 50%" behavior and
+// prevents one lucky QR from pinning an otherwise unreadable wall.
+export function automaticOpticsHoldEligible(sample, {
+  minAttempts = 20,
+  minOutputs = 5,
+  minYield = 0.35,
+  minBreadth = 0.60
+} = {}) {
+  if (!sample || sample.valid !== true || sample.unstable) return false;
+  const attempts = Math.max(0, Number(sample.attempts) || 0);
+  const outputs = Math.max(0, Math.min(attempts, Number(sample.outputs) || 0));
+  const reportedYield = Number(sample.yieldRate);
+  const yieldRate = Number.isFinite(reportedYield)
+    ? Math.max(0, Math.min(1, reportedYield))
+    : attempts ? outputs / attempts : 0;
+  const reportedBreadth = Number(sample.breadth);
+  const breadth = Number.isFinite(reportedBreadth)
+    ? Math.max(0, Math.min(1, reportedBreadth))
+    : outputs > 0 ? 1 : 0;
+  return attempts >= Math.max(1, Number(minAttempts) || 1) &&
+    outputs >= Math.max(1, Number(minOutputs) || 1) &&
+    yieldRate >= Math.max(0, Number(minYield) || 0) &&
+    breadth >= Math.max(0, Number(minBreadth) || 0);
 }
 
 export function temporalHardSkip({ explicitSkip = false, risk = 0, confidence = 0, measurement = false }) {
