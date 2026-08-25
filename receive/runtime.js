@@ -365,6 +365,7 @@ const AUTO_OPTICS_ACCEPT_YIELD_GAIN = 0.06;
 const AUTO_OPTICS_ACCEPT_SCORE_RATIO = 1.06;
 const AUTO_OPTICS_AE_RESCUE_DWELL_MS = 700;
 const AUTO_OPTICS_AE_RESCUE_RETRY_MS = 3000;
+const AUTO_OPTICS_AE_VALIDATION_RETRY_MS = 4000;
 const AUTO_OPTICS_SHORT_EXPOSURE_TRIGGER = 55; // 5.5 ms
 let autoOpticsTuneSummary = "";
 let autoOpticsRuntimeState = "ae";
@@ -3758,15 +3759,14 @@ async function abandonAutomaticShortSeed(track, reason = "short-shutter seed pro
     if (!automaticOpticsSessionAlive(track)) return;
     const now = receiverNow();
     autoOpticsAeBaseline = baseline;
-    autoOpticsSeedAttempt = 0;
     autoOpticsRuntimeState = "ae";
     autoOpticsControllerState = "ACQUIRE";
     autoOpticsMemoryBootAt = 0;
     autoOpticsMemoryBoot = void 0;
     autoOpticsLockSince = 0;
     autoOpticsAcquisitionSince = now;
-    autoOpticsRetryAt = Infinity;
-    autoOpticsRescueRetryAt = Infinity;
+    autoOpticsRetryAt = now + AUTO_OPTICS_LOCK_SETTLE_MS;
+    autoOpticsRescueRetryAt = now + AUTO_OPTICS_AE_RESCUE_RETRY_MS;
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = 0;
@@ -4044,9 +4044,95 @@ async function measureAutomaticIsoCandidate(track, exposure, requestedIso, isoRa
   if (!sample) return null;
   return { ...sample, iso: actualIso, requestedIso: iso, exposure: actualExposure, firstSequence };
 }
+async function validateAutomaticAeHold(track, now, exposureRange, isoRange) {
+  autoOpticsMutationRunning = true;
+  autoOpticsRuntimeState = "settling";
+  autoOpticsControllerState = "LEARN";
+  try {
+    const cohortSize = beginAutomaticOpticsMeasurementCohort();
+    if (!cohortSize) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_AE_VALIDATION_RETRY_MS;
+      autoOpticsTuneSummary = "hardware AE · waiting for measurable QR cohort";
+      return;
+    }
+
+    const before = track.getSettings();
+    const beforeExposure = Number(before.exposureTime);
+    const beforeIso = Number(before.iso);
+    if (!(beforeExposure > 0) || !(beforeIso > 0)) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_AE_VALIDATION_RETRY_MS;
+      autoOpticsTuneSummary = "hardware AE · waiting for stable sensor readback";
+      return;
+    }
+
+    const sample = await sampleAutomaticOpticsQuality(
+      track, beforeIso, latestSourceFrameSequence + 1, AUTO_OPTICS_BASELINE_SAMPLE_MS
+    );
+    if (!automaticOpticsSessionAlive(track)) return;
+    const after = track.getSettings();
+    const afterExposure = Number(after.exposureTime);
+    const afterIso = Number(after.iso);
+    const beforeProduct = beforeExposure * beforeIso;
+    const afterProduct = afterExposure * afterIso;
+    const aeDrift = beforeProduct > 0 && afterProduct > 0
+      ? Math.abs(Math.log2(afterProduct / beforeProduct))
+      : Infinity;
+
+    if (!sample || aeDrift > 0.25 || !automaticOpticsHoldEligible(sample)) {
+      const measuredYield = Math.max(0, Number(sample?.yieldRate) || 0);
+      const measuredBreadth = Math.max(0, Number(sample?.breadth) || 0);
+      const measuredTail = Math.max(0, Number(sample?.tailYield) || 0);
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_AE_VALIDATION_RETRY_MS;
+      autoOpticsHeldYield = 0;
+      autoOpticsHoldSample = void 0;
+      autoOpticsTuneSummary = aeDrift > 0.25
+        ? `hardware AE still settling · ${aeDrift.toFixed(2)} EV drift`
+        : `hardware AE unproven ${(measuredYield * 100).toFixed(0)}% · breadth ${(measuredBreadth * 100).toFixed(0)}% · tail ${(measuredTail * 100).toFixed(0)}%`;
+      return;
+    }
+
+    const winnerExposure = quantizeCameraRange(afterExposure, exposureRange);
+    const winnerIso = quantizeCameraRange(afterIso, isoRange);
+    const accepted = await applyCameraConstraint(track, {
+      exposureMode: "manual",
+      exposureTime: winnerExposure,
+      iso: winnerIso
+    });
+    if (!accepted || !automaticOpticsSessionAlive(track)) {
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_AE_VALIDATION_RETRY_MS;
+      autoOpticsTuneSummary = "hardware AE proven but manual freeze rejected";
+      return;
+    }
+
+    autoOpticsRuntimeState = "manual";
+    autoOpticsControllerState = "HOLD";
+    autoOpticsHeldYield = Math.max(0.01, Number(sample.yieldRate) || 0);
+    autoOpticsHoldSample = autoOpticsPipelineSnapshot();
+    autoOpticsHoldCollapseSince = 0;
+    autoOpticsRetryAt = Infinity;
+    autoOpticsAeBaseline = { exposure: winnerExposure, iso: winnerIso, at: receiverNow(), neutral: true };
+    if (autoOpticsHeldYield >= AUTO_OPTICS_MEMORY_MIN_YIELD)
+      rememberAutomaticOptics(track, winnerExposure, winnerIso, Number(sample.score) || 0,
+        autoOpticsHeldYield, winnerExposure * winnerIso, Number(sample.tailYield) || 0);
+    autoOpticsTuneSummary = `hardware AE proven · ${formatExposureMs(winnerExposure)} · ISO ${Math.round(winnerIso)} · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%`;
+    focusController.adoptAutomaticCameraState("QR-proven hardware AE values frozen; automatic optics now held");
+  } finally {
+    autoOpticsMeasurementSlots = void 0;
+    autoOpticsMutationRunning = false;
+  }
+}
 async function settleAutomaticQrOptics(track, now) {
   if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
   const startedFromMemory = autoOpticsRuntimeState === "memory";
+  const startedFromAe = autoOpticsRuntimeState === "ae";
   const caps = track.getCapabilities?.() ?? {};
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
@@ -4065,6 +4151,10 @@ async function settleAutomaticQrOptics(track, now) {
     autoOpticsLockSince = now;
     autoOpticsRetryAt = now + 600;
     autoOpticsTuneSummary = "hardware AE · waiting for stable QR geometry";
+    return;
+  }
+  if (startedFromAe) {
+    await validateAutomaticAeHold(track, now, exposureRange, isoRange);
     return;
   }
 
@@ -4101,8 +4191,8 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsControllerState = "ACQUIRE";
       autoOpticsLockSince = 0;
       autoOpticsAcquisitionSince = receiverNow();
-      autoOpticsRetryAt = Infinity;
-      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_LOCK_SETTLE_MS;
+      autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;
       autoOpticsHeldYield = 0;
       autoOpticsHoldSample = void 0;
       autoOpticsTuneSummary = "QR geometry not measurable · hardware AE fallback; no HOLD";
@@ -4122,8 +4212,8 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsControllerState = "ACQUIRE";
       autoOpticsLockSince = 0;
       autoOpticsAcquisitionSince = receiverNow();
-      autoOpticsRetryAt = Infinity;
-      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_LOCK_SETTLE_MS;
+      autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;
       autoOpticsHeldYield = 0;
       autoOpticsHoldSample = void 0;
       autoOpticsTuneSummary = "QR optics measurement inconclusive · hardware AE fallback; no HOLD";
@@ -4192,8 +4282,8 @@ async function settleAutomaticQrOptics(track, now) {
       autoOpticsControllerState = "ACQUIRE";
       autoOpticsLockSince = 0;
       autoOpticsAcquisitionSince = receiverNow();
-      autoOpticsRetryAt = Infinity;
-      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsRetryAt = receiverNow() + AUTO_OPTICS_LOCK_SETTLE_MS;
+      autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;
       autoOpticsHeldYield = 0;
       autoOpticsHoldSample = void 0;
       autoOpticsHoldCollapseSince = 0;
