@@ -26,11 +26,6 @@ function scheduleAutoCameraReopen(track) {
   reopenScheduled = true;
   const generation = ++reopenGeneration;
 
-  // Capture-phase ownership is deliberate: pauseReceiver() stops the old manual
-  // track synchronously before the EV/runtime checkbox handlers can enqueue any
-  // focus or exposure mutation. Runtime's camera mutation queue accepts writes
-  // only for the current live track, so a dead old HAL needs no global
-  // MediaStreamTrack.applyConstraints interception.
   window.dispatchEvent(new Event("airgapper:pause-mode"));
   if (track.readyState === "live") {
     try { track.stop(); } catch {}
@@ -124,14 +119,6 @@ function closeSetting(value, target, range) {
   return Math.abs(Number(value) - Number(target)) <= tolerance;
 }
 
-// Auto Optics may continue gathering evidence after the decoder has started
-// proving the current sensor state. Broad health is enough to protect a known
-// winner, but even the first fresh CRC-valid QR on a locked/seeded lattice gets
-// a short provisional lease: a rescue transaction can have been queued while
-// the preceding exposure was still blind and otherwise execute after that
-// exposure starts working. If the packet was luck and progress stops, the short
-// recovering lease expires and exploration resumes. The one exception is the
-// no-change continuous->manual transition that freezes current exposure/ISO.
 function healthyAutomaticExposureWouldPerturb(track, set) {
   if (!decodeExposureHealthy() && !decodeExposureRecovering()) return false;
   if (document.getElementById("camera-exposure-auto")?.checked !== true) return false;
@@ -176,6 +163,16 @@ function exposureTargetDiffers(set, actual, caps) {
     !closeSetting(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
 }
 
+function exposureMutationWouldChange(track, set) {
+  if (!track || !set || !EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return false;
+  const actual = track.getSettings?.() ?? {};
+  const caps = track.getCapabilities?.() ?? {};
+  return (set.exposureMode !== void 0 && set.exposureMode !== actual.exposureMode) ||
+    !closeSetting(actual.exposureTime, set.exposureTime, caps.exposureTime) ||
+    !closeSetting(actual.iso, set.iso, caps.iso) ||
+    !closeSetting(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
+}
+
 function reportStableSettledExposure(track, settled, set, actual, caps) {
   if (settled.reported || !exposureTargetDiffers(set, actual, caps)) return;
   settled.reported = true;
@@ -204,9 +201,6 @@ function stableSettledExposure(track, set) {
   if (!settled || settled.key !== exposureRequestKey(set)) return false;
   const actual = track.getSettings?.() ?? {};
   const caps = track.getCapabilities?.() ?? {};
-  // A camera that resolved applyConstraints() but ignored the requested mode is
-  // not settled. Remembering that false success makes every later request a
-  // no-op and can leave Auto Optics believing it owns manual exposure forever.
   const requestedModeHeld = set.exposureMode === void 0 || actual.exposureMode === set.exposureMode;
   const stable = requestedModeHeld &&
     (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
@@ -246,9 +240,6 @@ function withoutExposure(set) {
 }
 
 async function awaitConstraint(track, run) {
-  // A timeout does not cancel MediaStreamTrack.applyConstraints(). Keep the
-  // underlying HAL operation leased until it truly settles so an old timed-out
-  // write cannot overlap and later overwrite a newer camera command.
   if (pendingConstraint.has(track)) return { ok: false, timedOut: false, busy: true };
   let timer;
   let timedOut = false;
@@ -271,8 +262,6 @@ async function awaitConstraint(track, run) {
     return { ok: false, timedOut, busy: false };
   } finally {
     clearTimeout(timer);
-    // Rejected/successful operations are already done and can be released now.
-    // Timed-out operations stay leased until their real promise settles.
     if (!timedOut) release();
   }
 }
@@ -311,20 +300,18 @@ async function applyAdvancedConstraint(track, set, { allowHealthyPerturbation = 
   if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) return true;
   if (!allowHealthyPerturbation && healthyAutomaticExposureWouldPerturb(track, supported)) {
     const remainder = withoutExposure(supported);
-    // A protected sensor write is a veto, not a successful mutation. Apply any
-    // unrelated focus/POI remainder, but report false for the requested compound
-    // operation so Auto Optics cannot advance its state machine on settings that
-    // never reached the camera.
     if (Object.keys(remainder).length) await applyConstraint(track, remainder);
     return false;
   }
+
+  // Snapshot the exposure state before a compound request. A focus+exposure
+  // patch may contain exposure values that are already satisfied; if only the
+  // focus portion actually needs changing, clearing decoder health would create
+  // a false sensor epoch and can wake Auto Optics/recovery for no optical reason.
+  const exposureWillChange = touchesExposure && exposureMutationWouldChange(track, supported);
   const applied = await applyConstraint(track, supported);
   if (applied && touchesExposure) {
-    // applyConstraints() resolving is the earliest trustworthy point at which a
-    // new sensor epoch can begin. Decode health additionally fences the first
-    // short source-frame interval because Android HALs can expose old frames
-    // after this promise resolves.
-    noteExposureTransition(performance.now());
+    if (exposureWillChange) noteExposureTransition(performance.now());
     rememberSettledExposure(track, supported);
   }
   return applied;
