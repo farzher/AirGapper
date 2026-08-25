@@ -20,6 +20,7 @@
     "./receive/dev-tools-core.js",
     "./receive/dev-tools.js",
     "./receive/exposure-ev.js",
+    "./receive/focus-controller-core.js",
     "./receive/focus-controller.js",
     "./receive/grid-lattice-geometry.js",
     "./receive/grid-lattice.js",
@@ -82,8 +83,6 @@
         if (!response.ok) throw new Error(`Precache failed ${response.status}: ${url}`);
         await cache.put(url, response);
       }));
-      // Build URLs are versioned. Once this exact build is completely cached,
-      // keeping an older worker waiting only prolongs stale/offline behavior.
       await self.skipWaiting();
     })());
   });
@@ -94,9 +93,6 @@
       await Promise.all(
         keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key))
       );
-      // The newly installed build is internally complete, so take ownership of
-      // already-open AirGapper tabs immediately instead of requiring a full app
-      // close/reopen before the current cache becomes authoritative.
       await self.clients.claim();
     })());
   });
