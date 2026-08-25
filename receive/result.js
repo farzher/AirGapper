@@ -6,6 +6,7 @@ const RECEIVED_MEDIA_CACHE_ROOT = "received-media-";
 const RECEIVED_MEDIA_SESSION = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const RECEIVED_MEDIA_CACHE_PREFIX = `${RECEIVED_MEDIA_CACHE_ROOT}${RECEIVED_MEDIA_SESSION}-`;
 const LEGACY_RECEIVED_MEDIA_CACHE = "received-media";
+const RECEIVED_MEDIA_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const MIME_BY_EXTENSION = {
   apng: "image/apng", gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg",
   png: "image/png", svg: "image/svg+xml", webp: "image/webp", mp3: "audio/mpeg",
@@ -31,11 +32,31 @@ function receivedMediaCache(generationId) {
   return `${RECEIVED_MEDIA_CACHE_PREFIX}${generationId}`;
 }
 
+function receivedMediaSessionStartedAt(cacheName) {
+  if (!cacheName.startsWith(RECEIVED_MEDIA_CACHE_ROOT)) return 0;
+  const stamp = cacheName.slice(RECEIVED_MEDIA_CACHE_ROOT.length).split("-", 1)[0];
+  const startedAt = Number.parseInt(stamp, 36);
+  return Number.isFinite(startedAt) && startedAt > 0 ? startedAt : 0;
+}
+
 function cleanOlderReceivedMediaSessions() {
   if (!("caches" in window)) return;
+  const cutoff = Date.now() - RECEIVED_MEDIA_SESSION_MAX_AGE_MS;
   void caches.keys().then((keys) => Promise.all(keys
-    .filter((key) => key === LEGACY_RECEIVED_MEDIA_CACHE ||
-      key.startsWith(RECEIVED_MEDIA_CACHE_ROOT) && !key.startsWith(RECEIVED_MEDIA_CACHE_PREFIX))
+    .filter((key) => {
+      if (key === LEGACY_RECEIVED_MEDIA_CACHE) return true;
+      if (!key.startsWith(RECEIVED_MEDIA_CACHE_ROOT) || key.startsWith(RECEIVED_MEDIA_CACHE_PREFIX)) return false;
+      const startedAt = receivedMediaSessionStartedAt(key);
+      return startedAt > 0 && startedAt < cutoff;
+    })
+    .map((key) => caches.delete(key))
+  )).catch(() => void 0);
+}
+
+function cleanCurrentReceivedMediaSession() {
+  if (!("caches" in window)) return;
+  void caches.keys().then((keys) => Promise.all(keys
+    .filter((key) => key.startsWith(RECEIVED_MEDIA_CACHE_PREFIX))
     .map((key) => caches.delete(key))
   )).catch(() => void 0);
 }
@@ -327,4 +348,7 @@ export function showReceiveFailure(restartButton) {
 }
 
 cleanOlderReceivedMediaSessions();
+window.addEventListener("pagehide", (event) => {
+  if (!event.persisted) cleanCurrentReceivedMediaSession();
+});
 clearReceivedResult();
