@@ -72,6 +72,7 @@ class DecodeWorkerPool {
     this.onAvailable = onAvailable;
     this.onFrameSignature = onFrameSignature;
     this.workers = [];
+    this.ready = [];
     this.busy = [];
     this.activeIds = [];
     this.activeFull = [];
@@ -187,6 +188,7 @@ class DecodeWorkerPool {
     const failed = this.workers[slot];
     const timeoutMs = meta.timeoutMs;
     this.busy[slot] = false;
+    this.ready[slot] = false;
     this.activeIds[slot] = void 0;
     this.activeFull[slot] = false;
     this.activeMeta[slot] = null;
@@ -279,7 +281,11 @@ class DecodeWorkerPool {
     worker.onmessage = (event) => {
       if (this.workers[slot] !== worker) return;
       const message = event.data;
-      if (message.id === -1) return;
+      if (message.id === -1) {
+        this.ready[slot] = true;
+        this.onAvailable?.(slot);
+        return;
+      }
       if (this.activeIds[slot] !== message.id) return;
       if (message.preflight) {
         const info = this.frameSignatureInfos[slot];
@@ -357,6 +363,7 @@ class DecodeWorkerPool {
       const id = this.activeIds[slot];
       const full = this.activeFull[slot] ?? false;
       this.busy[slot] = false;
+      this.ready[slot] = false;
       this.activeIds[slot] = void 0;
       this.activeFull[slot] = false;
       this.activeMeta[slot] = null;
@@ -379,6 +386,7 @@ class DecodeWorkerPool {
 
     while (this.workers.length > target) {
       this.workers.pop().terminate();
+      this.ready.pop();
       this.busy.pop();
       this.activeIds.pop();
       this.activeFull.pop();
@@ -394,6 +402,7 @@ class DecodeWorkerPool {
       const slot = this.workers.length;
       const worker = this.create();
       this.workers.push(worker);
+      this.ready.push(false);
       this.busy.push(false);
       this.activeIds.push(void 0);
       this.activeFull.push(false);
@@ -427,16 +436,19 @@ class DecodeWorkerPool {
     const now = performance.now();
     return this.activeMeta.flatMap((meta, slot) => meta ? [{ ...meta, slot, ageMs: Math.max(0, now - meta.startedAt) }] : []);
   }
-  /** Worker slots that can accept a job right now. Exposed so dense-grid
-   * schedulers can preserve per-worker decoder-cache affinity instead of
-   * randomly moving a persistent QR batch between WASM instances. */
+  /** Worker slots that can accept a job right now. A newly created/replacement
+   * worker remains unavailable until worker.js emits its id:-1 WASM-ready signal.
+   * This prevents a cold worker from spending its first job deadline compiling
+   * the decoder and then being recycled into another cold worker. */
   get freeSlots() {
     const slots = [];
-    for (let slot = 0; slot < this.workers.length; slot++) if (!this.busy[slot]) slots.push(slot);
+    for (let slot = 0; slot < this.workers.length; slot++) {
+      if (this.ready[slot] && !this.busy[slot]) slots.push(slot);
+    }
     return slots;
   }
   submitAtSlot(slot, message, transfer) {
-    if (slot < 0 || slot >= this.workers.length || this.busy[slot]) return false;
+    if (slot < 0 || slot >= this.workers.length || !this.ready[slot] || this.busy[slot]) return false;
     const id = message.id;
     this.busy[slot] = true;
     this.activeIds[slot] = typeof id === "number" ? id : void 0;
@@ -481,12 +493,14 @@ class DecodeWorkerPool {
   submitTo(slot, message, transfer) {
     return Number.isInteger(slot) && this.submitAtSlot(slot, message, transfer);
   }
-  /** Hand a frame to any free worker. False when every worker is busy — the
-   * caller drops the frame rather than queueing it, because a stale frame is
-   * worth less than the next one. */
+  /** Hand a frame to any warm free worker. False when every warm worker is busy
+   * (or replacements are still initializing); callers drop the disposable frame
+   * rather than queueing stale camera work. */
   submit(message, transfer) {
-    const slot = this.busy.indexOf(false);
-    return slot !== -1 && this.submitAtSlot(slot, message, transfer);
+    for (let slot = 0; slot < this.workers.length; slot++) {
+      if (this.ready[slot] && !this.busy[slot]) return this.submitAtSlot(slot, message, transfer);
+    }
+    return false;
   }
 }
 export {
