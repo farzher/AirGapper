@@ -268,16 +268,25 @@ window.airgapperSuspend = () => {
   // and can make the sheet disappear before the user can answer it.
   if (cameraRequestPending()) return;
   receiveHealthToken++;
-  if (suspended || active === "home" || document.body.classList.contains("receive-complete")) return;
+  const completedReceive = active === "receive" && document.body.classList.contains("receive-complete");
+  if (suspended || active === "home" || completedReceive) return;
   suspended = true;
-  if (receiveModuleLoaded) window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
+  // Pause belongs to the active mode. Send owns its wake lock and scheduler;
+  // Receive owns camera teardown. Do not require Receive to be loaded merely to
+  // tell an already-running sender that the document became hidden.
+  if (active === "send" || active === "receive" && receiveModuleLoaded)
+    window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 function resumeActiveView() {
   if (document.visibilityState !== "visible" || cameraRequestPending()) return;
   const wasSuspended = suspended;
   if (suspended) {
     suspended = false;
-    dispatchReceiveWhenReady(receiveModuleLoaded ? "airgapper:resume-mode" : "airgapper:enter-receive");
+    if (active === "send") {
+      window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
+    } else if (active === "receive") {
+      dispatchReceiveWhenReady(receiveModuleLoaded ? "airgapper:resume-mode" : "airgapper:enter-receive");
+    }
   } else if (receiveNeedsCamera()) {
     dispatchReceiveWhenReady();
   }
