@@ -100,13 +100,14 @@ export function automaticOpticsHasAnotherAcquisitionSeed(attempt = 0) {
 
 // HOLD is a production state, not a guess. A setting must prove that it can
 // repeatedly decode a meaningful fraction of the measured physical cohort.
-// This deliberately rejects the old "0 outputs => pretend 50%" behavior and
-// prevents one lucky QR from pinning an otherwise unreadable wall.
+// Mean yield alone is insufficient: an exposure that makes half the wall great
+// and the other half nearly blind is a poor long-lived operating point.
 export function automaticOpticsHoldEligible(sample, {
   minAttempts = 20,
   minOutputs = 5,
-  minYield = 0.35,
-  minBreadth = 0.60
+  minYield = 0.55,
+  minBreadth = 0.65,
+  minTailYield = 0.20
 } = {}) {
   if (!sample || sample.valid !== true || sample.unstable) return false;
   const attempts = Math.max(0, Number(sample.attempts) || 0);
@@ -119,10 +120,15 @@ export function automaticOpticsHoldEligible(sample, {
   const breadth = Number.isFinite(reportedBreadth)
     ? Math.max(0, Math.min(1, reportedBreadth))
     : outputs > 0 ? 1 : 0;
+  const reportedTail = Number(sample.tailYield);
+  const tailYield = Number.isFinite(reportedTail)
+    ? Math.max(0, Math.min(1, reportedTail))
+    : yieldRate;
   return attempts >= Math.max(1, Number(minAttempts) || 1) &&
     outputs >= Math.max(1, Number(minOutputs) || 1) &&
     yieldRate >= Math.max(0, Number(minYield) || 0) &&
-    breadth >= Math.max(0, Number(minBreadth) || 0);
+    breadth >= Math.max(0, Number(minBreadth) || 0) &&
+    tailYield >= Math.max(0, Number(minTailYield) || 0);
 }
 
 export function temporalHardSkip({ explicitSkip = false, risk = 0, confidence = 0, measurement = false }) {
