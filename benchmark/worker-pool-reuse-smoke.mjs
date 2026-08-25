@@ -8,7 +8,7 @@ globalThis.document = {
   body: { classList: { contains: () => false } }
 };
 await import("../receive/worker-capacity-guard.js");
-if (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperRvfclumaGuard)
+if (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperWorkerPolicy)
   throw new Error("worker-capacity guard did not patch submitAtSlot");
 
 class FakeWorker {
@@ -33,6 +33,7 @@ const decodedInfos = [];
 let firstCompletion;
 let firstPreflight;
 let pool;
+let allowReentrantSubmit = false;
 let autoSubmittedSecond = false;
 let secondMeta;
 
@@ -63,10 +64,10 @@ pool = new DecodeWorkerPool(
     });
   },
   () => {
-    // DecodeWorkerPool intentionally calls onAvailable before it finishes
-    // consuming the just-completed jobMeta. Re-enter submit() here to prove the
-    // ping-pong metadata records keep the old sourceSequence/opticsEpoch intact.
-    if (autoSubmittedSecond) return;
+    // Worker-ready also uses onAvailable so queued live work can resume after a
+    // timeout replacement warms. Only exercise completion reentrancy after the
+    // first real job has been submitted.
+    if (!allowReentrantSubmit || autoSubmittedSecond) return;
     autoSubmittedSecond = true;
     if (!pool.submit({
       id: 2,
@@ -95,6 +96,12 @@ pool.resize(1);
 const worker = created[0];
 if (!worker) throw new Error("pool did not create worker");
 
+// A worker is intentionally not schedulable until worker.js has initialized
+// its WASM decoder and emitted the existing id:-1 ready signal.
+if (pool.submit({ id: 99, full: false, w: 8, h: 8, tracks: [] }, []))
+  throw new Error("cold worker accepted a decode job before ready");
+worker.onmessage({ data: { id: -1, bytes: null } });
+
 if (!pool.submit({
   id: 1,
   full: false,
@@ -105,6 +112,7 @@ if (!pool.submit({
   opticsEpoch: 11
 }, [])) throw new Error("first worker submit failed");
 const firstMeta = pool.activeMeta[0];
+allowReentrantSubmit = true;
 
 worker.onmessage({ data: {
   id: 1,
@@ -192,11 +200,39 @@ if (preflights[1].id !== 2 || preflights[1].sourceSequence !== 18 || preflights[
   throw new Error("reused preflight envelope did not receive fresh fields");
 
 pool.resize(0);
+
+// Acquisition timeout ownership belongs to DecodeWorkerPool. The receiver guard
+// may bound concurrency and normalize cheap-vs-robust modes, but it must not
+// silently replace the pool's recovery deadline with another short timeout.
+const timeoutWorkers = [];
+const timeoutPool = new DecodeWorkerPool(
+  () => {
+    const next = new FakeWorker();
+    timeoutWorkers.push(next);
+    return next;
+  },
+  () => void 0,
+  () => void 0,
+  () => void 0,
+  () => void 0
+);
+timeoutPool.resize(1);
+const timeoutWorker = timeoutWorkers[0];
+timeoutWorker.onmessage({ data: { id: -1, bytes: null } });
+if (!timeoutPool.submit({ id: 40, full: true, acquisitionMode: "seed", w: 64, h: 64 }, []))
+  throw new Error("warm acquisition worker rejected job");
+const acquisitionMeta = timeoutPool.activeMeta[0];
+if (!acquisitionMeta || acquisitionMeta.timeoutMs < 6000)
+  throw new Error(`acquisition timeout was unexpectedly shortened: ${acquisitionMeta?.timeoutMs}`);
+timeoutPool.resize(0);
+
 console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
   guardedSubmitPath: true,
+  coldWorkerRejected: true,
   completionIdentityReused: completions[1].sameIdentity && completions[2].sameIdentity,
   preflightIdentityReused: preflights[1].sameIdentity,
   staleGuidedMetricsCleared: completions[1].guidedMetrics === undefined,
   reentrantMetadataPreserved: decodedInfos[0]?.sourceSequence === 101 && decodedInfos[0]?.opticsEpoch === 11,
-  metadataRecordReused: thirdMeta === firstMeta
+  metadataRecordReused: thirdMeta === firstMeta,
+  acquisitionTimeoutMs: acquisitionMeta.timeoutMs
 }));
