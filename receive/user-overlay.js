@@ -1,13 +1,10 @@
 import { GridLattice } from "./grid-lattice.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
-const PROBE_FLASH_MS = 180;
-const MISS_FADE_MS = 520;
-const HIT_FADE_MS = 620;
+const MISS_FADE_MS = 420;
 const JOB_TTL_MS = 4000;
 const DRAW_INTERVAL_MS = 50;
 
-let lattice;
 let snapshot;
 const jobs = new Map();
 const slotActivity = new Map();
@@ -16,20 +13,9 @@ function now() {
   return performance.now();
 }
 
-function rememberLattice(value) {
-  lattice = value;
-}
-
 function wrapLattice() {
-  const originalTransition = GridLattice.prototype.transition;
-  GridLattice.prototype.transition = function (...args) {
-    rememberLattice(this);
-    return originalTransition.apply(this, args);
-  };
-
   const originalSnapshot = GridLattice.prototype.snapshot;
   GridLattice.prototype.snapshot = function (...args) {
-    rememberLattice(this);
     const value = originalSnapshot.apply(this, args);
     snapshot = value || null;
     return value;
@@ -38,7 +24,6 @@ function wrapLattice() {
   for (const name of ["reset", "reacquire"]) {
     const original = GridLattice.prototype[name];
     GridLattice.prototype[name] = function (...args) {
-      rememberLattice(this);
       const value = original.apply(this, args);
       snapshot = null;
       slotActivity.clear();
@@ -74,12 +59,15 @@ function trackSlot(track) {
   return best && best.distance < 0.75 ? best.index : null;
 }
 
-function targetSlots(message) {
-  if (message?.full || !Array.isArray(message?.tracks)) return [];
+function targetMissingSlots(message) {
+  if (message?.full || !Array.isArray(message?.tracks) || !snapshot?.slots?.length) return [];
+  const expected = new Map(snapshot.slots.map((slot) => [slot.index, slot]));
   const slots = new Set();
   for (const track of message.tracks) {
     const slot = trackSlot(track);
-    if (slot !== null) slots.add(slot);
+    if (slot === null) continue;
+    const known = expected.get(slot);
+    if (known && !known.decoded) slots.add(slot);
   }
   return [...slots];
 }
@@ -87,7 +75,7 @@ function targetSlots(message) {
 function activityFor(slot) {
   let value = slotActivity.get(slot);
   if (!value) {
-    value = { probeAt: -Infinity, missAt: -Infinity, hitAt: -Infinity };
+    value = { missAt: -Infinity };
     slotActivity.set(slot, value);
   }
   return value;
@@ -121,22 +109,17 @@ function noteCompletion(message) {
   const successes = packedSuccessSlots(message);
   for (const slot of job.slots) {
     const activity = activityFor(slot);
-    if (successes.has(slot)) activity.hitAt = at;
-    else activity.missAt = at;
+    activity.missAt = successes.has(slot) ? -Infinity : at;
   }
 }
 
 function wrapWorkerPool() {
   const originalSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
   DecodeWorkerPool.prototype.submitAtSlot = function (workerSlot, message, transfer) {
-    const slots = targetSlots(message);
+    const slots = targetMissingSlots(message);
     const id = Number(message?.id);
     const accepted = originalSubmitAtSlot.call(this, workerSlot, message, transfer);
-    if (accepted && Number.isInteger(id) && id >= 0 && slots.length) {
-      const at = now();
-      jobs.set(id, { slots, at });
-      for (const slot of slots) activityFor(slot).probeAt = at;
-    }
+    if (accepted && Number.isInteger(id) && id >= 0 && slots.length) jobs.set(id, { slots, at: now() });
     return accepted;
   };
 
@@ -201,15 +184,6 @@ function pixelsPerModule(value) {
   return median(sizes);
 }
 
-function drawCorners(x, y, w, h, length) {
-  ctx.beginPath();
-  ctx.moveTo(x, y + length); ctx.lineTo(x, y); ctx.lineTo(x + length, y);
-  ctx.moveTo(x + w - length, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + length);
-  ctx.moveTo(x + w, y + h - length); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w - length, y + h);
-  ctx.moveTo(x + length, y + h); ctx.lineTo(x, y + h); ctx.lineTo(x, y + h - length);
-  ctx.stroke();
-}
-
 function pathQuad(quad, scale, offX, offY) {
   const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
   ctx.beginPath();
@@ -225,20 +199,13 @@ function outerQuad(value) {
   const cols = Number(value?.layout?.cols);
   const rows = Number(value?.layout?.rows);
   if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return null;
-  const topLeft = value.slots?.[0]?.quad?.topLeft;
-  const topRight = value.slots?.[cols - 1]?.quad?.topRight;
-  const bottomLeft = value.slots?.[(rows - 1) * cols]?.quad?.bottomLeft;
-  const bottomRight = value.slots?.[rows * cols - 1]?.quad?.bottomRight;
-  const quad = { topLeft, topRight, bottomRight, bottomLeft };
+  const quad = {
+    topLeft: value.slots?.[0]?.quad?.topLeft,
+    topRight: value.slots?.[cols - 1]?.quad?.topRight,
+    bottomLeft: value.slots?.[(rows - 1) * cols]?.quad?.bottomLeft,
+    bottomRight: value.slots?.[rows * cols - 1]?.quad?.bottomRight
+  };
   return validQuad(quad) ? quad : null;
-}
-
-function stateColor(state) {
-  if (state === "TRACK") return "#6fffa8";
-  if (state === "GRID_LOCK") return "#70e7ff";
-  if (state === "PARTIAL_LOSS") return "#ffca64";
-  if (state === "REACQUIRE") return "#ff7c9c";
-  return "#d6dbe4";
 }
 
 function drawHud(at) {
@@ -261,79 +228,64 @@ function drawHud(at) {
   for (const [id, job] of jobs) if (at - job.at > JOB_TTL_MS) jobs.delete(id);
 
   const value = snapshot;
-  const state = lattice?.state || "SEARCH";
-  const ppm = value ? pixelsPerModule(value) : 0;
-  const label = `${state}${ppm > 0 ? ` · ${ppm.toFixed(1)} px/module` : ""}`;
-  const font = Math.max(11, 12 * dpr);
-  ctx.font = `650 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-  const padX = 8 * dpr;
-  const padY = 5 * dpr;
-  const badgeW = ctx.measureText(label).width + padX * 2;
-  const badgeH = font + padY * 2;
-  const badgeX = 8 * dpr;
-  const badgeY = 8 * dpr;
-  ctx.fillStyle = "rgba(5, 10, 16, 0.68)";
-  ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
-  ctx.fillStyle = stateColor(state);
-  ctx.fillText(label, badgeX + padX, badgeY + padY + font * 0.82);
-
   if (!value?.slots?.length) return;
   const scale = Math.min(width / vw, height / vh);
   const offX = (width - vw * scale) / 2;
   const offY = (height - vh * scale) / 2;
 
-  const wall = outerQuad(value);
-  if (wall) {
+  const ppm = pixelsPerModule(value);
+  if (ppm > 0) {
+    const label = `${ppm.toFixed(1)} px/module`;
+    const font = Math.max(10, 10.5 * dpr);
+    ctx.font = `600 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.lineWidth = Math.max(2, 2 * dpr);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.62)";
+    ctx.fillStyle = "rgba(245, 249, 252, 0.78)";
+    ctx.strokeText(label, 10 * dpr, 18 * dpr);
+    ctx.fillText(label, 10 * dpr, 18 * dpr);
+  }
+
+  if (value.distributedFit) {
+    const wall = outerQuad(value);
+    if (wall) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(184, 132, 255, 0.34)";
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.setLineDash([]);
+      pathQuad(wall, scale, offX, offY);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  const activeSlots = new Set();
+  for (const job of jobs.values()) for (const slot of job.slots) activeSlots.add(slot);
+
+  for (const slot of value.slots) {
+    if (!activeSlots.has(slot.index)) continue;
+    if (!validQuad(slot.quad)) continue;
     ctx.save();
-    ctx.strokeStyle = "rgba(183, 126, 255, 0.68)";
-    ctx.lineWidth = Math.max(1.2, 1.35 * dpr);
-    ctx.setLineDash([6 * dpr, 5 * dpr]);
-    pathQuad(wall, scale, offX, offY);
+    pathQuad(slot.quad, scale, offX, offY);
+    ctx.fillStyle = "rgba(70, 211, 255, 0.08)";
+    ctx.strokeStyle = "rgba(88, 220, 255, 0.58)";
+    ctx.lineWidth = Math.max(1.25, 1.25 * dpr);
+    ctx.fill();
     ctx.stroke();
     ctx.restore();
   }
 
   for (const slot of value.slots) {
-    const box = slot.box;
-    if (!box || ![box.x, box.y, box.w, box.h].every(Number.isFinite)) continue;
-    const x = offX + box.x * scale;
-    const y = offY + box.y * scale;
-    const w = box.w * scale;
-    const h = box.h * scale;
-    const minSide = Math.min(w, h);
-    const activity = slotActivity.get(slot.index);
-    const probeAge = at - (activity?.probeAt ?? -Infinity);
-    const missAge = at - (activity?.missAt ?? -Infinity);
-    const hitAge = at - (activity?.hitAt ?? -Infinity);
-
+    const missAt = slotActivity.get(slot.index)?.missAt ?? -Infinity;
+    const missAge = at - missAt;
+    if (missAge < 0 || missAge >= MISS_FADE_MS || !validQuad(slot.quad)) continue;
+    const t = 1 - missAge / MISS_FADE_MS;
     ctx.save();
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.setLineDash([]);
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = "rgba(214, 229, 241, 0.28)";
-    ctx.lineWidth = Math.max(1, dpr);
-    drawCorners(x, y, w, h, minSide * 0.13);
-
-    if (probeAge >= 0 && probeAge < PROBE_FLASH_MS) {
-      const t = 1 - probeAge / PROBE_FLASH_MS;
-      ctx.strokeStyle = `rgba(115, 222, 255, ${0.28 + 0.72 * t})`;
-      ctx.lineWidth = Math.max(2, (1.8 + t) * dpr);
-      drawCorners(x, y, w, h, minSide * 0.22);
-    }
-    if (missAge >= 0 && missAge < MISS_FADE_MS && missAge <= probeAge + MISS_FADE_MS) {
-      const t = 1 - missAge / MISS_FADE_MS;
-      ctx.strokeStyle = `rgba(255, 172, 74, ${0.15 + 0.65 * t})`;
-      ctx.lineWidth = Math.max(1.5, (1.5 + 0.7 * t) * dpr);
-      drawCorners(x, y, w, h, minSide * 0.18);
-    }
-    if (hitAge >= 0 && hitAge < HIT_FADE_MS) {
-      const t = 1 - hitAge / HIT_FADE_MS;
-      const pop = (2 + 3 * t) * dpr;
-      ctx.strokeStyle = `rgba(94, 255, 155, ${0.24 + 0.76 * t})`;
-      ctx.lineWidth = Math.max(2, (2 + t) * dpr);
-      drawCorners(x - pop, y - pop, w + pop * 2, h + pop * 2, minSide * 0.22);
-    }
+    pathQuad(slot.quad, scale, offX, offY);
+    ctx.fillStyle = `rgba(255, 166, 66, ${0.03 + 0.11 * t})`;
+    ctx.strokeStyle = `rgba(255, 174, 73, ${0.12 + 0.62 * t})`;
+    ctx.lineWidth = Math.max(1.25, (1.1 + 0.7 * t) * dpr);
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 }
