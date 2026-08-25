@@ -11,6 +11,15 @@ const COLORS = Object.freeze({
   acquire: [180, 134, 255]
 });
 
+const STATE_COLORS = Object.freeze({
+  SEARCH: "#b486ff",
+  GRID_LOCK: "#00efff",
+  TRACK: "#35d66f",
+  PARTIAL_LOSS: "#ffb23e",
+  REACQUIRE: "#ff735c",
+  DORMANT: "#9aa0a6"
+});
+
 const preview = document.querySelector("#preview .preview");
 const video = document.getElementById("video");
 const legacyOverlay = document.getElementById("detect-overlay");
@@ -27,8 +36,29 @@ Object.assign(canvas.style, {
   pointerEvents: "none",
   zIndex: "3"
 });
+
+const status = document.createElement("div");
+status.id = "user-scan-status";
+status.setAttribute("aria-hidden", "true");
+Object.assign(status.style, {
+  position: "absolute",
+  left: "10px",
+  top: "10px",
+  zIndex: "4",
+  pointerEvents: "none",
+  padding: "5px 8px",
+  borderRadius: "7px",
+  borderLeft: "3px solid #b486ff",
+  background: "rgba(12, 14, 18, 0.68)",
+  color: "#fff",
+  font: "700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace",
+  letterSpacing: ".01em",
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 5px rgba(0,0,0,.22)"
+});
+
 if (preview && getComputedStyle(preview).position === "static") preview.style.position = "relative";
-preview?.append(canvas);
+preview?.append(canvas, status);
 const ctx = canvas.getContext("2d");
 
 // Fixed-size, overwrite-in-place state. Even at hundreds of QR/s there is no
@@ -37,6 +67,9 @@ const activity = new Array(128);
 let geometry;
 let geometryUsable = false;
 let drawQueued = false;
+let receiverState = "SEARCH";
+let pixelsPerModule = 0;
+let lastStatusText = "";
 
 function normalMode() {
   return !devActions || devActions.hidden;
@@ -45,6 +78,53 @@ function normalMode() {
 function validQuad(quad) {
   return Boolean(quad) && [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]
     .every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+
+function quadPixelsPerModule(quad, modules) {
+  if (!validQuad(quad) || !(modules > 0)) return 0;
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  let shortest = Infinity;
+  for (let index = 0; index < 4; index++) {
+    const point = points[index];
+    const next = points[(index + 1) % 4];
+    shortest = Math.min(shortest, Math.hypot(point.x - next.x, point.y - next.y));
+  }
+  return Number.isFinite(shortest) ? shortest / modules : 0;
+}
+
+function snapshotPixelsPerModule(snapshot) {
+  const slots = snapshot?.slots;
+  const modules = Number(snapshot?.modules);
+  if (!Array.isArray(slots) || !slots.length || !(modules > 0)) return 0;
+  const step = Math.max(1, Math.ceil(slots.length / 6));
+  let sum = 0;
+  let count = 0;
+  for (let index = 0; index < slots.length && count < 6; index += step) {
+    const value = quadPixelsPerModule(slots[index]?.quad, modules);
+    if (!(value > 0)) continue;
+    sum += value;
+    count++;
+  }
+  if (!count) {
+    for (const slot of slots) {
+      const value = quadPixelsPerModule(slot?.quad, modules);
+      if (!(value > 0)) continue;
+      sum = value;
+      count = 1;
+      break;
+    }
+  }
+  return count ? sum / count : 0;
+}
+
+function updateStatus() {
+  const ppm = pixelsPerModule > 0 ? `${pixelsPerModule.toFixed(1)} px/module` : "— px/module";
+  const text = `${receiverState} · ${ppm}`;
+  if (text !== lastStatusText) {
+    status.textContent = text;
+    lastStatusText = text;
+  }
+  status.style.borderLeftColor = STATE_COLORS[receiverState] || "#b486ff";
 }
 
 function presentation() {
@@ -290,21 +370,29 @@ globalThis.__airgapperUserOverlay = {
   geometry(snapshot, usable) {
     geometry = snapshot || undefined;
     geometryUsable = Boolean(usable && snapshot?.distributedFit);
+    pixelsPerModule = snapshotPixelsPerModule(snapshot);
+    updateStatus();
     scheduleDraw();
   },
 
   latticeState(state) {
-    if (state === "SEARCH" || state === "REACQUIRE" || state === "DORMANT") {
+    receiverState = String(state || "SEARCH");
+    if (receiverState === "SEARCH" || receiverState === "REACQUIRE" || receiverState === "DORMANT") {
       geometryUsable = false;
+      pixelsPerModule = 0;
       activity.fill(undefined);
-      scheduleDraw();
     }
+    updateStatus();
+    scheduleDraw();
   },
 
   reset() {
     geometry = undefined;
     geometryUsable = false;
+    receiverState = "SEARCH";
+    pixelsPerModule = 0;
     activity.fill(undefined);
+    updateStatus();
     scheduleDraw();
   }
 };
@@ -313,7 +401,11 @@ function syncOverlayMode() {
   const developer = !normalMode();
   if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
   canvas.style.display = developer ? "none" : "";
-  if (!developer) scheduleDraw();
+  status.style.display = developer ? "none" : "";
+  if (!developer) {
+    updateStatus();
+    scheduleDraw();
+  }
 }
 
 if (devActions) {
@@ -326,4 +418,5 @@ video?.addEventListener("resize", scheduleDraw);
 window.addEventListener("resize", scheduleDraw);
 globalThis.screen?.orientation?.addEventListener?.("change", scheduleDraw);
 window.addEventListener("orientationchange", scheduleDraw);
+updateStatus();
 syncOverlayMode();
