@@ -211,7 +211,7 @@ class GridLattice extends GeometryGridLattice {
     return this.cacheFrameSnapshot(at, result);
   }
 
-  dropSlotCorrection(slot, at) {
+  dropSlotCorrection(slot) {
     // Five misses on one QR are not enough reason to perturb a wall that is
     // broadly producing CRC-valid packets. Rolling-shutter stripes and display
     // transitions can create short local miss streaks even at >90% wall yield.
@@ -219,7 +219,7 @@ class GridLattice extends GeometryGridLattice {
     // healthy; local self-heal automatically becomes available again once broad
     // coverage genuinely degrades.
     if (decodeWallBroadlyHealthy()) return null;
-    return this.cacheOutOfBandSnapshot(super.dropSlotCorrection(slot, at));
+    return this.cacheOutOfBandSnapshot(super.dropSlotCorrection(slot));
   }
 
   nudgeFromSightings(sightings, at) {
