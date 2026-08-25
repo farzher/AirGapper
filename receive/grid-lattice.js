@@ -45,7 +45,7 @@ class GridLattice extends GeometryGridLattice {
   }
 
   observeSnapshot(snapshot) {
-    if (snapshot) noteDecodeGeometry(snapshot);
+    if (snapshot) noteDecodeGeometry(snapshot, this.frameWidth, this.frameHeight);
     return snapshot;
   }
 
