@@ -20,8 +20,20 @@ function publishLatest() {
   frameMessage.frame = frame;
   frameMessage.totalFrames = totalFrames;
   frameMessage.discardedFrames = discardedFrames;
-  postMessage(frameMessage, [frame]);
-  frameMessage.frame = null;
+  try {
+    postMessage(frameMessage, [frame]);
+  } catch (error) {
+    frame?.close?.();
+    stopped = true;
+    try {
+      postMessage({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } catch {}
+  } finally {
+    frameMessage.frame = null;
+  }
 }
 
 async function stopSource() {
@@ -111,7 +123,12 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
   try {
     while (!stopped && reader === activeReader) {
       const { value, done } = await activeReader.read();
-      if (done) break;
+      if (done) {
+        if (!stopped && reader === activeReader) {
+          postMessage({ type: "error", message: "Worker camera processor ended unexpectedly" });
+        }
+        break;
+      }
       if (!value) continue;
       if (stopped || reader !== activeReader) {
         value.close?.();
