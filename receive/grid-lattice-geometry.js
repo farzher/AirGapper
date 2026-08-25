@@ -4,9 +4,6 @@ import { gridLayoutById } from "../shared/grid-layout.js";
 // probes get a brief chance to re-anchor the wall before a hard reacquire.
 const WHOLE_GRID_SOFT_LOSS_MS = 450;
 const WHOLE_GRID_HARD_LOSS_MS = 900;
-const SLOT_CORRECTION_DROP_WINDOW_MS = 650;
-const SLOT_CORRECTION_DROP_HARD_LIMIT = 4;
-const SLOT_CORRECTION_DROP_MIN_SILENCE_MS = 180;
 // Geometry has two different lifetimes. Identity/lock evidence may survive a
 // brief miss, but quads used to aim the hot decoder must represent the camera
 // pose *now*. Keeping those concepts separate prevents repeatedly decoded easy
@@ -126,9 +123,6 @@ function distributedFitReady(layout, observations) {
   // or one column are still only a local/provisional geometric seed.
   return cols.size >= 2 && rows.size >= 2;
 }
-function monotonicNow() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
 function orientationAngle() {
   const modern = Number(globalThis.screen?.orientation?.angle);
   if (Number.isFinite(modern)) return (modern % 360 + 360) % 360;
@@ -147,7 +141,6 @@ class GridLattice {
     this.frameWidth = 1;
     this.frameHeight = 1;
     this.pendingInvalidationReason = "";
-    this.slotCorrectionDropTimes = [];
     this.orientationAngle = orientationAngle();
     this.onOrientationChange = () => {
       const next = orientationAngle();
@@ -187,7 +180,6 @@ class GridLattice {
     this.candidate = void 0;
     this.lastHitAt = 0;
     this.pendingInvalidationReason = "";
-    this.slotCorrectionDropTimes = [];
     this.orientationAngle = orientationAngle();
   }
   reacquire(at, reason = "whole lattice invalidated") {
@@ -197,7 +189,6 @@ class GridLattice {
     this.candidate = void 0;
     this.lastHitAt = at;
     this.pendingInvalidationReason = "";
-    this.slotCorrectionDropTimes = [];
   }
   invalidatePose(reason = "camera pose invalidated") {
     if (!this.candidate || !this.locked) return false;
@@ -323,7 +314,7 @@ class GridLattice {
       dx, dy, maxShift: Math.hypot(dx, dy)
     }, at);
   }
-  dropSlotCorrection(slot, at = monotonicNow()) {
+  dropSlotCorrection(slot) {
     if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
     // A failed local residual is evidence about this slot, not the whole wall.
     // Keep global geometry alive as long as any CRC-valid QR continues to refresh
