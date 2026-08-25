@@ -5,8 +5,6 @@ const DORMANT_MS = 900;
 const OBSERVATION_HISTORY_MS = 2500;
 const CORRECTION_REFRESH_MS = 180;
 const FULL_FIT_REFRESH_MS = 160;
-const FRESH_PAYLOAD_HOLD_MS = 550;
-window.airgapperFreshPayloadUntil = 0;
 
 const activeDescriptor = Object.getOwnPropertyDescriptor(GridLattice.prototype, "active");
 if (activeDescriptor?.configurable) {
@@ -18,28 +16,27 @@ if (activeDescriptor?.configurable) {
   });
 }
 
-function noteFreshPayload() {
-  const now = performance.now();
-  window.airgapperFreshPayloadUntil = Math.max(
-    Number(window.airgapperFreshPayloadUntil) || 0,
-    now + FRESH_PAYLOAD_HOLD_MS
-  );
-  return now;
-}
-
 function clearCache(lattice) {
   lattice.__airgapperFrameAt = undefined;
   lattice.__airgapperFrameSnapshot = undefined;
   lattice.__airgapperCorrectionAt = undefined;
   lattice.__airgapperLastFullFitAt = undefined;
   lattice.__airgapperFullFitAttemptAt = undefined;
-  lattice.__airgapperLastPayloadAt = undefined;
 }
 
-function remember(lattice, snapshot, at) {
+function cacheFrameSnapshot(lattice, at, snapshot) {
+  const frameAt = Number(at);
+  if (snapshot && Number.isFinite(frameAt)) {
+    lattice.__airgapperFrameAt = frameAt;
+    lattice.__airgapperFrameSnapshot = snapshot;
+  }
+  return snapshot;
+}
+
+function cacheOutOfBandSnapshot(lattice, snapshot) {
   if (snapshot) {
     lattice.__airgapperFrameSnapshot = snapshot;
-    if (Number.isFinite(Number(at))) lattice.__airgapperFrameAt = Number(at);
+    lattice.__airgapperFrameAt = undefined;
   }
   return snapshot;
 }
@@ -58,7 +55,7 @@ GridLattice.prototype.reacquire = function(at, reason) {
 
 const baseNudgeMotion = GridLattice.prototype.nudgeMotion;
 GridLattice.prototype.nudgeMotion = function(motion, at = this.lastHitAt) {
-  return remember(this, baseNudgeMotion.call(this, motion, at), at);
+  return cacheFrameSnapshot(this, at, baseNudgeMotion.call(this, motion, at));
 };
 
 function sameFrameCompatible(lattice, detection) {
@@ -79,6 +76,8 @@ function sameFrameCompatible(lattice, detection) {
 
 function recordSameFrameObservation(lattice, detection, frameWidth, frameHeight) {
   const at = Number(detection.at);
+  const packetIsCurrent = at >= lattice.lastHitAt;
+  lattice.lastHitAt = Math.max(lattice.lastHitAt, at);
   lattice.frameWidth = Math.max(1, frameWidth);
   lattice.frameHeight = Math.max(1, frameHeight);
 
@@ -111,6 +110,10 @@ function recordSameFrameObservation(lattice, detection, frameWidth, frameHeight)
     }
   }
 
+  if (packetIsCurrent && lattice.locked) {
+    lattice.transition("TRACK", "valid packet refreshed locked lattice", at);
+  }
+
   const snapshot = lattice.__airgapperFrameSnapshot;
   snapshot.state = lattice.state;
   snapshot.provisional = !lattice.active;
@@ -120,8 +123,6 @@ function recordSameFrameObservation(lattice, detection, frameWidth, frameHeight)
 const baseAccept = GridLattice.prototype.accept;
 GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   const at = Number(detection?.at);
-
-  if (this.candidate && Number.isFinite(at)) this.noteValidPacket(at);
 
   if (sameFrameCompatible(this, detection)) {
     const lastFullFit = Number(this.__airgapperLastFullFitAt);
@@ -135,8 +136,7 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
     const result = baseAccept.call(this, detection, frameWidth, frameHeight);
     if (result) {
       this.__airgapperLastFullFitAt = at;
-      this.noteValidPacket(at);
-      return remember(this, result, at);
+      return cacheFrameSnapshot(this, at, result);
     }
     this.__airgapperFrameSnapshot = cached;
     return cached ?? result;
@@ -144,61 +144,45 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
 
   const priorAt = this.__airgapperFrameAt;
   const result = baseAccept.call(this, detection, frameWidth, frameHeight);
-  if (result && Number.isFinite(at)) {
-    if (priorAt !== at) {
-      this.__airgapperLastFullFitAt = at;
-      this.__airgapperFullFitAttemptAt = at;
-    }
-    this.noteValidPacket(at);
+  if (result && Number.isFinite(at) && priorAt !== at) {
+    this.__airgapperLastFullFitAt = at;
+    this.__airgapperFullFitAttemptAt = at;
   }
-  return remember(this, result, at);
+  return cacheFrameSnapshot(this, at, result);
 };
 
-// Decode misses are not geometry measurements. Rolling shutter, blur, and QR
-// payload damage can make correctly aimed slots miss repeatedly. Local geometry
-// is replaced only by new CRC-backed measurements or by a genuine whole-wall
-// reacquire.
-GridLattice.prototype.dropSlotCorrection = function() {
-  return null;
+// A decode miss is not a whole-wall failure, but a repeatedly bad local residual
+// is allowed to heal locally. New CRC-backed corners can learn the correction
+// again immediately. Runtime already rate-limits these per-slot repair attempts.
+GridLattice.prototype.dropSlotCorrection = function(slot) {
+  if (!Number.isInteger(slot) || !this.slotCorrections.has(slot)) return null;
+  this.slotCorrections.delete(slot);
+  return cacheOutOfBandSnapshot(this, this.candidate ? this.snapshot() : null);
 };
 
 const baseNudgeFromSightings = GridLattice.prototype.nudgeFromSightings;
 GridLattice.prototype.nudgeFromSightings = function(sightings, at) {
-  return remember(this, baseNudgeFromSightings.call(this, sightings, at), at);
-};
-
-const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
-GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
-  const result = baseNoteValidPacket.call(this, at);
-  if (!this.candidate) return result;
-
-  const payloadAt = noteFreshPayload();
-  this.__airgapperLastPayloadAt = payloadAt;
-  this.pendingInvalidationReason = "";
-  if (this.state === "DORMANT" || this.state === "PARTIAL_LOSS" || this.state === "GRID_LOCK") {
-    this.transition("TRACK", "fresh CRC payload kept retained lattice live", payloadAt);
-  }
-  if (this.__airgapperFrameSnapshot) {
-    this.__airgapperFrameSnapshot.state = this.state;
-    this.__airgapperFrameSnapshot.provisional = !this.active;
-  }
-  return result;
+  return cacheOutOfBandSnapshot(this, baseNudgeFromSightings.call(this, sightings, at));
 };
 
 const baseTick = GridLattice.prototype.tick;
 GridLattice.prototype.tick = function(now) {
-  if (!this.candidate || this.pendingInvalidationReason || !this.__airgapperFrameSnapshot) {
-    return remember(this, baseTick.call(this, now));
+  if (!this.candidate || this.pendingInvalidationReason) {
+    return cacheOutOfBandSnapshot(this, baseTick.call(this, now));
+  }
+  if (!this.__airgapperFrameSnapshot) {
+    return cacheOutOfBandSnapshot(this, baseTick.call(this, now));
   }
 
-  const lastPayloadAt = Number(this.__airgapperLastPayloadAt) || 0;
-  const staleMs = lastPayloadAt > 0 ? now - lastPayloadAt : now - this.lastHitAt;
+  // Geometry state is driven by the source-frame clock. A packet that finishes
+  // decoding late is still useful transport data, but it must not make an old
+  // camera pose look current. Dormant geometry is retained so acquisition can
+  // re-anchor it without throwing away the known wall identity.
+  const staleMs = now - this.lastHitAt;
   if (staleMs > DORMANT_MS) {
-    this.transition("DORMANT", "whole lattice payload stale; dormant geometry retained while acquisition owns scanner", now);
+    this.transition("DORMANT", "whole lattice geometry stale; retained while acquisition re-anchors", now);
   } else if (staleMs > SOFT_LOSS_MS) {
-    this.transition("PARTIAL_LOSS", "whole lattice payload stale; bounded recovery with proven geometry retained", now);
-  } else if (this.state === "DORMANT" || this.state === "PARTIAL_LOSS" || this.state === "GRID_LOCK") {
-    this.transition("TRACK", "recent CRC payload keeps lattice live", now);
+    this.transition("PARTIAL_LOSS", "whole lattice geometry stale; bounded re-anchor window", now);
   }
 
   const snapshot = this.__airgapperFrameSnapshot;
