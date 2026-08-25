@@ -8,7 +8,13 @@ assert.deepEqual(policy.acquisitionRacePolicy({ scanIndex: 1, ageMs: 0 }),
   { mode: "fast", fullFrame: true, targetSighting: false, stalled: false });
 assert.equal(policy.acquisitionRacePolicy({ scanIndex: 2, ageMs: 50 }).mode, "seed");
 assert.equal(policy.acquisitionRacePolicy({ scanIndex: 4, ageMs: 250, hasSighting: true }).mode, "sighting");
-assert.equal(policy.acquisitionRacePolicy({ scanIndex: 5, ageMs: 250 }).mode, "hunt");
+// A short acquisition miss must not immediately trigger the expensive generic finder.
+assert.equal(policy.acquisitionRacePolicy({ scanIndex: 5, ageMs: 250 }).mode, "fast");
+// Finder-only evidence gets bounded retries; intervening scans continue spatial search.
+assert.equal(policy.acquisitionRacePolicy({ scanIndex: 6, ageMs: 1000, hasSighting: true }).mode, "seed");
+assert.equal(policy.acquisitionRacePolicy({ scanIndex: 8, ageMs: 1000, hasSighting: true }).mode, "sighting");
+// Generic robust hunt is a sparse escape hatch after sustained blind acquisition.
+assert.equal(policy.acquisitionRacePolicy({ scanIndex: 13, ageMs: 1000 }).mode, "hunt");
 assert.equal(policy.temporalHardSkip({ risk: 0.8, confidence: 0.8 }), true);
 assert.equal(policy.temporalHardSkip({ risk: 0.8, confidence: 0.4 }), false);
 assert.equal(policy.temporalHardSkip({ risk: 0.8, confidence: 0.8, measurement: true }), false);
