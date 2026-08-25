@@ -26,10 +26,6 @@ function clearRecentDecodeHealth() {
   lastSuccessAt = 0;
 }
 
-// Exposure changes and decode completions live on different timelines. A worker
-// can finish an old camera frame hundreds of milliseconds after the sensor has
-// already moved to a new EV/ISO state. Fence those old source frames out, while
-// measuring freshness from the time the valid QR result actually becomes known.
 export function noteExposureTransition(at = performance.now()) {
   const value = Number(at);
   exposureTransitionAt = Number.isFinite(value) ? value : performance.now();
@@ -66,10 +62,6 @@ export function noteDecodeGeometry(snapshot, frameWidth, frameHeight) {
     return;
   }
 
-  // Lattice snapshots contain every declared layout slot, including QRs whose
-  // predicted centers are outside the camera. Exposure health is about the wall
-  // the camera can actually judge. Otherwise a partially framed 7x4 wall could
-  // require six distinct successes when only four or five QRs are on-camera.
   let visible = 0;
   for (const slot of slots) {
     const box = slot?.box;
@@ -113,11 +105,6 @@ export function resetDecodeHealth() {
   }
 }
 
-// Acquisition feedback reaches the camera mutation queue asynchronously. A
-// rescue command chosen while blind can otherwise execute after the preceding
-// exposure has already produced a verified QR and seeded/locked the lattice.
-// Treat that first real progress as a short provisional lease on the current
-// sensor state. If progress was luck and does not continue, the lease expires.
 export function decodeExposureRecovering(at = performance.now()) {
   if (latticeState !== "GRID_LOCK" && latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") return false;
   return Boolean(lastSuccessAt && at - lastSuccessAt <= RECOVERY_FRESH_MS);
@@ -140,9 +127,6 @@ function recentSlotCount(cutoff) {
   return count;
 }
 
-// HOLD collapse uses a laggy submission/completion window in runtime. This
-// completion-clock signal is deliberately weaker than broad health but strong
-// enough to say that a supposedly held exposure is still producing real QRs.
 export function decodeExposureSustaining(at = performance.now()) {
   if (latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") return false;
   if (!lastSuccessAt || at - lastSuccessAt > SUSTAIN_FRESH_MS) return false;
@@ -150,10 +134,6 @@ export function decodeExposureSustaining(at = performance.now()) {
 }
 
 export function decodeExposureHealthy(at = performance.now()) {
-  // Geometry fit quality and payload health are deliberately separate. A local
-  // fit can still be decoding broadly across the physical wall; those real CRC
-  // successes are stronger exposure evidence than whether the current pose has
-  // enough fresh anchors to be called distributed.
   if ((latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") || !geometrySlotCount) return false;
   if (!lastSuccessAt || at - lastSuccessAt > HEALTH_FRESH_MS) return false;
 
@@ -165,4 +145,16 @@ export function decodeExposureHealthy(at = performance.now()) {
   const requiredEvents = Math.max(12, requiredSlots * 4);
 
   return recentSlotCount(cutoff) >= requiredSlots && recentEventCount(cutoff) >= requiredEvents;
+}
+
+// Geometry self-heal is more disruptive than exposure protection: deleting a
+// learned slot residual resets scheduler history and forces a reprobe. Suppress
+// that churn only when the *majority* of the visible wall is demonstrably alive.
+// A handful of easy survivors must never mask a genuinely broken pose.
+export function decodeWallBroadlyHealthy(at = performance.now()) {
+  if ((latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") || geometrySlotCount < 4) return false;
+  if (!lastSuccessAt || at - lastSuccessAt > HEALTH_FRESH_MS) return false;
+  const cutoff = at - HEALTH_WINDOW_MS;
+  const requiredSlots = Math.max(4, Math.ceil(geometrySlotCount * 0.70));
+  return recentSlotCount(cutoff) >= requiredSlots && recentEventCount(cutoff) >= requiredSlots * 3;
 }

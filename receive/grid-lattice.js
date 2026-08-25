@@ -1,5 +1,6 @@
 import { GridLattice as GeometryGridLattice } from "./grid-lattice-geometry.js";
 import {
+  decodeWallBroadlyHealthy,
   noteDecodeGeometry,
   noteDecodeLatticeState,
   noteDecodeSuccess,
@@ -199,6 +200,13 @@ class GridLattice extends GeometryGridLattice {
   }
 
   dropSlotCorrection(slot, at) {
+    // Five misses on one QR are not enough reason to perturb a wall that is
+    // broadly producing CRC-valid packets. Rolling-shutter stripes and display
+    // transitions can create short local miss streaks even at >90% wall yield.
+    // Preserve the learned residual while the majority of visible slots remain
+    // healthy; local self-heal automatically becomes available again once broad
+    // coverage genuinely degrades.
+    if (decodeWallBroadlyHealthy()) return null;
     return this.cacheOutOfBandSnapshot(super.dropSlotCorrection(slot, at));
   }
 
