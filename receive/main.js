@@ -3,6 +3,7 @@ import "./exposure-ev.js";
 import "./track-processor-proxy.js";
 import "./dev-settings-unlock.js";
 import "./user-overlay.js";
+import "./startup-throughput.js";
 import "./runtime.js";
 
 // These diagnostics are intentionally absent from the normal receiver UI.
