@@ -59,15 +59,17 @@ function trackSlot(track) {
   return best && best.distance < 0.75 ? best.index : null;
 }
 
-function targetMissingSlots(message) {
-  if (message?.full || !Array.isArray(message?.tracks) || !snapshot?.slots?.length) return [];
-  const expected = new Map(snapshot.slots.map((slot) => [slot.index, slot]));
+function targetProbeSlots(message) {
+  // The user overlay shows dedicated local-recovery probes only. Ordinary
+  // tracked misses are often rolling-shutter/frame-phase failures and must not
+  // be presented as evidence that a geometry probe failed.
+  if (!message?.full || message?.acquisitionMode !== "recovery" ||
+      !Array.isArray(message?.tracks) || !snapshot?.slots?.length) return [];
+  const expected = new Set(snapshot.slots.map((slot) => slot.index));
   const slots = new Set();
   for (const track of message.tracks) {
     const slot = trackSlot(track);
-    if (slot === null) continue;
-    const known = expected.get(slot);
-    if (known && !known.decoded) slots.add(slot);
+    if (slot !== null && expected.has(slot)) slots.add(slot);
   }
   return [...slots];
 }
@@ -113,7 +115,7 @@ function noteCompletion(message) {
 function wrapWorkerPool() {
   const originalSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
   DecodeWorkerPool.prototype.submitAtSlot = function (workerSlot, message, transfer) {
-    const slots = targetMissingSlots(message);
+    const slots = targetProbeSlots(message);
     const id = Number(message?.id);
     const accepted = originalSubmitAtSlot.call(this, workerSlot, message, transfer);
     if (accepted && Number.isInteger(id) && id >= 0 && slots.length) jobs.set(id, { slots, at: now() });
