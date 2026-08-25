@@ -1,4 +1,4 @@
-name: receiver v459 once
+name: receiver v460 once
 on:
   push:
     branches: [master]
@@ -21,5 +21,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add receive/runtime.js version.js
           git rm .github/receiver-v459.py .github/workflows/receiver-v459-once.yml
-          git commit -m "Make Auto Optics motion-safe v0.5.459"
+          git commit -m "Make Auto Optics motion-safe v0.5.460"
           git push
