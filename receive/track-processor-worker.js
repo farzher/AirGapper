@@ -1,6 +1,6 @@
 let reader = null;
 let sourceTrack = null;
-let pendingFrame = null;
+const pendingFrames = [];
 let wantsFrame = false;
 let stopped = true;
 let totalFrames = 0;
@@ -8,13 +8,18 @@ let discardedFrames = 0;
 let expectedWidth = 0;
 let expectedHeight = 0;
 let expectedFrameRate = 0;
+const RETAINED_FRAME_LIMIT = 3;
 const frameMessage = { type: "frame", frame: null, totalFrames: 0, discardedFrames: 0 };
 
-function publishLatest() {
-  if (!wantsFrame || !pendingFrame) return;
+function closePendingFrames() {
+  for (const frame of pendingFrames) frame?.close?.();
+  pendingFrames.length = 0;
+}
+
+function publishNext() {
+  if (!wantsFrame || !pendingFrames.length) return;
   wantsFrame = false;
-  const frame = pendingFrame;
-  pendingFrame = null;
+  const frame = pendingFrames.shift();
   // postMessage clones the envelope synchronously and transfers frame ownership,
   // so one reusable envelope removes a tiny object allocation per camera frame.
   frameMessage.frame = frame;
@@ -45,8 +50,7 @@ async function stopSource() {
     try { await activeReader.cancel(); } catch {}
     try { activeReader.releaseLock(); } catch {}
   }
-  pendingFrame?.close?.();
-  pendingFrame = null;
+  closePendingFrames();
   sourceTrack?.stop?.();
   sourceTrack = null;
 }
@@ -155,14 +159,17 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
       const processorDrops = Number(processor.discardedFrames);
       if (Number.isFinite(processorDrops)) discardedFrames = Math.max(discardedFrames, processorDrops);
 
-      // The consumer wants the freshest camera image, never a queue of stale
-      // optical pages. Keep at most one frame while the main thread is busy.
-      if (pendingFrame) {
-        pendingFrame.close?.();
+      // Keep a tiny freshness queue rather than a single frame. Normal operation
+      // still publishes immediately, but a short main-thread/GC/FEC pause can be
+      // absorbed and six warm decoder workers can catch up afterward. When the
+      // pause exceeds this bounded window, drop the oldest image and retain only
+      // the newest ~2-3 camera intervals so motion/optics state never grows stale.
+      if (pendingFrames.length >= RETAINED_FRAME_LIMIT) {
+        pendingFrames.shift()?.close?.();
         discardedFrames++;
       }
-      pendingFrame = value;
-      publishLatest();
+      pendingFrames.push(value);
+      publishNext();
     }
   } catch (error) {
     if (!stopped && reader === activeReader) {
@@ -171,8 +178,7 @@ async function startSource(track, maxBufferSize = 1, expected = {}) {
   } finally {
     if (reader === activeReader) reader = null;
     try { activeReader.releaseLock(); } catch {}
-    pendingFrame?.close?.();
-    pendingFrame = null;
+    closePendingFrames();
     sourceTrack?.stop?.();
     sourceTrack = null;
   }
@@ -182,7 +188,7 @@ self.onmessage = (event) => {
   const message = event.data;
   if (message === "pull") {
     wantsFrame = true;
-    publishLatest();
+    publishNext();
     return;
   }
   const command = message ?? {};
