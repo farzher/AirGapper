@@ -71,12 +71,21 @@ export function lockedRecoveryPolicy({
   geometryProbeDue = false,
   allCandidatesCold = false,
   decodeSilenceMs = 0,
+  localProbeSilenceMs = 120,
   globalSilenceMs = 500,
   hasCandidates = true
 }) {
-  const globalRecovery = Number(decodeSilenceMs) >= Math.max(0, Number(globalSilenceMs) || 0);
+  const silence = Math.max(0, Number(decodeSilenceMs) || 0);
+  const globalThreshold = Math.max(0, Number(globalSilenceMs) || 0);
+  const localThreshold = Math.min(globalThreshold, Math.max(0, Number(localProbeSilenceMs) || 0));
+  const globalRecovery = silence >= globalThreshold;
+  // Periodic stale-geometry maintenance must not steal a robust worker from a
+  // wall that is still delivering payload every frame. Three-ish missed sender
+  // frames are enough to permit the local probe; a fully cold candidate set can
+  // still ask for immediate help without escalating to global reacquisition.
+  const localProbe = Boolean(geometryProbeDue) && silence >= localThreshold;
   const localRecovery = Boolean(hasCandidates) && !globalRecovery &&
-    (Boolean(geometryProbeDue) || Boolean(allCandidatesCold));
+    (localProbe || Boolean(allCandidatesCold));
   return {
     needsRecovery: globalRecovery || localRecovery,
     globalRecovery,
