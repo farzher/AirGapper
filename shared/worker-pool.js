@@ -7,6 +7,7 @@ const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
 const MAX_CONCURRENT_NATIVE_COPIES = 2;
+const CAPACITY_PRESSURE_HOLD_MS = 500;
 const receiveVideo = typeof document === "undefined" ? null : document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
@@ -15,6 +16,8 @@ let trackedTimeoutPressure = 0;
 let trackedTimeoutCount = 0;
 let trackedDecodeTimeoutCount = 0;
 let trackedPreflightTimeoutCount = 0;
+let trackedCapacityPressureUntil = 0;
+let trackedCapacityDropCount = 0;
 
 function noteTrackedTimeout(reachedPreflight) {
   trackedTimeoutCount++;
@@ -24,6 +27,11 @@ function noteTrackedTimeout(reachedPreflight) {
   }
   trackedDecodeTimeoutCount++;
   trackedTimeoutPressure = Math.min(1, trackedTimeoutPressure + (trackedTimeoutPressure ? 0.2 : 0.35));
+}
+
+function noteTrackedCapacityDrop(now = performance.now()) {
+  trackedCapacityDropCount++;
+  trackedCapacityPressureUntil = Math.max(trackedCapacityPressureUntil, now + CAPACITY_PRESSURE_HOLD_MS);
 }
 
 function noteHealthyTrackedCompletion(message, meta) {
@@ -45,9 +53,11 @@ function noteHealthyTrackedCompletion(message, meta) {
   trackedTimeoutPressure = Math.max(0, trackedTimeoutPressure - decay);
 }
 
-function applyTimeoutBackpressure(message, live) {
+function applyTrackedBackpressure(message, live) {
   const tracks = message?.tracks;
-  if (!live || message?.full || !Array.isArray(tracks) || tracks.length < 4 || trackedTimeoutPressure <= 0) return;
+  if (!live || message?.full || !Array.isArray(tracks) || tracks.length < 4) return;
+  const capacityPressured = performance.now() < trackedCapacityPressureUntil;
+  if (trackedTimeoutPressure <= 0 && !capacityPressured) return;
   // Runtime already selected this exact physical slot set and recorded it for
   // completion attribution, temporal prediction, weak-slot learning and Auto
   // Optics evidence. Never silently slice that list here: doing so manufactures
@@ -56,7 +66,14 @@ function applyTimeoutBackpressure(message, live) {
   if (trackedTimeoutPressure >= 0.5) {
     message.guidedRepairMask = 0;
     message.guidedFallbackMask = 0;
+    return;
   }
+  // A recent all-workers-busy drop means throughput, not per-frame recall, is
+  // the limiting resource. Generic fallback is the most expensive optional
+  // stage and has very low yield on already-guided dense walls. Skip it briefly
+  // so a fresh camera frame can enter the pool sooner. Keep the one-lane repair
+  // path available because it is already tightly bounded below.
+  if (capacityPressured) message.guidedFallbackMask = 0;
 }
 
 function liveReceiveCamera() {
@@ -274,6 +291,19 @@ class DecodeWorkerPool extends CoreDecodeWorkerPool {
     };
   }
 
+  submit(message, transfer) {
+    const liveTracked = Boolean(message && !message.full && liveReceiveCamera());
+    // Distinguish the common all-workers-busy drop from a lower-level rejection
+    // after submitAtSlot() has already taken responsibility for cleanup.
+    const hadFreeSlot = this.freeSlots.length > 0;
+    const accepted = super.submit(message, transfer);
+    if (!accepted && liveTracked) {
+      noteTrackedCapacityDrop();
+      if (!hadFreeSlot) closeMessageFrame(message);
+    }
+    return accepted;
+  }
+
   submitAtSlot(slot, message, transfer) {
     if (slot < 0 || slot >= this.workers.length || this.ready?.[slot] !== true || this.busy[slot]) {
       closeMessageFrame(message);
@@ -296,7 +326,7 @@ class DecodeWorkerPool extends CoreDecodeWorkerPool {
 
     const candidate = message && !message.full && !message.strictHotPath;
     const live = Boolean(candidate && cameraLive);
-    applyTimeoutBackpressure(message, live);
+    applyTrackedBackpressure(message, live);
     if (live && !message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
       const rgba = message.buf;
@@ -345,7 +375,9 @@ if (typeof window === "object") {
     count: trackedTimeoutCount,
     decode: trackedDecodeTimeoutCount,
     preflight: trackedPreflightTimeoutCount,
-    pressure: trackedTimeoutPressure
+    pressure: trackedTimeoutPressure,
+    capacityDrops: trackedCapacityDropCount,
+    capacityPressureMs: Math.max(0, trackedCapacityPressureUntil - performance.now())
   });
 }
 

@@ -119,9 +119,18 @@ export function automaticOpticsHoldEligible(sample, {
   minTailYield = 0.20,
   broadMinYield = 0.40,
   broadMinBreadth = 0.90,
-  broadMinTailYield = 0.35
+  broadMinTailYield = 0.35,
+  movingMinYield = 0.55,
+  movingMinBreadth = 0.90,
+  movingMinTailYield = 0.45
 } = {}) {
-  if (!sample || sample.valid !== true || sample.unstable) return false;
+  if (!sample) return false;
+  const poseUnstable = sample.unstable === true;
+  // A sample can be marked invalid solely because the phone moved during the
+  // measurement window. That must not force more exposure experiments when the
+  // decoder simultaneously proves broad, strong payload progress. Other invalid
+  // samples (insufficient jobs/evidence, missing cohort, etc.) remain ineligible.
+  if (sample.valid !== true && !poseUnstable) return false;
   const cohortSize = Number(sample.cohortSize);
   const cohortCoverage = Number(sample.cohortCoverage);
   const reportedBreadth = Number(sample.breadth);
@@ -149,9 +158,16 @@ export function automaticOpticsHoldEligible(sample, {
   const broadProof = yieldRate >= Math.max(0, Number(broadMinYield) || 0) &&
     breadth >= Math.max(0, Number(broadMinBreadth) || 0) &&
     tailYield >= Math.max(0, Number(broadMinTailYield) || 0);
-  return attempts >= Math.max(1, Number(minAttempts) || 1) &&
-    outputs >= Math.max(1, Number(minOutputs) || 1) &&
-    (standardProof || broadProof);
+  // Camera motion makes exposure comparisons noisier, but it also makes camera
+  // mutation more dangerous. If a moving wall is already broadly productive,
+  // use a stricter decoder proof and HOLD the current sensor state instead of
+  // waiting for a perfectly still pose while continuing to poke exposure.
+  const movingProof = yieldRate >= Math.max(0, Number(movingMinYield) || 0) &&
+    breadth >= Math.max(0, Number(movingMinBreadth) || 0) &&
+    tailYield >= Math.max(0, Number(movingMinTailYield) || 0);
+  const enoughEvidence = attempts >= Math.max(1, Number(minAttempts) || 1) &&
+    outputs >= Math.max(1, Number(minOutputs) || 1);
+  return enoughEvidence && (poseUnstable ? movingProof : (standardProof || broadProof));
 }
 
 export function temporalHardSkip({ explicitSkip = false, risk = 0, confidence = 0, measurement = false }) {
