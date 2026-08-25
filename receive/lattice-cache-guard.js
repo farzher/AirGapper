@@ -188,7 +188,7 @@ GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
 const baseTick = GridLattice.prototype.tick;
 GridLattice.prototype.tick = function(now) {
   if (!this.candidate || this.pendingInvalidationReason || !this.__airgapperFrameSnapshot) {
-    return remember(this, baseTick.call(this, now), now);
+    return remember(this, baseTick.call(this, now));
   }
 
   const lastPayloadAt = Number(this.__airgapperLastPayloadAt) || 0;
