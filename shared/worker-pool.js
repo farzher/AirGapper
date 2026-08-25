@@ -213,7 +213,11 @@ class DecodeWorkerPool extends CoreDecodeWorkerPool {
     if (!full && error === "Decode worker timed out") {
       completion.timedOut = true;
       completion.staleFrame = true;
-      completion.error = undefined;
+      // Runtime's adaptive models treat repeatSkipped as discarded evidence:
+      // no slot misses, temporal-band training, geometry collapse, Guided bad
+      // streak, or Auto Optics yield sample is learned from this completion.
+      // Keep the real timeout error visible so diagnostics count the event.
+      completion.repeatSkipped = true;
       completion.guidedError = undefined;
     }
     return completion;
