@@ -7,7 +7,6 @@ const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
 const MAX_CONCURRENT_NATIVE_COPIES = 2;
-const ACQUISITION_TIMEOUT_MS = 1500;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
@@ -336,10 +335,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
     const meta = this.activeMeta?.[slot];
     if (meta && meta.id === message.id) {
       meta.__airgapperPreflight = false;
-      if (fullAcquisition) {
-        meta.timeoutMs = Math.min(Number(meta.timeoutMs) || ACQUISITION_TIMEOUT_MS, ACQUISITION_TIMEOUT_MS);
-        meta.deadlineAt = meta.startedAt + meta.timeoutMs;
-      }
       if (native) {
         meta.__airgapperNativeFrameCopy = true;
         meta.__airgapperCopyComplete = false;
