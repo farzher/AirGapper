@@ -3,13 +3,6 @@ import {
   decodeExposureRecovering,
   decodeExposureSustaining
 } from "./decode-health.js";
-import { CAMERA_TUNING } from "./focus-controller.js";
-
-// applyConstraints() resolving is not a per-frame sensor timestamp. Two discarded
-// frames were only ~67 ms at 30 fps and could still straddle an Android HAL
-// exposure transition. Three keeps candidate attribution behind the 100 ms
-// sensor-epoch guard while adding only one camera frame to blind exploration.
-CAMERA_TUNING.exposureDiscardFrames = Math.max(3, Number(CAMERA_TUNING.exposureDiscardFrames) || 0);
 
 export const ACQUISITION_ESCALATE_MS = 180;
 export const ACQUISITION_HUNT_AFTER_MS = 900;
