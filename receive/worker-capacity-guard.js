@@ -12,11 +12,11 @@ const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
 
-// A rare damaged optical frame can drive Guided into a very slow path. Until
-// cancellation exists inside the synchronous WASM call, learn from those
-// timeouts and temporarily reduce work on following frames. Healthy completions
-// continuously relax the pressure back to zero, so this adapts to the device
-// and scene rather than a particular camera FPS or core count.
+// A rare damaged optical frame can drive Guided into a very slow synchronous
+// WASM path. The pool's normal job timeout is the single timeout authority.
+// Learn only from genuine tracked decode timeouts and temporarily reduce work on
+// following frames; camera-copy stalls are transport failures and do not train
+// decoder pressure.
 let trackedTimeoutPressure = 0;
 let trackedTimeoutCount = 0;
 let trackedDecodeTimeoutCount = 0;
@@ -80,15 +80,6 @@ function activeNativeCopies(pool) {
     if (meta?.__airgapperNativeFrameCopy && !meta.__airgapperCopyComplete) count++;
   }
   return count;
-}
-
-function copyStageTimeout(meta) {
-  const normal = Math.max(1, Number(meta?.timeoutMs) || 1);
-  return Math.max(250, Math.min(600, normal * 0.20));
-}
-
-function freshPayloadActive() {
-  return performance.now() < (Number(window.airgapperFreshPayloadUntil) || 0);
 }
 
 function takeBestFitBuffer(pool, bytes) {
@@ -239,7 +230,6 @@ const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
 if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperWorkerPolicy) {
   const configureWorker = function(slot, worker) {
     baseConfigureWorker.call(this, slot, worker);
-    worker.__airgapperCameraCopyWarm = false;
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
@@ -248,8 +238,6 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
         if (activeMeta && activeMeta.id === message.id) {
           activeMeta.__airgapperCopyComplete = true;
           activeMeta.__airgapperPreflight = true;
-          activeMeta.deadlineAt = performance.now() + Math.max(1, Number(activeMeta.timeoutMs) || 1);
-          worker.__airgapperCameraCopyWarm = true;
         }
         return;
       }
@@ -291,7 +279,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
     const cameraLive = liveReceiveCamera();
     const native = nativeFrame(message?.videoFrame);
     const fullAcquisition = Boolean(message?.full && message?.acquisitionMode);
-    if (fullAcquisition && (freshPayloadActive() || this.activeFullCount >= 1)) {
+    if (fullAcquisition && this.activeFullCount >= 1) {
       closeMessageFrame(message);
       return false;
     }
@@ -325,7 +313,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
     transfer = attachPackedResultScratch(message, transfer);
     transfer = packTracks(message, transfer);
 
-    const worker = this.workers?.[slot];
     const accepted = baseSubmitAtSlot.call(this, slot, message, transfer);
     if (!accepted) {
       recycleUnsentBuffers(message);
@@ -343,9 +330,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
       if (native) {
         meta.__airgapperNativeFrameCopy = true;
         meta.__airgapperCopyComplete = false;
-        if (worker?.__airgapperCameraCopyWarm) {
-          meta.deadlineAt = Math.min(meta.deadlineAt, meta.startedAt + copyStageTimeout(meta));
-        }
       }
     }
     return true;
@@ -361,8 +345,9 @@ window.airgapperTrackedTimeoutState = () => ({
   pressure: trackedTimeoutPressure
 });
 
-// One worker wrapper only: worker-camera reports native copy completion and then
-// imports worker-rvfc, which owns the packed/live-camera worker adaptations.
+// worker-camera reports when native copyTo() releases the camera frame, then
+// worker-rvfc owns the packed/live-camera adaptations. Copy completion is only
+// an ownership/diagnostic signal; it never creates a second timeout authority.
 const NativeWorker = globalThis.Worker;
 if (typeof NativeWorker === "function" && !NativeWorker.__airgapperDecodeWorkerGuard) {
   const rewriteWorkerUrl = (input) => {
