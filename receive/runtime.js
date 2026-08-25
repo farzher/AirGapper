@@ -335,6 +335,7 @@ const AUTO_OPTICS_COHORT_MAX_SLOTS = 12;
 const AUTO_OPTICS_COHORT_MIN_ATTEMPTS_PER_SLOT = 2;
 const AUTO_OPTICS_POSE_STABLE_MS = 300;
 const AUTO_OPTICS_POSE_WAIT_MS = 700;
+const AUTO_OPTICS_SEED_MIN_FULL_SCANS = 4;
 const AUTO_OPTICS_POSE_MAX_CENTER_DRIFT = 0.035;
 const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 // One stable tracked QR is enough to compare exposure candidates. Requiring
@@ -385,6 +386,9 @@ let autoOpticsAeBaseline;
 let autoOpticsMemoryBootAt = 0;
 let autoOpticsMemoryBoot;
 let autoOpticsMeasurementSlots;
+let autoOpticsSeedFullScansAt = 0;
+let autoOpticsHoldPoseAnchor;
+let autoOpticsHoldPoseStableSince = 0;
 // These are the user's persistent MANUAL optics profile. Automatic optics
 // may use arbitrary temporary sensor values, but must never overwrite these.
 let preferredExposureTime;
@@ -3535,6 +3539,28 @@ function autoOpticsPoseDrift(a, b) {
     scale: Math.abs(Math.log2(b.scale / a.scale))
   };
 }
+function resetAutomaticOpticsHoldPose() {
+  autoOpticsHoldPoseAnchor = void 0;
+  autoOpticsHoldPoseStableSince = 0;
+}
+function automaticOpticsHoldPoseStable(pose, now = receiverNow()) {
+  if (!autoOpticsPoseUsable(pose)) {
+    resetAutomaticOpticsHoldPose();
+    return false;
+  }
+  if (!autoOpticsHoldPoseAnchor) {
+    autoOpticsHoldPoseAnchor = pose;
+    autoOpticsHoldPoseStableSince = now;
+    return false;
+  }
+  const drift = autoOpticsPoseDrift(autoOpticsHoldPoseAnchor, pose);
+  if (drift.center > AUTO_OPTICS_POSE_MAX_CENTER_DRIFT || drift.scale > AUTO_OPTICS_POSE_MAX_SCALE_LOG2) {
+    autoOpticsHoldPoseAnchor = pose;
+    autoOpticsHoldPoseStableSince = now;
+    return false;
+  }
+  return now - autoOpticsHoldPoseStableSince >= AUTO_OPTICS_POSE_STABLE_MS;
+}
 async function waitForStableAutoOpticsPose(track, timeoutMs = AUTO_OPTICS_POSE_WAIT_MS) {
   const started = performance.now();
   let stableSince = 0;
@@ -3658,6 +3684,7 @@ async function applyAutomaticShortSeed(track, baseline, reason) {
   const actual = track.getSettings();
   autoOpticsAeBaseline = { ...baseline, at: receiverNow() };
   autoOpticsRuntimeState = "seed";
+  autoOpticsSeedFullScansAt = fullScans;
   autoOpticsMemoryBootAt = 0;
   autoOpticsMemoryBoot = void 0;
   autoOpticsLockSince = 0;
@@ -4117,6 +4144,7 @@ async function validateAutomaticAeHold(track, now, exposureRange, isoRange) {
     autoOpticsHeldYield = Math.max(0.01, Number(sample.yieldRate) || 0);
     autoOpticsHoldSample = autoOpticsPipelineSnapshot();
     autoOpticsHoldCollapseSince = 0;
+    resetAutomaticOpticsHoldPose();
     autoOpticsRetryAt = Infinity;
     autoOpticsAeBaseline = { exposure: winnerExposure, iso: winnerIso, at: receiverNow(), neutral: true };
     if (autoOpticsHeldYield >= AUTO_OPTICS_MEMORY_MIN_YIELD)
@@ -4305,6 +4333,7 @@ async function settleAutomaticQrOptics(track, now) {
     autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || 0);
     autoOpticsHoldSample = autoOpticsPipelineSnapshot();
     autoOpticsHoldCollapseSince = 0;
+    resetAutomaticOpticsHoldPose();
     autoOpticsRetryAt = Infinity;
     autoOpticsAeBaseline = { exposure: frozenExposure, iso: frozenIso, at: receiverNow(), neutral: false };
     if (autoOpticsHeldYield >= AUTO_OPTICS_MEMORY_MIN_YIELD)
@@ -4391,17 +4420,19 @@ function maintainAutomaticQrOptics(now) {
   if (!autoOpticsAcquisitionSince) autoOpticsAcquisitionSince = now;
 
   if (autoOpticsRuntimeState === "manual") {
-    const poseUsable = gridLattice.locked && autoOpticsPoseUsable(autoOpticsPoseSnapshot());
+    const pose = autoOpticsPoseSnapshot();
+    const poseUsable = gridLattice.locked && autoOpticsPoseUsable(pose);
+    const poseStable = poseUsable && automaticOpticsHoldPoseStable(pose, now);
     const temporal = predictedTemporalBand(latestSourceFrameSequence + 1, now);
     const temporalCoverage = temporal?.span ? temporal.width / temporal.span : 0;
     // A narrow rolling-shutter seam is normal and is now filtered before QR CPU.
     // Only a band covering much of the wall is allowed to invalidate an optics
     // measurement; otherwise a permanent small seam would freeze learning forever.
     const temporalDominant = Boolean(temporal && temporal.confidence >= 0.72 && temporalCoverage >= 0.42);
-    if (!poseUsable) {
+    if (!poseStable) {
       // Losing a page, moving the camera, or seeing too little of the wall is
       // not optical evidence. HOLD keeps its verified rollback point and makes
-      // no camera mutation until stable decoder-backed measurements return.
+      // no camera mutation until the wall has actually been stationary again.
       autoOpticsHoldSample = void 0;
       autoOpticsHoldCollapseSince = 0;
       return;
@@ -4459,9 +4490,11 @@ function maintainAutomaticQrOptics(now) {
   const seededStartup = autoOpticsRuntimeState === "seed";
   if (autoOpticsRuntimeState !== "ae" && !seededStartup) return;
 
+  const seedFullScans = seededStartup ? Math.max(0, fullScans - autoOpticsSeedFullScansAt) : 0;
   if (seededStartup && gridLattice.locked) {
     const recentSeedDecode = Boolean(lastStreamDecodeAt && lastStreamDecodeAt >= autoOpticsAcquisitionSince && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
-    if (!recentSeedDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS) {
+    if (!recentSeedDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS &&
+        seedFullScans >= AUTO_OPTICS_SEED_MIN_FULL_SCANS) {
       void abandonAutomaticShortSeed(track);
       return;
     }
@@ -4471,7 +4504,8 @@ function maintainAutomaticQrOptics(now) {
     autoOpticsLockSince = 0;
     const recentDecode = Boolean(lastStreamDecodeAt && lastStreamDecodeAt >= autoOpticsAcquisitionSince && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
     if (seededStartup) {
-      if (!recentDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS)
+      if (!recentDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS &&
+          seedFullScans >= AUTO_OPTICS_SEED_MIN_FULL_SCANS)
         void abandonAutomaticShortSeed(track);
     } else if (!recentDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS && now >= autoOpticsRescueRetryAt) {
       void rescueAutomaticQrAcquisition(track, now);
