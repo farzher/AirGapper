@@ -3,12 +3,24 @@ import { GridLattice } from "./grid-lattice.js";
 const SOFT_LOSS_MS = 450;
 const DORMANT_MS = 900;
 const FULL_FIT_REFRESH_MS = 160;
+const FRESH_PAYLOAD_HOLD_MS = 550;
+window.airgapperFreshPayloadUntil = 0;
+
+function noteFreshPayload(at) {
+  const now = performance.now();
+  const packetAt = Number(at);
+  const base = Number.isFinite(packetAt) && Math.abs(now - packetAt) < 5000
+    ? Math.max(now, packetAt)
+    : now;
+  window.airgapperFreshPayloadUntil = Math.max(
+    Number(window.airgapperFreshPayloadUntil) || 0,
+    base + FRESH_PAYLOAD_HOLD_MS
+  );
+}
 
 function remember(lattice, snapshot) {
   if (snapshot) {
     lattice.__airgapperFrameSnapshot = snapshot;
-    // Geometry changed outside a camera-frame accept/nudge. Do not let a later
-    // packet with an unrelated timestamp qualify for same-frame coalescing.
     lattice.__airgapperFrameAt = undefined;
   }
   return snapshot;
@@ -17,6 +29,11 @@ function remember(lattice, snapshot) {
 const coalescedAccept = GridLattice.prototype.accept;
 GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   const at = Number(detection?.at);
+
+  // A CRC-valid packet proves the retained wall is still present even when its
+  // new quad is too noisy/stale to refit. Refresh liveness before geometry work.
+  if (this.candidate && Number.isFinite(at)) this.noteValidPacket(at);
+
   const priorFrameAt = this.__airgapperFrameAt;
   const sameFrame = Number.isFinite(at) && priorFrameAt === at;
   const lastFullFit = Number(this.__airgapperLastFullFitAt);
@@ -25,18 +42,13 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
     (!Number.isFinite(lastFullFit) || at - lastFullFit >= FULL_FIT_REFRESH_MS);
 
   if (refreshDue) {
-    // runtime-guards interprets a same-frame cached snapshot as permission to
-    // record the QR without another homography. Temporarily withdraw that cache
-    // for the first QR of this refresh frame so the original GridLattice.accept
-    // performs one real projective fit from the accumulated CRC observations.
-    // Record the attempt even when the fit rejects noisy geometry so the other
-    // 20+ QR results from this same camera frame do not all retry the 8x8 solve.
     this.__airgapperFullFitAttemptAt = at;
     const cached = this.__airgapperFrameSnapshot;
     this.__airgapperFrameSnapshot = undefined;
     const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
     if (result) {
       this.__airgapperLastFullFitAt = at;
+      if (Number.isFinite(at)) this.noteValidPacket(at);
       return result;
     }
     this.__airgapperFrameSnapshot = cached;
@@ -44,9 +56,12 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   }
 
   const result = coalescedAccept.call(this, detection, frameWidth, frameHeight);
-  if (result && Number.isFinite(at) && priorFrameAt !== at) {
-    this.__airgapperLastFullFitAt = at;
-    this.__airgapperFullFitAttemptAt = at;
+  if (result && Number.isFinite(at)) {
+    if (priorFrameAt !== at) {
+      this.__airgapperLastFullFitAt = at;
+      this.__airgapperFullFitAttemptAt = at;
+    }
+    this.noteValidPacket(at);
   }
   return result;
 };
@@ -61,12 +76,6 @@ GridLattice.prototype.nudgeFromSightings = function(sightings, at) {
   return remember(this, baseNudgeFromSightings.call(this, sightings, at));
 };
 
-// A recent CRC-valid payload is direct evidence that the already-accepted wall
-// is still present even when geometry reports were thinned or a projective fit
-// temporarily looked noisy. Runtime calls noteValidPacket only after stream
-// identity has been checked, so this liveness evidence is strong enough to
-// cancel a pending pose invalidation. Do not alter geometry here; only measured
-// accept/nudge paths are allowed to change the wall pose.
 const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
 GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
   const result = baseNoteValidPacket.call(this, at);
@@ -78,6 +87,7 @@ GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
     if (this.state === "DORMANT" || this.state === "PARTIAL_LOSS" || this.state === "GRID_LOCK") {
       this.transition("TRACK", "fresh CRC payload kept retained lattice live", packetAt);
     }
+    noteFreshPayload(packetAt);
     if (this.__airgapperFrameSnapshot) {
       this.__airgapperFrameSnapshot.state = this.state;
       this.__airgapperFrameSnapshot.provisional = !this.active;
@@ -87,12 +97,6 @@ GridLattice.prototype.noteValidPacket = function(at = this.lastHitAt) {
 };
 
 const baseTick = GridLattice.prototype.tick;
-
-// A lattice snapshot contains the projected quad/box object graph for every QR
-// slot. It depends on candidate geometry and slot corrections, not on wall-clock
-// time. runtime-guards refreshes __airgapperFrameSnapshot whenever geometry is
-// actually changed. Reuse that object graph between geometry updates instead of
-// allocating/projecting the complete wall again on every camera tick.
 GridLattice.prototype.tick = function(now) {
   if (!this.candidate || this.pendingInvalidationReason) {
     return remember(this, baseTick.call(this, now));
