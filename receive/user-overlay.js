@@ -1,10 +1,8 @@
-import { GridLattice } from "./grid-lattice.js";
-import { DecodeWorkerPool } from "../shared/worker-pool.js";
+const SUCCESS_FRAMES = 18;
+const SIGHTING_FRAMES = 30;
+const MISS_FRAMES = 24;
 
-const PROBE_FADE_MS = Object.freeze({ success: 420, sighting: 720, miss: 560 });
-const JOB_TTL_MS = 4000;
-const DRAW_INTERVAL_MS = 50;
-const SUCCESS_COLORS = Object.freeze({
+const COLORS = Object.freeze({
   hot: [0, 239, 255],
   direct: [66, 165, 255],
   sparse: [53, 214, 111],
@@ -13,183 +11,11 @@ const SUCCESS_COLORS = Object.freeze({
   acquire: [180, 134, 255]
 });
 
-let snapshot;
-const jobs = new Map();
-const slotActivity = new Map();
-
-function now() {
-  return performance.now();
-}
-
-function wrapLattice() {
-  const originalSnapshot = GridLattice.prototype.snapshot;
-  GridLattice.prototype.snapshot = function (...args) {
-    const value = originalSnapshot.apply(this, args);
-    snapshot = value || null;
-    return value;
-  };
-
-  for (const name of ["reset", "reacquire"]) {
-    const original = GridLattice.prototype[name];
-    GridLattice.prototype[name] = function (...args) {
-      const value = original.apply(this, args);
-      snapshot = null;
-      slotActivity.clear();
-      jobs.clear();
-      return value;
-    };
-  }
-}
-
-function quadCenter(quad) {
-  if (!quad?.topLeft || !quad?.topRight || !quad?.bottomRight || !quad?.bottomLeft) return null;
-  return {
-    x: (quad.topLeft.x + quad.topRight.x + quad.bottomRight.x + quad.bottomLeft.x) / 4,
-    y: (quad.topLeft.y + quad.topRight.y + quad.bottomRight.y + quad.bottomLeft.y) / 4
-  };
-}
-
-function trackSlot(track) {
-  for (const value of [track?.gridSlot, track?.slotIndex, track?.slot, track?.index]) {
-    const slot = Number(value);
-    if (Number.isInteger(slot) && slot >= 0 && slot < 128) return slot;
-  }
-  const center = quadCenter(track?.quad);
-  if (!center || !snapshot?.slots?.length) return null;
-  let best = null;
-  for (const slot of snapshot.slots) {
-    const candidate = quadCenter(slot.quad);
-    if (!candidate) continue;
-    const scale = Math.max(1, Math.hypot(slot.box?.w || 0, slot.box?.h || 0));
-    const distance = Math.hypot(candidate.x - center.x, candidate.y - center.y) / scale;
-    if (!best || distance < best.distance) best = { index: slot.index, distance };
-  }
-  return best && best.distance < 0.75 ? best.index : null;
-}
-
-function targetJob(message) {
-  if (!message || !Number.isInteger(Number(message.id))) return null;
-  const slots = new Set();
-  if (Array.isArray(message.tracks) && snapshot?.slots?.length) {
-    const expected = new Set(snapshot.slots.map((slot) => slot.index));
-    for (const track of message.tracks) {
-      const slot = trackSlot(track);
-      if (slot !== null && expected.has(slot)) slots.add(slot);
-    }
-  }
-  return {
-    slots: [...slots],
-    recovery: Boolean(message.full && message.acquisitionMode === "recovery"),
-    acquire: Boolean(message.full && message.acquisitionMode !== "recovery")
-  };
-}
-
-function activityFor(slot) {
-  let value = slotActivity.get(slot);
-  if (!value) {
-    value = { at: -Infinity, kind: "miss" };
-    slotActivity.set(slot, value);
-  }
-  return value;
-}
-
-function sightingNearSlot(slot, sightings) {
-  const target = snapshot?.slots?.find((item) => item.index === slot);
-  const q = target?.quad;
-  if (!validQuad(q) || !Array.isArray(sightings) || !sightings.length) return false;
-  const xs = [q.topLeft.x, q.topRight.x, q.bottomRight.x, q.bottomLeft.x];
-  const ys = [q.topLeft.y, q.topRight.y, q.bottomRight.y, q.bottomLeft.y];
-  const left = Math.min(...xs), right = Math.max(...xs);
-  const top = Math.min(...ys), bottom = Math.max(...ys);
-  const pad = Math.max(12, Math.max(right - left, bottom - top) * 0.55);
-  return sightings.some((box) => {
-    const x = Number(box?.x) + Number(box?.w) * 0.5;
-    const y = Number(box?.y) + Number(box?.h) * 0.5;
-    return Number.isFinite(x) && Number.isFinite(y) &&
-      x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad;
-  });
-}
-
-function packedDecodePath(code) {
-  return code === 2 ? "sparse" : code === 3 ? "fallback" : code === 4 ? "robust" : "hot";
-}
-
-function successfulSlots(message) {
-  const slots = new Map();
-  for (const symbol of message?.symbols || []) {
-    const slot = Number(symbol?.header?.slotIndex);
-    if (Number.isInteger(slot) && slot >= 0) slots.set(slot, symbol?.decodePath || "hot");
-  }
-  const meta = message?.__airgapperPackedSymbolMeta;
-  const count = Math.trunc(Number(message?.__airgapperPackedSymbolCount) || 0);
-  if (meta instanceof ArrayBuffer && count > 0 && meta.byteLength >= count * 88) {
-    const words = new Uint32Array(meta);
-    for (let index = 0; index < count; index++) {
-      const base = index * 22;
-      const slot = words[base + 4] >>> 16;
-      const path = packedDecodePath((words[base + 3] >>> 8) & 255);
-      if (slot < 128) slots.set(slot, path);
-    }
-  }
-  return slots;
-}
-
-function noteCompletion(message) {
-  const id = Number(message?.id);
-  if (!Number.isInteger(id) || id < 0 || message?.preflight) return;
-  const job = jobs.get(id);
-  if (!job) return;
-  jobs.delete(id);
-  const at = now();
-  const successes = successfulSlots(message);
-
-  // Every successful slot is user-visible. Preserve the old path palette, but
-  // render success as a quiet translucent fill instead of another bracket.
-  for (const [slot, path] of successes) {
-    const activity = activityFor(slot);
-    activity.at = at;
-    activity.kind = "success";
-    activity.path = job.acquire ? "acquire" : path;
-  }
-
-  // Failure colors remain dedicated recovery evidence only. Ordinary tracked
-  // misses are often rolling-shutter/frame-phase misses and stay invisible.
-  if (!job.recovery) return;
-  for (const slot of job.slots) {
-    if (successes.has(slot)) continue;
-    const activity = activityFor(slot);
-    activity.at = at;
-    activity.kind = sightingNearSlot(slot, message?.sightings) ? "sighting" : "miss";
-    activity.path = undefined;
-  }
-}
-
-function wrapWorkerPool() {
-  const originalSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
-  DecodeWorkerPool.prototype.submitAtSlot = function (workerSlot, message, transfer) {
-    const job = targetJob(message);
-    const id = Number(message?.id);
-    const accepted = originalSubmitAtSlot.call(this, workerSlot, message, transfer);
-    if (accepted && job && Number.isInteger(id) && id >= 0) jobs.set(id, { ...job, at: now() });
-    return accepted;
-  };
-
-  const originalConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
-  DecodeWorkerPool.prototype.configureWorker = function (slot, worker) {
-    originalConfigureWorker.call(this, slot, worker);
-    const handler = worker.onmessage;
-    worker.onmessage = function (event) {
-      noteCompletion(event.data);
-      return handler.call(this, event);
-    };
-  };
-}
-
-wrapLattice();
-wrapWorkerPool();
-
 const preview = document.querySelector("#preview .preview");
 const video = document.getElementById("video");
+const legacyOverlay = document.getElementById("detect-overlay");
+const devActions = document.querySelector(".receiver-dev-actions");
+
 const canvas = document.createElement("canvas");
 canvas.id = "user-detect-overlay";
 canvas.setAttribute("aria-hidden", "true");
@@ -204,65 +30,35 @@ Object.assign(canvas.style, {
 if (preview && getComputedStyle(preview).position === "static") preview.style.position = "relative";
 preview?.append(canvas);
 const ctx = canvas.getContext("2d");
-const legacyOverlay = document.getElementById("detect-overlay");
-const receiverDevActions = document.querySelector(".receiver-dev-actions");
-function syncOverlayMode() {
-  const developer = Boolean(receiverDevActions && !receiverDevActions.hidden);
-  // Normal receiving has one simple overlay owner. The old diagnostic canvas is
-  // reserved for Developer Mode so its ghost/bracket constellation cannot show
-  // through user success fills (and it does no hidden draw work).
-  if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
-  canvas.style.display = developer ? "none" : "";
+
+// Fixed-size, overwrite-in-place state. Even at hundreds of QR/s there is no
+// growing event queue: each physical slot owns one current visual event.
+const activity = new Array(128);
+let geometry;
+let geometryUsable = false;
+let drawQueued = false;
+
+function normalMode() {
+  return !devActions || devActions.hidden;
 }
-if (receiverDevActions) {
-  new MutationObserver(syncOverlayMode).observe(receiverDevActions, { attributes: true, attributeFilter: ["hidden"] });
-}
-syncOverlayMode();
 
 function validQuad(quad) {
-  return quad && [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]
+  return Boolean(quad) && [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]
     .every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
 }
 
-function median(values) {
-  if (!values.length) return 0;
-  values.sort((a, b) => a - b);
-  const mid = Math.floor(values.length / 2);
-  return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
-}
-
-function pixelsPerModule(value) {
-  const modules = Number(value?.modules);
-  if (!(modules > 0)) return 0;
-  const sizes = [];
-  for (const slot of value.slots || []) {
-    const q = slot.quad;
-    if (!validQuad(q)) continue;
-    const edges = [
-      Math.hypot(q.topRight.x - q.topLeft.x, q.topRight.y - q.topLeft.y),
-      Math.hypot(q.bottomRight.x - q.bottomLeft.x, q.bottomRight.y - q.bottomLeft.y),
-      Math.hypot(q.bottomLeft.x - q.topLeft.x, q.bottomLeft.y - q.topLeft.y),
-      Math.hypot(q.bottomRight.x - q.topRight.x, q.bottomRight.y - q.topRight.y)
-    ];
-    sizes.push(edges.reduce((sum, edge) => sum + edge, 0) / edges.length / modules);
-  }
-  return median(sizes);
-}
-
-function fallbackPresentation() {
+function presentation() {
+  const mapped = globalThis.__airgapperOverlayPresentation?.();
+  if (mapped?.width > 0 && mapped?.height > 0 && typeof mapped.mapPoint === "function") return mapped;
   const width = Number(video?.videoWidth) || 0;
   const height = Number(video?.videoHeight) || 0;
   return width > 0 && height > 0
-    ? { width, height, mapPoint(point) { return { x: point.x, y: point.y }; } }
+    ? { width, height, mapPoint(point) { return point; } }
     : null;
 }
 
-function presentation() {
-  return globalThis.__airgapperOverlayPresentation?.() || fallbackPresentation();
-}
-
 function mapQuad(quad, view) {
-  if (!validQuad(quad) || !view?.mapPoint) return null;
+  if (!validQuad(quad) || !view) return null;
   const mapped = {
     topLeft: view.mapPoint(quad.topLeft),
     topRight: view.mapPoint(quad.topRight),
@@ -272,186 +68,262 @@ function mapQuad(quad, view) {
   return validQuad(mapped) ? mapped : null;
 }
 
-function canvasPoints(quad, scale, offX, offY) {
-  return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].map((point) => ({
-    x: offX + point.x * scale,
-    y: offY + point.y * scale
-  }));
+// The wall outline follows the same logical outer QR corners the lattice uses.
+// It exists only while runtime says the retained distributed pose is usable.
+function wallQuad(snapshot) {
+  const cols = Number(snapshot?.layout?.cols);
+  const rows = Number(snapshot?.layout?.rows);
+  const slots = snapshot?.slots;
+  if (!Number.isInteger(cols) || cols < 1 || !Number.isInteger(rows) || rows < 1 ||
+      !Array.isArray(slots) || slots.length < cols * rows) return null;
+
+  const byIndex = new Map(slots.map((slot) => [Number(slot?.index), slot?.quad]));
+  const topLeft = byIndex.get(0);
+  const topRight = byIndex.get(cols - 1);
+  const bottomRight = byIndex.get(cols * rows - 1);
+  const bottomLeft = byIndex.get((rows - 1) * cols);
+  if (![topLeft, topRight, bottomRight, bottomLeft].every(validQuad)) return null;
+
+  return {
+    topLeft: topLeft.topLeft,
+    topRight: topRight.topRight,
+    bottomRight: bottomRight.bottomRight,
+    bottomLeft: bottomLeft.bottomLeft
+  };
 }
 
-function pathPoints(points) {
+function quadPath(quad, scale, offX, offY) {
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
   ctx.beginPath();
   points.forEach((point, index) => {
-    if (index) ctx.lineTo(point.x, point.y);
-    else ctx.moveTo(point.x, point.y);
+    const x = offX + point.x * scale;
+    const y = offY + point.y * scale;
+    if (index) ctx.lineTo(x, y);
+    else ctx.moveTo(x, y);
   });
   ctx.closePath();
 }
 
-function fillMappedQuad(quad, scale, offX, offY, fillStyle) {
-  const points = canvasPoints(quad, scale, offX, offY);
-  pathPoints(points);
-  ctx.fillStyle = fillStyle;
-  ctx.fill();
-}
-
-function strokeExactCornerOutline(quad, scale, offX, offY, strokeStyle, lineWidth) {
-  const points = canvasPoints(quad, scale, offX, offY);
+function cornerOutline(quad, scale, offX, offY, color, width) {
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].map((point) => ({
+    x: offX + point.x * scale,
+    y: offY + point.y * scale
+  }));
   const fraction = 0.23;
+
   ctx.save();
-  // Clip the centered stroke to the QR polygon so the visible outline never
-  // grows outside the actual predicted QR boundary.
-  pathPoints(points);
+  ctx.beginPath();
+  points.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
+  ctx.closePath();
+  // Keep the visible stroke inside the exact predicted QR polygon.
   ctx.clip();
   ctx.beginPath();
-  for (let index = 0; index < points.length; index++) {
+  for (let index = 0; index < 4; index++) {
     const point = points[index];
-    const previous = points[(index + points.length - 1) % points.length];
-    const next = points[(index + 1) % points.length];
-    const from = {
-      x: point.x + (previous.x - point.x) * fraction,
-      y: point.y + (previous.y - point.y) * fraction
-    };
-    const to = {
-      x: point.x + (next.x - point.x) * fraction,
-      y: point.y + (next.y - point.y) * fraction
-    };
-    ctx.moveTo(from.x, from.y);
+    const previous = points[(index + 3) % 4];
+    const next = points[(index + 1) % 4];
+    ctx.moveTo(
+      point.x + (previous.x - point.x) * fraction,
+      point.y + (previous.y - point.y) * fraction
+    );
     ctx.lineTo(point.x, point.y);
-    ctx.lineTo(to.x, to.y);
+    ctx.lineTo(
+      point.x + (next.x - point.x) * fraction,
+      point.y + (next.y - point.y) * fraction
+    );
   }
-  ctx.strokeStyle = strokeStyle;
-  ctx.lineWidth = lineWidth;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.stroke();
   ctx.restore();
 }
 
-function outerQuad(value, view) {
-  const points = [];
-  for (const slot of value?.slots || []) {
-    const mapped = mapQuad(slot?.quad, view);
-    if (!mapped) continue;
-    points.push(mapped.topLeft, mapped.topRight, mapped.bottomRight, mapped.bottomLeft);
-  }
-  if (points.length < 4) return null;
-  const by = (score, preferMin) => points.reduce((best, point) => {
-    if (!best) return point;
-    return (preferMin ? score(point) < score(best) : score(point) > score(best)) ? point : best;
-  }, null);
-  const quad = {
-    topLeft: by((p) => p.x + p.y, true),
-    topRight: by((p) => p.x - p.y, false),
-    bottomRight: by((p) => p.x + p.y, false),
-    bottomLeft: by((p) => p.x - p.y, true)
-  };
-  return validQuad(quad) ? quad : null;
+function normalizePath(path) {
+  const value = String(path || "hot").toLowerCase();
+  if (COLORS[value]) return value;
+  if (value.includes("fallback")) return "fallback";
+  if (value.includes("robust")) return "robust";
+  if (value.includes("sparse")) return "sparse";
+  if (value.includes("direct")) return "direct";
+  if (value.includes("acquire")) return "acquire";
+  return "hot";
 }
 
-function drawPixelsPerModule(ppm, width, dpr) {
-  if (!(ppm > 0)) return;
-  const label = `${ppm.toFixed(1)} px/module`;
-  const font = 11.5 * dpr;
-  const padX = 7 * dpr;
-  const padY = 4.5 * dpr;
-  const margin = 8 * dpr;
-  ctx.font = `600 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-  const badgeW = ctx.measureText(label).width + padX * 2;
-  const badgeH = font + padY * 2;
-  const x = width - margin - badgeW;
-  const y = margin;
-  ctx.fillStyle = "rgba(7, 10, 14, 0.68)";
-  ctx.fillRect(x, y, badgeW, badgeH);
-  ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
-  ctx.textBaseline = "middle";
-  ctx.fillText(label, x + padX, y + badgeH / 2 + 0.25 * dpr);
-  ctx.textBaseline = "alphabetic";
+function scheduleDraw() {
+  if (drawQueued || !normalMode()) return;
+  drawQueued = true;
+  requestAnimationFrame(draw);
 }
 
-function drawHud(at) {
-  if (!ctx || !preview || !video || !document.body.classList.contains("receive-mode") || document.hidden) return;
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
+function draw() {
+  drawQueued = false;
+  if (!ctx || !normalMode() || document.hidden) return;
+
   const view = presentation();
-  const vw = Number(view?.width) || 0;
-  const vh = Number(view?.height) || 0;
-  if (!cw || !ch || !vw || !vh) return;
+  const clientWidth = canvas.clientWidth;
+  const clientHeight = canvas.clientHeight;
+  if (!view || !clientWidth || !clientHeight) return;
+
   const dpr = window.devicePixelRatio || 1;
-  const width = Math.round(cw * dpr);
-  const height = Math.round(ch * dpr);
+  const width = Math.round(clientWidth * dpr);
+  const height = Math.round(clientHeight * dpr);
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
+
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  for (const [id, job] of jobs) if (at - job.at > JOB_TTL_MS) jobs.delete(id);
+  const scale = Math.min(width / view.width, height / view.height);
+  const offX = (width - view.width * scale) * 0.5;
+  const offY = (height - view.height * scale) * 0.5;
 
-  const value = snapshot;
-  if (!value?.slots?.length) return;
-  const scale = Math.min(width / vw, height / vh);
-  const offX = (width - vw * scale) / 2;
-  const offY = (height - vh * scale) / 2;
-
-  drawPixelsPerModule(pixelsPerModule(value), width, dpr);
-
-  if (value.distributedFit) {
-    const wall = outerQuad(value, view);
+  // Persistent state: outline only, and only while the retained distributed
+  // wall pose is still usable by the receiver.
+  if (geometryUsable && geometry?.distributedFit) {
+    const wall = mapQuad(wallQuad(geometry), view);
     if (wall) {
-      ctx.save();
-      const points = canvasPoints(wall, scale, offX, offY);
-      pathPoints(points);
-      ctx.fillStyle = "rgba(184, 132, 255, 0.045)";
-      ctx.strokeStyle = "rgba(184, 132, 255, 0.68)";
-      ctx.lineWidth = Math.max(1.5, 1.55 * dpr);
-      ctx.fill();
+      quadPath(wall, scale, offX, offY);
+      ctx.strokeStyle = "rgba(184, 132, 255, 0.78)";
+      ctx.lineWidth = Math.max(1.25, 1.45 * dpr);
+      ctx.lineJoin = "round";
       ctx.stroke();
-      ctx.restore();
     }
   }
 
-  for (const slot of value.slots) {
-    const activity = slotActivity.get(slot.index);
-    const kind = activity?.kind || "miss";
-    const fade = PROBE_FADE_MS[kind] || PROBE_FADE_MS.miss;
-    const age = at - (activity?.at ?? -Infinity);
-    const mapped = mapQuad(slot.quad, view);
-    if (age < 0 || age >= fade || !mapped) continue;
-    const t = 1 - age / fade;
-
-    if (kind === "success") {
-      // Success is fill-only. Color preserves the original decoder-path language
-      // (cyan hot, blue direct, green sparse, orange fallback, red robust,
-      // purple acquisition) without adding another outline around the QR.
-      const color = SUCCESS_COLORS[activity?.path] || SUCCESS_COLORS.hot;
-      ctx.save();
-      fillMappedQuad(mapped, scale, offX, offY, `rgba(${color.join(",")}, ${0.08 + 0.20 * t})`);
-      ctx.restore();
+  let animate = false;
+  for (const item of activity) {
+    if (!item?.frames) continue;
+    const quad = mapQuad(item.quad, view);
+    if (!quad) {
+      item.frames = 0;
       continue;
     }
 
-    const amber = kind === "sighting";
-    const color = amber ? [255, 180, 45] : [255, 56, 72];
-    const alpha = amber ? 0.20 + 0.58 * t : 0.18 + 0.50 * t;
-    strokeExactCornerOutline(
-      mapped,
-      scale,
-      offX,
-      offY,
-      `rgba(${color.join(",")}, ${alpha})`,
-      Math.max(1, (1.05 + 0.55 * t) * dpr)
-    );
+    const fade = item.frames / item.maxFrames;
+    if (item.kind === "success") {
+      const color = COLORS[item.path] || COLORS.hot;
+      quadPath(quad, scale, offX, offY);
+      ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${0.10 + 0.18 * fade})`;
+      ctx.fill();
+    } else {
+      const finderSeen = item.kind === "sighting";
+      const color = finderSeen ? [255, 180, 45] : [255, 56, 72];
+      const alpha = (finderSeen ? 0.24 : 0.20) + (finderSeen ? 0.50 : 0.44) * fade;
+      cornerOutline(
+        quad,
+        scale,
+        offX,
+        offY,
+        `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`,
+        Math.max(1, 1.2 * dpr)
+      );
+    }
+
+    item.frames--;
+    if (item.frames > 0) animate = true;
   }
+
+  // No permanent animation/polling loop. Continue only while an event is
+  // visibly fading; otherwise the canvas sleeps until the runtime sends data.
+  if (animate) scheduleDraw();
 }
 
-let lastDrawAt = -Infinity;
-function frame(at) {
-  if (at - lastDrawAt >= DRAW_INTERVAL_MS) {
-    lastDrawAt = at;
-    drawHud(at);
-  }
-  requestAnimationFrame(frame);
+function mark(slot, quad, kind, path, frames) {
+  const index = Number(slot);
+  if (!Number.isInteger(index) || index < 0 || index >= activity.length || !validQuad(quad)) return;
+  activity[index] = {
+    quad,
+    kind,
+    path: normalizePath(path),
+    frames,
+    maxFrames: frames
+  };
+  scheduleDraw();
 }
-requestAnimationFrame(frame);
+
+function sightingNear(quad, sightings) {
+  if (!validQuad(quad) || !Array.isArray(sightings) || !sightings.length) return false;
+  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+  const left = Math.min(...points.map((point) => point.x));
+  const right = Math.max(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const pad = Math.max(12, Math.max(right - left, bottom - top) * 0.55);
+  return sightings.some((box) => {
+    const x = Number(box?.x) + Number(box?.w) * 0.5;
+    const y = Number(box?.y) + Number(box?.h) * 0.5;
+    return Number.isFinite(x) && Number.isFinite(y) &&
+      x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad;
+  });
+}
+
+globalThis.__airgapperUserOverlay = {
+  success(slot, quad, path = "hot") {
+    if (!normalMode()) return;
+    mark(slot, quad, "success", path, SUCCESS_FRAMES);
+  },
+
+  recovery(targets, symbols, sightings) {
+    if (!normalMode() || !Array.isArray(targets)) return;
+    const successes = new Set((symbols || [])
+      .map((symbol) => Number(symbol?.header?.slotIndex))
+      .filter(Number.isInteger));
+
+    for (const target of targets) {
+      const slot = Number(target?.slot);
+      if (!Number.isInteger(slot) || successes.has(slot) || !validQuad(target?.quad)) continue;
+      const finderSeen = sightingNear(target.quad, sightings);
+      mark(
+        slot,
+        target.quad,
+        finderSeen ? "sighting" : "miss",
+        "hot",
+        finderSeen ? SIGHTING_FRAMES : MISS_FRAMES
+      );
+    }
+  },
+
+  geometry(snapshot, usable) {
+    geometry = snapshot || undefined;
+    geometryUsable = Boolean(usable && snapshot?.distributedFit);
+    scheduleDraw();
+  },
+
+  latticeState(state) {
+    if (state === "SEARCH" || state === "REACQUIRE" || state === "DORMANT") {
+      geometryUsable = false;
+      activity.fill(undefined);
+      scheduleDraw();
+    }
+  },
+
+  reset() {
+    geometry = undefined;
+    geometryUsable = false;
+    activity.fill(undefined);
+    scheduleDraw();
+  }
+};
+
+function syncOverlayMode() {
+  const developer = !normalMode();
+  if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
+  canvas.style.display = developer ? "none" : "";
+  if (!developer) scheduleDraw();
+}
+
+if (devActions) {
+  new MutationObserver(syncOverlayMode).observe(devActions, {
+    attributes: true,
+    attributeFilter: ["hidden"]
+  });
+}
+video?.addEventListener("resize", scheduleDraw);
+window.addEventListener("resize", scheduleDraw);
+globalThis.screen?.orientation?.addEventListener?.("change", scheduleDraw);
+window.addEventListener("orientationchange", scheduleDraw);
+syncOverlayMode();
