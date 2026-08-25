@@ -1431,7 +1431,7 @@ ctx.onmessage = async (e) => {
               const before = symbols.length;
               appendResults(
                 zx.readDenseY(ptr + inputOffset + ry * inputStride + rx, rw, rh, inputStride, 4),
-                false, ox + rx, oy + ry, expectedSlot
+                true, ox + rx, oy + ry, expectedSlot
               );
               if (symbols.length > before) targetedSuccesses++;
             }

@@ -356,6 +356,8 @@ const AUTO_OPTICS_COLLAPSE_RETRY_MS = 1500;
 const AUTO_OPTICS_HOLD_SAMPLE_MS = 700;
 const AUTO_OPTICS_HOLD_COLLAPSE_MS = 2500;
 const AUTO_OPTICS_HOLD_MIN_ATTEMPTS = 40;
+const AUTO_OPTICS_HOLD_EMERGENCY_SILENCE_MS = 3000;
+const AUTO_OPTICS_HOLD_FINDER_EVIDENCE_MS = 1800;
 // Once a startup winner is found, never poke the camera periodically. Hold it
 // until live per-QR yield falls far enough below that measured winner to prove
 // the scene/optics changed, then recalibrate from neutral hardware AE.
@@ -2930,6 +2932,7 @@ function noteDecodeCompleted(id, completion) {
   benchmarkJobFrames.delete(id);
   const fullJob = fullScanJobs.get(id);
   const capturedAt = scanCapturedAt.get(id) ?? receiverNow();
+  if (completion.sightings?.length) lastFinderEvidenceAt = receiverNow();
   if (fullJob?.acquisition && !gridLattice.active && completion.symbolCount === 0 && completion.sightings?.length) {
     for (const sighting of completion.sightings.slice(0, 3)) noteRegion(sighting, capturedAt, false);
     acquisitionSightings += Math.min(3, completion.sightings.length);
@@ -3126,6 +3129,7 @@ let acquisitionRaceStartedAt = 0;
 let acquisitionHuntScans = 0;
 let acquisitionSightingScans = 0;
 let acquisitionSightings = 0;
+let lastFinderEvidenceAt = -Infinity;
 const FULL_SCAN_DEGRADED_MS = 250;
 // Recovery probes exist only when a proven wall stops producing packets. They
 // therefore cannot consume CPU in the healthy LOCKED throughput path.
@@ -4429,10 +4433,21 @@ function maintainAutomaticQrOptics(now) {
     // Only a band covering much of the wall is allowed to invalidate an optics
     // measurement; otherwise a permanent small seam would freeze learning forever.
     const temporalDominant = Boolean(temporal && temporal.confidence >= 0.72 && temporalCoverage >= 0.42);
+    const payloadSilenceMs = lastStreamDecodeAt ? Math.max(0, now - lastStreamDecodeAt) : Infinity;
+    const finderEvidenceFresh = now - lastFinderEvidenceAt <= AUTO_OPTICS_HOLD_FINDER_EVIDENCE_MS;
     if (!poseStable) {
-      // Losing a page, moving the camera, or seeing too little of the wall is
-      // not optical evidence. HOLD keeps its verified rollback point and makes
-      // no camera mutation until the wall has actually been stationary again.
+      // Motion is not ordinary exposure evidence, but finder/body evidence plus
+      // several seconds of zero CRC payload is different: the wall is still in
+      // view and this held sensor state is no longer doing its job. Escape to
+      // neutral hardware AE instead of allowing motion to protect a blind HOLD
+      // forever. Merely pointing the camera away produces no finder evidence and
+      // therefore preserves the proven HOLD.
+      if (payloadSilenceMs >= AUTO_OPTICS_HOLD_EMERGENCY_SILENCE_MS && finderEvidenceFresh) {
+        autoOpticsHoldSample = void 0;
+        autoOpticsHoldCollapseSince = 0;
+        void recoverCollapsedAutomaticOptics(track, 0, "held optics blind despite live finder evidence");
+        return;
+      }
       autoOpticsHoldSample = void 0;
       autoOpticsHoldCollapseSince = 0;
       return;

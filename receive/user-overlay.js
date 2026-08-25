@@ -1,7 +1,7 @@
 import { GridLattice } from "./grid-lattice.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
-const MISS_FADE_MS = 520;
+const PROBE_FADE_MS = Object.freeze({ success: 360, sighting: 680, miss: 520 });
 const JOB_TTL_MS = 4000;
 const DRAW_INTERVAL_MS = 50;
 
@@ -77,10 +77,27 @@ function targetProbeSlots(message) {
 function activityFor(slot) {
   let value = slotActivity.get(slot);
   if (!value) {
-    value = { missAt: -Infinity };
+    value = { at: -Infinity, kind: "miss" };
     slotActivity.set(slot, value);
   }
   return value;
+}
+
+function sightingNearSlot(slot, sightings) {
+  const target = snapshot?.slots?.find((item) => item.index === slot);
+  const q = target?.quad;
+  if (!validQuad(q) || !Array.isArray(sightings) || !sightings.length) return false;
+  const xs = [q.topLeft.x, q.topRight.x, q.bottomRight.x, q.bottomLeft.x];
+  const ys = [q.topLeft.y, q.topRight.y, q.bottomRight.y, q.bottomLeft.y];
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const pad = Math.max(12, Math.max(right - left, bottom - top) * 0.55);
+  return sightings.some((box) => {
+    const x = Number(box?.x) + Number(box?.w) * 0.5;
+    const y = Number(box?.y) + Number(box?.h) * 0.5;
+    return Number.isFinite(x) && Number.isFinite(y) &&
+      x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad;
+  });
 }
 
 function packedSuccessSlots(message) {
@@ -109,7 +126,13 @@ function noteCompletion(message) {
   jobs.delete(id);
   const at = now();
   const successes = packedSuccessSlots(message);
-  for (const slot of job.slots) activityFor(slot).missAt = successes.has(slot) ? -Infinity : at;
+  for (const slot of job.slots) {
+    const activity = activityFor(slot);
+    activity.at = at;
+    activity.kind = successes.has(slot)
+      ? "success"
+      : sightingNearSlot(slot, message?.sightings) ? "sighting" : "miss";
+  }
 }
 
 function wrapWorkerPool() {
@@ -195,14 +218,21 @@ function pathQuad(quad, scale, offX, offY) {
 }
 
 function outerQuad(value) {
-  const cols = Number(value?.layout?.cols);
-  const rows = Number(value?.layout?.rows);
-  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return null;
+  const points = [];
+  for (const slot of value?.slots || []) {
+    if (!validQuad(slot?.quad)) continue;
+    points.push(slot.quad.topLeft, slot.quad.topRight, slot.quad.bottomRight, slot.quad.bottomLeft);
+  }
+  if (points.length < 4) return null;
+  const by = (score, preferMin) => points.reduce((best, point) => {
+    if (!best) return point;
+    return (preferMin ? score(point) < score(best) : score(point) > score(best)) ? point : best;
+  }, null);
   const quad = {
-    topLeft: value.slots?.[0]?.quad?.topLeft,
-    topRight: value.slots?.[cols - 1]?.quad?.topRight,
-    bottomLeft: value.slots?.[(rows - 1) * cols]?.quad?.bottomLeft,
-    bottomRight: value.slots?.[rows * cols - 1]?.quad?.bottomRight
+    topLeft: by((p) => p.x + p.y, true),
+    topRight: by((p) => p.x - p.y, false),
+    bottomRight: by((p) => p.x + p.y, false),
+    bottomLeft: by((p) => p.x - p.y, true)
   };
   return validQuad(quad) ? quad : null;
 }
@@ -231,8 +261,9 @@ function drawHud(at) {
   if (!ctx || !preview || !video || !document.body.classList.contains("receive-mode") || document.hidden) return;
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+  const decoderSize = globalThis.__airgapperDecoderDisplaySize?.();
+  const vw = Number(decoderSize?.width) || video.videoWidth;
+  const vh = Number(decoderSize?.height) || video.videoHeight;
   if (!cw || !ch || !vw || !vh) return;
   const dpr = window.devicePixelRatio || 1;
   const width = Math.round(cw * dpr);
@@ -269,15 +300,22 @@ function drawHud(at) {
   }
 
   for (const slot of value.slots) {
-    const missAt = slotActivity.get(slot.index)?.missAt ?? -Infinity;
-    const missAge = at - missAt;
-    if (missAge < 0 || missAge >= MISS_FADE_MS || !validQuad(slot.quad)) continue;
-    const t = 1 - missAge / MISS_FADE_MS;
+    const activity = slotActivity.get(slot.index);
+    const kind = activity?.kind || "miss";
+    const fade = PROBE_FADE_MS[kind] || PROBE_FADE_MS.miss;
+    const age = at - (activity?.at ?? -Infinity);
+    if (age < 0 || age >= fade || !validQuad(slot.quad)) continue;
+    const t = 1 - age / fade;
+    const palette = kind === "success"
+      ? { fill: [41, 197, 105], stroke: [38, 211, 111] }
+      : kind === "sighting"
+        ? { fill: [255, 177, 43], stroke: [255, 180, 45] }
+        : { fill: [255, 48, 64], stroke: [255, 56, 72] };
     ctx.save();
     pathQuad(slot.quad, scale, offX, offY);
-    ctx.fillStyle = `rgba(255, 48, 64, ${0.025 + 0.085 * t})`;
-    ctx.strokeStyle = `rgba(255, 56, 72, ${0.12 + 0.42 * t})`;
-    ctx.lineWidth = Math.max(1, (1 + 0.45 * t) * dpr);
+    ctx.fillStyle = `rgba(${palette.fill.join(",")}, ${0.025 + 0.085 * t})`;
+    ctx.strokeStyle = `rgba(${palette.stroke.join(",")}, ${0.14 + 0.48 * t})`;
+    ctx.lineWidth = Math.max(1, (1 + 0.5 * t) * dpr);
     ctx.fill();
     ctx.stroke();
     ctx.restore();

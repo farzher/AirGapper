@@ -5,6 +5,7 @@
 // spaces actually differ. Matching cameras pay no per-frame transform cost.
 let decodeWidth = 0;
 let decodeHeight = 0;
+globalThis.__airgapperDecoderDisplaySize = () => ({ width: decodeWidth, height: decodeHeight });
 
 function noteDecodeFrame(frame) {
   if (!frame) return;
