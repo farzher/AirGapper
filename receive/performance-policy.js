@@ -107,7 +107,10 @@ export function automaticOpticsHoldEligible(sample, {
   minOutputs = 5,
   minYield = 0.55,
   minBreadth = 0.65,
-  minTailYield = 0.20
+  minTailYield = 0.20,
+  broadMinYield = 0.40,
+  broadMinBreadth = 0.90,
+  broadMinTailYield = 0.35
 } = {}) {
   if (!sample || sample.valid !== true || sample.unstable) return false;
   const cohortSize = Number(sample.cohortSize);
@@ -128,11 +131,18 @@ export function automaticOpticsHoldEligible(sample, {
     : attempts ? outputs / attempts : 0;
   const breadth = Math.max(0, Math.min(1, reportedBreadth));
   const tailYield = Math.max(0, Math.min(1, reportedTail));
-  return attempts >= Math.max(1, Number(minAttempts) || 1) &&
-    outputs >= Math.max(1, Number(minOutputs) || 1) &&
-    yieldRate >= Math.max(0, Number(minYield) || 0) &&
+  const standardProof = yieldRate >= Math.max(0, Number(minYield) || 0) &&
     breadth >= Math.max(0, Number(minBreadth) || 0) &&
     tailYield >= Math.max(0, Number(minTailYield) || 0);
+  // A uniformly productive wall is also safe to hold even when its aggregate
+  // sample yield sits below the old 55% cutoff. This is the important distinction
+  // between a broad 46% wall and a lucky 46% cluster in one easy corner.
+  const broadProof = yieldRate >= Math.max(0, Number(broadMinYield) || 0) &&
+    breadth >= Math.max(0, Number(broadMinBreadth) || 0) &&
+    tailYield >= Math.max(0, Number(broadMinTailYield) || 0);
+  return attempts >= Math.max(1, Number(minAttempts) || 1) &&
+    outputs >= Math.max(1, Number(minOutputs) || 1) &&
+    (standardProof || broadProof);
 }
 
 export function temporalHardSkip({ explicitSkip = false, risk = 0, confidence = 0, measurement = false }) {

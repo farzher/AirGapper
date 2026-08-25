@@ -1,3 +1,5 @@
+import { decodeExposureHealthy } from "./decode-health.js";
+
 const blockedForReopen = new WeakSet();
 let reopenScheduled = false;
 let reopenGeneration = 0;
@@ -115,6 +117,34 @@ function closeSetting(value, target, range) {
   if (!Number.isFinite(Number(value)) || !Number.isFinite(Number(target))) return value === target;
   const tolerance = Math.max(Number(range?.step) * 0.75 || 0, Math.abs(Number(target)) * 0.02, 1e-6);
   return Math.abs(Number(value) - Number(target)) <= tolerance;
+}
+
+// Auto Optics may continue gathering evidence after the decoder is already
+// producing broadly across the retained wall. At that point camera mutations
+// are more dangerous than useful: in particular, neutral photographic AE can
+// brighten an emissive QR wall and destroy the state that was being measured.
+// Keep the live sensor state read-only until decoder health actually falls.
+// The one exception is the no-change continuous->manual transition that freezes
+// the currently proven exposure/ISO into HOLD.
+function healthyAutomaticExposureWouldPerturb(track, set) {
+  if (!decodeExposureHealthy()) return false;
+  if (document.getElementById("camera-exposure-auto")?.checked !== true) return false;
+  if (!EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return false;
+
+  const actual = track?.getSettings?.() ?? {};
+  const caps = track?.getCapabilities?.() ?? {};
+  const freezeCurrentIntoManual = set.exposureMode === "manual" &&
+    actual.exposureMode !== "manual" &&
+    set.exposureCompensation === void 0 &&
+    closeSetting(actual.exposureTime, set.exposureTime, caps.exposureTime) &&
+    closeSetting(actual.iso, set.iso, caps.iso);
+  if (freezeCurrentIntoManual) return false;
+
+  if (set.exposureMode !== void 0 && set.exposureMode !== actual.exposureMode) return true;
+  if (!closeSetting(actual.exposureTime, set.exposureTime, caps.exposureTime)) return true;
+  if (!closeSetting(actual.iso, set.iso, caps.iso)) return true;
+  if (!closeSetting(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation)) return true;
+  return false;
 }
 
 function exposureConstraintAlreadySatisfied(track, set) {
@@ -252,6 +282,11 @@ async function applyAdvancedConstraint(track, set) {
   const touchesExposure = EXPOSURE_KEYS.some((key) => supported[key] !== void 0);
   if (requestedExposure && !touchesExposure && Object.keys(withoutExposure(supported)).length === 0) return false;
   if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) return true;
+  if (healthyAutomaticExposureWouldPerturb(track, supported)) {
+    const remainder = withoutExposure(supported);
+    if (!Object.keys(remainder).length) return true;
+    return applyConstraint(track, remainder);
+  }
   const applied = await applyConstraint(track, supported);
   if (applied && touchesExposure) rememberSettledExposure(track, supported);
   return applied;
