@@ -1,23 +1,59 @@
-const TRACKED_JOB_TIMEOUT_MS = 2200;
-const RECOVERY_JOB_TIMEOUT_MS = 6500;
-const ACQUISITION_JOB_TIMEOUT_MS = 9000;
-const WORKER_WATCHDOG_MS = 250;
-const PACKED_SYMBOL_BYTES = 88;
-const PACKED_SYMBOL_WORDS = PACKED_SYMBOL_BYTES >> 2;
-const EMPTY_SYMBOLS = Object.freeze([]);
-const EMPTY_SIGHTINGS = Object.freeze([]);
-let receiveVideo;
+import { DecodeWorkerPool as CoreDecodeWorkerPool } from "./worker-pool-core.js";
 
-function workerJobTimeout(message) {
-  if (!message?.full) return TRACKED_JOB_TIMEOUT_MS;
-  return message.acquisitionMode === "thorough" ? ACQUISITION_JOB_TIMEOUT_MS : RECOVERY_JOB_TIMEOUT_MS;
+const PACKED_TRACK_BYTES = 56;
+const PACKED_TRACK_WORDS = PACKED_TRACK_BYTES >> 2;
+const PACKED_SYMBOL_BYTES = 88;
+const DENSE_REPAIR_MIN_TRACKS = 12;
+const MAX_TRACK_BUFFER_POOL = 16;
+const MAX_RESULT_BUFFER_POOL = 16;
+const MAX_CONCURRENT_NATIVE_COPIES = 2;
+const receiveVideo = typeof document === "undefined" ? null : document.getElementById("video");
+const packedTrackBufferPool = [];
+const packedResultBufferPool = [];
+
+let trackedTimeoutPressure = 0;
+let trackedTimeoutCount = 0;
+let trackedDecodeTimeoutCount = 0;
+let trackedPreflightTimeoutCount = 0;
+
+function noteTrackedTimeout(reachedPreflight) {
+  trackedTimeoutCount++;
+  if (!reachedPreflight) {
+    trackedPreflightTimeoutCount++;
+    return;
+  }
+  trackedDecodeTimeoutCount++;
+  trackedTimeoutPressure = Math.min(1, trackedTimeoutPressure + (trackedTimeoutPressure ? 0.2 : 0.35));
+}
+
+function noteHealthyTrackedCompletion(message, meta) {
+  if (!meta || meta.full || message?.error) return;
+  const latency = Number(message?.latencyMs);
+  const timeout = Number(meta.timeoutMs);
+  if (!Number.isFinite(latency) || latency <= 0 || !Number.isFinite(timeout) || timeout <= 0) return;
+  if (latency <= timeout * 0.25) {
+    const useful = Number(message?.__airgapperPackedSymbolCount ?? message?.symbols?.length ?? 0) > 0;
+    trackedTimeoutPressure = Math.max(0, trackedTimeoutPressure - (useful ? 0.08 : 0.04));
+  }
+}
+
+function applyTimeoutBackpressure(message, live) {
+  const tracks = message?.tracks;
+  if (!live || message?.full || !Array.isArray(tracks) || tracks.length < 4 || trackedTimeoutPressure <= 0) return;
+  const originalCount = tracks.length;
+  const fraction = 1 - 0.6 * trackedTimeoutPressure;
+  const limit = Math.max(4, Math.min(originalCount, Math.ceil(originalCount * fraction)));
+  if (limit < originalCount) message.tracks = tracks.slice(0, limit);
+  if (trackedTimeoutPressure >= 0.5) {
+    message.guidedRepairMask = 0;
+    message.guidedFallbackMask = 0;
+  }
 }
 
 function liveReceiveCamera() {
-  if (typeof document === "undefined") return false;
-  receiveVideo ??= document.getElementById("video");
-  return document.body?.classList?.contains("receive-mode") === true &&
-    receiveVideo?.srcObject?.active === true;
+  const cameraStream = receiveVideo?.srcObject;
+  return typeof document !== "undefined" &&
+    document.body?.classList?.contains("receive-mode") === true && cameraStream?.active === true;
 }
 
 function addTransfer(transfer, value) {
@@ -26,483 +62,302 @@ function addTransfer(transfer, value) {
   return list;
 }
 
-function packedMode(code) {
-  return code === 0 ? "direct" : code === 1 ? "mds" : code === 2 ? "raptorq" : "";
+function nativeFrame(value) {
+  return typeof VideoFrame === "function" && value instanceof VideoFrame;
 }
 
-function packedDecodePath(code) {
-  return code === 3 ? "fallback" : code === 2 ? "sparse" : code === 4 ? "robust" : "hot";
+function closeMessageFrame(message) {
+  if (!nativeFrame(message?.videoFrame)) return;
+  try { message.videoFrame.close(); } catch {}
+  message.videoFrame = void 0;
 }
 
-/** Safari/iOS currently reaches Receive through requestVideoFrameCallback +
- * canvas ImageData rather than the transferable VideoFrame/Y8 camera path.
- * Once geometry is known, keeping those tracked crops as RGBA needlessly locks
- * the worker onto the slower generic decoder. The live worker wrapper can
- * compact green->Y8 in-place after ownership transfer, so this fallback must
- * never allocate a second full Y plane on the browser main thread. */
-function prepareTrackedBrowserY8(message, transfer) {
-  // The normal TrackProcessor path is already a direct VideoFrame/Y8 payload.
-  // Test cheap message state before touching DOM/camera state.
-  if (message?.full || message?.videoFrame || message?.strictHotPath || !liveReceiveCamera()) return transfer;
-  if (!Array.isArray(message?.tracks) || message.tracks.length < 2) return transfer;
-  if (message.pixelFormat && message.pixelFormat !== "rgba") return transfer;
-  if (!(message.buf instanceof ArrayBuffer)) return transfer;
-  const width = Math.trunc(Number(message.w) || 0);
-  const height = Math.trunc(Number(message.h) || 0);
-  const pixels = width * height;
-  if (width <= 0 || height <= 0 || pixels <= 0 || message.buf.byteLength < pixels * 4) return transfer;
-
-  const rgba = message.buf;
-  message.buf = void 0;
-  message.videoFrame = rgba;
-  message.__airgapperWorkerLumaFromRgba = true;
-  message.pixelFormat = "rgba";
-  message.payloadBytes = pixels;
-  message.guidedDecode = true;
-  return addTransfer(transfer, rgba);
+function activeNativeCopies(pool) {
+  let count = 0;
+  for (const meta of pool.activeMeta ?? []) {
+    if (meta?.__airgapperNativeFrameCopy && !meta.__airgapperCopyComplete) count++;
+  }
+  return count;
 }
 
-class DecodeWorkerPool {
-  constructor(create, onDecoded, onSighted, onTrackedAttempt, onCompleted, onAvailable, onFrameSignature) {
-    this.create = create;
-    this.onDecoded = onDecoded;
-    this.onSighted = onSighted;
-    this.onTrackedAttempt = onTrackedAttempt;
-    this.onCompleted = onCompleted;
-    this.onAvailable = onAvailable;
-    this.onFrameSignature = onFrameSignature;
-    this.workers = [];
-    this.ready = [];
-    this.busy = [];
-    this.activeIds = [];
-    this.activeFull = [];
-    this.activeMeta = [];
-    // onAvailable() may synchronously schedule the next job before the current
-    // completion has finished consuming jobMeta. Keep two metadata records per
-    // slot and alternate them so both jobs can overlap in JS without allocation.
-    this.metaRecords = [];
-    this.metaRecordNext = [];
-    this.resizeGeneration = 0;
-    this.lastNonZeroSize = 1;
-    this.watchdog = void 0;
-    // Normal live decode consumes this synchronously. Reuse it for every symbol
-    // instead of allocating one metadata object per QR. Optimizer-attributed jobs
-    // use a dedicated object because runtime may intentionally retain it.
-    this.decodeInfo = {};
-    this.packedSymbolPools = [];
-    this.packedSymbolLists = [];
-    // A worker slot can finish only one job at a time. Runtime consumes these
-    // synchronously, so keep mutable summary/preflight records per slot instead
-    // of allocating callback envelopes at camera cadence.
-    this.completions = [];
-    this.frameSignatureInfos = [];
-  }
-  get size() {
-    return this.workers.length;
-  }
-  get busyCount() {
-    let count = 0;
-    for (let index = 0; index < this.busy.length; index++) count += Number(this.busy[index]);
-    return count;
-  }
-  get activeCount() {
-    return this.busyCount;
-  }
-  get activeFullCount() {
-    let count = 0;
-    for (let index = 0; index < this.busy.length; index++) {
-      if (this.busy[index] && this.activeFull[index]) count++;
+function copyStageTimeout(meta) {
+  const normal = Math.max(1, Number(meta?.timeoutMs) || 1);
+  return Math.max(250, Math.min(600, normal * 0.20));
+}
+
+function takeBestFitBuffer(pool, bytes) {
+  let bestIndex = -1;
+  let bestSize = Infinity;
+  for (let index = 0; index < pool.length; index++) {
+    const size = pool[index].byteLength;
+    if (size >= bytes && size < bestSize) {
+      bestIndex = index;
+      bestSize = size;
     }
-    return count;
   }
-  get oldestActiveAgeMs() {
-    const now = performance.now();
-    let oldest = 0;
-    for (const meta of this.activeMeta) {
-      if (meta) oldest = Math.max(oldest, now - meta.startedAt);
+  if (bestIndex < 0) return new ArrayBuffer(bytes);
+  const lastIndex = pool.length - 1;
+  const buffer = pool[bestIndex];
+  if (bestIndex !== lastIndex) pool[bestIndex] = pool[lastIndex];
+  pool.pop();
+  return buffer;
+}
+
+function recyclePackedTrackBuffer(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_TRACK_BYTES || packedTrackBufferPool.length >= MAX_TRACK_BUFFER_POOL) return;
+  packedTrackBufferPool.push(buffer);
+}
+
+function recyclePackedResultBuffer(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_SYMBOL_BYTES || packedResultBufferPool.length >= MAX_RESULT_BUFFER_POOL) return;
+  packedResultBufferPool.push(buffer);
+}
+
+function stripIdentityOutputMap(message) {
+  const map = message?.outputMap;
+  if (!map) return;
+  if (Number(map.offsetX) === 0 && Number(map.offsetY) === 0 && Number(map.scaleX) === 1 && Number(map.scaleY) === 1) {
+    message.outputMap = undefined;
+  }
+}
+
+function keepTrackedCameraOnGuided(message, live) {
+  if (live && message && !message.full && !message.strictHotPath && message.videoFrame &&
+      Array.isArray(message.tracks) && message.tracks.length >= 2 &&
+      (message.pixelFormat === "y8" || message.__airgapperWorkerLumaFromRgba)) {
+    message.guidedDecode = true;
+    message.__airgapperLiveTracked = true;
+  }
+}
+
+function capDenseRepairMask(message, live) {
+  const tracks = message?.tracks;
+  if (!live || message?.full || !message?.guidedDecode || !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
+  const laneMask = tracks.length >= 32 ? 0xffffffff : (2 ** tracks.length - 1) >>> 0;
+  const requested = message.guidedRepairMask === undefined ? laneMask : Number(message.guidedRepairMask) >>> 0;
+  const allowed = requested & laneMask;
+  if (!allowed || (allowed & (allowed - 1)) === 0) return;
+  const chosen = (allowed & -allowed) >>> 0;
+  message.guidedRepairMask = chosen;
+  if (message.guidedFallbackMask !== undefined)
+    message.guidedFallbackMask = (Number(message.guidedFallbackMask) >>> 0) & chosen;
+}
+
+function attachPackedResultScratch(message, transfer) {
+  const tracks = message?.tracks;
+  if (!message?.__airgapperLiveTracked || !message?.repeatFilter || !Array.isArray(tracks) || tracks.length < 2) return transfer;
+  const scratch = takeBestFitBuffer(packedResultBufferPool, tracks.length * PACKED_SYMBOL_BYTES);
+  message.__airgapperPackedSymbolScratch = scratch;
+  return addTransfer(transfer, scratch);
+}
+
+function packTracks(message, transfer) {
+  const tracks = message?.tracks;
+  if (message?.full || !message?.videoFrame || !Array.isArray(tracks) || tracks.length < 2) return transfer;
+  const count = tracks.length;
+  const usedBytes = count * PACKED_TRACK_BYTES;
+  const packed = takeBestFitBuffer(packedTrackBufferPool, usedBytes);
+  const i32 = new Int32Array(packed);
+  const f32 = new Float32Array(packed);
+  for (let index = 0; index < count; index++) {
+    const track = tracks[index];
+    const q = track?.quad;
+    if (!q?.topLeft || !q?.topRight || !q?.bottomRight || !q?.bottomLeft) {
+      recyclePackedTrackBuffer(packed);
+      return transfer;
     }
-    return oldest;
+    const base = index * PACKED_TRACK_WORDS;
+    i32[base] = Math.trunc(Number(track.id) || 0);
+    i32[base + 1] = Number.isInteger(track.slot) ? track.slot : -1;
+    i32[base + 2] = Math.trunc(Number(track.misses) || 0);
+    i32[base + 3] = Math.trunc(Number(track.dim) || 0);
+    i32[base + 4] = Number(Boolean(track.crc32)) | (Number(Boolean(track.temporalProbe)) << 1);
+    f32[base + 5] = Number(track.temporalRisk) || 0;
+    f32[base + 6] = Number(q.topLeft.x);
+    f32[base + 7] = Number(q.topLeft.y);
+    f32[base + 8] = Number(q.topRight.x);
+    f32[base + 9] = Number(q.topRight.y);
+    f32[base + 10] = Number(q.bottomRight.x);
+    f32[base + 11] = Number(q.bottomRight.y);
+    f32[base + 12] = Number(q.bottomLeft.x);
+    f32[base + 13] = Number(q.bottomLeft.y);
   }
-  ensureWatchdog() {
-    if (this.watchdog !== void 0 || this.workers.length === 0) return;
-    this.watchdog = setInterval(() => this.checkTimeouts(), WORKER_WATCHDOG_MS);
-  }
-  stopWatchdog() {
-    if (this.watchdog === void 0) return;
-    clearInterval(this.watchdog);
-    this.watchdog = void 0;
-  }
-  completionFor(slot) {
-    let completion = this.completions[slot];
-    if (!completion) completion = this.completions[slot] = {};
-    return completion;
-  }
+  message.__airgapperPackedTracks = packed;
+  message.__airgapperPackedTrackCount = count;
+  message.trackCount = count;
+  message.tracks = undefined;
+  return addTransfer(transfer, packed);
+}
+
+function recycleUnsentBuffers(message) {
+  const tracks = message?.__airgapperPackedTracks;
+  const result = message?.__airgapperPackedSymbolScratch;
+  if (tracks instanceof ArrayBuffer && tracks.byteLength) recyclePackedTrackBuffer(tracks);
+  if (result instanceof ArrayBuffer && result.byteLength) recyclePackedResultBuffer(result);
+}
+
+class DecodeWorkerPool extends CoreDecodeWorkerPool {
   failureCompletion(slot, full, latencyMs, error) {
-    const completion = this.completionFor(slot);
-    completion.full = Boolean(full);
-    completion.symbolCount = 0;
-    completion.sightingCount = 0;
-    completion.trackedAttempted = false;
-    completion.trackedHit = false;
-    completion.fallbackAttempted = false;
-    completion.fallbackSucceeded = false;
-    completion.readFullAttempts = 0;
-    completion.workerWaitMs = 0;
-    completion.targetedAttempts = 0;
-    completion.targetedPixels = 0;
-    completion.targetedSuccesses = 0;
-    completion.latencyMs = latencyMs;
-    completion.frameCopyMs = 0;
-    completion.directMetrics = undefined;
-    completion.guidedMetrics = undefined;
-    completion.guidedError = undefined;
-    completion.pixelPath = undefined;
-    completion.robustMs = 0;
-    completion.robustBands = 1;
-    completion.robustSearchMs = 0;
-    completion.exactFastPath = false;
-    completion.directFrameFailed = false;
-    completion.repeatSkipped = false;
-    completion.repeatDistance = NaN;
-    completion.symbols = EMPTY_SYMBOLS;
-    completion.sightings = EMPTY_SIGHTINGS;
-    completion.error = error;
+    const completion = super.failureCompletion(slot, full, latencyMs, error);
+    completion.timedOut = false;
+    completion.staleFrame = false;
+    if (!full && error === "Decode worker timed out") {
+      completion.timedOut = true;
+      completion.staleFrame = true;
+      completion.error = undefined;
+      completion.guidedError = undefined;
+    }
     return completion;
   }
-  checkTimeouts() {
-    if (!this.workers.length) {
-      this.stopWatchdog();
-      return;
-    }
-    const now = performance.now();
-    for (let slot = 0; slot < this.activeMeta.length; slot++) {
-      const meta = this.activeMeta[slot];
-      if (!meta || !this.busy[slot] || !(meta.deadlineAt > 0) || now < meta.deadlineAt) continue;
-      this.timeoutWorker(slot, meta);
-    }
-  }
+
   timeoutWorker(slot, meta) {
-    const activeId = this.activeIds[slot];
-    if (activeId === void 0 || activeId !== meta.id || !this.workers[slot]) return;
-    const full = this.activeFull[slot] ?? false;
-    const failed = this.workers[slot];
-    const timeoutMs = meta.timeoutMs;
-    this.busy[slot] = false;
-    this.ready[slot] = false;
-    this.activeIds[slot] = void 0;
-    this.activeFull[slot] = false;
-    this.activeMeta[slot] = null;
-    this.onCompleted?.(
-      activeId,
-      this.failureCompletion(slot, full, timeoutMs, "Decode worker timed out")
-    );
-    failed.terminate();
-    const replacement = this.create();
-    this.workers[slot] = replacement;
-    this.configureWorker(slot, replacement);
+    if (meta?.__airgapperNativeFrameCopy) meta.__airgapperPreflight = Boolean(meta.__airgapperCopyComplete);
+    if (!(this.activeFull?.[slot] ?? false)) noteTrackedTimeout(Boolean(meta?.__airgapperPreflight));
+    return super.timeoutWorker(slot, meta);
   }
-  packedSymbol(slot, index) {
-    let pool = this.packedSymbolPools[slot];
-    if (!pool) pool = this.packedSymbolPools[slot] = [];
-    let symbol = pool[index];
-    if (!symbol) {
-      symbol = { header: {} };
-      pool[index] = symbol;
-    }
-    return symbol;
-  }
-  unpackPackedSymbols(slot, message) {
-    const meta = message.__airgapperPackedSymbolMeta;
-    const payload = message.__airgapperPackedSymbolPayload;
-    const count = Math.trunc(Number(message.__airgapperPackedSymbolCount) || 0);
-    if (!(meta instanceof ArrayBuffer) || !(payload instanceof ArrayBuffer) || count <= 0 ||
-        meta.byteLength < count * PACKED_SYMBOL_BYTES) return null;
-    let list = this.packedSymbolLists[slot];
-    if (!list) list = this.packedSymbolLists[slot] = [];
-    list.length = count;
-    const u32 = new Uint32Array(meta);
-    const f32 = new Float32Array(meta);
-    for (let index = 0; index < count; index++) {
-      const base = index * PACKED_SYMBOL_WORDS;
-      const byteOffset = u32[base];
-      const byteLength = u32[base + 1];
-      if (byteLength <= 0 || byteOffset + byteLength > payload.byteLength) return null;
-      const symbol = this.packedSymbol(slot, index);
-      const control0 = u32[base + 3];
-      const control1 = u32[base + 4];
-      const flags = control0 & 255;
-      const header = symbol.header;
-      header.mode = packedMode(control0 >>> 16 & 255);
-      header.seq = u32[base + 5];
-      header.layoutId = control0 >>> 24 & 255;
-      header.extendedGrid = Boolean(flags & 16);
-      header.gridCols = control1 & 255;
-      header.gridRows = control1 >>> 8 & 255;
-      header.slotIndex = control1 >>> 16 & 0xffff;
-      header.k = u32[base + 6];
-      header.blockLen = u32[base + 7];
-      header.totalLen = u32[base + 8];
-      header.payloadId = u32[base + 9];
-      symbol.bytes = new Uint8Array(payload, byteOffset, byteLength);
-      symbol.modules = u32[base + 2];
-      symbol.tracked = Boolean(flags & 1);
-      symbol.geometryMeasured = Boolean(flags & 2);
-      symbol.crc32 = Boolean(flags & 4);
-      symbol.verifiedPayload = Boolean(flags & 8);
-      symbol.decodePath = packedDecodePath(control0 >>> 8 & 255);
-      // Motion is coherent whole-wall evidence; onDecoded consumes at most the
-      // first source-sequence report. Carry one object per frame, not per QR.
-      symbol.wallMotion = index === 0 ? message.__airgapperPackedWallMotion : undefined;
-      if (symbol.geometryMeasured) {
-        // Measured geometry can be retained by GridLattice observations, so
-        // these <=4 records deliberately receive fresh point/quad objects. The
-        // remaining payload-only QRs allocate none of this geometry graph.
-        symbol.box = {
-          x: f32[base + 10],
-          y: f32[base + 11],
-          w: f32[base + 12],
-          h: f32[base + 13]
-        };
-        symbol.quad = {
-          topLeft: { x: f32[base + 14], y: f32[base + 15] },
-          topRight: { x: f32[base + 16], y: f32[base + 17] },
-          bottomRight: { x: f32[base + 18], y: f32[base + 19] },
-          bottomLeft: { x: f32[base + 20], y: f32[base + 21] }
-        };
-      } else {
-        symbol.box = undefined;
-        symbol.quad = undefined;
-      }
-      list[index] = symbol;
-    }
-    return list;
-  }
+
   configureWorker(slot, worker) {
+    super.configureWorker(slot, worker);
+    worker.__airgapperCameraCopyWarm = false;
+    const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
-      if (this.workers[slot] !== worker) return;
-      const message = event.data;
-      if (message.id === -1) {
-        this.ready[slot] = true;
-        this.onAvailable?.(slot);
-        return;
-      }
-      if (this.activeIds[slot] !== message.id) return;
-      if (message.preflight) {
-        const info = this.frameSignatureInfos[slot];
-        info.id = message.id;
-        info.sourceSequence = message.sourceSequence;
-        info.signature = message.frameSignature;
-        this.onFrameSignature?.(info);
-        return;
-      }
-      const packedSymbols = this.unpackPackedSymbols(slot, message);
-      const symbols = packedSymbols ?? message.symbols ?? [];
-      const sightings = message.sightings ?? [];
-      const jobMeta = this.activeMeta[slot];
-      this.busy[slot] = false;
-      this.activeIds[slot] = void 0;
-      this.activeFull[slot] = false;
-      this.activeMeta[slot] = null;
-      this.onAvailable?.(slot);
-      const completion = this.completionFor(slot);
-      completion.full = Boolean(message.full);
-      completion.symbolCount = symbols.length;
-      completion.sightingCount = sightings.length;
-      completion.trackedAttempted = Boolean(message.trackedAttempted);
-      completion.trackedHit = Boolean(message.trackedHit);
-      completion.fallbackAttempted = Boolean(message.fallbackAttempted);
-      completion.fallbackSucceeded = Boolean(message.fallbackSucceeded);
-      completion.readFullAttempts = message.readFullAttempts ?? 0;
-      completion.workerWaitMs = message.workerWaitMs ?? 0;
-      completion.targetedAttempts = message.targetedAttempts ?? 0;
-      completion.targetedPixels = message.targetedPixels ?? 0;
-      completion.targetedSuccesses = message.targetedSuccesses ?? 0;
-      completion.latencyMs = message.latencyMs ?? 0;
-      completion.frameCopyMs = message.frameCopyMs ?? 0;
-      completion.directMetrics = message.directMetrics;
-      completion.guidedMetrics = message.guidedMetrics;
-      completion.guidedError = message.guidedError;
-      completion.pixelPath = message.pixelPath;
-      completion.robustMs = message.robustMs ?? 0;
-      completion.robustBands = message.robustBands ?? 1;
-      completion.robustSearchMs = message.robustSearchMs ?? 0;
-      completion.exactFastPath = Boolean(message.exactFastPath);
-      completion.directFrameFailed = Boolean(message.directFrameFailed);
-      completion.repeatSkipped = Boolean(message.repeatSkipped);
-      completion.repeatDistance = Number(message.repeatDistance);
-      completion.symbols = symbols;
-      completion.sightings = sightings;
-      completion.error = message.error ??
-        (message.__airgapperPackedSymbolMeta && !packedSymbols ? "Packed worker result was invalid" : undefined);
-      try {
-        if (message.trackedAttempted) this.onTrackedAttempt?.();
-        const reusableInfo = jobMeta?.opticsEpoch === void 0 ? this.decodeInfo : null;
-        for (const symbol of symbols) {
-          const info = reusableInfo ?? {};
-          info.scanId = message.id;
-          info.sourceSequence = jobMeta?.sourceSequence;
-          info.opticsEpoch = jobMeta?.opticsEpoch;
-          info.quad = symbol.quad;
-          info.modules = symbol.modules;
-          info.tracked = symbol.tracked;
-          info.geometryMeasured = symbol.geometryMeasured !== false;
-          info.wallMotion = symbol.wallMotion;
-          info.decodePath = symbol.decodePath;
-          info.crc32 = symbol.crc32;
-          info.verifiedPayload = Boolean(symbol.verifiedPayload);
-          info.header = symbol.header;
-          this.onDecoded(symbol.bytes, symbol.box, info);
+      const message = event?.data;
+      const activeMeta = this.activeMeta?.[slot];
+      if (message?.__airgapperCameraCopyComplete) {
+        if (activeMeta && activeMeta.id === message.id) {
+          activeMeta.__airgapperCopyComplete = true;
+          activeMeta.__airgapperPreflight = true;
+          activeMeta.deadlineAt = performance.now() + Math.max(1, Number(activeMeta.timeoutMs) || 1);
+          worker.__airgapperCameraCopyWarm = true;
         }
-        if (this.onSighted) for (const sighting of sightings) this.onSighted(sighting, message.id);
+        return;
+      }
+      if (message?.preflight && activeMeta) activeMeta.__airgapperPreflight = true;
+      const recycledTrack = message?.__airgapperPackedTrackRecycle;
+      if (recycledTrack instanceof ArrayBuffer) {
+        recyclePackedTrackBuffer(recycledTrack);
+        delete message.__airgapperPackedTrackRecycle;
+      }
+      const resultMeta = message?.__airgapperPackedSymbolMeta;
+      const unusedScratch = message?.__airgapperPackedSymbolScratchRecycle;
+      if (!message?.preflight) {
+        const completion = this.completionFor(slot);
+        completion.timedOut = false;
+        completion.staleFrame = false;
+      }
+      let result;
+      try {
+        result = baseOnMessage?.call(worker, event);
+        if (!message?.preflight) noteHealthyTrackedCompletion(message, activeMeta);
       } finally {
-        this.onCompleted?.(message.id, completion);
+        if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
+        if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta) recyclePackedResultBuffer(unusedScratch);
+        if (message) {
+          delete message.__airgapperPackedSymbolScratchRecycle;
+          delete message.__airgapperPackedSymbolMeta;
+        }
       }
-    };
-    worker.onerror = (event) => {
-      if (this.workers[slot] !== worker) return;
-      const id = this.activeIds[slot];
-      const full = this.activeFull[slot] ?? false;
-      this.busy[slot] = false;
-      this.ready[slot] = false;
-      this.activeIds[slot] = void 0;
-      this.activeFull[slot] = false;
-      this.activeMeta[slot] = null;
-      this.onCompleted?.(
-        id ?? -1,
-        this.failureCompletion(slot, full, 0, event.message || "Decode worker failed to start")
-      );
-      worker.terminate();
-      const replacement = this.create();
-      this.workers[slot] = replacement;
-      this.configureWorker(slot, replacement);
+      return result;
     };
   }
-  /** Grow or shrink in place. Terminating a busy worker drops its disposable
-   * frame during teardown; active operation always receives a completion. */
-  resize(count) {
-    const target = Math.max(0, Math.trunc(Number(count) || 0));
-    const generation = ++this.resizeGeneration;
-    if (target > 0) this.lastNonZeroSize = target;
 
-    while (this.workers.length > target) {
-      this.workers.pop().terminate();
-      this.ready.pop();
-      this.busy.pop();
-      this.activeIds.pop();
-      this.activeFull.pop();
-      this.activeMeta.pop();
-      this.metaRecords.pop();
-      this.metaRecordNext.pop();
-      this.packedSymbolPools.pop();
-      this.packedSymbolLists.pop();
-      this.completions.pop();
-      this.frameSignatureInfos.pop();
-    }
-    while (this.workers.length < target) {
-      const slot = this.workers.length;
-      const worker = this.create();
-      this.workers.push(worker);
-      this.ready.push(false);
-      this.busy.push(false);
-      this.activeIds.push(void 0);
-      this.activeFull.push(false);
-      this.activeMeta.push(null);
-      this.metaRecords.push([{}, {}]);
-      this.metaRecordNext.push(0);
-      this.packedSymbolPools.push([]);
-      this.packedSymbolLists.push([]);
-      this.completions.push({});
-      this.frameSignatureInfos.push({});
-      this.configureWorker(slot, worker);
-    }
-    if (target > 0) this.ensureWatchdog();
-    else this.stopWatchdog();
-
-    // A live receiver must never remain at 0 workers: captureFrame treats a
-    // zero-size pool as fully saturated (0 busy === 0 size), which otherwise
-    // drops every camera frame forever. Intended restart sequences call
-    // resize(0) followed synchronously by resize(N), invalidating this token.
-    // Stop/pause/finish have no live video track, so they remain at zero.
-    if (target === 0) {
-      queueMicrotask(() => {
-        if (generation !== this.resizeGeneration || this.workers.length !== 0 || !liveReceiveCamera()) return;
-        this.resize(Math.max(1, this.lastNonZeroSize));
-      });
-    }
-  }
-  /** Live worker ownership for diagnostics. Ages are measured from postMessage,
-   * so a long-running job cannot masquerade as an unexplained scanner stall. */
-  get activeJobs() {
-    const now = performance.now();
-    return this.activeMeta.flatMap((meta, slot) => meta ? [{ ...meta, slot, ageMs: Math.max(0, now - meta.startedAt) }] : []);
-  }
-  /** Worker slots that can accept a job right now. A newly created/replacement
-   * worker remains unavailable until worker.js emits its id:-1 WASM-ready signal.
-   * This prevents a cold worker from spending its first job deadline compiling
-   * the decoder and then being recycled into another cold worker. */
-  get freeSlots() {
-    const slots = [];
-    for (let slot = 0; slot < this.workers.length; slot++) {
-      if (this.ready[slot] && !this.busy[slot]) slots.push(slot);
-    }
-    return slots;
-  }
   submitAtSlot(slot, message, transfer) {
-    if (slot < 0 || slot >= this.workers.length || !this.ready[slot] || this.busy[slot]) return false;
-    const id = message.id;
-    this.busy[slot] = true;
-    this.activeIds[slot] = typeof id === "number" ? id : void 0;
-    this.activeFull[slot] = Boolean(message.full);
-    const startedAt = performance.now();
-    const timeoutMs = workerJobTimeout(message);
-    const recordIndex = this.metaRecordNext[slot];
-    this.metaRecordNext[slot] = recordIndex ^ 1;
-    const meta = this.metaRecords[slot][recordIndex];
-    meta.id = typeof id === "number" ? id : void 0;
-    meta.kind = message.jobKind ?? (message.full ? "full" : "tracked");
-    meta.full = Boolean(message.full);
-    meta.tracks = Number(message.trackCount ?? message.tracks?.length ?? 0);
-    meta.pixels = Math.max(0, Number(message.w) || 0) * Math.max(0, Number(message.h) || 0);
-    meta.sourceSequence = typeof message.sourceSequence === "number" ? message.sourceSequence : void 0;
-    meta.opticsEpoch = typeof message.opticsEpoch === "number" ? message.opticsEpoch : void 0;
-    meta.startedAt = startedAt;
-    meta.timeoutMs = timeoutMs;
-    meta.deadlineAt = startedAt + timeoutMs;
-    this.activeMeta[slot] = meta;
-    try {
-      if (message && typeof message === "object") message.sentAt = startedAt;
-      transfer = prepareTrackedBrowserY8(message, transfer);
-      this.workers[slot].postMessage(message, transfer);
-      return true;
-    } catch (error) {
-      const full = this.activeFull[slot] ?? false;
-      this.busy[slot] = false;
-      this.activeIds[slot] = void 0;
-      this.activeFull[slot] = false;
-      this.activeMeta[slot] = null;
-      if (typeof id === "number") {
-        const message = error instanceof Error ? error.message : "Could not send frame to decode worker";
-        this.onCompleted?.(id, this.failureCompletion(slot, full, 0, message));
-      }
+    if (slot < 0 || slot >= this.workers.length || this.ready?.[slot] !== true || this.busy[slot]) {
+      closeMessageFrame(message);
       return false;
     }
-  }
-  /** Submit to a specific free worker. This is intentionally strict: callers
-   * requesting affinity would rather drop a disposable camera frame than
-   * destroy another worker's warm decoder geometry cache. */
-  submitTo(slot, message, transfer) {
-    return Number.isInteger(slot) && this.submitAtSlot(slot, message, transfer);
-  }
-  /** Hand a frame to any warm free worker. False when every warm worker is busy
-   * (or replacements are still initializing); callers drop the disposable frame
-   * rather than queueing stale camera work. */
-  submit(message, transfer) {
-    for (let slot = 0; slot < this.workers.length; slot++) {
-      if (this.ready[slot] && !this.busy[slot]) return this.submitAtSlot(slot, message, transfer);
+
+    const cameraLive = liveReceiveCamera();
+    const native = nativeFrame(message?.videoFrame);
+    const worker = this.workers?.[slot];
+    const fullAcquisition = Boolean(cameraLive && message?.full);
+    const acquisitionConcurrency = this.workers.length >= 4 ? 2 : 1;
+    if (fullAcquisition && this.activeFullCount >= acquisitionConcurrency) {
+      closeMessageFrame(message);
+      return false;
     }
-    return false;
+    if (native && activeNativeCopies(this) >= MAX_CONCURRENT_NATIVE_COPIES) {
+      closeMessageFrame(message);
+      return false;
+    }
+
+    const candidate = message && !message.full && !message.strictHotPath;
+    const live = Boolean(candidate && cameraLive);
+    applyTimeoutBackpressure(message, live);
+    if (live && !message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
+        (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
+      const rgba = message.buf;
+      const width = Math.trunc(Number(message.w) || 0);
+      const height = Math.trunc(Number(message.h) || 0);
+      if (width > 0 && height > 0 && rgba.byteLength >= width * height * 4) {
+        message.buf = undefined;
+        message.videoFrame = rgba;
+        message.__airgapperWorkerLumaFromRgba = true;
+        message.pixelFormat = "rgba";
+        message.payloadBytes = width * height;
+        message.guidedDecode = true;
+        transfer = addTransfer(transfer, rgba);
+      }
+    }
+    stripIdentityOutputMap(message);
+    keepTrackedCameraOnGuided(message, live);
+    capDenseRepairMask(message, live);
+    transfer = attachPackedResultScratch(message, transfer);
+    transfer = packTracks(message, transfer);
+
+    const accepted = super.submitAtSlot(slot, message, transfer);
+    if (!accepted) {
+      recycleUnsentBuffers(message);
+      closeMessageFrame(message);
+      return false;
+    }
+
+    const meta = this.activeMeta?.[slot];
+    if (meta && meta.id === message.id) {
+      meta.__airgapperPreflight = false;
+      if (native) {
+        meta.__airgapperNativeFrameCopy = true;
+        meta.__airgapperCopyComplete = false;
+        if (worker?.__airgapperCameraCopyWarm) {
+          meta.deadlineAt = Math.min(meta.deadlineAt, meta.startedAt + copyStageTimeout(meta));
+        }
+      }
+    }
+    return true;
   }
 }
-export {
-  DecodeWorkerPool
-};
+
+if (typeof window === "object") {
+  window.airgapperTrackedTimeoutState = () => ({
+    count: trackedTimeoutCount,
+    decode: trackedDecodeTimeoutCount,
+    preflight: trackedPreflightTimeoutCount,
+    pressure: trackedTimeoutPressure
+  });
+}
+
+// Decode workers use worker-camera.js so native VideoFrame copy completion can
+// release camera-buffer pressure before the decoder's normal deadline begins.
+const NativeWorker = globalThis.Worker;
+if (typeof NativeWorker === "function" && !NativeWorker.__airgapperDecodeWorkerGuard) {
+  const rewriteWorkerUrl = (input) => {
+    try {
+      const url = input instanceof URL ? new URL(input.href) : new URL(String(input), location.href);
+      if (url.pathname.endsWith("/receive/worker.js")) {
+        url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-camera.js";
+      }
+      return url;
+    } catch {
+      return input;
+    }
+  };
+  function AirGapperWorker(url, options) {
+    return new NativeWorker(rewriteWorkerUrl(url), options);
+  }
+  AirGapperWorker.prototype = NativeWorker.prototype;
+  try { Object.setPrototypeOf(AirGapperWorker, NativeWorker); } catch {}
+  Object.defineProperty(AirGapperWorker, "__airgapperDecodeWorkerGuard", { value: true });
+  try { globalThis.Worker = AirGapperWorker; } catch {}
+}
+
+export { DecodeWorkerPool };
