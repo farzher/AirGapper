@@ -1,7 +1,7 @@
 import { GridLattice } from "./grid-lattice.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
-const PROBE_FADE_MS = Object.freeze({ success: 360, sighting: 680, miss: 520 });
+const PROBE_FADE_MS = Object.freeze({ success: 420, sighting: 720, miss: 560 });
 const JOB_TTL_MS = 4000;
 const DRAW_INTERVAL_MS = 50;
 
@@ -206,22 +206,91 @@ function pixelsPerModule(value) {
   return median(sizes);
 }
 
-function pathQuad(quad, scale, offX, offY) {
-  const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+function fallbackPresentation() {
+  const width = Number(video?.videoWidth) || 0;
+  const height = Number(video?.videoHeight) || 0;
+  return width > 0 && height > 0
+    ? { width, height, mapPoint(point) { return { x: point.x, y: point.y }; } }
+    : null;
+}
+
+function presentation() {
+  return globalThis.__airgapperOverlayPresentation?.() || fallbackPresentation();
+}
+
+function mapQuad(quad, view) {
+  if (!validQuad(quad) || !view?.mapPoint) return null;
+  const mapped = {
+    topLeft: view.mapPoint(quad.topLeft),
+    topRight: view.mapPoint(quad.topRight),
+    bottomRight: view.mapPoint(quad.bottomRight),
+    bottomLeft: view.mapPoint(quad.bottomLeft)
+  };
+  return validQuad(mapped) ? mapped : null;
+}
+
+function canvasPoints(quad, scale, offX, offY) {
+  return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].map((point) => ({
+    x: offX + point.x * scale,
+    y: offY + point.y * scale
+  }));
+}
+
+function pathPoints(points) {
   ctx.beginPath();
   points.forEach((point, index) => {
-    const x = offX + point.x * scale;
-    const y = offY + point.y * scale;
-    if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    if (index) ctx.lineTo(point.x, point.y);
+    else ctx.moveTo(point.x, point.y);
   });
   ctx.closePath();
 }
 
-function outerQuad(value) {
+function fillMappedQuad(quad, scale, offX, offY, fillStyle) {
+  const points = canvasPoints(quad, scale, offX, offY);
+  pathPoints(points);
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+}
+
+function strokeExactCornerOutline(quad, scale, offX, offY, strokeStyle, lineWidth) {
+  const points = canvasPoints(quad, scale, offX, offY);
+  const fraction = 0.23;
+  ctx.save();
+  // Clip the centered stroke to the QR polygon so the visible outline never
+  // grows outside the actual predicted QR boundary.
+  pathPoints(points);
+  ctx.clip();
+  ctx.beginPath();
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index];
+    const previous = points[(index + points.length - 1) % points.length];
+    const next = points[(index + 1) % points.length];
+    const from = {
+      x: point.x + (previous.x - point.x) * fraction,
+      y: point.y + (previous.y - point.y) * fraction
+    };
+    const to = {
+      x: point.x + (next.x - point.x) * fraction,
+      y: point.y + (next.y - point.y) * fraction
+    };
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.lineTo(to.x, to.y);
+  }
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke();
+  ctx.restore();
+}
+
+function outerQuad(value, view) {
   const points = [];
   for (const slot of value?.slots || []) {
-    if (!validQuad(slot?.quad)) continue;
-    points.push(slot.quad.topLeft, slot.quad.topRight, slot.quad.bottomRight, slot.quad.bottomLeft);
+    const mapped = mapQuad(slot?.quad, view);
+    if (!mapped) continue;
+    points.push(mapped.topLeft, mapped.topRight, mapped.bottomRight, mapped.bottomLeft);
   }
   if (points.length < 4) return null;
   const by = (score, preferMin) => points.reduce((best, point) => {
@@ -261,9 +330,9 @@ function drawHud(at) {
   if (!ctx || !preview || !video || !document.body.classList.contains("receive-mode") || document.hidden) return;
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
-  const decoderSize = globalThis.__airgapperDecoderDisplaySize?.();
-  const vw = Number(decoderSize?.width) || video.videoWidth;
-  const vh = Number(decoderSize?.height) || video.videoHeight;
+  const view = presentation();
+  const vw = Number(view?.width) || 0;
+  const vh = Number(view?.height) || 0;
   if (!cw || !ch || !vw || !vh) return;
   const dpr = window.devicePixelRatio || 1;
   const width = Math.round(cw * dpr);
@@ -286,10 +355,11 @@ function drawHud(at) {
   drawPixelsPerModule(pixelsPerModule(value), width, dpr);
 
   if (value.distributedFit) {
-    const wall = outerQuad(value);
+    const wall = outerQuad(value, view);
     if (wall) {
       ctx.save();
-      pathQuad(wall, scale, offX, offY);
+      const points = canvasPoints(wall, scale, offX, offY);
+      pathPoints(points);
       ctx.fillStyle = "rgba(184, 132, 255, 0.045)";
       ctx.strokeStyle = "rgba(184, 132, 255, 0.68)";
       ctx.lineWidth = Math.max(1.5, 1.55 * dpr);
@@ -304,21 +374,30 @@ function drawHud(at) {
     const kind = activity?.kind || "miss";
     const fade = PROBE_FADE_MS[kind] || PROBE_FADE_MS.miss;
     const age = at - (activity?.at ?? -Infinity);
-    if (age < 0 || age >= fade || !validQuad(slot.quad)) continue;
+    const mapped = mapQuad(slot.quad, view);
+    if (age < 0 || age >= fade || !mapped) continue;
     const t = 1 - age / fade;
-    const palette = kind === "success"
-      ? { fill: [41, 197, 105], stroke: [38, 211, 111] }
-      : kind === "sighting"
-        ? { fill: [255, 177, 43], stroke: [255, 180, 45] }
-        : { fill: [255, 48, 64], stroke: [255, 56, 72] };
-    ctx.save();
-    pathQuad(slot.quad, scale, offX, offY);
-    ctx.fillStyle = `rgba(${palette.fill.join(",")}, ${0.025 + 0.085 * t})`;
-    ctx.strokeStyle = `rgba(${palette.stroke.join(",")}, ${0.14 + 0.48 * t})`;
-    ctx.lineWidth = Math.max(1, (1 + 0.5 * t) * dpr);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
+
+    if (kind === "success") {
+      // Success is unmistakable but quiet: the exact QR polygon briefly fills
+      // with translucent green instead of growing an outline around it.
+      ctx.save();
+      fillMappedQuad(mapped, scale, offX, offY, `rgba(38, 211, 111, ${0.07 + 0.19 * t})`);
+      ctx.restore();
+      continue;
+    }
+
+    const amber = kind === "sighting";
+    const color = amber ? [255, 180, 45] : [255, 56, 72];
+    const alpha = amber ? 0.20 + 0.58 * t : 0.18 + 0.50 * t;
+    strokeExactCornerOutline(
+      mapped,
+      scale,
+      offX,
+      offY,
+      `rgba(${color.join(",")}, ${alpha})`,
+      Math.max(1, (1.05 + 0.55 * t) * dpr)
+    );
   }
 }
 
