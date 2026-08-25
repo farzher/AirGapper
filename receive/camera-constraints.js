@@ -86,16 +86,46 @@ function exposureRequestKey(set) {
   return EXPOSURE_KEYS.map((key) => `${key}:${set[key] === void 0 ? "" : set[key]}`).join("|");
 }
 
+function exposureTargetDiffers(set, actual, caps) {
+  return !closeSetting(actual.exposureTime, set.exposureTime, caps.exposureTime) ||
+    !closeSetting(actual.iso, set.iso, caps.iso) ||
+    !closeSetting(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
+}
+
+function reportStableSettledExposure(track, settled, set, actual, caps) {
+  if (settled.reported || !exposureTargetDiffers(set, actual, caps)) return;
+  settled.reported = true;
+  if (typeof window !== "object" || typeof CustomEvent !== "function") return;
+  const detail = {
+    track,
+    requested: {
+      exposureMode: set.exposureMode,
+      exposureTime: set.exposureTime,
+      iso: set.iso,
+      exposureCompensation: set.exposureCompensation
+    },
+    actual: {
+      exposureMode: actual.exposureMode,
+      exposureTime: actual.exposureTime,
+      iso: actual.iso,
+      exposureCompensation: actual.exposureCompensation
+    }
+  };
+  queueMicrotask(() => window.dispatchEvent(new CustomEvent("airgapper:exposure-settled", { detail })));
+}
+
 function stableSettledExposure(track, set) {
   if (!track || !EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return false;
   const settled = settledExposure.get(track);
   if (!settled || settled.key !== exposureRequestKey(set)) return false;
   const actual = track.getSettings?.() ?? {};
   const caps = track.getCapabilities?.() ?? {};
-  return (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
+  const stable = (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
     closeSetting(actual.exposureTime, settled.actual.exposureTime, caps.exposureTime) &&
     closeSetting(actual.iso, settled.actual.iso, caps.iso) &&
     closeSetting(actual.exposureCompensation, settled.actual.exposureCompensation, caps.exposureCompensation);
+  if (stable) reportStableSettledExposure(track, settled, set, actual, caps);
+  return stable;
 }
 
 function rememberSettledExposure(track, set) {
@@ -103,6 +133,7 @@ function rememberSettledExposure(track, set) {
   const actual = track.getSettings?.() ?? {};
   settledExposure.set(track, {
     key: exposureRequestKey(set),
+    reported: false,
     actual: {
       exposureMode: actual.exposureMode,
       exposureTime: actual.exposureTime,
