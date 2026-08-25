@@ -9,8 +9,11 @@ const anchor = document.getElementById("camera-exposure-control");
 
 let savedEv;
 try {
-  const value = Number(localStorage.getItem(STORAGE_KEY));
-  if (Number.isFinite(value)) savedEv = value;
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored !== null) {
+    const value = Number(stored);
+    if (Number.isFinite(value)) savedEv = value;
+  }
 } catch {}
 
 const control = document.createElement("div");
@@ -86,7 +89,7 @@ function syncControl(track = activeTrack()) {
   output.textContent = output.value;
 }
 
-async function applyCurrentEv(track = activeTrack()) {
+async function applyCurrentEv(track = activeTrack(), persist = false) {
   syncControl(track);
   const range = rangeFor(track);
   if (!track || track.readyState !== "live" || !range || slider.disabled) return false;
@@ -95,14 +98,16 @@ async function applyCurrentEv(track = activeTrack()) {
   slider.value = String(value);
   output.value = formatEv(value);
   output.textContent = output.value;
-  savedEv = value;
-  try { localStorage.setItem(STORAGE_KEY, String(value)); } catch {}
+  if (persist) {
+    savedEv = value;
+    try { localStorage.setItem(STORAGE_KEY, String(value)); } catch {}
+  }
   // Explicit user EV changes outrank Auto Optics' healthy-scan mutation lease.
-  // Automatic controller writes still go through the protected default path.
+  // Automatic/default controller writes still go through the protected path.
   const accepted = await applyAdvancedConstraint(
     track,
     { exposureCompensation: value },
-    { allowHealthyPerturbation: true }
+    { allowHealthyPerturbation: persist }
   );
   return generation === applyGeneration && accepted;
 }
@@ -112,15 +117,17 @@ function syncFreshCamera() {
   syncControl(track);
   if (!track || track.readyState !== "live" || !rangeFor(track) || manualExposureAvailable(track)) return;
 
-  // Devices without native shutter+ISO get a darker QR-specific AE bias.
-  void applyCurrentEv(track);
+  // Devices without native shutter+ISO get a darker QR-specific AE bias. Keep
+  // the app default separate from an explicit user preference so future tuning
+  // is not frozen into localStorage merely because the camera opened once.
+  void applyCurrentEv(track, false);
 }
 
 slider?.addEventListener("input", () => {
   output.value = formatEv(slider.value);
   output.textContent = output.value;
 });
-slider?.addEventListener("change", () => void applyCurrentEv());
+slider?.addEventListener("change", () => void applyCurrentEv(activeTrack(), true));
 
 autoToggle?.addEventListener("change", () => {
   syncControl();

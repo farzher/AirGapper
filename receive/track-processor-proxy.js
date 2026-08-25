@@ -85,8 +85,8 @@ if (typeof PresentedTrackProcessor === "function" && !PresentedTrackProcessor.__
 }
 
 // Native MediaStreamTrackProcessor stall recovery. The mobile worker-backed
-// processor already owns its own worker/error/snapshot lifecycle, so never wrap
-// that proxy a second time.
+// processor owns its own worker/error lifecycle and deliberately rejects a
+// stalled read so runtime.js can switch to rVFC. Never wrap that proxy again.
 const TRACK_PROCESSOR_STALL_MS = 900;
 const TRACK_PROCESSOR_WATCHDOG_MS = 200;
 
@@ -99,9 +99,7 @@ function abortError(message = "MediaStreamTrackProcessor stalled") {
 function installTrackProcessorWatchdog() {
   const NativeTrackProcessor = globalThis.MediaStreamTrackProcessor;
   if (typeof NativeTrackProcessor !== "function" || NativeTrackProcessor.__airgapperStallGuard) return;
-
-  const proxyPrototype = NativeTrackProcessor.prototype;
-  if (typeof proxyPrototype?._onMessage === "function" && typeof proxyPrototype?._requestSnapshot === "function") return;
+  if (NativeTrackProcessor.__airgapperWorkerProxy) return;
 
   class GuardedTrackProcessor {
     constructor(options) {
@@ -158,8 +156,7 @@ function installTrackProcessorWatchdog() {
       try { old.releaseLock(); } catch {}
       if (this.closed) return;
       this.open();
-      this.pending = false;
-      this.pendingSince = 0;
+      this.pendingSince = performance.now();
     }
 
     getReader() {

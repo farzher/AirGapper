@@ -9,7 +9,6 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
   const WORKER_PULL_STALL_MS = 220;
-  const WORKER_STALLS_BEFORE_SNAPSHOT_ONLY = 3;
   let prewarmedWorker = null;
 
   function createProcessorWorker() {
@@ -47,26 +46,19 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       this._worker = takeProcessorWorker();
       this._workerHealthy = false;
       this._workerStallTimer = 0;
-      this._workerStallCount = 0;
       this._readerTaken = false;
       this._closed = false;
       this._terminalError = null;
       this._pendingResolve = null;
       this._pendingReject = null;
       this._readGeneration = 0;
-      this._snapshotCallbackId = 0;
       this._totalFrames = 0;
       this._discardedFrames = 0;
       this._terminateTimer = 0;
-      this._video = typeof document !== "undefined" ? document.getElementById("video") : null;
-      this._snapshotEnabled = typeof globalThis.VideoFrame === "function" &&
-        typeof this._video?.requestVideoFrameCallback === "function";
 
       this._worker.onmessage = (event) => this._onMessage(event.data ?? {});
       this._worker.onerror = (event) => {
-        const error = new Error(event.message || "Worker MediaStreamTrackProcessor failed");
-        if (this._snapshotEnabled) this._useSnapshotsOnly(error);
-        else this._fail(error);
+        this._fail(new Error(event.message || "Worker MediaStreamTrackProcessor failed"));
       };
 
       const settings = track.getSettings?.() ?? {};
@@ -85,8 +77,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         }, [workerTrack]);
       } catch (error) {
         workerTrack?.stop?.();
-        if (this._snapshotEnabled) this._useSnapshotsOnly(error);
-        else this._fail(error instanceof Error ? error : new Error(String(error)));
+        this._fail(error instanceof Error ? error : new Error(String(error)));
       }
 
       this.readable = {
@@ -116,32 +107,23 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
             const token = ++this._readGeneration;
             this._pendingResolve = resolve;
             this._pendingReject = reject;
-
-            let workerRequested = false;
-            if (this._worker) {
-              try {
-                this._worker.postMessage("pull");
-                workerRequested = true;
-              } catch (error) {
-                if (this._snapshotEnabled) this._useSnapshotsOnly(error);
-                else {
-                  this._clearPending(token);
-                  reject(error);
-                  return;
-                }
-              }
-            }
-
-            if (this._snapshotEnabled && (!workerRequested || !this._workerHealthy)) {
-              this._requestSnapshot(token);
-            } else if (workerRequested && this._workerHealthy) {
-              // A worker that succeeded once is not healthy forever. If it stops
-              // answering while <video> keeps advancing, race in a fresh-video
-              // snapshot instead of leaving this read pending indefinitely.
-              this._armWorkerStallFallback(token);
-            } else if (!workerRequested && !this._snapshotEnabled) {
+            const worker = this._worker;
+            if (!worker) {
+              const error = new Error("Worker camera source unavailable");
               this._clearPending(token);
-              reject(new Error("No usable video-frame source"));
+              reject(error);
+              return;
+            }
+            try {
+              worker.postMessage("pull");
+              // Initial startup already has runtime.js' 250 ms watchdog. Once a
+              // worker has actually delivered a frame, a missing pull response is
+              // a true mid-session stall and should immediately reject this read.
+              // pumpTrackFrames() will then switch to the normal rVFC path.
+              if (this._workerHealthy) this._armWorkerStallFailure(token);
+            } catch (error) {
+              this._clearPending(token);
+              reject(error instanceof Error ? error : new Error(String(error)));
             }
           });
         },
@@ -159,72 +141,27 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       };
     }
 
-    _clearWorkerStallFallback() {
+    _clearWorkerStallFailure() {
       if (!this._workerStallTimer) return;
       clearTimeout(this._workerStallTimer);
       this._workerStallTimer = 0;
     }
 
-    _armWorkerStallFallback(token) {
-      this._clearWorkerStallFallback();
+    _armWorkerStallFailure(token) {
+      this._clearWorkerStallFailure();
       this._workerStallTimer = setTimeout(() => {
         this._workerStallTimer = 0;
         if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
         this._workerHealthy = false;
-        this._workerStallCount++;
-        const error = new Error("Worker MediaStreamTrackProcessor stalled");
-        if (this._snapshotEnabled) {
-          if (this._workerStallCount >= WORKER_STALLS_BEFORE_SNAPSHOT_ONLY) this._useSnapshotsOnly(error);
-          else this._requestSnapshot(token);
-        } else {
-          this._fail(error);
-        }
+        this._fail(new Error("Worker MediaStreamTrackProcessor stalled"));
       }, WORKER_PULL_STALL_MS);
     }
 
     _clearPending(token = this._readGeneration) {
       if (token !== this._readGeneration) return;
-      this._clearWorkerStallFallback();
+      this._clearWorkerStallFailure();
       this._pendingResolve = null;
       this._pendingReject = null;
-    }
-
-    _cancelSnapshot() {
-      if (!this._snapshotCallbackId) return;
-      try { this._video?.cancelVideoFrameCallback?.(this._snapshotCallbackId); } catch {}
-      this._snapshotCallbackId = 0;
-    }
-
-    _requestSnapshot(token) {
-      if (!this._snapshotEnabled || token !== this._readGeneration ||
-          !this._pendingResolve || this._snapshotCallbackId) return;
-      const video = this._video;
-      try {
-        this._snapshotCallbackId = video.requestVideoFrameCallback((callbackTime, metadata = {}) => {
-          this._snapshotCallbackId = 0;
-          if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
-          let frame;
-          try {
-            const mediaTime = Number(metadata.mediaTime);
-            const timestamp = Number.isFinite(mediaTime)
-              ? Math.max(0, Math.round(mediaTime * 1e6))
-              : Math.max(0, Math.round(Number(callbackTime || performance.now()) * 1e3));
-            frame = new globalThis.VideoFrame(video, { timestamp });
-          } catch (error) {
-            this._snapshotEnabled = false;
-            if (!this._worker) this._fail(error instanceof Error ? error : new Error(String(error)));
-            return;
-          }
-          const resolve = this._pendingResolve;
-          this._clearPending(token);
-          this._totalFrames++;
-          resolve({ value: frame, done: false });
-        });
-      } catch (error) {
-        this._snapshotCallbackId = 0;
-        this._snapshotEnabled = false;
-        if (!this._worker) this._fail(error instanceof Error ? error : new Error(String(error)));
-      }
     }
 
     _updateCounters(message) {
@@ -237,11 +174,8 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     _onMessage(message) {
       this._updateCounters(message);
       if (message.type === "frame") {
-        const timely = Boolean(this._workerStallTimer);
-        this._clearWorkerStallFallback();
-        if (timely) this._workerStallCount = 0;
+        this._clearWorkerStallFailure();
         this._workerHealthy = true;
-        this._cancelSnapshot();
         const frame = message.frame;
         const resolve = this._pendingResolve;
         if (this._closed || this._terminalError || !resolve) {
@@ -254,46 +188,29 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         return;
       }
       if (message.type === "unsupported") {
-        const error = new Error("MediaStreamTrackProcessor is unavailable in this worker");
-        if (this._snapshotEnabled) this._useSnapshotsOnly(error);
-        else this._fail(error);
+        this._fail(new Error("MediaStreamTrackProcessor is unavailable in this worker"));
         return;
       }
       if (message.type === "error") {
-        const error = new Error(message.message || "Worker MediaStreamTrackProcessor failed");
-        if (this._snapshotEnabled) this._useSnapshotsOnly(error);
-        else this._fail(error);
+        this._fail(new Error(message.message || "Worker MediaStreamTrackProcessor failed"));
         return;
       }
       if (message.type === "stopped") {
-        if (!this._worker && this._snapshotEnabled && !this._closed) return;
-        this._closed = true;
-        this._clearWorkerStallFallback();
-        const resolve = this._pendingResolve;
-        this._pendingResolve = null;
-        this._pendingReject = null;
-        if (resolve) resolve({ value: undefined, done: true });
-        this._terminateNow();
+        if (this._closed) {
+          this._terminateNow();
+          return;
+        }
+        // A graceful done:true here would make runtime.js leave its pump loop
+        // without starting rVFC. Treat an unsolicited stop as a source failure so
+        // the outer frame pump keeps the live preview/scanner moving.
+        this._fail(new Error("Worker MediaStreamTrackProcessor stopped unexpectedly"));
       }
-    }
-
-    _useSnapshotsOnly(_reason) {
-      this._clearWorkerStallFallback();
-      const worker = this._worker;
-      this._worker = null;
-      this._workerHealthy = false;
-      if (worker) {
-        try { worker.postMessage({ type: "stop" }); } catch {}
-        try { worker.terminate(); } catch {}
-      }
-      if (this._pendingResolve) this._requestSnapshot(this._readGeneration);
     }
 
     _fail(error) {
       if (this._terminalError || this._closed) return;
       this._terminalError = error;
-      this._clearWorkerStallFallback();
-      this._cancelSnapshot();
+      this._clearWorkerStallFailure();
       const reject = this._pendingReject;
       this._pendingResolve = null;
       this._pendingReject = null;
@@ -305,8 +222,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       if (this._closed) return Promise.resolve();
       this._closed = true;
       ++this._readGeneration;
-      this._clearWorkerStallFallback();
-      this._cancelSnapshot();
+      this._clearWorkerStallFailure();
       const resolve = this._pendingResolve;
       const reject = this._pendingReject;
       this._pendingResolve = null;
@@ -330,8 +246,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     }
 
     _terminateNow() {
-      this._clearWorkerStallFallback();
-      this._cancelSnapshot();
+      this._clearWorkerStallFailure();
       const worker = this._worker;
       this._worker = null;
       if (this._terminateTimer) {
