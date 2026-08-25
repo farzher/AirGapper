@@ -18,7 +18,7 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      - name: Patch receiver control plane
+      - name: Patch receiver owners
         shell: bash
         run: |
           set -euo pipefail
@@ -26,8 +26,8 @@ jobs:
           from pathlib import Path
           import re
 
-          path = Path("receive/runtime.js")
-          source = path.read_text()
+          runtime = Path("receive/runtime.js")
+          source = runtime.read_text()
 
           def replace_once(old, new, label):
               global source
@@ -46,6 +46,12 @@ jobs:
                   raise SystemExit(f"{label}: target not found after marker")
               source = source[:at] + new + source[at + len(old):]
 
+          def regex_once(pattern, replacement, label, flags=re.S):
+              global source
+              source, count = re.subn(pattern, replacement, source, count=1, flags=flags)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+
           replace_once(
           '''import {
             acquisitionRacePolicy,
@@ -56,11 +62,24 @@ jobs:
             acquisitionRacePolicy,
             automaticOpticsAcquisitionSeed,
             automaticOpticsHasAnotherAcquisitionSeed,
+            automaticOpticsHoldEligible,
             automaticOpticsHoldThreshold,
             legacyTemporalRiskWeight,
             lockedRecoveryPolicy
           } from "./performance-policy.js";''',
           "performance policy imports")
+
+          replace_once(
+          '''const AUTO_QR_EV_BIAS = -0.75;
+          const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);''',
+          '''const AUTO_QR_EV_BIAS = -0.75;''',
+          "obsolete fixed QR light scale")
+          replace_once(
+          '''const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
+          const AUTO_OPTICS_MAX_SHORT_EXPOSURE = 35; // 3.5 ms; exposureTime uses 0.1 ms units
+          // After the motion-safe shutter handoff, tune gain against the decoder itself.''',
+          '''// After the motion-safe shutter handoff, tune gain against the decoder itself.''',
+          "obsolete fixed short-shutter constants")
 
           replace_once(
           '''let autoOpticsAeRescueStep = 0;
@@ -78,7 +97,6 @@ jobs:
             autoOpticsSeedAttempt = 0;
             autoOpticsAeBias = 0;''',
           "auto optics runtime reset")
-
           replace_after(
           "async function primeAutomaticQrOpticsStartup(track) {",
           '''    autoOpticsAeRescueStep = 0;
@@ -101,39 +119,39 @@ jobs:
           '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
             const aeProduct = baseline.exposure * baseline.iso;
             const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
-            // Keep acquisition motion-safe while trying a tiny QR-specific light
-            // ladder before giving photographic AE control back.
+            // Acquisition can explore both sides of the meter, but every seed
+            // keeps a short shutter so rolling-shutter safety is never traded away.
             const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);
             let exposure = quantizeCameraRange(
               Math.min(exposureRange.max, seedPolicy.maxExposure, 1e4 / fps * seedPolicy.frameFraction),
               exposureRange
             );''',
           "short shutter seed policy")
-
           replace_once(
           '''  return { exposure, iso, aeProduct, targetProduct };
           }''',
           '''  return { exposure, iso, aeProduct, targetProduct, seedPolicy };
           }''',
           "short shutter seed metadata")
-
           replace_once(
           '''  autoOpticsTuneSummary = `${reason} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;''',
           '''  autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;''',
           "short shutter diagnostics")
 
-          pattern = re.compile(r'''async function abandonAutomaticShortSeed\(track, reason = "fast-dark seed produced no QR"\) \{.*?\n\}\n(?=async function abandonAutomaticOpticsStartupMemory)''', re.S)
-          replacement = '''async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
+          regex_once(
+          r'''async function abandonAutomaticShortSeed\(track, reason = "fast-dark seed produced no QR"\) \{.*?\n\}\n(?=async function abandonAutomaticOpticsStartupMemory)''',
+          '''async function advanceAutomaticOpticsAcquisitionSeed(track, reason) {
+            if (!automaticOpticsSessionAlive(track) || !autoOpticsAeBaseline ||
+                !automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt)) return false;
+            autoOpticsSeedAttempt++;
+            const next = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
+            return applyAutomaticShortSeed(track, autoOpticsAeBaseline, `${reason} · trying ${next.label}`);
+          }
+          async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
             if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
             autoOpticsMutationRunning = true;
             try {
-              // Acquisition may spend optics. Exhaust the bounded QR-specific
-              // short-shutter ladder before returning control to photographic AE.
-              if (automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt) && autoOpticsAeBaseline) {
-                autoOpticsSeedAttempt++;
-                const next = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
-                if (await applyAutomaticShortSeed(track, autoOpticsAeBaseline, `${reason} · trying ${next.label}`)) return;
-              }
+              if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;
 
               const baseline = await readAutomaticAeBaseline(track);
               if (!automaticOpticsSessionAlive(track)) return;
@@ -141,26 +159,141 @@ jobs:
               autoOpticsAeBaseline = baseline;
               autoOpticsSeedAttempt = 0;
               autoOpticsRuntimeState = "ae";
+              autoOpticsControllerState = "ACQUIRE";
               autoOpticsMemoryBootAt = 0;
               autoOpticsMemoryBoot = void 0;
               autoOpticsLockSince = 0;
               autoOpticsAcquisitionSince = now;
-              autoOpticsRetryAt = 0;
+              // All bounded QR-specific seeds failed. Leave hardware AE in
+              // charge instead of repeatedly freezing another unproven value.
+              autoOpticsRetryAt = Infinity;
               autoOpticsRescueRetryAt = now + 300;
               autoOpticsHoldSample = void 0;
               autoOpticsHoldCollapseSince = 0;
               autoOpticsHeldYield = 0;
-              autoOpticsTuneSummary = `${reason} · QR seed ladder exhausted · neutral AE rescue`;
-              focusController.adoptAutomaticCameraState("QR-specific short-shutter acquisition exhausted; hardware AE rescue enabled");
+              autoOpticsTuneSummary = `${reason} · QR seed ladder exhausted · hardware AE fallback`;
+              focusController.adoptAutomaticCameraState("QR-specific short-shutter acquisition exhausted; hardware AE remains in control");
             } finally {
               autoOpticsMutationRunning = false;
             }
           }
-          '''
-          source, count = pattern.subn(replacement, source, count=1)
-          if count != 1:
-              raise SystemExit(f"bounded auto optics acquisition ladder: expected exactly one match, found {count}")
+          ''',
+          "bounded auto optics acquisition ladder")
 
+          # A remembered setting is only a prior. One lucky decode must not turn
+          # stale lighting into a permanent HOLD; validate it through the same
+          # cohort measurement as every other candidate.
+          regex_once(
+          r'''(if \(autoOpticsRuntimeState === "memory"\) \{.*?const recentDecode = .*?;\n)    if \(gridLattice\.locked && recentDecode\) \{.*?\n    \}\n(    if \(!recentDecode)''',
+          r'''\1    if (gridLattice.locked && recentDecode) {
+              autoOpticsTuneSummary = "remembered winner reacquired · validating live QR cohort";
+              autoOpticsLockSince = now - AUTO_OPTICS_LOCK_SETTLE_MS;
+              autoOpticsRetryAt = 0;
+              void settleAutomaticQrOptics(track, now);
+              return;
+            }
+\2''',
+          "memory winner live validation")
+
+          # Capture whether a memory prior is being validated so a failed live
+          # measurement can invalidate it instead of retrying it next launch.
+          replace_once(
+          '''async function settleAutomaticQrOptics(track, now) {
+            if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;''',
+          '''async function settleAutomaticQrOptics(track, now) {
+            if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
+            const startedFromMemory = autoOpticsRuntimeState === "memory";''',
+          "remember auto optics source")
+
+          # No cohort is no evidence. Never manufacture a 50% winner from it.
+          regex_once(
+          r'''    const cohortSize = beginAutomaticOpticsMeasurementCohort\(\);\n    if \(!cohortSize\) \{.*?\n      return;\n    \}\n\n    const baseline = await sampleAutomaticOpticsQuality''',
+          '''    const cohortSize = beginAutomaticOpticsMeasurementCohort();
+            if (!cohortSize) {
+              autoOpticsMeasurementSlots = void 0;
+              const fallback = await readAutomaticAeBaseline(track);
+              if (!automaticOpticsSessionAlive(track)) return;
+              autoOpticsAeBaseline = fallback;
+              autoOpticsRuntimeState = "ae";
+              autoOpticsControllerState = "ACQUIRE";
+              autoOpticsLockSince = 0;
+              autoOpticsAcquisitionSince = receiverNow();
+              autoOpticsRetryAt = Infinity;
+              autoOpticsHeldYield = 0;
+              autoOpticsHoldSample = void 0;
+              autoOpticsTuneSummary = "QR geometry not measurable · hardware AE fallback; no HOLD";
+              focusController.adoptAutomaticCameraState("no measurable QR cohort; unproven manual exposure was not held");
+              return;
+            }
+
+            const baseline = await sampleAutomaticOpticsQuality''',
+          "no-cohort false hold")
+
+          # An unstable/incomplete measurement also cannot become a synthetic
+          # 35% HOLD. Fall back without declaring a winner.
+          regex_once(
+          r'''    if \(!baseline \|\| baseline\.unstable \|\| !baseline\.valid\) \{.*?\n      return;\n    \}''',
+          '''    if (!baseline || baseline.unstable || !baseline.valid) {
+              autoOpticsMeasurementSlots = void 0;
+              const fallback = await readAutomaticAeBaseline(track);
+              if (!automaticOpticsSessionAlive(track)) return;
+              autoOpticsAeBaseline = fallback;
+              autoOpticsRuntimeState = "ae";
+              autoOpticsControllerState = "ACQUIRE";
+              autoOpticsLockSince = 0;
+              autoOpticsAcquisitionSince = receiverNow();
+              autoOpticsRetryAt = Infinity;
+              autoOpticsHeldYield = 0;
+              autoOpticsHoldSample = void 0;
+              autoOpticsTuneSummary = "QR optics measurement inconclusive · hardware AE fallback; no HOLD";
+              focusController.adoptAutomaticCameraState("QR optics evidence was incomplete; unproven manual exposure was not held");
+              return;
+            }''',
+          "invalid baseline false hold")
+
+          # Before applying the winner, require real yield + spatial breadth.
+          # If the measured bracket is poor, continue the acquisition ladder;
+          # after the ladder is exhausted, leave hardware AE alone rather than
+          # entering the old recalibration/HOLD oscillation.
+          replace_once(
+          '''    const winnerExposure = quantizeCameraRange(best.exposure || frozenExposure, exposureRange);
+            const winnerIso = quantizeCameraRange(best.iso || frozenIso, isoRange);
+            await applyCameraConstraint(track, {''',
+          '''    if (!automaticOpticsHoldEligible(best)) {
+              const measuredYield = Math.max(0, Number(best.yieldRate) || 0);
+              const measuredBreadth = Math.max(0, Number(best.breadth) || 0);
+              const reason = `QR bracket unproven ${(measuredYield * 100).toFixed(0)}% · breadth ${(measuredBreadth * 100).toFixed(0)}%`;
+              if (startedFromMemory) forgetAutomaticOptics(track);
+              autoOpticsMeasurementSlots = void 0;
+              if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;
+              const fallback = await readAutomaticAeBaseline(track);
+              if (!automaticOpticsSessionAlive(track)) return;
+              autoOpticsAeBaseline = fallback;
+              autoOpticsRuntimeState = "ae";
+              autoOpticsControllerState = "ACQUIRE";
+              autoOpticsLockSince = 0;
+              autoOpticsAcquisitionSince = receiverNow();
+              autoOpticsRetryAt = Infinity;
+              autoOpticsHeldYield = 0;
+              autoOpticsHoldSample = void 0;
+              autoOpticsHoldCollapseSince = 0;
+              autoOpticsTuneSummary = `${reason} · hardware AE fallback; no HOLD`;
+              focusController.adoptAutomaticCameraState("no QR-tested optics candidate met HOLD quality; hardware AE remains in control");
+              return;
+            }
+
+            const winnerExposure = quantizeCameraRange(best.exposure || frozenExposure, exposureRange);
+            const winnerIso = quantizeCameraRange(best.iso || frozenIso, isoRange);
+            await applyCameraConstraint(track, {''',
+          "evidence gate before HOLD")
+
+          replace_once(
+          '''    autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || Number(baseline.yieldRate) || 0.5);''',
+          '''    autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || 0);''',
+          "remove synthetic 50 percent hold")
+
+          # Recovery policy: a bad local slot never wakes global acquisition
+          # while valid payload is still arriving.
           replace_once(
           '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
                         const healed = gridLattice.dropSlotCorrection(slot);
@@ -181,8 +314,6 @@ jobs:
                       }''',
           '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
                         const healed = gridLattice.dropSlotCorrection(slot);
-                        // A miss streak is not proof that a local lens residual exists.
-                        // If there was nothing to remove, leave hot scheduling alone.
                         slotGeometryRetryAt[slot] = recoveryNow + 3000;
                         if (healed) {
                           resetSlotSchedulingHistory(slot, recoveryNow);
@@ -224,11 +355,9 @@ jobs:
               globalSilenceMs: GEOMETRY_PROBE_SILENCE_MS,
               hasCandidates: lockedGeometryCandidates.length > 0
             });
-            // Three tracked misses are evidence for local predicted-slot repair, not
-            // evidence that the wall vanished. Full-frame reacquisition is reserved
-            // for sustained payload silence so healthy locks keep the CPU hot path.''',
+            // Cold slots are a local known-grid repair signal. Only real payload
+            // silence can promote recovery to the generic whole-frame finder.''',
           "locked recovery policy wiring")
-
           replace_once(
           '''  const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
             ? geometryProbeDue || allLockedCandidatesCold
@@ -237,7 +366,6 @@ jobs:
             ? lockedRecovery.needsRecovery
             : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;''',
           "locked recovery scheduling")
-
           replace_once(
           '''  const globalRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
             (allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS);
@@ -260,28 +388,41 @@ jobs:
             geometryMotionNudges = 0;''',
           "receiver diagnostic reset")
 
-          path.write_text(source)
+          runtime.write_text(source)
+
+          version = Path("version.js")
+          version_source = version.read_text()
+          if 'APP_VERSION = "0.5.453"' not in version_source:
+              raise SystemExit("version source is not v0.5.453")
+          version.write_text(version_source.replace('APP_VERSION = "0.5.453"', 'APP_VERSION = "0.5.454"', 1))
           PY
 
-      - name: Verify convergence patch
+      - name: Verify convergence invariants
         shell: bash
         run: |
           set -euo pipefail
           node --input-type=module --check < receive/runtime.js
           node --input-type=module --check < receive/performance-policy.js
           node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
           python3 - <<'PY'
           from pathlib import Path
           s = Path("receive/runtime.js").read_text()
           heal = s.index("const healed = gridLattice.dropSlotCorrection(slot);")
           guard = s.index("if (healed) {", heal)
           reset = s.index("resetSlotSchedulingHistory(slot, recoveryNow);", heal)
-          assert heal < guard < reset, "slot scheduler reset is not guarded by real correction removal"
+          assert heal < guard < reset
           assert "lockedRecovery.globalRecovery" in s
           assert "lockedRecovery.localRecovery" in s
           assert "allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS" not in s
-          assert "automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt)" in s
+          assert "automaticOpticsHoldEligible(best)" in s
+          assert "Number(best.yieldRate) || Number(baseline.yieldRate) || 0.5" not in s
+          assert "autoOpticsHeldYield = 0.5" not in s
+          assert "autoOpticsHeldYield = Math.max(0.35" not in s
+          assert "remembered winner reacquired · validating live QR cohort" in s
+          assert "advanceAutomaticOpticsAcquisitionSeed" in s
           assert s.count("autoOpticsSeedAttempt = 0;") >= 3
+          assert 'APP_VERSION = "0.5.454"' in Path("version.js").read_text()
           print("receiver convergence invariants: ok")
           PY
           git diff --check
@@ -293,7 +434,7 @@ jobs:
           rm .github/workflows/receiver-convergence-once.yml
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add receive/runtime.js .github/workflows/receiver-convergence-once.yml
+          git add receive/runtime.js version.js .github/workflows/receiver-convergence-once.yml
           git diff --cached --check
-          git commit -m "Converge locked recovery and Auto Optics acquisition"
+          git commit -m "Converge Auto Optics and locked recovery v0.5.454"
           git push origin HEAD:master
