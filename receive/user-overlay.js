@@ -256,9 +256,11 @@ function drawHud(at) {
     const wall = outerQuad(value);
     if (wall) {
       ctx.save();
-      ctx.strokeStyle = "rgba(184, 132, 255, 0.28)";
-      ctx.lineWidth = Math.max(1, dpr);
       pathQuad(wall, scale, offX, offY);
+      ctx.fillStyle = "rgba(184, 132, 255, 0.045)";
+      ctx.strokeStyle = "rgba(184, 132, 255, 0.68)";
+      ctx.lineWidth = Math.max(1.5, 1.55 * dpr);
+      ctx.fill();
       ctx.stroke();
       ctx.restore();
     }
@@ -271,8 +273,10 @@ function drawHud(at) {
     const t = 1 - missAge / MISS_FADE_MS;
     ctx.save();
     pathQuad(slot.quad, scale, offX, offY);
-    ctx.strokeStyle = `rgba(255, 64, 76, ${0.18 + 0.78 * t})`;
-    ctx.lineWidth = Math.max(1.5, (1.35 + 0.8 * t) * dpr);
+    ctx.fillStyle = `rgba(255, 48, 64, ${0.025 + 0.085 * t})`;
+    ctx.strokeStyle = `rgba(255, 56, 72, ${0.12 + 0.42 * t})`;
+    ctx.lineWidth = Math.max(1, (1 + 0.45 * t) * dpr);
+    ctx.fill();
     ctx.stroke();
     ctx.restore();
   }
