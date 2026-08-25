@@ -1,0 +1,141 @@
+name: focus ownership cleanup v465 once
+on:
+  push:
+    paths:
+      - .github/workflows/focus-owner-v465-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Consolidate focus ownership
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          focus = Path('receive/focus-controller.js')
+          text = focus.read_text()
+
+          old = '''    const modes = this.focusModes();
+    const currentFocusMode = this.settings().focusMode;
+    const canSingle = modes.includes("single-shot") && !this.singleShotAfRejected;
+'''
+          new = '''    const modes = this.focusModes();
+    const currentFocusMode = this.settings().focusMode;
+    if (this.strategy === "auto" && modes.includes("continuous") && currentFocusMode === "continuous") {
+      // Native continuous AF owns focus once it is running. Re-applying the
+      // same mode, POI writes, or escalating to single-shot can restart lens
+      // work on real camera HALs without adding useful QR evidence.
+      this.singleShotAfRejected = true;
+      this.lastReason = "native continuous autofocus owns focus; no camera focus write needed";
+      this.changed();
+      return;
+    }
+    const canSingle = modes.includes("single-shot") && !this.singleShotAfRejected;
+'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          old = '''      const actual = this.settings();
+      this.committedFocusMode = actual.focusMode;
+      this.committedFocusDistance = actual.focusDistance;
+      this.lastSeekingAfAt = performance.now();
+'''
+          new = '''      const actual = this.settings();
+      this.committedFocusMode = actual.focusMode;
+      this.committedFocusDistance = actual.focusDistance;
+      // A camera with working continuous AF never needs AirGapper to fall back
+      // to a disruptive single-shot sweep later in the same camera session.
+      this.singleShotAfRejected = true;
+      this.lastSeekingAfAt = performance.now();
+'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          text, count = re.subn(
+            r'  noteTargetAbsent\(now = performance\.now\(\)\) \{.*?\n  \}\n  diagnostics\(\) \{',
+            '''  noteTargetAbsent(now = performance.now()) {
+    if (this.strategy !== "auto" || this.state === "UNAVAILABLE" || this.state === "OVERRIDE") return;
+
+    // The decoder is the authoritative target-presence signal. The optional
+    // static analyzer can miss a perfectly healthy animated wall; that must not
+    // re-arm autofocus while CRC-valid QR payload is still arriving.
+    if (this.decodeIsFresh(now)) {
+      this.targetMissingSince = 0;
+      if (!this.isOptimizing() && this.state !== "LOCKED") {
+        this.transition("LOCKED", "verified QR decode overrides static-target miss");
+      } else {
+        this.lastReason = "verified QR decode overrides static-target miss";
+        this.changed();
+      }
+      return;
+    }
+
+    if (!this.targetMissingSince) this.targetMissingSince = now;
+    if (this.isOptimizing()) {
+      this.lastReason = "QR absent; explicit exposure tournament continues";
+      this.changed();
+      return;
+    }
+
+    if (this.state === "LOCKED") {
+      this.transition("TARGET_LOST_GRACE", "static target missing; decoder-silence confirmation required");
+    } else if (this.state === "STABILIZING" || this.state === "TARGET_LOST_GRACE") {
+      const targetMissingMs = now - this.targetMissingSince;
+      const requiredSilenceMs = Math.max(CAMERA_TUNING.targetLostGraceMs, this.silenceThreshold());
+      if (targetMissingMs >= CAMERA_TUNING.targetLostGraceMs && this.decodeSilence(now) >= requiredSilenceMs) {
+        this.stableGeometry = void 0;
+        this.stableSince = 0;
+        this.transition("SEEKING", "decoder silence confirmed target loss; autofocus recovery armed");
+      }
+    }
+
+    if (this.isAcquiring()) void this.maybeRetrySeekingAutofocus(now);
+    this.changed();
+  }
+  diagnostics() {''',
+            text,
+            count=1,
+            flags=re.S
+          )
+          assert count == 1
+
+          text, count = re.subn(
+            r'  pointsOfInterestSupported\(\) \{.*?\n  \}\n  overrideFocusModes\(\) \{',
+            '''  pointsOfInterestSupported() {
+    // POI writes are mutations, not passive hints. Several phone HALs restart
+    // AF/metring work on every write, so framing owns the target center instead.
+    return false;
+  }
+  overrideFocusModes() {''',
+            text,
+            count=1,
+            flags=re.S
+          )
+          assert count == 1
+          focus.write_text(text)
+
+          main = Path('receive/main.js')
+          m = main.read_text()
+          old_import = 'import "./acquisition-focus-recovery.js";\n'
+          assert m.count(old_import) == 1
+          main.write_text(m.replace(old_import, ''))
+
+          version = Path('version.js')
+          v = version.read_text()
+          assert 'APP_VERSION = "0.5.464"' in v
+          version.write_text(v.replace('APP_VERSION = "0.5.464"', 'APP_VERSION = "0.5.465"'))
+
+          Path('receive/acquisition-focus-recovery.js').unlink()
+          PY
+
+          rm .github/workflows/focus-owner-v465-once.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/focus-controller.js receive/main.js receive/acquisition-focus-recovery.js version.js .github/workflows/focus-owner-v465-once.yml
+          git commit -m "Consolidate focus mutation ownership v0.5.465"
+          git push
