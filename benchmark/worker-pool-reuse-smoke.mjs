@@ -3,9 +3,10 @@ import { DecodeWorkerPool } from "../shared/worker-pool.js";
 // The receiver imports worker-capacity-guard.js before constructing its pool.
 // Mock the tiny browser surface it needs so this smoke exercises the same
 // patched submitAtSlot() prototype instead of only the unwrapped base class.
+const receiveVideo = { srcObject: { active: true } };
 globalThis.document = {
-  getElementById: () => null,
-  body: { classList: { contains: () => false } }
+  getElementById: (id) => id === "video" ? receiveVideo : null,
+  body: { classList: { contains: (name) => name === "receive-mode" } }
 };
 globalThis.window = globalThis;
 await import("../receive/worker-capacity-guard.js");
@@ -227,6 +228,36 @@ if (!acquisitionMeta || acquisitionMeta.timeoutMs < 6000)
   throw new Error(`acquisition timeout was unexpectedly shortened: ${acquisitionMeta?.timeoutMs}`);
 timeoutPool.resize(0);
 
+// An unclassified live full scan is normalized before concurrency accounting.
+// With four workers, exactly two acquisition lanes are allowed; the third scan
+// must be dropped so recovery cannot consume the whole decoder pool.
+const capWorkers = [];
+const capPool = new DecodeWorkerPool(
+  () => {
+    const next = new FakeWorker();
+    capWorkers.push(next);
+    return next;
+  },
+  () => void 0,
+  () => void 0,
+  () => void 0,
+  () => void 0
+);
+capPool.resize(4);
+for (const readyWorker of capWorkers) readyWorker.onmessage({ data: { id: -1, bytes: null } });
+const acquisitionA = { id: 50, full: true, w: 64, h: 64 };
+const acquisitionB = { id: 51, full: true, w: 64, h: 64 };
+const acquisitionC = { id: 52, full: true, w: 64, h: 64 };
+if (!capPool.submit(acquisitionA, []) || !capPool.submit(acquisitionB, []))
+  throw new Error("two permitted acquisition lanes were not accepted");
+if (acquisitionA.acquisitionMode !== "seed" || acquisitionB.acquisitionMode !== "seed")
+  throw new Error("live full scans were not normalized to seed before scheduling");
+if (capPool.submit(acquisitionC, []))
+  throw new Error("third concurrent acquisition scan bypassed the two-lane cap");
+if (capPool.activeFullCount !== 2)
+  throw new Error(`expected two active acquisition jobs, got ${capPool.activeFullCount}`);
+capPool.resize(0);
+
 console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
   guardedSubmitPath: true,
   coldWorkerRejected: true,
@@ -235,5 +266,6 @@ console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
   staleGuidedMetricsCleared: completions[1].guidedMetrics === undefined,
   reentrantMetadataPreserved: decodedInfos[0]?.sourceSequence === 101 && decodedInfos[0]?.opticsEpoch === 11,
   metadataRecordReused: thirdMeta === firstMeta,
-  acquisitionTimeoutMs: acquisitionMeta.timeoutMs
+  acquisitionTimeoutMs: acquisitionMeta.timeoutMs,
+  acquisitionConcurrencyCap: 2
 }));
