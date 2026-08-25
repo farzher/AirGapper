@@ -11,6 +11,7 @@ import "./lattice-liveness-guard.js";
 import "./worker-capacity-guard.js";
 import "./camera-frame-copy-guard.js";
 import "./acquisition-worker-guard.js";
+import "./fresh-payload-recovery-guard.js";
 import "./stale-timeout-latency-guard.js";
 import "./timeout-diagnostics.js";
 import "./dev-settings-unlock.js";
