@@ -10,4 +10,5 @@ import "./worker-capacity-guard.js";
 import "./timeout-diagnostics.js";
 import "./dev-settings-unlock.js";
 import "./status-neutral.js";
+import "./user-overlay.js";
 import "./runtime.js";
