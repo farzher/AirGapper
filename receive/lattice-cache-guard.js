@@ -22,6 +22,7 @@ function clearCache(lattice) {
   lattice.__airgapperCorrectionAt = undefined;
   lattice.__airgapperLastFullFitAt = undefined;
   lattice.__airgapperFullFitAttemptAt = undefined;
+  lattice.__airgapperPayloadAt = undefined;
 }
 
 function cacheFrameSnapshot(lattice, at, snapshot) {
@@ -41,6 +42,21 @@ function cacheOutOfBandSnapshot(lattice, snapshot) {
   return snapshot;
 }
 
+function notePayloadAlive(lattice) {
+  if (!lattice.candidate || lattice.pendingInvalidationReason) return false;
+  const now = performance.now();
+  lattice.__airgapperPayloadAt = now;
+  const geometryAge = now - lattice.lastHitAt;
+  lattice.transition(
+    geometryAge > SOFT_LOSS_MS ? "PARTIAL_LOSS" : "TRACK",
+    geometryAge > SOFT_LOSS_MS
+      ? "valid payload kept wall alive; geometry awaiting refresh"
+      : "valid payload kept lattice alive",
+    now
+  );
+  return true;
+}
+
 const baseReset = GridLattice.prototype.reset;
 GridLattice.prototype.reset = function() {
   clearCache(this);
@@ -51,6 +67,12 @@ const baseReacquire = GridLattice.prototype.reacquire;
 GridLattice.prototype.reacquire = function(at, reason) {
   clearCache(this);
   return baseReacquire.call(this, at, reason);
+};
+
+const baseNoteValidPacket = GridLattice.prototype.noteValidPacket;
+GridLattice.prototype.noteValidPacket = function() {
+  if (!this.candidate) return baseNoteValidPacket.call(this);
+  return notePayloadAlive(this);
 };
 
 const baseNudgeMotion = GridLattice.prototype.nudgeMotion;
@@ -76,7 +98,6 @@ function sameFrameCompatible(lattice, detection) {
 
 function recordSameFrameObservation(lattice, detection, frameWidth, frameHeight) {
   const at = Number(detection.at);
-  const packetIsCurrent = at >= lattice.lastHitAt;
   lattice.lastHitAt = Math.max(lattice.lastHitAt, at);
   lattice.frameWidth = Math.max(1, frameWidth);
   lattice.frameHeight = Math.max(1, frameHeight);
@@ -110,10 +131,7 @@ function recordSameFrameObservation(lattice, detection, frameWidth, frameHeight)
     }
   }
 
-  if (packetIsCurrent && lattice.locked) {
-    lattice.transition("TRACK", "valid packet refreshed locked lattice", at);
-  }
-
+  notePayloadAlive(lattice);
   const snapshot = lattice.__airgapperFrameSnapshot;
   snapshot.state = lattice.state;
   snapshot.provisional = !lattice.active;
@@ -135,6 +153,7 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
     this.__airgapperFrameSnapshot = undefined;
     const result = baseAccept.call(this, detection, frameWidth, frameHeight);
     if (result) {
+      notePayloadAlive(this);
       this.__airgapperLastFullFitAt = at;
       return cacheFrameSnapshot(this, at, result);
     }
@@ -144,9 +163,12 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
 
   const priorAt = this.__airgapperFrameAt;
   const result = baseAccept.call(this, detection, frameWidth, frameHeight);
-  if (result && Number.isFinite(at) && priorAt !== at) {
-    this.__airgapperLastFullFitAt = at;
-    this.__airgapperFullFitAttemptAt = at;
+  if (result) {
+    notePayloadAlive(this);
+    if (Number.isFinite(at) && priorAt !== at) {
+      this.__airgapperLastFullFitAt = at;
+      this.__airgapperFullFitAttemptAt = at;
+    }
   }
   return cacheFrameSnapshot(this, at, result);
 };
@@ -168,22 +190,23 @@ GridLattice.prototype.tick = function(now) {
   if (!this.candidate || this.pendingInvalidationReason) {
     return cacheOutOfBandSnapshot(this, baseTick.call(this, now));
   }
-  if (!this.__airgapperFrameSnapshot) {
-    return cacheOutOfBandSnapshot(this, baseTick.call(this, now));
+
+  // Geometry and stream liveness are different clocks. Measured corners use
+  // source-frame time; any CRC-valid packet proves the known wall is still
+  // present at completion time. Stale geometry may request local repair, but
+  // only payload silence may make the wall dormant and wake cold acquisition.
+  const geometryAge = now - this.lastHitAt;
+  const payloadAt = Number(this.__airgapperPayloadAt);
+  const payloadAge = Number.isFinite(payloadAt) ? now - payloadAt : Infinity;
+  if (payloadAge > DORMANT_MS && geometryAge > DORMANT_MS) {
+    this.transition("DORMANT", "payload silent and whole lattice geometry stale", now);
+  } else if (geometryAge > SOFT_LOSS_MS) {
+    this.transition("PARTIAL_LOSS", "wall alive; geometry awaiting bounded refresh", now);
   }
 
-  // Geometry state is driven by the source-frame clock. A packet that finishes
-  // decoding late is still useful transport data, but it must not make an old
-  // camera pose look current. Dormant geometry is retained so acquisition can
-  // re-anchor it without throwing away the known wall identity.
-  const staleMs = now - this.lastHitAt;
-  if (staleMs > DORMANT_MS) {
-    this.transition("DORMANT", "whole lattice geometry stale; retained while acquisition re-anchors", now);
-  } else if (staleMs > SOFT_LOSS_MS) {
-    this.transition("PARTIAL_LOSS", "whole lattice geometry stale; bounded re-anchor window", now);
-  }
-
-  const snapshot = this.__airgapperFrameSnapshot;
+  const snapshot = this.__airgapperFrameSnapshot ?? this.snapshot();
+  if (!snapshot) return null;
+  this.__airgapperFrameSnapshot = snapshot;
   snapshot.state = this.state;
   snapshot.provisional = !this.active;
   return snapshot;
