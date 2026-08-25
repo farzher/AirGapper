@@ -62,7 +62,8 @@ function recentEventCount(cutoff) {
 function recentSlotCount(cutoff) {
   let count = 0;
   for (let index = 0; index < SLOT_CAPACITY; index++) {
-    if (slotSuccessAt[index] >= cutoff) count++;
+    const at = slotSuccessAt[index];
+    if (at > 0 && at >= cutoff) count++;
   }
   return count;
 }
