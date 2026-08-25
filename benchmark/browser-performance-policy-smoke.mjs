@@ -41,15 +41,30 @@ assert.deepEqual(policy.lockedRecoveryPolicy({
   hasCandidates: true
 }), { needsRecovery: false, globalRecovery: false, localRecovery: false });
 
-// Auto Optics gets a bounded QR-specific ladder before photographic AE fallback.
-const seed0 = policy.automaticOpticsAcquisitionSeed(0);
-const seed1 = policy.automaticOpticsAcquisitionSeed(1);
-const seed2 = policy.automaticOpticsAcquisitionSeed(2);
-assert(seed0.lightScale < seed1.lightScale && seed1.lightScale < seed2.lightScale);
-assert(seed0.maxExposure < seed1.maxExposure && seed1.maxExposure < seed2.maxExposure);
+// Auto Optics explores both sides of the initial QR exposure before AE fallback.
+const seeds = [0, 1, 2, 3].map((index) => policy.automaticOpticsAcquisitionSeed(index));
+assert.deepEqual(seeds.map((seed) => seed.label), ["fast-dark", "extra-dark", "neutral-short", "bright-short"]);
+assert(seeds[1].lightScale < seeds[0].lightScale);
+assert(seeds[2].lightScale > seeds[0].lightScale);
+assert(seeds[3].lightScale > seeds[2].lightScale);
 assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(0), true);
-assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(1), true);
-assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), false);
+assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), true);
+assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);
+
+// HOLD must be earned by real decoder evidence. The v0.5.453 failure mode
+// (3/20-ish or even 0/20 becoming a synthetic 50% HOLD) must never return.
+assert.equal(policy.automaticOpticsHoldEligible({
+  valid: true, unstable: false, attempts: 20, outputs: 3, yieldRate: 0.15, breadth: 0.75
+}), false);
+assert.equal(policy.automaticOpticsHoldEligible({
+  valid: true, unstable: false, attempts: 24, outputs: 12, yieldRate: 0.50, breadth: 0.25
+}), false);
+assert.equal(policy.automaticOpticsHoldEligible({
+  valid: true, unstable: false, attempts: 24, outputs: 12, yieldRate: 0.50, breadth: 0.75
+}), true);
+assert.equal(policy.automaticOpticsHoldEligible({
+  valid: false, unstable: false, attempts: 40, outputs: 30, yieldRate: 0.75, breadth: 1
+}), false);
 
 assert.equal(policy.temporalHardSkip({ risk: 0.8, confidence: 0.8 }), true);
 assert.equal(policy.temporalHardSkip({ risk: 0.8, confidence: 0.4 }), false);
