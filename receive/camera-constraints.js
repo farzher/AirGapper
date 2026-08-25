@@ -1,13 +1,3 @@
-import { installReceiverRecoveryPolicy } from "./recovery-policy.js";
-import {
-  consumeExposureRescue,
-  noteSuppressedExposureWrite,
-  shouldPreserveManualExposure,
-  verifiedExposureLatchDecision
-} from "./recovery-state.js";
-
-installReceiverRecoveryPolicy();
-
 const nav = typeof navigator === "undefined" ? void 0 : navigator;
 const iosSafariCamera = !!nav && (/iPad|iPhone|iPod/.test(nav.userAgent) || nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
 
@@ -268,22 +258,7 @@ async function applyAdvancedConstraint(track, set) {
   const supported = supportedExposureSet(track, set ?? {});
   const touchesExposure = EXPOSURE_KEYS.some((key) => supported[key] !== void 0);
   if (requestedExposure && !touchesExposure && Object.keys(withoutExposure(supported)).length === 0) return false;
-  if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) {
-    noteSuppressedExposureWrite();
-    return true;
-  }
-  if (touchesExposure) {
-    if (supported.exposureMode === "continuous" && shouldPreserveManualExposure(track)) {
-      noteSuppressedExposureWrite();
-      return applyConstraint(track, withoutExposure(supported));
-    }
-    const latch = verifiedExposureLatchDecision(track);
-    if (latch.hold) {
-      noteSuppressedExposureWrite();
-      return applyConstraint(track, withoutExposure(supported));
-    }
-    if (latch.rescue) consumeExposureRescue(track);
-  }
+  if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) return true;
   const applied = await applyConstraint(track, supported);
   if (applied && touchesExposure) rememberSettledExposure(track, supported);
   return applied;
