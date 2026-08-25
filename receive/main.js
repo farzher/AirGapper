@@ -2,6 +2,7 @@ import "./camera-constraints.js";
 import "./camera-constraint-guard.js";
 import "./exposure-ev.js";
 import "./track-processor-proxy.js";
+import "./overlay-coordinate-guard.js";
 import "./track-processor-watchdog.js";
 import "./runtime-guards.js";
 import "./acquisition-focus-recovery.js";
