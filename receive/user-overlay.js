@@ -315,13 +315,16 @@ function draw() {
 function mark(slot, quad, kind, path, frames) {
   const index = Number(slot);
   if (!Number.isInteger(index) || index < 0 || index >= activity.length || !validQuad(quad)) return;
-  activity[index] = {
-    quad,
-    kind,
-    path: normalizePath(path),
-    frames,
-    maxFrames: frames
-  };
+  let item = activity[index];
+  if (!item) {
+    item = { quad: undefined, kind: "", path: "hot", frames: 0, maxFrames: 0 };
+    activity[index] = item;
+  }
+  item.quad = quad;
+  item.kind = kind;
+  item.path = normalizePath(path);
+  item.frames = frames;
+  item.maxFrames = frames;
   scheduleDraw();
 }
 
