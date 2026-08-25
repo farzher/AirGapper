@@ -2,7 +2,9 @@ import { formatBytes } from "../shared/format.js";
 import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 
-const RECEIVED_MEDIA_CACHE_PREFIX = "received-media-";
+const RECEIVED_MEDIA_CACHE_ROOT = "received-media-";
+const RECEIVED_MEDIA_SESSION = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const RECEIVED_MEDIA_CACHE_PREFIX = `${RECEIVED_MEDIA_CACHE_ROOT}${RECEIVED_MEDIA_SESSION}-`;
 const LEGACY_RECEIVED_MEDIA_CACHE = "received-media";
 const MIME_BY_EXTENSION = {
   apng: "image/apng", gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg",
@@ -27,6 +29,15 @@ function receivedObjectUrl(blob) {
 
 function receivedMediaCache(generationId) {
   return `${RECEIVED_MEDIA_CACHE_PREFIX}${generationId}`;
+}
+
+function cleanOlderReceivedMediaSessions() {
+  if (!("caches" in window)) return;
+  void caches.keys().then((keys) => Promise.all(keys
+    .filter((key) => key === LEGACY_RECEIVED_MEDIA_CACHE ||
+      key.startsWith(RECEIVED_MEDIA_CACHE_ROOT) && !key.startsWith(RECEIVED_MEDIA_CACHE_PREFIX))
+    .map((key) => caches.delete(key))
+  )).catch(() => void 0);
 }
 
 export function clearReceivedResult() {
@@ -315,4 +326,5 @@ export function showReceiveFailure(restartButton) {
   result.append(heading, detail, restartButton);
 }
 
+cleanOlderReceivedMediaSessions();
 clearReceivedResult();
