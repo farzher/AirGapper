@@ -35,7 +35,44 @@ export function softenIOSCameraConstraints(constraints) {
 }
 
 function isConstraintFailure(error) {
-  return error?.name === "OverconstrainedError" || error?.name === "ConstraintNotSatisfiedError";
+  return error?.name === "OverconstrainedError" ||
+    error?.name === "ConstraintNotSatisfiedError" ||
+    /invalid constraint/i.test(String(error?.message || ""));
+}
+
+function relaxedFacingMode(video) {
+  return video?.facingMode ?? { ideal: "environment" };
+}
+
+function rememberStartError(error) {
+  if (!isIOS || isConstraintFailure(error)) return;
+  recentStartError = error;
+  recentStartErrorUntil = performance.now() + 1200;
+}
+
+async function requestIOSCamera(nativeGetUserMedia, constraints) {
+  const softened = softenIOSCameraConstraints(constraints);
+  try {
+    return await nativeGetUserMedia(softened);
+  } catch (error) {
+    const video = softened?.video;
+    if (!isConstraintFailure(error) || !video || typeof video !== "object" || Array.isArray(video)) throw error;
+    const facingMode = relaxedFacingMode(video);
+    try {
+      return await nativeGetUserMedia({
+        audio: softened?.audio ?? false,
+        video: {
+          facingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 }
+        }
+      });
+    } catch (relaxedError) {
+      if (!isConstraintFailure(relaxedError)) throw relaxedError;
+      return nativeGetUserMedia({ audio: softened?.audio ?? false, video: { facingMode } });
+    }
+  }
 }
 
 export function installCameraStartGuard() {
@@ -48,22 +85,18 @@ export function installCameraStartGuard() {
   const nativeGetUserMedia = getUserMedia.bind(mediaDevices);
   const guardedGetUserMedia = async (constraints) => {
     const now = performance.now();
-    // receive/main.js intentionally retries exact camera constraints with ideal
-    // constraints. On iOS, only a genuine constraint failure should be allowed
-    // to open that fallback request. Permission/lifecycle/device errors must
-    // surface once instead of immediately producing another system sheet.
-    if (isIOS && recentStartError && now < recentStartErrorUntil) {
-      throw recentStartError;
-    }
+    // One logical camera request owns the complete iOS fallback ladder. A prior
+    // permission/lifecycle/device error must surface once instead of immediately
+    // producing another system sheet from the caller's ideal-mode retry.
+    if (isIOS && recentStartError && now < recentStartErrorUntil) throw recentStartError;
 
     pendingRequests++;
     try {
-      return await nativeGetUserMedia(softenIOSCameraConstraints(constraints));
+      return isIOS
+        ? await requestIOSCamera(nativeGetUserMedia, constraints)
+        : await nativeGetUserMedia(constraints);
     } catch (error) {
-      if (isIOS && !isConstraintFailure(error)) {
-        recentStartError = error;
-        recentStartErrorUntil = performance.now() + 1200;
-      }
+      rememberStartError(error);
       throw error;
     } finally {
       pendingRequests = Math.max(0, pendingRequests - 1);
