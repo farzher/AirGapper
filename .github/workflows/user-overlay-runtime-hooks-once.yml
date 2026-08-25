@@ -1,0 +1,101 @@
+name: user overlay runtime hooks once
+on:
+  push:
+    paths:
+      - .github/workflows/user-overlay-runtime-hooks-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Add explicit overlay hooks
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('receive/runtime.js')
+          s = p.read_text()
+
+          def one(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1: raise SystemExit(f'{label}: expected 1, found {n}')
+              s = s.replace(old, new)
+
+          one(
+          '  trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });\n}',
+          '  trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });\n  globalThis.__airgapperUserOverlay?.latticeState(to);\n}',
+          'lattice hook')
+
+          one(
+          '  peakRegions = Math.max(peakRegions, snapshot.slots.length);\n  return decodedRegion;\n}',
+          '  peakRegions = Math.max(peakRegions, snapshot.slots.length);\n  globalThis.__airgapperUserOverlay?.geometry(snapshot, gridLattice.active && Boolean(snapshot.distributedFit));\n  return decodedRegion;\n}',
+          'geometry hook')
+
+          one(
+          'function queueOverlayDraw() {\n  if (overlayDrawQueued) return;',
+          'function queueOverlayDraw() {\n  // Legacy diagnostics render only when Developer Mode is visible.\n  if (receiverDevActions.hidden || overlayDrawQueued) return;',
+          'dev draw gate')
+
+          one(
+          'acquisitionMode: message.acquisitionMode\n      });',
+          '''acquisitionMode: message.acquisitionMode,
+        targets: message.acquisitionMode === "recovery" ? (message.tracks ?? []).map((track) => {
+          const map = message.outputMap;
+          const unmap = (point) => map && Number(map.scaleX) > 0 && Number(map.scaleY) > 0 ? {
+            x: (point.x - Number(map.offsetX || 0)) / Number(map.scaleX),
+            y: (point.y - Number(map.offsetY || 0)) / Number(map.scaleY)
+          } : point;
+          const quad = track?.quad;
+          return {
+            slot: Number(track?.slot ?? track?.id),
+            quad: validQuadObject(quad) ? {
+              topLeft: unmap(quad.topLeft), topRight: unmap(quad.topRight),
+              bottomRight: unmap(quad.bottomRight), bottomLeft: unmap(quad.bottomLeft)
+            } : undefined
+          };
+        }).filter((target) => Number.isInteger(target.slot) && validQuadObject(target.quad)) : undefined
+      });''',
+          'recovery targets')
+
+          one(
+          '  const fullJob = fullScanJobs.get(id);\n  const capturedAt = scanCapturedAt.get(id) ?? receiverNow();',
+          '  const fullJob = fullScanJobs.get(id);\n  const capturedAt = scanCapturedAt.get(id) ?? receiverNow();\n  if (!replayRunning && fullJob?.acquisitionMode === "recovery" && fullJob.targets?.length) {\n    globalThis.__airgapperUserOverlay?.recovery(fullJob.targets, completion.symbols ?? [], completion.sightings ?? []);\n  }',
+          'recovery result')
+
+          one(
+          '''  if (decodedRegion && info?.decodePath) {
+    decodedRegion.decodePath = info.decodePath;
+    decodedRegion.decodePathAt = decodedAt;
+  }
+  if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);''',
+          '''  if (decodedRegion && info?.decodePath) {
+    decodedRegion.decodePath = info.decodePath;
+    decodedRegion.decodePathAt = decodedAt;
+  }
+  if (!optimizerAttribution && !replayRunning) {
+    const measuredQuad = info?.geometryMeasured !== false && validQuadObject(info?.quad) ? info.quad : void 0;
+    const overlayQuad = measuredQuad ?? (validQuadObject(decodedRegion?.quad) ? decodedRegion.quad : void 0);
+    if (overlayQuad) {
+      const fullJob = info?.scanId === void 0 ? void 0 : fullScanJobs.get(info.scanId);
+      const path = fullJob?.acquisition && fullJob?.acquisitionMode !== "recovery"
+        ? "acquire"
+        : info?.decodePath || decodedRegion?.decodePath || "hot";
+      globalThis.__airgapperUserOverlay?.success(header.slotIndex, overlayQuad, path);
+    }
+  }
+  if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);''',
+          'success hook')
+
+          p.write_text(s)
+          PY
+          rm -f .github/workflows/user-overlay-v465-once.yml .github/workflows/user-overlay-v466-once.yml .github/workflows/user-overlay-v466-final-once.yml .github/workflows/user-overlay-runtime-hooks-once.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/runtime.js .github/workflows/user-overlay-v465-once.yml .github/workflows/user-overlay-v466-once.yml .github/workflows/user-overlay-v466-final-once.yml .github/workflows/user-overlay-runtime-hooks-once.yml
+          git commit -m "Expose lightweight user overlay events"
+          git push
