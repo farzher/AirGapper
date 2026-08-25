@@ -128,7 +128,7 @@ export function automaticOpticsHoldEligible(sample, {
   broadMinYield = 0.40,
   broadMinBreadth = 0.90,
   broadMinTailYield = 0.35,
-  movingMinYield = 0.55,
+  movingMinYield = 0.45,
   movingMinBreadth = 0.90,
   movingMinTailYield = 0.45
 } = {}) {
@@ -166,10 +166,10 @@ export function automaticOpticsHoldEligible(sample, {
   const broadProof = yieldRate >= Math.max(0, Number(broadMinYield) || 0) &&
     breadth >= Math.max(0, Number(broadMinBreadth) || 0) &&
     tailYield >= Math.max(0, Number(broadMinTailYield) || 0);
-  // Camera motion makes exposure comparisons noisier, but it also makes camera
-  // mutation more dangerous. If a moving wall is already broadly productive,
-  // use a stricter decoder proof and HOLD the current sensor state instead of
-  // waiting for a perfectly still pose while continuing to poke exposure.
+  // Motion makes comparison noisier, but demanding *higher* aggregate yield
+  // than the broad stationary proof caused a useful 48% / 100% / 48% wall to
+  // remain in ACQUIRE until a later rescue overwrote it. Keep the spatial proof
+  // strict while allowing a broadly productive handheld wall to become HOLD.
   const movingProof = yieldRate >= Math.max(0, Number(movingMinYield) || 0) &&
     breadth >= Math.max(0, Number(movingMinBreadth) || 0) &&
     tailYield >= Math.max(0, Number(movingMinTailYield) || 0);

@@ -1,4 +1,4 @@
-import { decodeExposureHealthy } from "./decode-health.js";
+import { decodeExposureHealthy, decodeExposureRecovering } from "./decode-health.js";
 
 const blockedForReopen = new WeakSet();
 let reopenScheduled = false;
@@ -120,15 +120,16 @@ function closeSetting(value, target, range) {
   return Math.abs(Number(value) - Number(target)) <= tolerance;
 }
 
-// Auto Optics may continue gathering evidence after the decoder is already
-// producing broadly across the retained wall. At that point camera mutations
-// are more dangerous than useful: in particular, neutral photographic AE can
-// brighten an emissive QR wall and destroy the state that was being measured.
-// Keep the live sensor state read-only until decoder health actually falls.
-// The one exception is the no-change continuous->manual transition that freezes
-// the currently proven exposure/ISO into HOLD.
+// Auto Optics may continue gathering evidence after the decoder has started
+// proving the current sensor state. Broad health is enough to protect a known
+// winner, but even the first fresh CRC-valid QR on a locked/seeded lattice gets
+// a short provisional lease: a rescue transaction can have been queued while
+// the preceding exposure was still blind and otherwise execute after that
+// exposure starts working. If the packet was luck and progress stops, the short
+// recovering lease expires and exploration resumes. The one exception is the
+// no-change continuous->manual transition that freezes current exposure/ISO.
 function healthyAutomaticExposureWouldPerturb(track, set) {
-  if (!decodeExposureHealthy()) return false;
+  if (!decodeExposureHealthy() && !decodeExposureRecovering()) return false;
   if (document.getElementById("camera-exposure-auto")?.checked !== true) return false;
   if (!EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return false;
 

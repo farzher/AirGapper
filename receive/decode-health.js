@@ -2,6 +2,7 @@ const SLOT_CAPACITY = 128;
 const EVENT_CAPACITY = 1024;
 const HEALTH_WINDOW_MS = 800;
 const HEALTH_FRESH_MS = 250;
+const RECOVERY_FRESH_MS = 700;
 
 const slotSuccessAt = new Float64Array(SLOT_CAPACITY);
 const eventSuccessAt = new Float64Array(EVENT_CAPACITY);
@@ -73,6 +74,18 @@ export function resetDecodeHealth() {
   latticeState = "SEARCH";
   geometrySlotCount = 0;
   clearRecentDecodeHealth();
+}
+
+// Acquisition feedback reaches the camera mutation queue asynchronously. A
+// rescue command chosen while blind can otherwise execute after the preceding
+// exposure has already produced a verified QR and seeded/locked the lattice.
+// Treat that first real progress as a short provisional lease on the current
+// sensor state. This is intentionally much weaker than HOLD: if progress was a
+// lucky packet and does not continue, the lease expires quickly and exploration
+// is free to resume.
+export function decodeExposureRecovering(at = performance.now()) {
+  if (latticeState !== "GRID_LOCK" && latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") return false;
+  return Boolean(lastSuccessAt && at - lastSuccessAt <= RECOVERY_FRESH_MS);
 }
 
 function recentEventCount(cutoff) {
