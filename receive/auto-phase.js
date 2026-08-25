@@ -1,5 +1,4 @@
 import { AutoPhasePolicy, parseAutoPhaseDiagnostics } from "./auto-phase-policy.js";
-import { allowPhasePulse, beginOpticsExperiment } from "./optics-guard.js";
 
 const phaseRoot = document.getElementById("camera-phase-nudge");
 const pulseInput = document.getElementById("camera-exposure-pulse-ms");
@@ -96,9 +95,11 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
       return;
     }
     const beforeDisabled = pulseButton.disabled;
-    allowPhasePulse(650);
     autoDispatch = "phase";
     try {
+      // The phase control itself owns its temporary camera mutation. Merely
+      // loading developer recovery no longer installs a global applyConstraints
+      // policy in front of production Auto Optics.
       pulseButton.click();
     } finally {
       autoDispatch = "";
@@ -124,10 +125,11 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
       autoStatus.textContent = "RECOVER · optics recalibration unavailable";
       return;
     }
-    beginOpticsExperiment(8000);
     policy.noteActionStarted("optics", sample, sample.now);
     autoDispatch = "optics";
     try {
+      // Explicitly click the runtime's optimizer. The runtime is the sole camera
+      // state owner and already knows how to settle/rollback its own experiment.
       opticsOptimize.click();
     } finally {
       autoDispatch = "";
@@ -158,12 +160,10 @@ if (phaseRoot && pulseInput && pulseButton && diagnostics && !document.getElemen
 
   const observer = new MutationObserver(queueConsider);
   observer.observe(diagnostics, { childList: true, characterData: true, subtree: true });
-  // Background pages already throttle timers. Keep this alive for the lifetime
-  // of the page so iOS pagehide/pageshow does not permanently disable recovery.
   setInterval(queueConsider, 220);
 
-  // Manual developer actions are still experiments in the same control loop.
-  // Account for them so Auto Recovery measures the new state before acting again.
+  // Manual developer actions are still experiments in the same policy, but the
+  // policy observes them; it never becomes a second camera-constraint owner.
   pulseButton.addEventListener("click", () => {
     if (!enabled || !toggle.checked || autoDispatch === "phase") return;
     queueMicrotask(() => {
