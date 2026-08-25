@@ -79,6 +79,6 @@ path.write_text(source)
 
 version_path = Path("version.js")
 version = version_path.read_text()
-if 'APP_VERSION = "0.5.458"' not in version:
-    raise SystemExit("expected v0.5.458 before bump")
-version_path.write_text(version.replace('APP_VERSION = "0.5.458"', 'APP_VERSION = "0.5.459"', 1))
+if 'APP_VERSION = "0.5.459"' not in version:
+    raise SystemExit("expected v0.5.459 before bump")
+version_path.write_text(version.replace('APP_VERSION = "0.5.459"', 'APP_VERSION = "0.5.460"', 1))
