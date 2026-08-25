@@ -31,19 +31,28 @@ function noteHealthyTrackedCompletion(message, meta) {
   const latency = Number(message?.latencyMs);
   const timeout = Number(meta.timeoutMs);
   if (!Number.isFinite(latency) || latency <= 0 || !Number.isFinite(timeout) || timeout <= 0) return;
-  if (latency <= timeout * 0.25) {
-    const useful = Number(message?.__airgapperPackedSymbolCount ?? message?.symbols?.length ?? 0) > 0;
-    trackedTimeoutPressure = Math.max(0, trackedTimeoutPressure - (useful ? 0.08 : 0.04));
-  }
+  const useful = Number(message?.__airgapperPackedSymbolCount ?? message?.symbols?.length ?? 0) > 0;
+  const ratio = latency / timeout;
+  // Timeout pressure is a recovery hint, not a sticky operating mode. Any real
+  // healthy completion is evidence that capacity has returned; low-latency
+  // useful work clears the penalty fastest while slow/empty work still lets it
+  // decay instead of trapping the session after one historical timeout.
+  const decay = ratio <= 0.25
+    ? (useful ? 0.08 : 0.04)
+    : ratio <= 0.60
+      ? (useful ? 0.035 : 0.02)
+      : (useful ? 0.015 : 0.01);
+  trackedTimeoutPressure = Math.max(0, trackedTimeoutPressure - decay);
 }
 
 function applyTimeoutBackpressure(message, live) {
   const tracks = message?.tracks;
   if (!live || message?.full || !Array.isArray(tracks) || tracks.length < 4 || trackedTimeoutPressure <= 0) return;
-  const originalCount = tracks.length;
-  const fraction = 1 - 0.6 * trackedTimeoutPressure;
-  const limit = Math.max(4, Math.min(originalCount, Math.ceil(originalCount * fraction)));
-  if (limit < originalCount) message.tracks = tracks.slice(0, limit);
+  // Runtime already selected this exact physical slot set and recorded it for
+  // completion attribution, temporal prediction, weak-slot learning and Auto
+  // Optics evidence. Never silently slice that list here: doing so manufactures
+  // misses for QRs the worker never saw. Pressure may only remove optional
+  // expensive salvage work; semantic track selection stays with runtime.
   if (trackedTimeoutPressure >= 0.5) {
     message.guidedRepairMask = 0;
     message.guidedFallbackMask = 0;

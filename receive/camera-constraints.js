@@ -306,8 +306,12 @@ async function applyAdvancedConstraint(track, set, { allowHealthyPerturbation = 
   if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) return true;
   if (!allowHealthyPerturbation && healthyAutomaticExposureWouldPerturb(track, supported)) {
     const remainder = withoutExposure(supported);
-    if (!Object.keys(remainder).length) return true;
-    return applyConstraint(track, remainder);
+    // A protected sensor write is a veto, not a successful mutation. Apply any
+    // unrelated focus/POI remainder, but report false for the requested compound
+    // operation so Auto Optics cannot advance its state machine on settings that
+    // never reached the camera.
+    if (Object.keys(remainder).length) await applyConstraint(track, remainder);
+    return false;
   }
   const applied = await applyConstraint(track, supported);
   if (applied && touchesExposure) rememberSettledExposure(track, supported);
