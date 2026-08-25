@@ -2,7 +2,8 @@ import { formatBytes } from "../shared/format.js";
 import { copyTextOnAndroid, isAndroidApp, saveFileOnAndroid } from "../shared/android.js";
 import { readStoredZip } from "../shared/zip.js";
 
-const RECEIVED_MEDIA_CACHE = "received-media";
+const RECEIVED_MEDIA_CACHE_PREFIX = "received-media-";
+const LEGACY_RECEIVED_MEDIA_CACHE = "received-media";
 const MIME_BY_EXTENSION = {
   apng: "image/apng", gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg",
   png: "image/png", svg: "image/svg+xml", webp: "image/webp", mp3: "audio/mpeg",
@@ -24,12 +25,19 @@ function receivedObjectUrl(blob) {
   return url;
 }
 
+function receivedMediaCache(generationId) {
+  return `${RECEIVED_MEDIA_CACHE_PREFIX}${generationId}`;
+}
+
 export function clearReceivedResult() {
-  generation++;
+  const staleGeneration = generation++;
   result.replaceChildren();
   for (const url of receivedObjectUrls) URL.revokeObjectURL(url);
   receivedObjectUrls.clear();
-  if ("caches" in window) void caches.delete(RECEIVED_MEDIA_CACHE).catch(() => void 0);
+  if ("caches" in window) {
+    void caches.delete(receivedMediaCache(staleGeneration)).catch(() => void 0);
+    if (staleGeneration === 0) void caches.delete(LEGACY_RECEIVED_MEDIA_CACHE).catch(() => void 0);
+  }
 }
 
 function inferredType(name) {
@@ -50,14 +58,23 @@ function downloadLink(name, type, bytes, label = `Save ${name}`, blobUrl) {
   return link;
 }
 
-async function servableMediaUrl(blob, type, blobUrl) {
+async function servableMediaUrl(blob, type, blobUrl, expectedGeneration) {
   try {
-    if (!navigator.serviceWorker?.controller) return blobUrl;
+    if (!navigator.serviceWorker?.controller || expectedGeneration !== generation) return blobUrl;
     const target = new URL(`../received-media/${Date.now()}-${Math.random().toString(36).slice(2)}`, window.location.href).href;
-    const cache = await caches.open(RECEIVED_MEDIA_CACHE);
+    const cacheName = receivedMediaCache(expectedGeneration);
+    const cache = await caches.open(cacheName);
+    if (expectedGeneration !== generation) {
+      void caches.delete(cacheName).catch(() => void 0);
+      return blobUrl;
+    }
     await cache.put(target, new Response(blob, {
       headers: { "Content-Type": type, "Content-Length": String(blob.size) }
     }));
+    if (expectedGeneration !== generation) {
+      void caches.delete(cacheName).catch(() => void 0);
+      return blobUrl;
+    }
     return `${target}?v=${Date.now()}`;
   } catch {
     return blobUrl;
@@ -185,7 +202,7 @@ async function appendReceivedFile(entry, parent, declaredType, autoplayVideo, ex
         receivedVideo = player;
       }
     }
-    const src = await servableMediaUrl(blob, type, url);
+    const src = await servableMediaUrl(blob, type, url, expectedGeneration);
     if (expectedGeneration !== generation) return false;
     if (src !== url) player.addEventListener("error", () => { player.src = url; }, { once: true });
     player.src = src;
