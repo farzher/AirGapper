@@ -150,6 +150,7 @@ const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensat
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
 const CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS = 3000;
 const constraintBlockedUntil = new WeakMap();
+const settledExposure = new WeakMap();
 
 function supportedExposureSet(track, set) {
   const out = { ...set };
@@ -164,6 +165,13 @@ function supportedExposureSet(track, set) {
   return out;
 }
 
+function closeSetting(value, target, range) {
+  if (target === void 0) return true;
+  if (!Number.isFinite(Number(value)) || !Number.isFinite(Number(target))) return value === target;
+  const tolerance = Math.max(Number(range?.step) * 0.75 || 0, Math.abs(Number(target)) * 0.02, 1e-6);
+  return Math.abs(Number(value) - Number(target)) <= tolerance;
+}
+
 function exposureConstraintAlreadySatisfied(track, set) {
   if (!track || !set) return false;
   const touchesFocus = set.focusMode !== void 0 || set.focusDistance !== void 0 || set.pointsOfInterest !== void 0;
@@ -171,16 +179,40 @@ function exposureConstraintAlreadySatisfied(track, set) {
   if (touchesFocus || !touchesExposure) return false;
   const actual = track.getSettings?.() ?? {};
   const caps = track.getCapabilities?.() ?? {};
-  const close = (value, requested, range) => {
-    if (requested === void 0) return true;
-    if (!Number.isFinite(Number(value)) || !Number.isFinite(Number(requested))) return value === requested;
-    const tolerance = Math.max(Number(range?.step) * 0.75 || 0, Math.abs(Number(requested)) * 0.02, 1e-6);
-    return Math.abs(Number(value) - Number(requested)) <= tolerance;
-  };
   return (set.exposureMode === void 0 || actual.exposureMode === set.exposureMode) &&
-    close(actual.exposureTime, set.exposureTime, caps.exposureTime) &&
-    close(actual.iso, set.iso, caps.iso) &&
-    close(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
+    closeSetting(actual.exposureTime, set.exposureTime, caps.exposureTime) &&
+    closeSetting(actual.iso, set.iso, caps.iso) &&
+    closeSetting(actual.exposureCompensation, set.exposureCompensation, caps.exposureCompensation);
+}
+
+function exposureRequestKey(set) {
+  return EXPOSURE_KEYS.map((key) => `${key}:${set[key] === void 0 ? "" : set[key]}`).join("|");
+}
+
+function stableSettledExposure(track, set) {
+  if (!track || !EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return false;
+  const settled = settledExposure.get(track);
+  if (!settled || settled.key !== exposureRequestKey(set)) return false;
+  const actual = track.getSettings?.() ?? {};
+  const caps = track.getCapabilities?.() ?? {};
+  return (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
+    closeSetting(actual.exposureTime, settled.actual.exposureTime, caps.exposureTime) &&
+    closeSetting(actual.iso, settled.actual.iso, caps.iso) &&
+    closeSetting(actual.exposureCompensation, settled.actual.exposureCompensation, caps.exposureCompensation);
+}
+
+function rememberSettledExposure(track, set) {
+  if (!track || !EXPOSURE_KEYS.some((key) => set[key] !== void 0)) return;
+  const actual = track.getSettings?.() ?? {};
+  settledExposure.set(track, {
+    key: exposureRequestKey(set),
+    actual: {
+      exposureMode: actual.exposureMode,
+      exposureTime: actual.exposureTime,
+      iso: actual.iso,
+      exposureCompensation: actual.exposureCompensation
+    }
+  });
 }
 
 function withoutExposure(set) {
@@ -236,7 +268,7 @@ async function applyAdvancedConstraint(track, set) {
   const supported = supportedExposureSet(track, set ?? {});
   const touchesExposure = EXPOSURE_KEYS.some((key) => supported[key] !== void 0);
   if (requestedExposure && !touchesExposure && Object.keys(withoutExposure(supported)).length === 0) return false;
-  if (exposureConstraintAlreadySatisfied(track, supported)) {
+  if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) {
     noteSuppressedExposureWrite();
     return true;
   }
@@ -252,7 +284,9 @@ async function applyAdvancedConstraint(track, set) {
     }
     if (latch.rescue) consumeExposureRescue(track);
   }
-  return applyConstraint(track, supported);
+  const applied = await applyConstraint(track, supported);
+  if (applied && touchesExposure) rememberSettledExposure(track, supported);
+  return applied;
 }
 
 export { applyAdvancedConstraint };
