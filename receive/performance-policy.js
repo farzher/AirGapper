@@ -110,20 +110,24 @@ export function automaticOpticsHoldEligible(sample, {
   minTailYield = 0.20
 } = {}) {
   if (!sample || sample.valid !== true || sample.unstable) return false;
+  const cohortSize = Number(sample.cohortSize);
+  const cohortCoverage = Number(sample.cohortCoverage);
+  const reportedBreadth = Number(sample.breadth);
+  const reportedTail = Number(sample.tailYield);
+  // HOLD must be backed by an actual spatial QR cohort. Aggregate yield with no
+  // cohort used to synthesize 100% breadth and reuse mean yield as the weak tail,
+  // which could promote a lucky/local decode into a long-lived camera setting.
+  if (!Number.isFinite(cohortSize) || cohortSize < 1 ||
+      !Number.isFinite(cohortCoverage) || cohortCoverage < 1 ||
+      !Number.isFinite(reportedBreadth) || !Number.isFinite(reportedTail)) return false;
   const attempts = Math.max(0, Number(sample.attempts) || 0);
   const outputs = Math.max(0, Math.min(attempts, Number(sample.outputs) || 0));
   const reportedYield = Number(sample.yieldRate);
   const yieldRate = Number.isFinite(reportedYield)
     ? Math.max(0, Math.min(1, reportedYield))
     : attempts ? outputs / attempts : 0;
-  const reportedBreadth = Number(sample.breadth);
-  const breadth = Number.isFinite(reportedBreadth)
-    ? Math.max(0, Math.min(1, reportedBreadth))
-    : outputs > 0 ? 1 : 0;
-  const reportedTail = Number(sample.tailYield);
-  const tailYield = Number.isFinite(reportedTail)
-    ? Math.max(0, Math.min(1, reportedTail))
-    : yieldRate;
+  const breadth = Math.max(0, Math.min(1, reportedBreadth));
+  const tailYield = Math.max(0, Math.min(1, reportedTail));
   return attempts >= Math.max(1, Number(minAttempts) || 1) &&
     outputs >= Math.max(1, Number(minOutputs) || 1) &&
     yieldRate >= Math.max(0, Number(minYield) || 0) &&
