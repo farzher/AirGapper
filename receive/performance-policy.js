@@ -1,3 +1,5 @@
+import { decodeExposureHealthy } from "./decode-health.js";
+
 export const ACQUISITION_ESCALATE_MS = 180;
 export const ACQUISITION_HUNT_AFTER_MS = 900;
 export const ACQUISITION_HUNT_EVERY_SCANS = 12;
@@ -27,6 +29,12 @@ export function acquisitionRacePolicy({
 }) {
   if (captureNextScan) return { mode: "thorough", fullFrame: true, targetSighting: false, stalled: false };
   if (localRecovery) return { mode: "recovery", fullFrame: false, targetSighting: false, stalled: false };
+  // Once the retained wall is already producing broad, fresh CRC-valid payload,
+  // finder acquisition has completed in every practical sense. Auto Optics may
+  // still be learning internally, but that must not spend whole-frame workers on
+  // rediscovering geometry the tracked decoder is actively using.
+  if (decodeExposureHealthy())
+    return { mode: "seed", fullFrame: false, targetSighting: false, stalled: false };
 
   const index = Math.max(1, Math.trunc(Number(scanIndex) || 1));
   const age = Math.max(0, Number(ageMs) || 0);
