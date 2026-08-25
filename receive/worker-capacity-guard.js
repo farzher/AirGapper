@@ -6,6 +6,8 @@ const PACKED_SYMBOL_BYTES = 88;
 const DENSE_REPAIR_MIN_TRACKS = 12;
 const MAX_TRACK_BUFFER_POOL = 16;
 const MAX_RESULT_BUFFER_POOL = 16;
+const MAX_CONCURRENT_NATIVE_COPIES = 2;
+const ACQUISITION_TIMEOUT_MS = 1500;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
@@ -46,9 +48,6 @@ function applyTimeoutBackpressure(message, live) {
   const limit = Math.max(4, Math.min(originalCount, Math.ceil(originalCount * fraction)));
   if (limit < originalCount) message.tracks = tracks.slice(0, limit);
   if (trackedTimeoutPressure >= 0.5) {
-    // While recovering from repeated decoder cliffs, spend CPU on fresh
-    // direct/sparse attempts instead of salvaging one already-damaged page.
-    // Fountain coding makes a clean QR from the next frame more valuable.
     message.guidedRepairMask = 0;
     message.guidedFallbackMask = 0;
   }
@@ -56,14 +55,40 @@ function applyTimeoutBackpressure(message, live) {
 
 function liveReceiveCamera() {
   const cameraStream = receiveVideo?.srcObject;
-  return document.body?.classList?.contains("receive-mode") === true &&
-    cameraStream?.active === true;
+  return document.body?.classList?.contains("receive-mode") === true && cameraStream?.active === true;
 }
 
 function addTransfer(transfer, value) {
   const list = Array.isArray(transfer) ? transfer : [];
   if (value && !list.includes(value)) list.push(value);
   return list;
+}
+
+function nativeFrame(value) {
+  return typeof VideoFrame === "function" && value instanceof VideoFrame;
+}
+
+function closeMessageFrame(message) {
+  if (!nativeFrame(message?.videoFrame)) return;
+  try { message.videoFrame.close(); } catch {}
+  message.videoFrame = void 0;
+}
+
+function activeNativeCopies(pool) {
+  let count = 0;
+  for (const meta of pool.activeMeta ?? []) {
+    if (meta?.__airgapperNativeFrameCopy && !meta.__airgapperCopyComplete) count++;
+  }
+  return count;
+}
+
+function copyStageTimeout(meta) {
+  const normal = Math.max(1, Number(meta?.timeoutMs) || 1);
+  return Math.max(250, Math.min(600, normal * 0.20));
+}
+
+function freshPayloadActive() {
+  return performance.now() < (Number(window.airgapperFreshPayloadUntil) || 0);
 }
 
 function takeBestFitBuffer(pool, bytes) {
@@ -85,29 +110,26 @@ function takeBestFitBuffer(pool, bytes) {
 }
 
 function recyclePackedTrackBuffer(buffer) {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_TRACK_BYTES ||
-      packedTrackBufferPool.length >= MAX_TRACK_BUFFER_POOL) return;
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_TRACK_BYTES || packedTrackBufferPool.length >= MAX_TRACK_BUFFER_POOL) return;
   packedTrackBufferPool.push(buffer);
 }
 
 function recyclePackedResultBuffer(buffer) {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_SYMBOL_BYTES ||
-      packedResultBufferPool.length >= MAX_RESULT_BUFFER_POOL) return;
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < PACKED_SYMBOL_BYTES || packedResultBufferPool.length >= MAX_RESULT_BUFFER_POOL) return;
   packedResultBufferPool.push(buffer);
 }
 
 function stripIdentityOutputMap(message) {
   const map = message?.outputMap;
   if (!map) return;
-  if (Number(map.offsetX) === 0 && Number(map.offsetY) === 0 &&
-      Number(map.scaleX) === 1 && Number(map.scaleY) === 1) {
+  if (Number(map.offsetX) === 0 && Number(map.offsetY) === 0 && Number(map.scaleX) === 1 && Number(map.scaleY) === 1) {
     message.outputMap = undefined;
   }
 }
 
 function keepTrackedCameraOnGuided(message, live) {
-  if (live && message && !message.full && !message.strictHotPath &&
-      message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
+  if (live && message && !message.full && !message.strictHotPath && message.videoFrame &&
+      Array.isArray(message.tracks) && message.tracks.length >= 2 &&
       (message.pixelFormat === "y8" || message.__airgapperWorkerLumaFromRgba)) {
     message.guidedDecode = true;
     message.__airgapperLiveTracked = true;
@@ -117,29 +139,16 @@ function keepTrackedCameraOnGuided(message, live) {
 function boundLiveAcquisition(message, live) {
   if (!live || !message?.full || message.thorough) return;
   const mode = message.acquisitionMode;
-  if (mode === undefined || mode === "fast") {
-    // A camera frame that fails the full-resolution dense seed search is
-    // disposable. Do not immediately run a second generic tryHarder scan on the
-    // same optical frame: rolling-shutter/mixed pages are exactly the frames
-    // that make that fallback pathological. Runtime already schedules explicit
-    // deep/hunt/sighting work when fresh frames still cannot acquire a seed.
-    message.acquisitionMode = "seed";
-  }
+  if (mode === undefined || mode === "fast") message.acquisitionMode = "seed";
 }
 
 function capDenseRepairMask(message, live) {
   const tracks = message?.tracks;
-  if (!live || message?.full || !message?.guidedDecode ||
-      !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
+  if (!live || message?.full || !message?.guidedDecode || !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
   const laneMask = tracks.length >= 32 ? 0xffffffff : (2 ** tracks.length - 1) >>> 0;
-  const requested = message.guidedRepairMask === undefined
-    ? laneMask
-    : Number(message.guidedRepairMask) >>> 0;
+  const requested = message.guidedRepairMask === undefined ? laneMask : Number(message.guidedRepairMask) >>> 0;
   const allowed = requested & laneMask;
   if (!allowed || (allowed & (allowed - 1)) === 0) return;
-  // Missing symbols are ordinary erasures for the fountain layer. Bound all
-  // expensive per-QR salvage to one candidate on a dense frame so one damaged
-  // optical page cannot multiply fallback cost across many tracks.
   const chosen = (allowed & -allowed) >>> 0;
   message.guidedRepairMask = chosen;
   if (message.guidedFallbackMask !== undefined)
@@ -148,8 +157,7 @@ function capDenseRepairMask(message, live) {
 
 function attachPackedResultScratch(message, transfer) {
   const tracks = message?.tracks;
-  if (!message?.__airgapperLiveTracked || !message?.repeatFilter ||
-      !Array.isArray(tracks) || tracks.length < 2) return transfer;
+  if (!message?.__airgapperLiveTracked || !message?.repeatFilter || !Array.isArray(tracks) || tracks.length < 2) return transfer;
   const scratch = takeBestFitBuffer(packedResultBufferPool, tracks.length * PACKED_SYMBOL_BYTES);
   message.__airgapperPackedSymbolScratch = scratch;
   return addTransfer(transfer, scratch);
@@ -205,8 +213,6 @@ if (typeof baseFailureCompletion === "function" && !baseFailureCompletion.__airg
   const failureCompletion = function(slot, full, latencyMs, error) {
     const completion = baseFailureCompletion.call(this, slot, full, latencyMs, error);
     if (!full && error === "Decode worker timed out") {
-      // A live camera frame is disposable. Keep this out of the ordinary user
-      // error channel; full/acquisition failures remain real errors.
       completion.timedOut = true;
       completion.staleFrame = true;
       completion.error = undefined;
@@ -219,23 +225,34 @@ if (typeof baseFailureCompletion === "function" && !baseFailureCompletion.__airg
 }
 
 const baseTimeoutWorker = DecodeWorkerPool.prototype.timeoutWorker;
-if (typeof baseTimeoutWorker === "function" && !baseTimeoutWorker.__airgapperTimeoutBackpressure) {
+if (typeof baseTimeoutWorker === "function" && !baseTimeoutWorker.__airgapperWorkerPolicy) {
   const timeoutWorker = function(slot, meta) {
+    if (meta?.__airgapperNativeFrameCopy) meta.__airgapperPreflight = Boolean(meta.__airgapperCopyComplete);
     if (!(this.activeFull?.[slot] ?? false)) noteTrackedTimeout(Boolean(meta?.__airgapperPreflight));
     return baseTimeoutWorker.call(this, slot, meta);
   };
-  Object.defineProperty(timeoutWorker, "__airgapperTimeoutBackpressure", { value: true });
+  Object.defineProperty(timeoutWorker, "__airgapperWorkerPolicy", { value: true });
   DecodeWorkerPool.prototype.timeoutWorker = timeoutWorker;
 }
 
 const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
-if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperPackedBufferRecycle) {
+if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperWorkerPolicy) {
   const configureWorker = function(slot, worker) {
     baseConfigureWorker.call(this, slot, worker);
+    worker.__airgapperCameraCopyWarm = false;
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
       const activeMeta = this.activeMeta?.[slot];
+      if (message?.__airgapperCameraCopyComplete) {
+        if (activeMeta && activeMeta.id === message.id) {
+          activeMeta.__airgapperCopyComplete = true;
+          activeMeta.__airgapperPreflight = true;
+          activeMeta.deadlineAt = performance.now() + Math.max(1, Number(activeMeta.timeoutMs) || 1);
+          worker.__airgapperCameraCopyWarm = true;
+        }
+        return;
+      }
       if (message?.preflight && activeMeta) activeMeta.__airgapperPreflight = true;
       const recycledTrack = message?.__airgapperPackedTrackRecycle;
       if (recycledTrack instanceof ArrayBuffer) {
@@ -250,8 +267,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
         if (!message?.preflight) noteHealthyTrackedCompletion(message, activeMeta);
       } finally {
         if (resultMeta instanceof ArrayBuffer) recyclePackedResultBuffer(resultMeta);
-        if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta)
-          recyclePackedResultBuffer(unusedScratch);
+        if (unusedScratch instanceof ArrayBuffer && unusedScratch !== resultMeta) recyclePackedResultBuffer(unusedScratch);
         if (message) {
           delete message.__airgapperPackedSymbolScratchRecycle;
           delete message.__airgapperPackedSymbolMeta;
@@ -260,22 +276,35 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
       return result;
     };
   };
-  Object.defineProperty(configureWorker, "__airgapperPackedBufferRecycle", { value: true });
+  Object.defineProperty(configureWorker, "__airgapperWorkerPolicy", { value: true });
   DecodeWorkerPool.prototype.configureWorker = configureWorker;
 }
 
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
-if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfclumaGuard) {
+if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorkerPolicy) {
   const submitAtSlot = function(slot, message, transfer) {
-    if (slot < 0 || slot >= this.workers.length || this.busy[slot]) return false;
+    if (slot < 0 || slot >= this.workers.length || this.busy[slot]) {
+      closeMessageFrame(message);
+      return false;
+    }
 
     const cameraLive = liveReceiveCamera();
+    const native = nativeFrame(message?.videoFrame);
+    const fullAcquisition = Boolean(message?.full && message?.acquisitionMode);
+    if (fullAcquisition && (freshPayloadActive() || this.activeFullCount >= 1)) {
+      closeMessageFrame(message);
+      return false;
+    }
+    if (native && activeNativeCopies(this) >= MAX_CONCURRENT_NATIVE_COPIES) {
+      closeMessageFrame(message);
+      return false;
+    }
+
     const candidate = message && !message.full && !message.strictHotPath;
     const live = Boolean(candidate && cameraLive);
     boundLiveAcquisition(message, cameraLive);
     applyTimeoutBackpressure(message, live);
-    if (live && !message.videoFrame &&
-        Array.isArray(message.tracks) && message.tracks.length >= 2 &&
+    if (live && !message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
       const rgba = message.buf;
       const width = Math.trunc(Number(message.w) || 0);
@@ -296,21 +325,35 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperRvfcl
     transfer = attachPackedResultScratch(message, transfer);
     transfer = packTracks(message, transfer);
 
+    const worker = this.workers?.[slot];
     const accepted = baseSubmitAtSlot.call(this, slot, message, transfer);
     if (!accepted) {
       recycleUnsentBuffers(message);
+      closeMessageFrame(message);
       return false;
     }
+
     const meta = this.activeMeta?.[slot];
-    if (meta && meta.id === message.id) meta.__airgapperPreflight = false;
+    if (meta && meta.id === message.id) {
+      meta.__airgapperPreflight = false;
+      if (fullAcquisition) {
+        meta.timeoutMs = Math.min(Number(meta.timeoutMs) || ACQUISITION_TIMEOUT_MS, ACQUISITION_TIMEOUT_MS);
+        meta.deadlineAt = meta.startedAt + meta.timeoutMs;
+      }
+      if (native) {
+        meta.__airgapperNativeFrameCopy = true;
+        meta.__airgapperCopyComplete = false;
+        if (worker?.__airgapperCameraCopyWarm) {
+          meta.deadlineAt = Math.min(meta.deadlineAt, meta.startedAt + copyStageTimeout(meta));
+        }
+      }
+    }
     return true;
   };
-  Object.defineProperty(submitAtSlot, "__airgapperRvfclumaGuard", { value: true });
+  Object.defineProperty(submitAtSlot, "__airgapperWorkerPolicy", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
 }
 
-// Aggregate debug state only. Production decisions are driven by measured
-// completions, not these counters.
 window.airgapperTrackedTimeoutState = () => ({
   count: trackedTimeoutCount,
   decode: trackedDecodeTimeoutCount,
@@ -318,15 +361,15 @@ window.airgapperTrackedTimeoutState = () => ({
   pressure: trackedTimeoutPressure
 });
 
-// Every AirGapper decode worker uses the live-camera wrapper. Preserve the
-// build/scalar query string so it imports the exact same codec variant.
+// One worker wrapper only: worker-camera reports native copy completion and then
+// imports worker-rvfc, which owns the packed/live-camera worker adaptations.
 const NativeWorker = globalThis.Worker;
-if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorkerGuard) {
+if (typeof NativeWorker === "function" && !NativeWorker.__airgapperDecodeWorkerGuard) {
   const rewriteWorkerUrl = (input) => {
     try {
       const url = input instanceof URL ? new URL(input.href) : new URL(String(input), location.href);
       if (url.pathname.endsWith("/receive/worker.js")) {
-        url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-rvfc.js";
+        url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-camera.js";
       }
       return url;
     } catch {
@@ -338,6 +381,6 @@ if (typeof NativeWorker === "function" && !NativeWorker.__airgapperRvfclumaWorke
   }
   AirGapperWorker.prototype = NativeWorker.prototype;
   try { Object.setPrototypeOf(AirGapperWorker, NativeWorker); } catch {}
-  Object.defineProperty(AirGapperWorker, "__airgapperRvfclumaWorkerGuard", { value: true });
+  Object.defineProperty(AirGapperWorker, "__airgapperDecodeWorkerGuard", { value: true });
   try { globalThis.Worker = AirGapperWorker; } catch {}
 }
