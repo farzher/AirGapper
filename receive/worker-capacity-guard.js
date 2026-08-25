@@ -11,6 +11,7 @@ const ACQUISITION_TIMEOUT_MS = 1500;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
+const readyWorkers = new WeakSet();
 
 // A rare damaged optical frame can drive Guided into a very slow synchronous
 // WASM path. The pool's normal job timeout is the single timeout authority.
@@ -233,6 +234,10 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
+      if (message?.id === -1) {
+        readyWorkers.add(worker);
+        return baseOnMessage?.call(worker, event);
+      }
       const activeMeta = this.activeMeta?.[slot];
       if (message?.__airgapperCameraCopyComplete) {
         if (activeMeta && activeMeta.id === message.id) {
@@ -275,11 +280,17 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
       closeMessageFrame(message);
       return false;
     }
+    const worker = this.workers[slot];
+    if (!readyWorkers.has(worker)) {
+      closeMessageFrame(message);
+      return false;
+    }
 
     const cameraLive = liveReceiveCamera();
     const native = nativeFrame(message?.videoFrame);
     const fullAcquisition = Boolean(message?.full && message?.acquisitionMode);
-    if (fullAcquisition && this.activeFullCount >= 1) {
+    const acquisitionConcurrency = this.workers.length >= 4 ? 2 : 1;
+    if (fullAcquisition && this.activeFullCount >= acquisitionConcurrency) {
       closeMessageFrame(message);
       return false;
     }
