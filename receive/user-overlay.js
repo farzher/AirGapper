@@ -1,7 +1,7 @@
 import { GridLattice } from "./grid-lattice.js";
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
-const MISS_FADE_MS = 420;
+const MISS_FADE_MS = 520;
 const JOB_TTL_MS = 4000;
 const DRAW_INTERVAL_MS = 50;
 
@@ -107,10 +107,7 @@ function noteCompletion(message) {
   jobs.delete(id);
   const at = now();
   const successes = packedSuccessSlots(message);
-  for (const slot of job.slots) {
-    const activity = activityFor(slot);
-    activity.missAt = successes.has(slot) ? -Infinity : at;
-  }
+  for (const slot of job.slots) activityFor(slot).missAt = successes.has(slot) ? -Infinity : at;
 }
 
 function wrapWorkerPool() {
@@ -208,6 +205,26 @@ function outerQuad(value) {
   return validQuad(quad) ? quad : null;
 }
 
+function drawPixelsPerModule(ppm, width, dpr) {
+  if (!(ppm > 0)) return;
+  const label = `${ppm.toFixed(1)} px/module`;
+  const font = 11.5 * dpr;
+  const padX = 7 * dpr;
+  const padY = 4.5 * dpr;
+  const margin = 8 * dpr;
+  ctx.font = `600 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  const badgeW = ctx.measureText(label).width + padX * 2;
+  const badgeH = font + padY * 2;
+  const x = width - margin - badgeW;
+  const y = margin;
+  ctx.fillStyle = "rgba(7, 10, 14, 0.68)";
+  ctx.fillRect(x, y, badgeW, badgeH);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + padX, y + badgeH / 2 + 0.25 * dpr);
+  ctx.textBaseline = "alphabetic";
+}
+
 function drawHud(at) {
   if (!ctx || !preview || !video || !document.body.classList.contains("receive-mode") || document.hidden) return;
   const cw = canvas.clientWidth;
@@ -233,45 +250,18 @@ function drawHud(at) {
   const offX = (width - vw * scale) / 2;
   const offY = (height - vh * scale) / 2;
 
-  const ppm = pixelsPerModule(value);
-  if (ppm > 0) {
-    const label = `${ppm.toFixed(1)} px/module`;
-    const font = Math.max(10, 10.5 * dpr);
-    ctx.font = `600 ${font}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    ctx.lineWidth = Math.max(2, 2 * dpr);
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.62)";
-    ctx.fillStyle = "rgba(245, 249, 252, 0.78)";
-    ctx.strokeText(label, 10 * dpr, 18 * dpr);
-    ctx.fillText(label, 10 * dpr, 18 * dpr);
-  }
+  drawPixelsPerModule(pixelsPerModule(value), width, dpr);
 
   if (value.distributedFit) {
     const wall = outerQuad(value);
     if (wall) {
       ctx.save();
-      ctx.strokeStyle = "rgba(184, 132, 255, 0.34)";
+      ctx.strokeStyle = "rgba(184, 132, 255, 0.28)";
       ctx.lineWidth = Math.max(1, dpr);
-      ctx.setLineDash([]);
       pathQuad(wall, scale, offX, offY);
       ctx.stroke();
       ctx.restore();
     }
-  }
-
-  const activeSlots = new Set();
-  for (const job of jobs.values()) for (const slot of job.slots) activeSlots.add(slot);
-
-  for (const slot of value.slots) {
-    if (!activeSlots.has(slot.index)) continue;
-    if (!validQuad(slot.quad)) continue;
-    ctx.save();
-    pathQuad(slot.quad, scale, offX, offY);
-    ctx.fillStyle = "rgba(70, 211, 255, 0.08)";
-    ctx.strokeStyle = "rgba(88, 220, 255, 0.58)";
-    ctx.lineWidth = Math.max(1.25, 1.25 * dpr);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
   }
 
   for (const slot of value.slots) {
@@ -281,10 +271,8 @@ function drawHud(at) {
     const t = 1 - missAge / MISS_FADE_MS;
     ctx.save();
     pathQuad(slot.quad, scale, offX, offY);
-    ctx.fillStyle = `rgba(255, 166, 66, ${0.03 + 0.11 * t})`;
-    ctx.strokeStyle = `rgba(255, 174, 73, ${0.12 + 0.62 * t})`;
-    ctx.lineWidth = Math.max(1.25, (1.1 + 0.7 * t) * dpr);
-    ctx.fill();
+    ctx.strokeStyle = `rgba(255, 64, 76, ${0.18 + 0.78 * t})`;
+    ctx.lineWidth = Math.max(1.5, (1.35 + 0.8 * t) * dpr);
     ctx.stroke();
     ctx.restore();
   }
