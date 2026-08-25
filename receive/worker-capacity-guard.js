@@ -81,6 +81,11 @@ function activeNativeCopies(pool) {
   return count;
 }
 
+function copyStageTimeout(meta) {
+  const normal = Math.max(1, Number(meta?.timeoutMs) || 1);
+  return Math.max(250, Math.min(600, normal * 0.20));
+}
+
 function takeBestFitBuffer(pool, bytes) {
   let bestIndex = -1;
   let bestSize = Infinity;
@@ -223,6 +228,7 @@ const baseConfigureWorker = DecodeWorkerPool.prototype.configureWorker;
 if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgapperWorkerPolicy) {
   const configureWorker = function(slot, worker) {
     baseConfigureWorker.call(this, slot, worker);
+    worker.__airgapperCameraCopyWarm = false;
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
@@ -231,6 +237,10 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
         if (activeMeta && activeMeta.id === message.id) {
           activeMeta.__airgapperCopyComplete = true;
           activeMeta.__airgapperPreflight = true;
+          // Same watchdog, next stage: the native camera buffer is released,
+          // so the decoder gets its normal remaining budget.
+          activeMeta.deadlineAt = performance.now() + Math.max(1, Number(activeMeta.timeoutMs) || 1);
+          worker.__airgapperCameraCopyWarm = true;
         }
         return;
       }
@@ -271,6 +281,7 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
 
     const cameraLive = liveReceiveCamera();
     const native = nativeFrame(message?.videoFrame);
+    const worker = this.workers?.[slot];
     // Capacity is a resource concern, not an acquisition-algorithm concern.
     // Every live full-frame job consumes a bounded acquisition lane while the
     // acquisition policy remains the sole owner of seed/fast/hunt/thorough mode.
@@ -322,6 +333,12 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
       if (native) {
         meta.__airgapperNativeFrameCopy = true;
         meta.__airgapperCopyComplete = false;
+        // Keep the first camera job on a newly-created decoder conservative.
+        // After one proven copy, a later 250-600 ms copy stall is a wedged
+        // camera buffer and the pool's existing watchdog can reclaim it.
+        if (worker?.__airgapperCameraCopyWarm) {
+          meta.deadlineAt = Math.min(meta.deadlineAt, meta.startedAt + copyStageTimeout(meta));
+        }
       }
     }
     return true;

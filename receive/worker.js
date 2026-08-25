@@ -1436,7 +1436,9 @@ ctx.onmessage = async (e) => {
               if (symbols.length > before) targetedSuccesses++;
             }
           }
-          if (symbols.length === 0) acquireWithScaleFallback(1);
+          // Local recovery deliberately stops here. A miss is not permission
+          // to wake the generic whole-frame finder; sustained payload silence
+          // is the runtime's sole global-recovery trigger.
         } else if (fullMode === "seed") {
           readFullAttempts++;
           appendResults(readDenseSeed(1), false);

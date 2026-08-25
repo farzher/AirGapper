@@ -34,8 +34,12 @@ import {
 import { StaticQrOpticsAnalyzer } from "./qr-optics.js";
 import {
   acquisitionRacePolicy,
+  automaticOpticsAcquisitionSeed,
+  automaticOpticsHasAnotherAcquisitionSeed,
+  automaticOpticsHoldEligible,
   automaticOpticsHoldThreshold,
-  legacyTemporalRiskWeight
+  legacyTemporalRiskWeight,
+  lockedRecoveryPolicy
 } from "./performance-policy.js";
 import {
   copyTextOnAndroid,
@@ -311,15 +315,12 @@ let requestedWidth = 2560;
 let requestedHeight = 1440;
 let requestedFps = 60;
 const AUTO_QR_EV_BIAS = -0.75;
-const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);
 let automaticOptics = true;
 let automaticExposureAxis = true;
 let automaticIsoAxis = true;
 const AUTO_OPTICS_LOCK_SETTLE_MS = 700;
 const AUTO_OPTICS_RECENT_DECODE_MS = 900;
 const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
-const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
-const AUTO_OPTICS_MAX_SHORT_EXPOSURE = 35; // 3.5 ms; exposureTime uses 0.1 ms units
 // After the motion-safe shutter handoff, tune gain against the decoder itself.
 // Hardware AE is inconsistent on an animated emissive QR wall: the same phone
 // has chosen 10 ms / ISO 100 and 10 ms / ISO 200 on adjacent runs, while the
@@ -374,6 +375,7 @@ let autoOpticsRetryAt = 0;
 let autoOpticsAcquisitionSince = 0;
 let autoOpticsRescueRetryAt = 0;
 let autoOpticsAeRescueStep = 0;
+let autoOpticsSeedAttempt = 0;
 let autoOpticsAeBias = 0;
 let autoOpticsHoldSample;
 let autoOpticsHoldCollapseSince = 0;
@@ -3085,20 +3087,22 @@ function noteDecodeCompleted(id, completion) {
             const geometryEligible = region.visibleFraction >= 0.88 && region.pixelsPerModule >= 2.4;
             if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
               const healed = gridLattice.dropSlotCorrection(slot);
-              resetSlotSchedulingHistory(slot, recoveryNow);
-              slotGeometryProbeUntil[slot] = recoveryNow + 900;
               slotGeometryRetryAt[slot] = recoveryNow + 3000;
-              region.consecutiveMisses = 0;
-              region.decodeConfidence = Math.max(region.decodeConfidence, 0.65);
-              resetTrackBudgetController();
-              geometrySlotCorrectionResets++;
-              if (healed) syncGrid(healed, recoveryNow);
-              const refreshed = regions.find((item) => Number(item.gridSlot) === slot);
-              if (refreshed) {
-                refreshed.consecutiveMisses = 0;
-                refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
+              if (healed) {
+                resetSlotSchedulingHistory(slot, recoveryNow);
+                slotGeometryProbeUntil[slot] = recoveryNow + 900;
+                region.consecutiveMisses = 0;
+                region.decodeConfidence = Math.max(region.decodeConfidence, 0.65);
+                resetTrackBudgetController();
+                geometrySlotCorrectionResets++;
+                syncGrid(healed, recoveryNow);
+                const refreshed = regions.find((item) => Number(item.gridSlot) === slot);
+                if (refreshed) {
+                  refreshed.consecutiveMisses = 0;
+                  refreshed.decodeConfidence = Math.max(refreshed.decodeConfidence, 0.65);
+                }
+                lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
               }
-              lastRecoveryReason = `slot s${slot} geometry self-heal reprobe (${geometrySlotCorrectionResets})`;
             }
           }
         }
@@ -3459,6 +3463,7 @@ function resetAutomaticOpticsRuntime() {
   autoOpticsAcquisitionSince = 0;
   autoOpticsRescueRetryAt = 0;
   autoOpticsAeRescueStep = 0;
+  autoOpticsSeedAttempt = 0;
   autoOpticsAeBias = 0;
   autoOpticsHoldSample = void 0;
   autoOpticsHoldCollapseSince = 0;
@@ -3594,11 +3599,12 @@ function automaticOpticsMemoryHealthy(saved) {
 }
 function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
   const aeProduct = baseline.exposure * baseline.iso;
-  // readAutomaticAeBaseline() is neutral. Apply AirGapper's deliberate darkness
-  // preference exactly once here; remembered/manual winners bypass this meter.
-  const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * AUTO_QR_LIGHT_SCALE);
+  const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
+  // Acquisition can explore both sides of the meter, but every seed keeps a
+  // short shutter so rolling-shutter safety is never traded away.
+  const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);
   let exposure = quantizeCameraRange(
-    Math.min(exposureRange.max, AUTO_OPTICS_MAX_SHORT_EXPOSURE, 1e4 / fps * AUTO_OPTICS_SHUTTER_FRAME_FRACTION),
+    Math.min(exposureRange.max, seedPolicy.maxExposure, 1e4 / fps * seedPolicy.frameFraction),
     exposureRange
   );
   if (targetProduct / Math.max(exposureRange.min, exposure) < isoRange.min) {
@@ -3611,7 +3617,7 @@ function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
     Math.max(isoRange.min, Math.min(isoRange.max, targetProduct / Math.max(exposureRange.min, exposure))),
     isoRange
   );
-  return { exposure, iso, aeProduct, targetProduct };
+  return { exposure, iso, aeProduct, targetProduct, seedPolicy };
 }
 async function readAutomaticAeBaseline(track) {
   const beforeSequence = latestSourceFrameSequence;
@@ -3657,7 +3663,7 @@ async function applyAutomaticShortSeed(track, baseline, reason) {
   autoOpticsAcquisitionSince = receiverNow();
   autoOpticsRetryAt = 0;
   autoOpticsRescueRetryAt = autoOpticsAcquisitionSince + AUTO_OPTICS_ACQUISITION_RESCUE_MS;
-  autoOpticsTuneSummary = `${reason} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
+  autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
   focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");
   return true;
 }
@@ -3704,6 +3710,7 @@ async function primeAutomaticQrOpticsStartup(track) {
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsAeRescueStep = 0;
+    autoOpticsSeedAttempt = 0;
     autoOpticsAeBias = 0;
 
     // The last CRC-proven manual setting is a much better prior for an emissive
@@ -3735,26 +3742,36 @@ async function primeAutomaticQrOpticsStartup(track) {
     autoOpticsMutationRunning = false;
   }
 }
-async function abandonAutomaticShortSeed(track, reason = "fast-dark seed produced no QR") {
+async function advanceAutomaticOpticsAcquisitionSeed(track, reason) {
+  if (!automaticOpticsSessionAlive(track) || !autoOpticsAeBaseline ||
+      !automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt)) return false;
+  autoOpticsSeedAttempt++;
+  const next = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
+  return applyAutomaticShortSeed(track, autoOpticsAeBaseline, `${reason} · trying ${next.label}`);
+}
+async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
   if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
   autoOpticsMutationRunning = true;
   try {
+    if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;
     const baseline = await readAutomaticAeBaseline(track);
     if (!automaticOpticsSessionAlive(track)) return;
     const now = receiverNow();
     autoOpticsAeBaseline = baseline;
+    autoOpticsSeedAttempt = 0;
     autoOpticsRuntimeState = "ae";
+    autoOpticsControllerState = "ACQUIRE";
     autoOpticsMemoryBootAt = 0;
     autoOpticsMemoryBoot = void 0;
     autoOpticsLockSince = 0;
     autoOpticsAcquisitionSince = now;
-    autoOpticsRetryAt = 0;
-    autoOpticsRescueRetryAt = now + 300;
+    autoOpticsRetryAt = Infinity;
+    autoOpticsRescueRetryAt = Infinity;
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = 0;
-    autoOpticsTuneSummary = `${reason} · neutral AE rescue`;
-    focusController.adoptAutomaticCameraState("fast-dark startup failed; hardware AE rescue enabled");
+    autoOpticsTuneSummary = `${reason} · QR seed ladder exhausted · hardware AE fallback`;
+    focusController.adoptAutomaticCameraState("QR-specific short-shutter acquisition exhausted; hardware AE remains in control");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4029,6 +4046,7 @@ async function measureAutomaticIsoCandidate(track, exposure, requestedIso, isoRa
 }
 async function settleAutomaticQrOptics(track, now) {
   if (autoOpticsMutationRunning || !automaticOptics || now < autoOpticsRetryAt) return;
+  const startedFromMemory = autoOpticsRuntimeState === "memory";
   const caps = track.getCapabilities?.() ?? {};
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
@@ -4075,12 +4093,20 @@ async function settleAutomaticQrOptics(track, now) {
 
     const cohortSize = beginAutomaticOpticsMeasurementCohort();
     if (!cohortSize) {
-      autoOpticsRuntimeState = "manual";
-      autoOpticsControllerState = "HOLD";
-      autoOpticsHeldYield = 0.5;
+      autoOpticsMeasurementSlots = void 0;
+      const fallback = await readAutomaticAeBaseline(track);
+      if (!automaticOpticsSessionAlive(track)) return;
+      autoOpticsAeBaseline = fallback;
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = receiverNow();
       autoOpticsRetryAt = Infinity;
-      autoOpticsHoldSample = autoOpticsPipelineSnapshot();
-      autoOpticsTuneSummary = `QR-proven AE frozen · ${formatExposureMs(frozenExposure)} · ISO ${Math.round(frozenIso)} · no stable cohort`;
+      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsHeldYield = 0;
+      autoOpticsHoldSample = void 0;
+      autoOpticsTuneSummary = "QR geometry not measurable · hardware AE fallback; no HOLD";
+      focusController.adoptAutomaticCameraState("no measurable QR cohort; unproven manual exposure was not held");
       return;
     }
 
@@ -4088,13 +4114,20 @@ async function settleAutomaticQrOptics(track, now) {
       track, frozenIso, latestSourceFrameSequence + 1, AUTO_OPTICS_BASELINE_SAMPLE_MS
     );
     if (!baseline || baseline.unstable || !baseline.valid) {
-      autoOpticsRuntimeState = "manual";
-      autoOpticsControllerState = "HOLD";
-      autoOpticsHeldYield = Math.max(0.35, Number(baseline?.yieldRate) || 0);
+      autoOpticsMeasurementSlots = void 0;
+      const fallback = await readAutomaticAeBaseline(track);
+      if (!automaticOpticsSessionAlive(track)) return;
+      autoOpticsAeBaseline = fallback;
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = receiverNow();
       autoOpticsRetryAt = Infinity;
-      autoOpticsHoldSample = autoOpticsPipelineSnapshot();
-      autoOpticsTuneSummary = `QR-proven AE frozen · ${formatExposureMs(frozenExposure)} · ISO ${Math.round(frozenIso)} · calibration skipped`;
-      focusController.adoptAutomaticCameraState("QR-proven AE frozen; local comparison lacked stable evidence so no further camera mutation was allowed");
+      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsHeldYield = 0;
+      autoOpticsHoldSample = void 0;
+      autoOpticsTuneSummary = "QR optics measurement inconclusive · hardware AE fallback; no HOLD";
+      focusController.adoptAutomaticCameraState("QR optics evidence was incomplete; unproven manual exposure was not held");
       return;
     }
 
@@ -4145,6 +4178,30 @@ async function settleAutomaticQrOptics(track, now) {
       }
     }
 
+    if (!automaticOpticsHoldEligible(best)) {
+      const measuredYield = Math.max(0, Number(best.yieldRate) || 0);
+      const measuredBreadth = Math.max(0, Number(best.breadth) || 0);
+      const reason = `QR bracket unproven ${(measuredYield * 100).toFixed(0)}% · breadth ${(measuredBreadth * 100).toFixed(0)}%`;
+      if (startedFromMemory) forgetAutomaticOptics(track);
+      autoOpticsMeasurementSlots = void 0;
+      if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;
+      const fallback = await readAutomaticAeBaseline(track);
+      if (!automaticOpticsSessionAlive(track)) return;
+      autoOpticsAeBaseline = fallback;
+      autoOpticsRuntimeState = "ae";
+      autoOpticsControllerState = "ACQUIRE";
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = receiverNow();
+      autoOpticsRetryAt = Infinity;
+      autoOpticsRescueRetryAt = Infinity;
+      autoOpticsHeldYield = 0;
+      autoOpticsHoldSample = void 0;
+      autoOpticsHoldCollapseSince = 0;
+      autoOpticsTuneSummary = `${reason} · hardware AE fallback; no HOLD`;
+      focusController.adoptAutomaticCameraState("no QR-tested optics candidate met HOLD quality; hardware AE remains in control");
+      return;
+    }
+
     const winnerExposure = quantizeCameraRange(best.exposure || frozenExposure, exposureRange);
     const winnerIso = quantizeCameraRange(best.iso || frozenIso, isoRange);
     await applyCameraConstraint(track, {
@@ -4155,7 +4212,7 @@ async function settleAutomaticQrOptics(track, now) {
     if (!automaticOpticsSessionAlive(track)) return;
     autoOpticsRuntimeState = "manual";
     autoOpticsControllerState = "HOLD";
-    autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || Number(baseline.yieldRate) || 0.5);
+    autoOpticsHeldYield = Math.max(0.01, Number(best.yieldRate) || 0);
     autoOpticsHoldSample = autoOpticsPipelineSnapshot();
     autoOpticsHoldCollapseSince = 0;
     autoOpticsRetryAt = Infinity;
@@ -4298,15 +4355,10 @@ function maintainAutomaticQrOptics(now) {
   if (autoOpticsRuntimeState === "memory") {
     const recentDecode = Boolean(lastStreamDecodeAt && lastStreamDecodeAt >= autoOpticsAcquisitionSince && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
     if (gridLattice.locked && recentDecode) {
-      const saved = autoOpticsMemoryBoot;
-      autoOpticsRuntimeState = "manual";
-      autoOpticsControllerState = "HOLD";
-      autoOpticsHeldYield = Math.max(AUTO_OPTICS_MEMORY_MIN_YIELD, Math.min(1, Number(saved?.yieldRate) || 0.75));
-      autoOpticsHoldSample = autoOpticsPipelineSnapshot();
-      autoOpticsHoldCollapseSince = 0;
-      autoOpticsRetryAt = Infinity;
-      autoOpticsTuneSummary = `remembered winner proven · ${formatExposureMs(saved?.exposure)} · ISO ${Math.round(saved?.iso || 0)} · hold ${(autoOpticsHeldYield * 100).toFixed(0)}%`;
-      focusController.adoptAutomaticCameraState("remembered QR-proven exposure reacquired immediately and is held");
+      autoOpticsTuneSummary = "remembered winner reacquired · validating live QR cohort";
+      autoOpticsLockSince = now - AUTO_OPTICS_LOCK_SETTLE_MS;
+      autoOpticsRetryAt = 0;
+      void settleAutomaticQrOptics(track, now);
       return;
     }
     if (!recentDecode && autoOpticsMemoryBootAt && now - autoOpticsMemoryBootAt >= AUTO_OPTICS_MEMORY_BOOT_MAX_MS)
@@ -4316,6 +4368,14 @@ function maintainAutomaticQrOptics(now) {
 
   const seededStartup = autoOpticsRuntimeState === "seed";
   if (autoOpticsRuntimeState !== "ae" && !seededStartup) return;
+
+  if (seededStartup && gridLattice.locked) {
+    const recentSeedDecode = Boolean(lastStreamDecodeAt && lastStreamDecodeAt >= autoOpticsAcquisitionSince && now - lastStreamDecodeAt < AUTO_OPTICS_RECENT_DECODE_MS);
+    if (!recentSeedDecode && now - autoOpticsAcquisitionSince >= AUTO_OPTICS_ACQUISITION_RESCUE_MS) {
+      void abandonAutomaticShortSeed(track);
+      return;
+    }
+  }
 
   if (!gridLattice.locked) {
     autoOpticsLockSince = 0;
@@ -5202,6 +5262,8 @@ function stopReceiver() {
   lastStreamDecodeAt = 0;
   geometryRecoveryProbes = 0;
   geometryRecoveryResets = 0;
+  geometrySlotCorrectionResets = 0;
+  geometrySightingNudges = 0;
   geometryMotionNudges = 0;
   geometryMotionPixels = 0;
   geometrySimilarityNudges = 0;
@@ -6673,16 +6735,15 @@ async function captureFrame(source) {
   const geometryProbeDue = lockedGeometryTrusted && (aggressiveGeometryProbe || maintenanceGeometryProbe);
   const allLockedCandidatesCold = lockedGeometryTrusted && recentLockedHits === 0 &&
     lockedGeometryCandidates.every((region) => region.consecutiveMisses >= GEOMETRY_COLD_MISSES);
-  // Three tracked misses are evidence for a rescue probe, not evidence that the
-  // wall geometry vanished. Previously this destroyed a good lattice after
-  // roughly 0.9 s of optical misses and forced dense generic reacquisition.
-  // Preserve the hot geometry while rescue scans run in parallel; only abandon
-  // it after sustained decoder silence.
-  // A proven lattice is sticky for the life of this receive session.
-  // `allLockedCandidatesCold` escalates to bounded full-frame recovery below,
-  // but ordinary decoder silence must never destroy stream identity/geometry.
-  // A newly found CRC-valid QR will reject stale pose anchors and re-anchor the
-  // existing wall in place, even when only that one QR is visible.
+  const lockedRecovery = lockedRecoveryPolicy({
+    geometryProbeDue,
+    allCandidatesCold: allLockedCandidatesCold,
+    decodeSilenceMs: lockedDecodeSilenceMs,
+    globalSilenceMs: GEOMETRY_PROBE_SILENCE_MS,
+    hasCandidates: lockedGeometryCandidates.length > 0
+  });
+  // Cold slots are a local known-grid repair signal. Only real payload silence
+  // can promote recovery to the generic whole-frame finder.
   // A decoded QR is not the same thing as acquired grid geometry. In SEARCH
   // or REACQUIRE, one valid seed can set expectedRegions/live to 1 before the
   // lattice accepts its geometry. Never let that lone region suppress the
@@ -6712,7 +6773,7 @@ async function captureFrame(source) {
   // back to local robust decode or by abandoning the grid and reacquiring it.
   gridLattice.noteMissing(strictLockedAudit ? false : gridNeedsDiscovery, now);
   const needsRecoveryScan = strictLockedAudit ? false : preLatticeDiscovery ? true : lockedGeometryTrusted
-    ? geometryProbeDue || allLockedCandidatesCold
+    ? lockedRecovery.needsRecovery
     : live === 0 || live < expectedRegions || trackingUnhealthy || gridNeedsDiscovery;
   const captureHasTrackedWork = gridLattice.active ? lockedGeometryCandidates.length > 0 : regions.some((region) => region.decoded && region.quad && region.dim && validTrackedQuad(region, vw, vh));
   const provisionalUnknownVisible = acquisitionDiscovery && lastGridSnapshot ? visibleGridSlots.filter((region) =>
@@ -6761,9 +6822,9 @@ async function captureFrame(source) {
   // acquisition parallel without burying slower phones under duplicate work.
   const acquisitionSeedScan = fullScanDue && !captureNextScan && !gridLattice.active;
   const globalRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
-    (allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS);
+    lockedRecovery.globalRecovery;
   const localRecoverySeedScan = fullScanDue && !captureNextScan && !autoOpticsMeasurementSlots?.size && gridLattice.locked &&
-    geometryProbeDue && !globalRecoverySeedScan && lockedGeometryCandidates.length > 0;
+    lockedRecovery.localRecovery;
   if (globalRecoverySeedScan) {
     const recoveryInflight = pool.activeFullCount;
     if (recoveryInflight >= 1) {
