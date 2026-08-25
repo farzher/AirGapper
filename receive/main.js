@@ -5,7 +5,6 @@ import "./track-processor-proxy.js";
 import "./overlay-coordinate-guard.js";
 import "./track-processor-watchdog.js";
 import "./worker-capacity-guard.js";
-import "./timeout-diagnostics.js";
 import "./dev-settings-unlock.js";
 import "./status-neutral.js";
 import "./user-overlay.js";
