@@ -1,12 +1,13 @@
 import { DecodeWorkerPool } from "../shared/worker-pool.js";
 
 // The receiver imports worker-capacity-guard.js before constructing its pool.
-// Mock the tiny DOM surface it needs so this smoke exercises the same patched
-// submitAtSlot() prototype instead of only the unwrapped base class.
+// Mock the tiny browser surface it needs so this smoke exercises the same
+// patched submitAtSlot() prototype instead of only the unwrapped base class.
 globalThis.document = {
   getElementById: () => null,
   body: { classList: { contains: () => false } }
 };
+globalThis.window = globalThis;
 await import("../receive/worker-capacity-guard.js");
 if (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperWorkerPolicy)
   throw new Error("worker-capacity guard did not patch submitAtSlot");
