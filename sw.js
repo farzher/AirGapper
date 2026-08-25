@@ -19,6 +19,7 @@
     "./receive/focus-controller.js",
     "./receive/grid-lattice.js",
     "./receive/main.js",
+    "./receive/user-overlay.js",
     "./receive/optics-guard.js",
     "./receive/performance-policy.js",
     "./receive/phase-nudge.js",
