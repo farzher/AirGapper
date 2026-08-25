@@ -8,7 +8,14 @@ const preferWorkerProcessor = navigator.userAgentData?.mobile === true ||
 if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "function") &&
     typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
-  const WORKER_PULL_STALL_MS = 220;
+  // A single late worker reply must never permanently demote a healthy 30 fps
+  // TrackProcessor camera to rVFC. Older Android devices can present <video> at
+  // only 5-10 fps even while the camera track itself is still delivering 30 fps.
+  // Treat a missed pull as a recoverable worker fault first. Only repeated
+  // consecutive failures escape to runtime's compatibility fallback.
+  const WORKER_PULL_STALL_MS = 500;
+  const WORKER_RESTART_STALL_MS = 900;
+  const WORKER_STALL_RESTART_LIMIT = 2;
   let prewarmedWorker = null;
 
   function createProcessorWorker() {
@@ -43,8 +50,16 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         throw new TypeError("MediaStreamTrackProcessor requires a video MediaStreamTrack");
       }
 
-      this._worker = takeProcessorWorker();
+      this._sourceTrack = track;
+      this._maxBufferSize = Math.max(1, Math.trunc(Number(maxBufferSize) || 1));
+      const settings = track.getSettings?.() ?? {};
+      this._expectedWidth = Number(settings.width) || 0;
+      this._expectedHeight = Number(settings.height) || 0;
+      this._expectedFrameRate = Number(settings.frameRate) || 0;
+      this._worker = null;
+      this._workerGeneration = 0;
       this._workerHealthy = false;
+      this._consecutiveWorkerStalls = 0;
       this._workerStallTimer = 0;
       this._readerTaken = false;
       this._closed = false;
@@ -56,27 +71,9 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       this._discardedFrames = 0;
       this._terminateTimer = 0;
 
-      this._worker.onmessage = (event) => this._onMessage(event.data ?? {});
-      this._worker.onerror = (event) => {
-        this._fail(new Error(event.message || "Worker MediaStreamTrackProcessor failed"));
-      };
-
-      const settings = track.getSettings?.() ?? {};
-      let workerTrack;
       try {
-        // Transferring the original would detach ownership from the page. Keep
-        // the live preview/controller track where it is and transfer its clone.
-        workerTrack = track.clone();
-        this._worker.postMessage({
-          type: "start",
-          track: workerTrack,
-          maxBufferSize: Math.max(1, Math.trunc(Number(maxBufferSize) || 1)),
-          expectedWidth: Number(settings.width) || 0,
-          expectedHeight: Number(settings.height) || 0,
-          expectedFrameRate: Number(settings.frameRate) || 0
-        }, [workerTrack]);
+        this._startWorker(takeProcessorWorker());
       } catch (error) {
-        workerTrack?.stop?.();
         this._fail(error instanceof Error ? error : new Error(String(error)));
       }
 
@@ -91,6 +88,44 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
 
     get discardedFrames() {
       return this._discardedFrames;
+    }
+
+    _startWorker(worker) {
+      if (!worker) throw new Error("Worker camera source unavailable");
+      const generation = ++this._workerGeneration;
+      this._worker = worker;
+      worker.onmessage = (event) => {
+        const message = event.data ?? {};
+        if (this._closed || generation !== this._workerGeneration || worker !== this._worker) {
+          message?.frame?.close?.();
+          return;
+        }
+        this._onMessage(message);
+      };
+      worker.onerror = (event) => {
+        if (this._closed || generation !== this._workerGeneration || worker !== this._worker) return;
+        this._fail(new Error(event.message || "Worker MediaStreamTrackProcessor failed"));
+      };
+
+      let workerTrack;
+      try {
+        // Transferring the original would detach ownership from the page. Keep
+        // the live preview/controller track where it is and transfer its clone.
+        workerTrack = this._sourceTrack.clone();
+        worker.postMessage({
+          type: "start",
+          track: workerTrack,
+          maxBufferSize: this._maxBufferSize,
+          expectedWidth: this._expectedWidth,
+          expectedHeight: this._expectedHeight,
+          expectedFrameRate: this._expectedFrameRate
+        }, [workerTrack]);
+      } catch (error) {
+        workerTrack?.stop?.();
+        if (this._worker === worker) this._worker = null;
+        try { worker.terminate(); } catch {}
+        throw error;
+      }
     }
 
     _getReader() {
@@ -116,11 +151,11 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
             }
             try {
               worker.postMessage("pull");
-              // Initial startup already has runtime.js' 250 ms watchdog. Once a
-              // worker has actually delivered a frame, a missing pull response is
-              // a true mid-session stall and should immediately reject this read.
-              // pumpTrackFrames() will then switch to the normal rVFC path.
-              if (this._workerHealthy) this._armWorkerStallFailure(token);
+              // Initial startup already has runtime.js' first-frame watchdog.
+              // Once this source has proved itself, fence a truly missing reply;
+              // recovery stays inside this processor instead of demoting the
+              // entire camera session after one scheduler hiccup.
+              if (this._workerHealthy) this._armWorkerStallRecovery(token, WORKER_PULL_STALL_MS);
             } catch (error) {
               this._clearPending(token);
               reject(error instanceof Error ? error : new Error(String(error)));
@@ -141,25 +176,51 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       };
     }
 
-    _clearWorkerStallFailure() {
+    _clearWorkerStallRecovery() {
       if (!this._workerStallTimer) return;
       clearTimeout(this._workerStallTimer);
       this._workerStallTimer = 0;
     }
 
-    _armWorkerStallFailure(token) {
-      this._clearWorkerStallFailure();
+    _armWorkerStallRecovery(token, delay) {
+      this._clearWorkerStallRecovery();
       this._workerStallTimer = setTimeout(() => {
         this._workerStallTimer = 0;
         if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
-        this._workerHealthy = false;
-        this._fail(new Error("Worker MediaStreamTrackProcessor stalled"));
-      }, WORKER_PULL_STALL_MS);
+        this._recoverWorkerStall(token);
+      }, delay);
+    }
+
+    _recoverWorkerStall(token) {
+      if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
+      this._workerHealthy = false;
+      this._consecutiveWorkerStalls++;
+      const oldWorker = this._worker;
+      this._worker = null;
+      ++this._workerGeneration;
+      try { oldWorker?.terminate(); } catch {}
+
+      const sourceLive = !this._sourceTrack?.readyState || this._sourceTrack.readyState === "live";
+      if (!sourceLive || this._consecutiveWorkerStalls > WORKER_STALL_RESTART_LIMIT) {
+        this._fail(new Error("Worker MediaStreamTrackProcessor repeatedly stalled"));
+        return;
+      }
+
+      try {
+        this._startWorker(createProcessorWorker());
+        // Keep the caller's original read() pending across the restart. The new
+        // worker receives its pull immediately; startSource() queues the request
+        // even if module/camera initialization has not produced a frame yet.
+        this._worker.postMessage("pull");
+        this._armWorkerStallRecovery(token, WORKER_RESTART_STALL_MS);
+      } catch (error) {
+        this._fail(error instanceof Error ? error : new Error(String(error)));
+      }
     }
 
     _clearPending(token = this._readGeneration) {
       if (token !== this._readGeneration) return;
-      this._clearWorkerStallFailure();
+      this._clearWorkerStallRecovery();
       this._pendingResolve = null;
       this._pendingReject = null;
     }
@@ -174,8 +235,9 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     _onMessage(message) {
       this._updateCounters(message);
       if (message.type === "frame") {
-        this._clearWorkerStallFailure();
+        this._clearWorkerStallRecovery();
         this._workerHealthy = true;
+        this._consecutiveWorkerStalls = 0;
         const frame = message.frame;
         const resolve = this._pendingResolve;
         if (this._closed || this._terminalError || !resolve) {
@@ -210,7 +272,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     _fail(error) {
       if (this._terminalError || this._closed) return;
       this._terminalError = error;
-      this._clearWorkerStallFailure();
+      this._clearWorkerStallRecovery();
       const reject = this._pendingReject;
       this._pendingResolve = null;
       this._pendingReject = null;
@@ -222,7 +284,8 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       if (this._closed) return Promise.resolve();
       this._closed = true;
       ++this._readGeneration;
-      this._clearWorkerStallFailure();
+      ++this._workerGeneration;
+      this._clearWorkerStallRecovery();
       const resolve = this._pendingResolve;
       const reject = this._pendingReject;
       this._pendingResolve = null;
@@ -232,11 +295,11 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         else resolve?.({ value: undefined, done: true });
       }
       const worker = this._worker;
+      this._worker = null;
       if (worker) {
         try { worker.postMessage({ type: "stop" }); } catch {}
         if (!this._terminateTimer) {
           this._terminateTimer = setTimeout(() => {
-            if (this._worker === worker) this._worker = null;
             try { worker.terminate(); } catch {}
             this._terminateTimer = 0;
           }, 100);
@@ -246,7 +309,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     }
 
     _terminateNow() {
-      this._clearWorkerStallFailure();
+      this._clearWorkerStallRecovery();
       const worker = this._worker;
       this._worker = null;
       if (this._terminateTimer) {
