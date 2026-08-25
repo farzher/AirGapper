@@ -92,6 +92,7 @@ jobs:
           node --input-type=module --check < receive/worker.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
+          node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
           node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
@@ -105,6 +106,7 @@ jobs:
           # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
           node benchmark/auto-phase-policy-smoke.mjs
           node benchmark/version-source-smoke.mjs
           node benchmark/guided-motion-smoke.mjs
