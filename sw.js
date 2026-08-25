@@ -15,21 +15,33 @@
     "./receive/auto-phase.js",
     "./receive/camera-constraints.js",
     "./receive/camera-ui.js",
+    "./receive/decode-health.js",
+    "./receive/dev-settings-unlock.js",
+    "./receive/dev-tools-core.js",
     "./receive/dev-tools.js",
+    "./receive/exposure-ev.js",
     "./receive/focus-controller.js",
+    "./receive/grid-lattice-geometry.js",
     "./receive/grid-lattice.js",
+    "./receive/guided-motion.js",
     "./receive/main.js",
-    "./receive/user-overlay.js",
-    "./receive/optics-guard.js",
+    "./receive/overlay-coordinate-dev.js",
     "./receive/performance-policy.js",
     "./receive/phase-nudge.js",
     "./receive/qr-optics.js",
-    "./receive/recovery-policy.js",
-    "./receive/recovery-state.js",
     "./receive/result.js",
+    "./receive/rgba-luma.js",
     "./receive/runtime.js",
+    "./receive/timeout-diagnostics.js",
+    "./receive/track-processor-proxy.js",
+    "./receive/track-processor-worker-proxy.js",
     "./receive/track-processor-worker.js",
+    "./receive/user-overlay.js",
+    "./receive/worker-camera.js",
+    "./receive/worker-core.js",
+    "./receive/worker-rvfc.js",
     "./receive/worker.js",
+    "./send/dev-settings.js",
     "./send/main.js",
     "./send/render-worker.js",
     "./send/transfer-qr.js",
@@ -50,6 +62,7 @@
     "./shared/style.css",
     "./shared/transport.js",
     "./shared/wake-lock.js",
+    "./shared/worker-pool-core.js",
     "./shared/worker-pool.js",
     "./shared/zip.js",
     "./codec/scalar/airgapper_codec.js",
@@ -60,20 +73,34 @@
     "./vendor/raptorq/raptorq.js",
     "./vendor/raptorq/raptorq_bg.wasm"
   ];
+
   self.addEventListener("install", (event) => {
-    event.waitUntil(caches.open(CACHE).then(async (cache) => {
+    event.waitUntil((async () => {
+      const cache = await caches.open(CACHE);
       await Promise.all(PRECACHE.map(async (url) => {
         const response = await fetch(url, { cache: "reload" });
         if (!response.ok) throw new Error(`Precache failed ${response.status}: ${url}`);
         await cache.put(url, response);
       }));
-    }));
+      // Build URLs are versioned. Once this exact build is completely cached,
+      // keeping an older worker waiting only prolongs stale/offline behavior.
+      await self.skipWaiting();
+    })());
   });
+
   self.addEventListener("activate", (event) => {
-    event.waitUntil(caches.keys().then((keys) => Promise.all(
-      keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key))
-    )));
+    event.waitUntil((async () => {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys.filter((key) => key !== CACHE && key.startsWith("airgapper-")).map((key) => caches.delete(key))
+      );
+      // The newly installed build is internally complete, so take ownership of
+      // already-open AirGapper tabs immediately instead of requiring a full app
+      // close/reopen before the current cache becomes authoritative.
+      await self.clients.claim();
+    })());
   });
+
   async function rangeResponse(request, response) {
     const range = request.headers.get("range");
     if (!range || !response) return response;
@@ -94,6 +121,7 @@
     headers.set("Accept-Ranges", "bytes");
     return new Response(body, { status: 206, statusText: "Partial Content", headers });
   }
+
   self.addEventListener("fetch", (event) => {
     const request = event.request;
     if (request.method !== "GET") return;
