@@ -1,0 +1,25 @@
+name: receiver v459 once
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/receiver-v459-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply source patch
+        run: python .github/receiver-v459.py
+      - name: Commit source and remove one-shot files
+        run: |
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/runtime.js version.js
+          git rm .github/receiver-v459.py .github/workflows/receiver-v459-once.yml
+          git commit -m "Make Auto Optics motion-safe v0.5.459"
+          git push
