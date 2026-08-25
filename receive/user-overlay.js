@@ -4,6 +4,14 @@ import { DecodeWorkerPool } from "../shared/worker-pool.js";
 const PROBE_FADE_MS = Object.freeze({ success: 420, sighting: 720, miss: 560 });
 const JOB_TTL_MS = 4000;
 const DRAW_INTERVAL_MS = 50;
+const SUCCESS_COLORS = Object.freeze({
+  hot: [0, 239, 255],
+  direct: [66, 165, 255],
+  sparse: [53, 214, 111],
+  fallback: [255, 178, 62],
+  robust: [255, 115, 92],
+  acquire: [180, 134, 255]
+});
 
 let snapshot;
 const jobs = new Map();
@@ -59,19 +67,21 @@ function trackSlot(track) {
   return best && best.distance < 0.75 ? best.index : null;
 }
 
-function targetProbeSlots(message) {
-  // The user overlay shows dedicated local-recovery probes only. Ordinary
-  // tracked misses are often rolling-shutter/frame-phase failures and must not
-  // be presented as evidence that a geometry probe failed.
-  if (!message?.full || message?.acquisitionMode !== "recovery" ||
-      !Array.isArray(message?.tracks) || !snapshot?.slots?.length) return [];
-  const expected = new Set(snapshot.slots.map((slot) => slot.index));
+function targetJob(message) {
+  if (!message || !Number.isInteger(Number(message.id))) return null;
   const slots = new Set();
-  for (const track of message.tracks) {
-    const slot = trackSlot(track);
-    if (slot !== null && expected.has(slot)) slots.add(slot);
+  if (Array.isArray(message.tracks) && snapshot?.slots?.length) {
+    const expected = new Set(snapshot.slots.map((slot) => slot.index));
+    for (const track of message.tracks) {
+      const slot = trackSlot(track);
+      if (slot !== null && expected.has(slot)) slots.add(slot);
+    }
   }
-  return [...slots];
+  return {
+    slots: [...slots],
+    recovery: Boolean(message.full && message.acquisitionMode === "recovery"),
+    acquire: Boolean(message.full && message.acquisitionMode !== "recovery")
+  };
 }
 
 function activityFor(slot) {
@@ -100,19 +110,25 @@ function sightingNearSlot(slot, sightings) {
   });
 }
 
-function packedSuccessSlots(message) {
-  const slots = new Set();
+function packedDecodePath(code) {
+  return code === 2 ? "sparse" : code === 3 ? "fallback" : code === 4 ? "robust" : "hot";
+}
+
+function successfulSlots(message) {
+  const slots = new Map();
   for (const symbol of message?.symbols || []) {
     const slot = Number(symbol?.header?.slotIndex);
-    if (Number.isInteger(slot) && slot >= 0) slots.add(slot);
+    if (Number.isInteger(slot) && slot >= 0) slots.set(slot, symbol?.decodePath || "hot");
   }
   const meta = message?.__airgapperPackedSymbolMeta;
   const count = Math.trunc(Number(message?.__airgapperPackedSymbolCount) || 0);
   if (meta instanceof ArrayBuffer && count > 0 && meta.byteLength >= count * 88) {
     const words = new Uint32Array(meta);
     for (let index = 0; index < count; index++) {
-      const slot = words[index * 22 + 4] >>> 16;
-      if (slot < 128) slots.add(slot);
+      const base = index * 22;
+      const slot = words[base + 4] >>> 16;
+      const path = packedDecodePath((words[base + 3] >>> 8) & 255);
+      if (slot < 128) slots.set(slot, path);
     }
   }
   return slots;
@@ -125,23 +141,36 @@ function noteCompletion(message) {
   if (!job) return;
   jobs.delete(id);
   const at = now();
-  const successes = packedSuccessSlots(message);
-  for (const slot of job.slots) {
+  const successes = successfulSlots(message);
+
+  // Every successful slot is user-visible. Preserve the old path palette, but
+  // render success as a quiet translucent fill instead of another bracket.
+  for (const [slot, path] of successes) {
     const activity = activityFor(slot);
     activity.at = at;
-    activity.kind = successes.has(slot)
-      ? "success"
-      : sightingNearSlot(slot, message?.sightings) ? "sighting" : "miss";
+    activity.kind = "success";
+    activity.path = job.acquire ? "acquire" : path;
+  }
+
+  // Failure colors remain dedicated recovery evidence only. Ordinary tracked
+  // misses are often rolling-shutter/frame-phase misses and stay invisible.
+  if (!job.recovery) return;
+  for (const slot of job.slots) {
+    if (successes.has(slot)) continue;
+    const activity = activityFor(slot);
+    activity.at = at;
+    activity.kind = sightingNearSlot(slot, message?.sightings) ? "sighting" : "miss";
+    activity.path = undefined;
   }
 }
 
 function wrapWorkerPool() {
   const originalSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
   DecodeWorkerPool.prototype.submitAtSlot = function (workerSlot, message, transfer) {
-    const slots = targetProbeSlots(message);
+    const job = targetJob(message);
     const id = Number(message?.id);
     const accepted = originalSubmitAtSlot.call(this, workerSlot, message, transfer);
-    if (accepted && Number.isInteger(id) && id >= 0 && slots.length) jobs.set(id, { slots, at: now() });
+    if (accepted && job && Number.isInteger(id) && id >= 0) jobs.set(id, { ...job, at: now() });
     return accepted;
   };
 
@@ -175,6 +204,20 @@ Object.assign(canvas.style, {
 if (preview && getComputedStyle(preview).position === "static") preview.style.position = "relative";
 preview?.append(canvas);
 const ctx = canvas.getContext("2d");
+const legacyOverlay = document.getElementById("detect-overlay");
+const receiverDevActions = document.querySelector(".receiver-dev-actions");
+function syncOverlayMode() {
+  const developer = Boolean(receiverDevActions && !receiverDevActions.hidden);
+  // Normal receiving has one simple overlay owner. The old diagnostic canvas is
+  // reserved for Developer Mode so its ghost/bracket constellation cannot show
+  // through user success fills (and it does no hidden draw work).
+  if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
+  canvas.style.display = developer ? "none" : "";
+}
+if (receiverDevActions) {
+  new MutationObserver(syncOverlayMode).observe(receiverDevActions, { attributes: true, attributeFilter: ["hidden"] });
+}
+syncOverlayMode();
 
 function validQuad(quad) {
   return quad && [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]
@@ -379,10 +422,12 @@ function drawHud(at) {
     const t = 1 - age / fade;
 
     if (kind === "success") {
-      // Success is unmistakable but quiet: the exact QR polygon briefly fills
-      // with translucent green instead of growing an outline around it.
+      // Success is fill-only. Color preserves the original decoder-path language
+      // (cyan hot, blue direct, green sparse, orange fallback, red robust,
+      // purple acquisition) without adding another outline around the QR.
+      const color = SUCCESS_COLORS[activity?.path] || SUCCESS_COLORS.hot;
       ctx.save();
-      fillMappedQuad(mapped, scale, offX, offY, `rgba(38, 211, 111, ${0.07 + 0.19 * t})`);
+      fillMappedQuad(mapped, scale, offX, offY, `rgba(${color.join(",")}, ${0.08 + 0.20 * t})`);
       ctx.restore();
       continue;
     }
