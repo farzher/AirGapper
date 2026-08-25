@@ -276,6 +276,10 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
     }
 
     const cameraLive = liveReceiveCamera();
+    // Normalize the production full-scan mode before deciding whether this job
+    // consumes an acquisition lane. Otherwise an undefined mode is converted to
+    // "seed" only after the concurrency test and can bypass the cap entirely.
+    boundLiveAcquisition(message, cameraLive);
     const native = nativeFrame(message?.videoFrame);
     const fullAcquisition = Boolean(message?.full && message?.acquisitionMode);
     const acquisitionConcurrency = this.workers.length >= 4 ? 2 : 1;
@@ -290,7 +294,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
 
     const candidate = message && !message.full && !message.strictHotPath;
     const live = Boolean(candidate && cameraLive);
-    boundLiveAcquisition(message, cameraLive);
     applyTimeoutBackpressure(message, live);
     if (live && !message.videoFrame && Array.isArray(message.tracks) && message.tracks.length >= 2 &&
         (!message.pixelFormat || message.pixelFormat === "rgba") && message.buf instanceof ArrayBuffer) {
