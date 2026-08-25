@@ -1,4 +1,10 @@
 import { GridLattice as GeometryGridLattice } from "./grid-lattice-geometry.js";
+import {
+  noteDecodeGeometry,
+  noteDecodeLatticeState,
+  noteDecodeSuccess,
+  resetDecodeHealth
+} from "./decode-health.js";
 
 const SOFT_LOSS_MS = 450;
 const DORMANT_MS = 900;
@@ -12,7 +18,11 @@ function monotonicNow() {
 
 class GridLattice extends GeometryGridLattice {
   constructor(onTransition) {
-    super(onTransition);
+    super((from, to, reason, at) => {
+      noteDecodeLatticeState(to);
+      onTransition?.(from, to, reason, at);
+    });
+    noteDecodeLatticeState(this.state);
     this.frameAt = undefined;
     this.frameSnapshot = undefined;
     this.correctionAt = undefined;
@@ -34,13 +44,18 @@ class GridLattice extends GeometryGridLattice {
     this.lastPayloadAt = undefined;
   }
 
+  observeSnapshot(snapshot) {
+    if (snapshot) noteDecodeGeometry(snapshot);
+    return snapshot;
+  }
+
   cacheFrameSnapshot(at, snapshot) {
     const frameAt = Number(at);
     if (snapshot && Number.isFinite(frameAt)) {
       this.frameAt = frameAt;
       this.frameSnapshot = snapshot;
     }
-    return snapshot;
+    return this.observeSnapshot(snapshot);
   }
 
   cacheOutOfBandSnapshot(snapshot) {
@@ -48,7 +63,7 @@ class GridLattice extends GeometryGridLattice {
       this.frameSnapshot = snapshot;
       this.frameAt = undefined;
     }
-    return snapshot;
+    return this.observeSnapshot(snapshot);
   }
 
   notePayloadAlive() {
@@ -67,11 +82,13 @@ class GridLattice extends GeometryGridLattice {
   }
 
   reset() {
+    resetDecodeHealth();
     this.clearRuntimeCache();
     return super.reset();
   }
 
   reacquire(at, reason) {
+    resetDecodeHealth();
     this.clearRuntimeCache();
     return super.reacquire(at, reason);
   }
@@ -139,11 +156,14 @@ class GridLattice extends GeometryGridLattice {
     const snapshot = this.frameSnapshot;
     snapshot.state = this.state;
     snapshot.provisional = !this.active;
-    return snapshot;
+    return this.observeSnapshot(snapshot);
   }
 
   accept(detection, frameWidth, frameHeight) {
     const at = Number(detection?.at);
+    const slot = Number(detection?.slotIndex);
+    if (Number.isInteger(slot) && slot >= 0 && slot < 128)
+      noteDecodeSuccess(slot, Number.isFinite(at) ? at : monotonicNow());
 
     if (this.sameFrameCompatible(detection)) {
       const lastFullFit = Number(this.lastFullFitAt);
@@ -161,7 +181,7 @@ class GridLattice extends GeometryGridLattice {
         return this.cacheFrameSnapshot(at, result);
       }
       this.frameSnapshot = cached;
-      return cached ?? result;
+      return this.observeSnapshot(cached ?? result);
     }
 
     const priorAt = this.frameAt;
@@ -203,7 +223,7 @@ class GridLattice extends GeometryGridLattice {
     this.frameSnapshot = snapshot;
     snapshot.state = this.state;
     snapshot.provisional = !this.active;
-    return snapshot;
+    return this.observeSnapshot(snapshot);
   }
 }
 

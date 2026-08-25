@@ -10,7 +10,6 @@ let eventCount = 0;
 let lastSuccessAt = 0;
 let latticeState = "SEARCH";
 let geometrySlotCount = 0;
-let distributedGeometry = false;
 
 function clearRecentDecodeHealth() {
   slotSuccessAt.fill(0);
@@ -29,16 +28,14 @@ export function noteDecodeSuccess(slot, at = performance.now()) {
   lastSuccessAt = at;
 }
 
-export function noteDecodeGeometry(snapshot, usable) {
+export function noteDecodeGeometry(snapshot) {
   const slots = snapshot?.slots;
   geometrySlotCount = Array.isArray(slots) ? Math.min(SLOT_CAPACITY, slots.length) : 0;
-  distributedGeometry = Boolean(usable && snapshot?.distributedFit);
 }
 
 export function noteDecodeLatticeState(state) {
   latticeState = String(state || "SEARCH");
   if (latticeState === "SEARCH" || latticeState === "REACQUIRE" || latticeState === "DORMANT") {
-    distributedGeometry = false;
     geometrySlotCount = 0;
     clearRecentDecodeHealth();
   }
@@ -46,7 +43,6 @@ export function noteDecodeLatticeState(state) {
 
 export function resetDecodeHealth() {
   latticeState = "SEARCH";
-  distributedGeometry = false;
   geometrySlotCount = 0;
   clearRecentDecodeHealth();
 }
@@ -69,7 +65,11 @@ function recentSlotCount(cutoff) {
 }
 
 export function decodeExposureHealthy(at = performance.now()) {
-  if (latticeState !== "TRACK" || !distributedGeometry || !geometrySlotCount) return false;
+  // Geometry fit quality and payload health are deliberately separate. A local
+  // fit can still be decoding broadly across the physical wall; those real CRC
+  // successes are stronger exposure evidence than whether the current pose has
+  // enough fresh anchors to be called distributed.
+  if ((latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") || !geometrySlotCount) return false;
   if (!lastSuccessAt || at - lastSuccessAt > HEALTH_FRESH_MS) return false;
 
   const cutoff = at - HEALTH_WINDOW_MS;

@@ -2,7 +2,7 @@ import "./camera-constraints.js";
 import "./exposure-ev.js";
 import "./track-processor-proxy.js";
 import "./dev-settings-unlock.js";
-import "./decode-health-tap.js";
+import "./user-overlay.js";
 import "./runtime.js";
 
 // These diagnostics are intentionally absent from the normal receiver UI.
