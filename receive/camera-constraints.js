@@ -46,6 +46,7 @@ installIOSCameraConstraintFallback();
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
 const CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS = 3000;
+const SETTLED_EXPOSURE_CONFIRMATIONS = 2;
 const constraintBlockedUntil = new WeakMap();
 const settledExposure = new WeakMap();
 
@@ -124,7 +125,13 @@ function stableSettledExposure(track, set) {
     closeSetting(actual.exposureTime, settled.actual.exposureTime, caps.exposureTime) &&
     closeSetting(actual.iso, settled.actual.iso, caps.iso) &&
     closeSetting(actual.exposureCompensation, settled.actual.exposureCompensation, caps.exposureCompensation);
-  if (stable) reportStableSettledExposure(track, settled, set, actual, caps);
+  if (stable) {
+    settled.stableChecks++;
+    if (settled.stableChecks >= SETTLED_EXPOSURE_CONFIRMATIONS)
+      reportStableSettledExposure(track, settled, set, actual, caps);
+  } else {
+    settled.stableChecks = 0;
+  }
   return stable;
 }
 
@@ -134,6 +141,7 @@ function rememberSettledExposure(track, set) {
   settledExposure.set(track, {
     key: exposureRequestKey(set),
     reported: false,
+    stableChecks: 0,
     actual: {
       exposureMode: actual.exposureMode,
       exposureTime: actual.exposureTime,
