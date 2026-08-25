@@ -977,18 +977,40 @@ class FocusController {
   }
   noteTargetAbsent(now = performance.now()) {
     if (this.strategy !== "auto" || this.state === "UNAVAILABLE" || this.state === "OVERRIDE") return;
+
+    // The decoder is the authoritative target-presence signal. The optional
+    // static analyzer can miss a perfectly healthy animated wall; that must not
+    // re-arm autofocus while CRC-valid QR payload is still arriving.
+    if (this.decodeIsFresh(now)) {
+      this.targetMissingSince = 0;
+      if (!this.isOptimizing() && this.state !== "LOCKED") {
+        this.transition("LOCKED", "verified QR decode overrides static-target miss");
+      } else {
+        this.lastReason = "verified QR decode overrides static-target miss";
+        this.changed();
+      }
+      return;
+    }
+
     if (!this.targetMissingSince) this.targetMissingSince = now;
     if (this.isOptimizing()) {
       this.lastReason = "QR absent; explicit exposure tournament continues";
       this.changed();
       return;
-    } else if (this.state === "LOCKED") {
-      this.transition("TARGET_LOST_GRACE", "static target missing; continuous AF and exposure retained");
-    } else if ((this.state === "STABILIZING" || this.state === "TARGET_LOST_GRACE") && now - this.targetMissingSince >= CAMERA_TUNING.targetLostGraceMs) {
-      this.stableGeometry = void 0;
-      this.stableSince = 0;
-      this.transition("SEEKING", "target absent; camera state retained while decoding continues");
     }
+
+    if (this.state === "LOCKED") {
+      this.transition("TARGET_LOST_GRACE", "static target missing; decoder-silence confirmation required");
+    } else if (this.state === "STABILIZING" || this.state === "TARGET_LOST_GRACE") {
+      const targetMissingMs = now - this.targetMissingSince;
+      const requiredSilenceMs = Math.max(CAMERA_TUNING.targetLostGraceMs, this.silenceThreshold());
+      if (targetMissingMs >= CAMERA_TUNING.targetLostGraceMs && this.decodeSilence(now) >= requiredSilenceMs) {
+        this.stableGeometry = void 0;
+        this.stableSince = 0;
+        this.transition("SEEKING", "decoder silence confirmed target loss; autofocus recovery armed");
+      }
+    }
+
     if (this.isAcquiring()) void this.maybeRetrySeekingAutofocus(now);
     this.changed();
   }
@@ -1182,6 +1204,15 @@ class FocusController {
     if (!track || track.readyState !== "live") return;
     const modes = this.focusModes();
     const currentFocusMode = this.settings().focusMode;
+    if (this.strategy === "auto" && modes.includes("continuous") && currentFocusMode === "continuous") {
+      // Native continuous AF owns focus once it is running. Re-applying the
+      // same mode, POI writes, or escalating to single-shot can restart lens
+      // work on real camera HALs without adding useful QR evidence.
+      this.singleShotAfRejected = true;
+      this.lastReason = "native continuous autofocus owns focus; no camera focus write needed";
+      this.changed();
+      return;
+    }
     const canSingle = modes.includes("single-shot") && !this.singleShotAfRejected;
     const canContinuous = modes.includes("continuous") || currentFocusMode === "continuous";
     if (!canSingle && !canContinuous) return;
@@ -1298,6 +1329,9 @@ class FocusController {
       const actual = this.settings();
       this.committedFocusMode = actual.focusMode;
       this.committedFocusDistance = actual.focusDistance;
+      // A camera with working continuous AF never needs AirGapper to fall back
+      // to a disruptive single-shot sweep later in the same camera session.
+      this.singleShotAfRejected = true;
       this.lastSeekingAfAt = performance.now();
       this.lastReason = initial.focusMode === "continuous"
         ? "continuous hardware AF already running; waiting for QR evidence"
@@ -1447,12 +1481,9 @@ class FocusController {
     return Array.isArray(this.caps.focusMode) ? this.caps.focusMode : [];
   }
   pointsOfInterestSupported() {
-    let supported = false;
-    try {
-      supported = Boolean(navigator.mediaDevices?.getSupportedConstraints?.().pointsOfInterest);
-    } catch {
-    }
-    return Boolean(this.caps.pointsOfInterest) || supported;
+    // POI writes are mutations, not passive hints. Several phone HALs restart
+    // AF/metering work on every write, so framing owns the target center instead.
+    return false;
   }
   overrideFocusModes() {
     const modes = this.focusModes();
