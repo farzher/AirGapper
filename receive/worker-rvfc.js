@@ -9,7 +9,7 @@ import { compactRgbaGreenInPlace } from "./rgba-luma.js";
 // churn from dozens of nested quad objects per camera frame.
 
 const query = self.location.search || "";
-await import(`./worker.js${query}`);
+await import(`./worker-core.js${query}`);
 
 const baseOnMessage = self.onmessage;
 const nativePostMessage = self.postMessage.bind(self);
@@ -215,7 +215,7 @@ function packLiveGuidedSymbols(message, transfer) {
   return transfer;
 }
 
-// worker.js posts through ctx === self, so this interception applies to its
+// worker-core.js posts through ctx === self, so this interception applies to its
 // final result without changing the codec. Preflight/signature messages have no
 // symbols and pass straight through. Input and result metadata buffers are
 // returned to the page on the final result so both directions can ping-pong the

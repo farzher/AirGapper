@@ -336,28 +336,4 @@ if (typeof window === "object") {
   });
 }
 
-// Decode workers use worker-camera.js so native VideoFrame copy completion can
-// release camera-buffer pressure before the decoder's normal deadline begins.
-const NativeWorker = globalThis.Worker;
-if (typeof NativeWorker === "function" && !NativeWorker.__airgapperDecodeWorkerGuard) {
-  const rewriteWorkerUrl = (input) => {
-    try {
-      const url = input instanceof URL ? new URL(input.href) : new URL(String(input), location.href);
-      if (url.pathname.endsWith("/receive/worker.js")) {
-        url.pathname = url.pathname.slice(0, -"worker.js".length) + "worker-camera.js";
-      }
-      return url;
-    } catch {
-      return input;
-    }
-  };
-  function AirGapperWorker(url, options) {
-    return new NativeWorker(rewriteWorkerUrl(url), options);
-  }
-  AirGapperWorker.prototype = NativeWorker.prototype;
-  try { Object.setPrototypeOf(AirGapperWorker, NativeWorker); } catch {}
-  Object.defineProperty(AirGapperWorker, "__airgapperDecodeWorkerGuard", { value: true });
-  try { globalThis.Worker = AirGapperWorker; } catch {}
-}
-
 export { DecodeWorkerPool };
