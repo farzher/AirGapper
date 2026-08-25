@@ -3,19 +3,22 @@
 // pending VideoFrame, so main-thread scheduling jitter cannot starve the native
 // processor or build a stale queue. Browsers without a Window-side processor use
 // the same compatibility path regardless of device class.
+const NativeWindowTrackProcessor = typeof globalThis.MediaStreamTrackProcessor === "function"
+  ? globalThis.MediaStreamTrackProcessor
+  : null;
 const preferWorkerProcessor = navigator.userAgentData?.mobile === true ||
   globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
-if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "function") &&
-    typeof globalThis.Worker === "function") {
+if ((preferWorkerProcessor || !NativeWindowTrackProcessor) && typeof globalThis.Worker === "function") {
   const workerUrl = new URL("./track-processor-worker.js", import.meta.url);
   // A single late worker reply must never permanently demote a healthy 30 fps
   // TrackProcessor camera to rVFC. Older Android devices can present <video> at
   // only 5-10 fps even while the camera track itself is still delivering 30 fps.
-  // Treat a missed pull as a recoverable worker fault first. Only repeated
-  // consecutive failures escape to runtime's compatibility fallback.
+  // Treat a missed pull as a recoverable worker fault first. If the worker path
+  // repeatedly fails, prefer Window MediaStreamTrackProcessor before rVFC.
   const WORKER_PULL_STALL_MS = 500;
   const WORKER_RESTART_STALL_MS = 900;
   const WORKER_STALL_RESTART_LIMIT = 2;
+  const NATIVE_PULL_STALL_MS = 1200;
   let prewarmedWorker = null;
 
   function createProcessorWorker() {
@@ -61,6 +64,14 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       this._workerHealthy = false;
       this._consecutiveWorkerStalls = 0;
       this._workerStallTimer = 0;
+      this._workerTotalBase = 0;
+      this._workerDiscardedBase = 0;
+      this._usingNative = false;
+      this._nativeProcessor = null;
+      this._nativeReader = null;
+      this._nativeStallTimer = 0;
+      this._nativeTotalBase = 0;
+      this._nativeDiscardedBase = 0;
       this._readerTaken = false;
       this._closed = false;
       this._terminalError = null;
@@ -74,7 +85,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       try {
         this._startWorker(takeProcessorWorker());
       } catch (error) {
-        this._fail(error instanceof Error ? error : new Error(String(error)));
+        this._switchToNative(error instanceof Error ? error : new Error(String(error)));
       }
 
       this.readable = {
@@ -83,15 +94,28 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     }
 
     get totalFrames() {
+      if (this._usingNative) {
+        const current = Number(this._nativeProcessor?.totalFrames);
+        if (Number.isFinite(current) && current > 0)
+          return Math.max(this._totalFrames, this._nativeTotalBase + current);
+      }
       return this._totalFrames;
     }
 
     get discardedFrames() {
+      if (this._usingNative) {
+        const current = Number(this._nativeProcessor?.discardedFrames);
+        if (Number.isFinite(current) && current > 0)
+          return Math.max(this._discardedFrames, this._nativeDiscardedBase + current);
+      }
       return this._discardedFrames;
     }
 
     _startWorker(worker) {
       if (!worker) throw new Error("Worker camera source unavailable");
+      this._usingNative = false;
+      this._workerTotalBase = this._totalFrames;
+      this._workerDiscardedBase = this._discardedFrames;
       const generation = ++this._workerGeneration;
       this._worker = worker;
       worker.onmessage = (event) => {
@@ -104,7 +128,8 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       };
       worker.onerror = (event) => {
         if (this._closed || generation !== this._workerGeneration || worker !== this._worker) return;
-        this._fail(new Error(event.message || "Worker MediaStreamTrackProcessor failed"));
+        this._switchToNative(new Error(event.message || "Worker MediaStreamTrackProcessor failed"));
+        if (this._usingNative && this._pendingResolve) this._readNative(this._readGeneration);
       };
 
       let workerTrack;
@@ -142,11 +167,14 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
             const token = ++this._readGeneration;
             this._pendingResolve = resolve;
             this._pendingReject = reject;
+            if (this._usingNative) {
+              this._readNative(token);
+              return;
+            }
             const worker = this._worker;
             if (!worker) {
-              const error = new Error("Worker camera source unavailable");
-              this._clearPending(token);
-              reject(error);
+              this._switchToNative(new Error("Worker camera source unavailable"));
+              if (this._usingNative && token === this._readGeneration && this._pendingResolve) this._readNative(token);
               return;
             }
             try {
@@ -157,8 +185,8 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
               // entire camera session after one scheduler hiccup.
               if (this._workerHealthy) this._armWorkerStallRecovery(token, WORKER_PULL_STALL_MS);
             } catch (error) {
-              this._clearPending(token);
-              reject(error instanceof Error ? error : new Error(String(error)));
+              this._switchToNative(error instanceof Error ? error : new Error(String(error)));
+              if (this._usingNative && token === this._readGeneration && this._pendingResolve) this._readNative(token);
             }
           });
         },
@@ -182,6 +210,12 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       this._workerStallTimer = 0;
     }
 
+    _clearNativeStallFailure() {
+      if (!this._nativeStallTimer) return;
+      clearTimeout(this._nativeStallTimer);
+      this._nativeStallTimer = 0;
+    }
+
     _armWorkerStallRecovery(token, delay) {
       this._clearWorkerStallRecovery();
       this._workerStallTimer = setTimeout(() => {
@@ -201,8 +235,13 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       try { oldWorker?.terminate(); } catch {}
 
       const sourceLive = !this._sourceTrack?.readyState || this._sourceTrack.readyState === "live";
-      if (!sourceLive || this._consecutiveWorkerStalls > WORKER_STALL_RESTART_LIMIT) {
-        this._fail(new Error("Worker MediaStreamTrackProcessor repeatedly stalled"));
+      if (!sourceLive) {
+        this._fail(new Error("Camera track ended while worker processor stalled"));
+        return;
+      }
+      if (this._consecutiveWorkerStalls > WORKER_STALL_RESTART_LIMIT) {
+        this._switchToNative(new Error("Worker MediaStreamTrackProcessor repeatedly stalled"));
+        if (this._usingNative && token === this._readGeneration && this._pendingResolve) this._readNative(token);
         return;
       }
 
@@ -214,13 +253,96 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         this._worker.postMessage("pull");
         this._armWorkerStallRecovery(token, WORKER_RESTART_STALL_MS);
       } catch (error) {
-        this._fail(error instanceof Error ? error : new Error(String(error)));
+        this._switchToNative(error instanceof Error ? error : new Error(String(error)));
+        if (this._usingNative && token === this._readGeneration && this._pendingResolve) this._readNative(token);
       }
+    }
+
+    _switchToNative(workerError) {
+      if (this._closed || this._terminalError || this._usingNative) return;
+      this._clearWorkerStallRecovery();
+      const oldWorker = this._worker;
+      this._worker = null;
+      ++this._workerGeneration;
+      try { oldWorker?.terminate(); } catch {}
+
+      const sourceLive = !this._sourceTrack?.readyState || this._sourceTrack.readyState === "live";
+      if (!NativeWindowTrackProcessor || !sourceLive) {
+        this._fail(workerError instanceof Error ? workerError : new Error(String(workerError)));
+        return;
+      }
+
+      try {
+        let processor;
+        try {
+          processor = new NativeWindowTrackProcessor({
+            track: this._sourceTrack,
+            maxBufferSize: this._maxBufferSize
+          });
+        } catch {
+          processor = new NativeWindowTrackProcessor({ track: this._sourceTrack });
+        }
+        const reader = processor.readable.getReader();
+        this._nativeTotalBase = this._totalFrames;
+        this._nativeDiscardedBase = this._discardedFrames;
+        this._nativeProcessor = processor;
+        this._nativeReader = reader;
+        this._usingNative = true;
+        this._workerHealthy = false;
+      } catch (error) {
+        this._fail(error instanceof Error ? error : workerError instanceof Error ? workerError : new Error(String(error)));
+      }
+    }
+
+    _readNative(token) {
+      if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
+      const reader = this._nativeReader;
+      if (!reader) {
+        this._fail(new Error("Native MediaStreamTrackProcessor unavailable"));
+        return;
+      }
+      this._clearNativeStallFailure();
+      this._nativeStallTimer = setTimeout(() => {
+        this._nativeStallTimer = 0;
+        if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
+        this._fail(new Error("Native MediaStreamTrackProcessor stalled"));
+      }, NATIVE_PULL_STALL_MS);
+      Promise.resolve(reader.read()).then((result) => {
+        this._clearNativeStallFailure();
+        if (this._closed || token !== this._readGeneration || !this._pendingResolve) {
+          result?.value?.close?.();
+          return;
+        }
+        if (result?.done) {
+          this._fail(new Error("Native MediaStreamTrackProcessor ended unexpectedly"));
+          return;
+        }
+        const frame = result?.value;
+        if (!frame) {
+          this._fail(new Error("Native MediaStreamTrackProcessor returned no frame"));
+          return;
+        }
+        const processorTotal = Number(this._nativeProcessor?.totalFrames);
+        this._totalFrames = Number.isFinite(processorTotal) && processorTotal > 0
+          ? Math.max(this._totalFrames, this._nativeTotalBase + processorTotal)
+          : this._totalFrames + 1;
+        const processorDrops = Number(this._nativeProcessor?.discardedFrames);
+        if (Number.isFinite(processorDrops) && processorDrops > 0)
+          this._discardedFrames = Math.max(this._discardedFrames, this._nativeDiscardedBase + processorDrops);
+        const resolve = this._pendingResolve;
+        this._clearPending(token);
+        resolve({ value: frame, done: false });
+      }).catch((error) => {
+        this._clearNativeStallFailure();
+        if (this._closed || token !== this._readGeneration || !this._pendingResolve) return;
+        this._fail(error instanceof Error ? error : new Error(String(error)));
+      });
     }
 
     _clearPending(token = this._readGeneration) {
       if (token !== this._readGeneration) return;
       this._clearWorkerStallRecovery();
+      this._clearNativeStallFailure();
       this._pendingResolve = null;
       this._pendingReject = null;
     }
@@ -228,8 +350,10 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
     _updateCounters(message) {
       const total = Number(message.totalFrames);
       const discarded = Number(message.discardedFrames);
-      if (Number.isFinite(total)) this._totalFrames = Math.max(this._totalFrames, total);
-      if (Number.isFinite(discarded)) this._discardedFrames = Math.max(this._discardedFrames, discarded);
+      if (Number.isFinite(total))
+        this._totalFrames = Math.max(this._totalFrames, this._workerTotalBase + Math.max(0, total));
+      if (Number.isFinite(discarded))
+        this._discardedFrames = Math.max(this._discardedFrames, this._workerDiscardedBase + Math.max(0, discarded));
     }
 
     _onMessage(message) {
@@ -250,11 +374,13 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         return;
       }
       if (message.type === "unsupported") {
-        this._fail(new Error("MediaStreamTrackProcessor is unavailable in this worker"));
+        this._switchToNative(new Error("MediaStreamTrackProcessor is unavailable in this worker"));
+        if (this._usingNative && this._pendingResolve) this._readNative(this._readGeneration);
         return;
       }
       if (message.type === "error") {
-        this._fail(new Error(message.message || "Worker MediaStreamTrackProcessor failed"));
+        this._switchToNative(new Error(message.message || "Worker MediaStreamTrackProcessor failed"));
+        if (this._usingNative && this._pendingResolve) this._readNative(this._readGeneration);
         return;
       }
       if (message.type === "stopped") {
@@ -262,10 +388,8 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
           this._terminateNow();
           return;
         }
-        // A graceful done:true here would make runtime.js leave its pump loop
-        // without starting rVFC. Treat an unsolicited stop as a source failure so
-        // the outer frame pump keeps the live preview/scanner moving.
-        this._fail(new Error("Worker MediaStreamTrackProcessor stopped unexpectedly"));
+        this._switchToNative(new Error("Worker MediaStreamTrackProcessor stopped unexpectedly"));
+        if (this._usingNative && this._pendingResolve) this._readNative(this._readGeneration);
       }
     }
 
@@ -273,6 +397,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       if (this._terminalError || this._closed) return;
       this._terminalError = error;
       this._clearWorkerStallRecovery();
+      this._clearNativeStallFailure();
       const reject = this._pendingReject;
       this._pendingResolve = null;
       this._pendingReject = null;
@@ -286,6 +411,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
       ++this._readGeneration;
       ++this._workerGeneration;
       this._clearWorkerStallRecovery();
+      this._clearNativeStallFailure();
       const resolve = this._pendingResolve;
       const reject = this._pendingReject;
       this._pendingResolve = null;
@@ -294,6 +420,17 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
         if (reason instanceof Error) reject?.(reason);
         else resolve?.({ value: undefined, done: true });
       }
+
+      const nativeReader = this._nativeReader;
+      this._nativeReader = null;
+      this._nativeProcessor = null;
+      this._usingNative = false;
+      if (nativeReader) {
+        void Promise.resolve(nativeReader.cancel(reason)).catch(() => void 0).finally(() => {
+          try { nativeReader.releaseLock(); } catch {}
+        });
+      }
+
       const worker = this._worker;
       this._worker = null;
       if (worker) {
@@ -310,6 +447,7 @@ if ((preferWorkerProcessor || typeof globalThis.MediaStreamTrackProcessor !== "f
 
     _terminateNow() {
       this._clearWorkerStallRecovery();
+      this._clearNativeStallFailure();
       const worker = this._worker;
       this._worker = null;
       if (this._terminateTimer) {
