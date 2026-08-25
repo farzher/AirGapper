@@ -82,6 +82,14 @@ class GridLattice extends GeometryGridLattice {
     return true;
   }
 
+  noteAcceptedDecode(detection) {
+    const at = Number(detection?.at);
+    const slot = Number(detection?.slotIndex);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= 128) return false;
+    const observedAt = monotonicNow();
+    return noteDecodeSuccess(slot, Number.isFinite(at) ? at : observedAt, observedAt);
+  }
+
   reset() {
     resetDecodeHealth();
     this.clearRuntimeCache();
@@ -162,13 +170,12 @@ class GridLattice extends GeometryGridLattice {
 
   accept(detection, frameWidth, frameHeight) {
     const at = Number(detection?.at);
-    const slot = Number(detection?.slotIndex);
-    if (Number.isInteger(slot) && slot >= 0 && slot < 128) {
-      const observedAt = monotonicNow();
-      noteDecodeSuccess(slot, Number.isFinite(at) ? at : observedAt, observedAt);
-    }
 
     if (this.sameFrameCompatible(detection)) {
+      // Same-frame cache reuse is already fenced by current identity, declared
+      // layout, slot range and module count. Attribute this CRC-valid packet to
+      // decode health before the cheap observation update; no full fit is needed.
+      this.noteAcceptedDecode(detection);
       const lastFullFit = Number(this.lastFullFitAt);
       const refreshDue = this.fullFitAttemptAt !== at &&
         (!Number.isFinite(lastFullFit) || at - lastFullFit >= FULL_FIT_REFRESH_MS);
@@ -190,6 +197,11 @@ class GridLattice extends GeometryGridLattice {
     const priorAt = this.frameAt;
     const result = super.accept(detection, frameWidth, frameHeight);
     if (result) {
+      // Full-path packets become exposure/decoder-health evidence only after the
+      // geometry owner has accepted their identity/layout/slot/quad. Previously
+      // this happened before validation, so a valid packet from a layout change
+      // could briefly protect the stale wall/optics state.
+      this.noteAcceptedDecode(detection);
       this.notePayloadAlive();
       if (Number.isFinite(at) && priorAt !== at) {
         this.lastFullFitAt = at;
