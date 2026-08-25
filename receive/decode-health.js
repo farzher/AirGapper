@@ -28,9 +28,37 @@ export function noteDecodeSuccess(slot, at = performance.now()) {
   lastSuccessAt = at;
 }
 
-export function noteDecodeGeometry(snapshot) {
+export function noteDecodeGeometry(snapshot, frameWidth, frameHeight) {
   const slots = snapshot?.slots;
-  geometrySlotCount = Array.isArray(slots) ? Math.min(SLOT_CAPACITY, slots.length) : 0;
+  if (!Array.isArray(slots)) {
+    geometrySlotCount = 0;
+    return;
+  }
+
+  const width = Number(frameWidth);
+  const height = Number(frameHeight);
+  if (!(width > 1) || !(height > 1)) {
+    geometrySlotCount = Math.min(SLOT_CAPACITY, slots.length);
+    return;
+  }
+
+  // Lattice snapshots contain every declared layout slot, including QRs whose
+  // predicted centers are outside the camera. Exposure health is about the wall
+  // the camera can actually judge. Otherwise a partially framed 7x4 wall could
+  // require six distinct successes when only four or five QRs are on-camera.
+  let visible = 0;
+  for (const slot of slots) {
+    const box = slot?.box;
+    const x = Number(box?.x);
+    const y = Number(box?.y);
+    const w = Number(box?.w);
+    const h = Number(box?.h);
+    if (![x, y, w, h].every(Number.isFinite) || !(w > 0) || !(h > 0)) continue;
+    const centerX = x + w * 0.5;
+    const centerY = y + h * 0.5;
+    if (centerX >= 0 && centerY >= 0 && centerX < width && centerY < height) visible++;
+  }
+  geometrySlotCount = Math.min(SLOT_CAPACITY, visible);
 }
 
 export function noteDecodeLatticeState(state) {
