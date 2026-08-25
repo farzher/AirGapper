@@ -204,8 +204,8 @@ if (preflights[1].id !== 2 || preflights[1].sourceSequence !== 18 || preflights[
 pool.resize(0);
 
 // Acquisition timeout ownership belongs to DecodeWorkerPool. The receiver guard
-// may bound concurrency and normalize cheap-vs-robust modes, but it must not
-// silently replace the pool's recovery deadline with another short timeout.
+// may bound concurrency, but it must not silently replace the pool's recovery
+// deadline with another short timeout.
 const timeoutWorkers = [];
 const timeoutPool = new DecodeWorkerPool(
   () => {
@@ -228,9 +228,9 @@ if (!acquisitionMeta || acquisitionMeta.timeoutMs < 6000)
   throw new Error(`acquisition timeout was unexpectedly shortened: ${acquisitionMeta?.timeoutMs}`);
 timeoutPool.resize(0);
 
-// An unclassified live full scan is normalized before concurrency accounting.
-// With four workers, exactly two acquisition lanes are allowed; the third scan
-// must be dropped so recovery cannot consume the whole decoder pool.
+// Capacity and acquisition algorithm are separate concerns. With four workers,
+// exactly two live full-frame lanes are allowed, but the guard must preserve the
+// scan modes chosen by acquisition policy instead of silently rewriting them.
 const capWorkers = [];
 const capPool = new DecodeWorkerPool(
   () => {
@@ -245,13 +245,13 @@ const capPool = new DecodeWorkerPool(
 );
 capPool.resize(4);
 for (const readyWorker of capWorkers) readyWorker.onmessage({ data: { id: -1, bytes: null } });
-const acquisitionA = { id: 50, full: true, w: 64, h: 64 };
-const acquisitionB = { id: 51, full: true, w: 64, h: 64 };
-const acquisitionC = { id: 52, full: true, w: 64, h: 64 };
+const acquisitionA = { id: 50, full: true, acquisitionMode: "fast", w: 64, h: 64 };
+const acquisitionB = { id: 51, full: true, acquisitionMode: "hunt", w: 64, h: 64 };
+const acquisitionC = { id: 52, full: true, acquisitionMode: "seed", w: 64, h: 64 };
 if (!capPool.submit(acquisitionA, []) || !capPool.submit(acquisitionB, []))
   throw new Error("two permitted acquisition lanes were not accepted");
-if (acquisitionA.acquisitionMode !== "seed" || acquisitionB.acquisitionMode !== "seed")
-  throw new Error("live full scans were not normalized to seed before scheduling");
+if (acquisitionA.acquisitionMode !== "fast" || acquisitionB.acquisitionMode !== "hunt")
+  throw new Error("worker capacity policy rewrote acquisition scan modes");
 if (capPool.submit(acquisitionC, []))
   throw new Error("third concurrent acquisition scan bypassed the two-lane cap");
 if (capPool.activeFullCount !== 2)
@@ -267,5 +267,6 @@ console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
   reentrantMetadataPreserved: decodedInfos[0]?.sourceSequence === 101 && decodedInfos[0]?.opticsEpoch === 11,
   metadataRecordReused: thirdMeta === firstMeta,
   acquisitionTimeoutMs: acquisitionMeta.timeoutMs,
-  acquisitionConcurrencyCap: 2
+  acquisitionConcurrencyCap: 2,
+  acquisitionModesPreserved: true
 }));
