@@ -1,4 +1,6 @@
 export const ACQUISITION_ESCALATE_MS = 180;
+export const ACQUISITION_HUNT_AFTER_MS = 900;
+export const ACQUISITION_HUNT_EVERY_SCANS = 12;
 export const TEMPORAL_HARD_SKIP_CONFIDENCE = 0.62;
 export const TEMPORAL_HARD_SKIP_RISK = 0.48;
 
@@ -11,19 +13,34 @@ export function acquisitionRacePolicy({
 }) {
   if (captureNextScan) return { mode: "thorough", fullFrame: true, targetSighting: false, stalled: false };
   if (localRecovery) return { mode: "recovery", fullFrame: false, targetSighting: false, stalled: false };
+
   const index = Math.max(1, Math.trunc(Number(scanIndex) || 1));
-  const stalled = Number(ageMs) >= ACQUISITION_ESCALATE_MS;
+  const age = Math.max(0, Number(ageMs) || 0);
+  const stalled = age >= ACQUISITION_ESCALATE_MS;
+
+  // Acquisition should spend almost all of its time on the cheap dense finder.
+  // A generic robust hunt can take hundreds of milliseconds (or hit the worker
+  // timeout) on older phones, which used to block the single acquisition lane
+  // every other full scan. Keep dense full-frame seeds flowing and use actual
+  // finder sightings for targeted retries; the expensive generic finder is only
+  // a sparse escape hatch after a sustained blind stall.
   const fullEvery = stalled ? 2 : 4;
   const fullFrame = (index - 1) % fullEvery === 0;
+
   if (!fullFrame && hasSighting)
     return { mode: "sighting", fullFrame: false, targetSighting: true, stalled };
+
   if (fullFrame) {
-    // After a short zero-QR stall, keep one complementary error-aware generic
-    // finder in the race. The other jobs remain the cheaper dense finder.
-    if (stalled && (index - 1) % 4 === 0)
-      return { mode: "hunt", fullFrame: true, targetSighting: false, stalled };
-    return { mode: index % 13 === 0 ? "deep" : "fast", fullFrame: true, targetSighting: false, stalled };
+    const huntDue = age >= ACQUISITION_HUNT_AFTER_MS &&
+      (index - 1) % ACQUISITION_HUNT_EVERY_SCANS === 0;
+    return {
+      mode: huntDue ? "hunt" : "fast",
+      fullFrame: true,
+      targetSighting: false,
+      stalled
+    };
   }
+
   return { mode: "seed", fullFrame: false, targetSighting: false, stalled };
 }
 
