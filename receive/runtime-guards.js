@@ -125,3 +125,11 @@ GridLattice.prototype.accept = function(detection, frameWidth, frameHeight) {
   }
   return cacheFrameSnapshot(this, detection?.at, baseGridAccept.call(this, detection, frameWidth, frameHeight));
 };
+
+// Decode misses are not geometry measurements. Rolling shutter, blur, and QR
+// payload damage can make a correctly aimed slot fail for many consecutive
+// frames. Preserve CRC-learned local calibration until new CRC-backed geometry
+// replaces it or the whole wall genuinely reacquires.
+GridLattice.prototype.dropSlotCorrection = function() {
+  return null;
+};
