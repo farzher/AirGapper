@@ -97,7 +97,13 @@ async function applyCurrentEv(track = activeTrack()) {
   output.textContent = output.value;
   savedEv = value;
   try { localStorage.setItem(STORAGE_KEY, String(value)); } catch {}
-  const accepted = await applyAdvancedConstraint(track, { exposureCompensation: value });
+  // Explicit user EV changes outrank Auto Optics' healthy-scan mutation lease.
+  // Automatic controller writes still go through the protected default path.
+  const accepted = await applyAdvancedConstraint(
+    track,
+    { exposureCompensation: value },
+    { allowHealthyPerturbation: true }
+  );
   return generation === applyGeneration && accepted;
 }
 

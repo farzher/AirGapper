@@ -98,6 +98,7 @@ const CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS = 3000;
 const SETTLED_EXPOSURE_CONFIRMATIONS = 2;
 const constraintBlockedUntil = new WeakMap();
 const settledExposure = new WeakMap();
+const pendingConstraint = new WeakMap();
 
 function supportedExposureSet(track, set) {
   const out = { ...set };
@@ -198,7 +199,12 @@ function stableSettledExposure(track, set) {
   if (!settled || settled.key !== exposureRequestKey(set)) return false;
   const actual = track.getSettings?.() ?? {};
   const caps = track.getCapabilities?.() ?? {};
-  const stable = (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
+  // A camera that resolved applyConstraints() but ignored the requested mode is
+  // not settled. Remembering that false success makes every later request a
+  // no-op and can leave Auto Optics believing it owns manual exposure forever.
+  const requestedModeHeld = set.exposureMode === void 0 || actual.exposureMode === set.exposureMode;
+  const stable = requestedModeHeld &&
+    (settled.actual.exposureMode === void 0 || actual.exposureMode === settled.actual.exposureMode) &&
     closeSetting(actual.exposureTime, settled.actual.exposureTime, caps.exposureTime) &&
     closeSetting(actual.iso, settled.actual.iso, caps.iso) &&
     closeSetting(actual.exposureCompensation, settled.actual.exposureCompensation, caps.exposureCompensation);
@@ -234,9 +240,19 @@ function withoutExposure(set) {
   return remainder;
 }
 
-async function awaitConstraint(promise) {
+async function awaitConstraint(track, run) {
+  // A timeout does not cancel MediaStreamTrack.applyConstraints(). Keep the
+  // underlying HAL operation leased until it truly settles so an old timed-out
+  // write cannot overlap and later overwrite a newer camera command.
+  if (pendingConstraint.has(track)) return { ok: false, timedOut: false, busy: true };
   let timer;
   let timedOut = false;
+  const operation = Promise.resolve().then(run);
+  pendingConstraint.set(track, operation);
+  const release = () => {
+    if (pendingConstraint.get(track) === operation) pendingConstraint.delete(track);
+  };
+  void operation.then(release, release);
   try {
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => {
@@ -244,11 +260,16 @@ async function awaitConstraint(promise) {
         reject(new Error("Camera constraint write timed out"));
       }, CAMERA_CONSTRAINT_TIMEOUT_MS);
     });
-    await Promise.race([promise, timeout]);
-    return { ok: true, timedOut: false };
+    await Promise.race([operation, timeout]);
+    return { ok: true, timedOut: false, busy: false };
   } catch {
-    return { ok: false, timedOut };
-  } finally { clearTimeout(timer); }
+    return { ok: false, timedOut, busy: false };
+  } finally {
+    clearTimeout(timer);
+    // Rejected/successful operations are already done and can be released now.
+    // Timed-out operations stay leased until their real promise settles.
+    if (!timedOut) release();
+  }
 }
 
 function exactExposureConstraints(set) {
@@ -260,29 +281,30 @@ function noteConstraintTimeout(track) {
   constraintBlockedUntil.set(track, performance.now() + CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS);
 }
 async function applyConstraint(track, set) {
-  if (!Object.keys(set).length) return false;
-  if ((constraintBlockedUntil.get(track) ?? 0) > performance.now()) return false;
+  if (!Object.keys(set).length || !track || track.readyState !== "live") return false;
+  if ((constraintBlockedUntil.get(track) ?? 0) > performance.now() || pendingConstraint.has(track)) return false;
   const exposureOnly = Object.keys(set).every((key) => EXPOSURE_KEYS.includes(key));
   if (exposureOnly) {
-    const strict = await awaitConstraint(track.applyConstraints(exactExposureConstraints(set)));
+    const strict = await awaitConstraint(track, () => track.applyConstraints(exactExposureConstraints(set)));
     if (strict.ok) return true;
+    if (strict.busy) return false;
     if (strict.timedOut) {
       noteConstraintTimeout(track);
       return false;
     }
   }
-  const fallback = await awaitConstraint(track.applyConstraints({ advanced: [set] }));
+  const fallback = await awaitConstraint(track, () => track.applyConstraints({ advanced: [set] }));
   if (fallback.timedOut) noteConstraintTimeout(track);
   return fallback.ok;
 }
 
-async function applyAdvancedConstraint(track, set) {
+async function applyAdvancedConstraint(track, set, { allowHealthyPerturbation = false } = {}) {
   const requestedExposure = Boolean(set) && EXPOSURE_KEYS.some((key) => set[key] !== void 0);
   const supported = supportedExposureSet(track, set ?? {});
   const touchesExposure = EXPOSURE_KEYS.some((key) => supported[key] !== void 0);
   if (requestedExposure && !touchesExposure && Object.keys(withoutExposure(supported)).length === 0) return false;
   if (exposureConstraintAlreadySatisfied(track, supported) || stableSettledExposure(track, supported)) return true;
-  if (healthyAutomaticExposureWouldPerturb(track, supported)) {
+  if (!allowHealthyPerturbation && healthyAutomaticExposureWouldPerturb(track, supported)) {
     const remainder = withoutExposure(supported);
     if (!Object.keys(remainder).length) return true;
     return applyConstraint(track, remainder);
