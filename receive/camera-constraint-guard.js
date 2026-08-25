@@ -31,12 +31,6 @@ function scheduleAutoCameraReopen(track) {
       if (!receiveView?.classList.contains("active")) return;
 
       window.dispatchEvent(new Event("airgapper:pause-mode"));
-
-      // pauseReceiver() synchronously stops the track, but Android camera
-      // teardown itself is asynchronous below Chromium. Give Camera2 a small,
-      // bounded release window before opening the replacement stream. This is
-      // deliberately outside runtime camera constraints so the old track stays
-      // completely mutation-free during the transition.
       await cameraReleaseBarrier();
 
       if (generation !== reopenGeneration) return;
@@ -79,4 +73,48 @@ function installManualToAutoReopenGuard() {
   try { proto.applyConstraints = guardedApply; } catch {}
 }
 
+function closeNumber(a, b, ratio = 0.02) {
+  a = Number(a);
+  b = Number(b);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * ratio);
+}
+
+function syncManualAxis(id, autoId, actual) {
+  const input = document.getElementById(id);
+  const automatic = document.getElementById(autoId);
+  const value = Number(actual);
+  if (!(input instanceof HTMLInputElement) || automatic?.checked || !Number.isFinite(value)) return false;
+  if (closeNumber(input.value, value)) return false;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const clamped = Math.max(Number.isFinite(min) ? min : -Infinity, Math.min(Number.isFinite(max) ? max : Infinity, value));
+  input.value = String(clamped);
+  // Runtime's existing input handler owns the saved preference and one final
+  // no-op apply. After that, its 500 ms drift checker compares against the value
+  // the HAL can actually hold instead of retrying an impossible target forever.
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
+}
+
+function installSettledExposureSync() {
+  window.addEventListener("airgapper:exposure-settled", (event) => {
+    const detail = event?.detail;
+    const track = activeCameraTrack();
+    if (!track || detail?.track !== track || track.readyState !== "live") return;
+    if (document.getElementById("camera-exposure-auto")?.checked) return;
+    const requested = detail.requested ?? {};
+    const actual = detail.actual ?? {};
+
+    // Only concede an axis the user actually pinned and that the browser proved
+    // it cannot hold. Tiny shutter quantization remains invisible; large stable
+    // HAL substitutions (for example requested ISO 1295 -> actual ISO 363) become
+    // the session truth and terminate the repair loop.
+    if (requested.exposureTime !== undefined)
+      syncManualAxis("camera-exposure", "exposure-axis-auto", actual.exposureTime);
+    if (requested.iso !== undefined)
+      syncManualAxis("camera-iso", "iso-axis-auto", actual.iso);
+  });
+}
+
 installManualToAutoReopenGuard();
+installSettledExposureSync();
