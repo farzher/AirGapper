@@ -513,7 +513,7 @@ function discardSelectedFile() {
   activeTransportEncoder = null;
   activeTransportEncoderKey = null;
   activeTransportCursor = null;
-  selectedFile?.payload.fill(0);
+  selectedFile == null ? void 0 : selectedFile.payload.fill(0);
   selectedFile = null;
   resizeDisplay = null;
   canvas.width = canvas.height = 16;
@@ -534,6 +534,9 @@ function stopTransfer() {
 }
 let scrollBeforeFullscreen = 0;
 function settleFullscreenSenderGeometry() {
+  // requestFullscreen() changes the Android visual viewport asynchronously.
+  // Wait until the fullscreen layout has actually committed before the Auto
+  // solver chooses a wall for that viewport.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     resizeDisplay?.();
     if (selectedFile && isAutoLayout()) {
@@ -547,7 +550,9 @@ function setStageFullscreen(on) {
   if (on) scrollBeforeFullscreen = window.scrollY;
   document.body.classList.toggle("qr-full", on);
   if (!on && document.fullscreenElement) void document.exitFullscreen().catch(() => void 0);
-  resizeDisplay?.();
+  resizeDisplay == null ? void 0 : resizeDisplay();
+  // Auto is a viewport solver, not just a canvas scaler. Entering/exiting
+  // fullscreen changes the candidate set, so recompute QR version + layout.
   if (selectedFile && isAutoLayout()) {
     clearTimeout(autoGridRefreshTimer);
     autoGridRefreshTimer = setTimeout(() => void startStream(), 140);
@@ -555,9 +560,10 @@ function setStageFullscreen(on) {
   window.scrollTo(0, on ? 0 : scrollBeforeFullscreen);
 }
 canvas.addEventListener("click", () => {
+  var _a, _b;
   const entering = !document.body.classList.contains("qr-full");
   setStageFullscreen(entering);
-  if (entering) void document.documentElement.requestFullscreen?.().catch(() => void 0);
+  if (entering) void ((_b = (_a = document.documentElement).requestFullscreen) == null ? void 0 : _b.call(_a).catch(() => void 0));
 });
 document.addEventListener("fullscreenchange", () => {
   if (!document.fullscreenElement) {
@@ -606,8 +612,7 @@ async function startSelection(status, prepare) {
     updateFilePicker();
     await startStream(true);
   } catch (error) {
-    if (selectionGeneration === generation)
-      showError(error instanceof Error ? error.message : String(error));
+    showError(error instanceof Error ? error.message : String(error));
   }
 }
 async function selectFiles(fileList) {
@@ -635,6 +640,8 @@ async function selectFiles(fileList) {
     return {
       name: `${files.length}-files.zip`,
       size: total,
+      // Our ZIP entries are stored, not deflated, so unlike an uploaded ZIP
+      // the archive can still benefit substantially from container gzip.
       packed: await packFile(`${files.length}-files.zip`, "application/vnd.airgapper.files+zip", archive, true),
       files: files.map(({ name, size }) => ({ name, size }))
     };
@@ -649,34 +656,65 @@ async function selectSnippet() {
   });
 }
 function restoreSendSettings() {
+  var _a;
   try {
-    const saved = JSON.parse(localStorage.getItem(SEND_SETTINGS_KEY) ?? "null");
+    const saved = JSON.parse((_a = localStorage.getItem(SEND_SETTINGS_KEY)) != null ? _a : "null");
     if (!saved) return;
-    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) selectFps(saved.fps);
-    if (saved.sizeMode === "auto") cfgSize.value = "auto";
-    else if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) cfgSize.value = String(saved.sizeLevel);
+    if (typeof saved.fps === "number" && Number.isInteger(saved.fps) && saved.fps >= 1 && saved.fps <= 480) {
+      selectFps(saved.fps);
+    }
+    if (saved.sizeMode === "auto") {
+      cfgSize.value = "auto";
+    } else if (typeof saved.sizeLevel === "number" && Number.isInteger(saved.sizeLevel) && saved.sizeLevel >= 0 && saved.sizeLevel < FRAME_BYTES_OPTIONS.length) {
+      cfgSize.value = String(saved.sizeLevel);
+    }
     if (saved.scaling === "integer" || saved.scaling === "fit") cfgScaling.value = saved.scaling;
     if (saved.updatePattern === "synchronous" || saved.updatePattern === "fixed" || saved.updatePattern === "fixed-columns" || saved.updatePattern === "dispersed") cfgUpdatePattern.value = saved.updatePattern;
-    if (["auto-1","auto-2","auto-3","auto-4","single","one-two","two-two","two-three","four-three","three-five","three-six","four-six","four-seven","four-eight"].includes(saved.layout)) cfgLayout.value = saved.layout;
-    if (["auto","portrait","landscape"].includes(saved.orientation)) cfgOrientation.value = saved.orientation;
-  } catch {}
+    if (saved.layout === "auto-1" || saved.layout === "auto-2" || saved.layout === "auto-3" || saved.layout === "auto-4" || saved.layout === "single" || saved.layout === "one-two" || saved.layout === "two-two" || saved.layout === "two-three" || saved.layout === "four-three" || saved.layout === "three-five" || saved.layout === "three-six" || saved.layout === "four-six" || saved.layout === "four-seven" || saved.layout === "four-eight") {
+      cfgLayout.value = saved.layout;
+    }
+    if (saved.orientation === "auto" || saved.orientation === "portrait" || saved.orientation === "landscape") {
+      cfgOrientation.value = saved.orientation;
+    }
+  } catch {
+  }
 }
 function saveSendSettings() {
   try {
     localStorage.setItem(SEND_SETTINGS_KEY, JSON.stringify({
-      fps: selectedFps(), sizeMode: autoSizeEnabled() ? "auto" : "exact",
-      sizeLevel: autoSizeEnabled() ? null : Number(cfgSize.value), scaling: cfgScaling.value,
-      layout: cfgLayout.value, updatePattern: selectedUpdatePattern(), orientation: selectedOrientation()
+      fps: selectedFps(),
+      sizeMode: autoSizeEnabled() ? "auto" : "exact",
+      sizeLevel: autoSizeEnabled() ? null : Number(cfgSize.value),
+      scaling: cfgScaling.value,
+      layout: cfgLayout.value,
+      updatePattern: selectedUpdatePattern(),
+      orientation: selectedOrientation()
     }));
-  } catch {}
+  } catch {
+  }
 }
 async function main() {
+  var _a;
   snippetText.maxLength = MAX_SNIPPET_BYTES;
   snippetLabel.textContent = `Text to send · up to ${MAX_SNIPPET_LABEL}`;
-  cfgFile.addEventListener("change", () => void selectFiles(cfgFile.files ?? []));
-  for (const eventName of ["dragenter", "dragover"]) paneFile.addEventListener(eventName, (event) => { event.preventDefault(); paneFile.classList.add("dragging"); });
-  for (const eventName of ["dragleave", "drop"]) paneFile.addEventListener(eventName, () => paneFile.classList.remove("dragging"));
-  paneFile.addEventListener("drop", (event) => { event.preventDefault(); if (event.dataTransfer?.files.length) void selectFiles(event.dataTransfer.files); });
+  cfgFile.addEventListener("change", () => {
+    var _a2;
+    return void selectFiles((_a2 = cfgFile.files) != null ? _a2 : []);
+  });
+  for (const eventName of ["dragenter", "dragover"]) {
+    paneFile.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      paneFile.classList.add("dragging");
+    });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    paneFile.addEventListener(eventName, () => paneFile.classList.remove("dragging"));
+  }
+  paneFile.addEventListener("drop", (event) => {
+    var _a2;
+    event.preventDefault();
+    if ((_a2 = event.dataTransfer) == null ? void 0 : _a2.files.length) void selectFiles(event.dataTransfer.files);
+  });
   paneFile.addEventListener("click", (event) => {
     if (!paneFile.classList.contains("has-file")) return;
     event.preventDefault();
@@ -700,14 +738,17 @@ async function main() {
     if (selectedFile && !applyLiveSenderFps()) void startStream();
   });
   const resizeForViewport = () => {
-    resizeDisplay?.();
+    resizeDisplay == null ? void 0 : resizeDisplay();
     if (selectedFile && isAutoLayout()) {
       clearTimeout(autoGridRefreshTimer);
       autoGridRefreshTimer = setTimeout(() => void startStream(), 140);
     }
   };
   window.addEventListener("resize", resizeForViewport);
-  window.visualViewport?.addEventListener("resize", resizeForViewport);
+  (_a = window.visualViewport) == null ? void 0 : _a.addEventListener("resize", resizeForViewport);
+  // FPS is a live scheduler parameter. Size/layout/scaling/orientation still
+  // rebuild geometry/transport as needed, but a speed change must never blank
+  // the already-visible QR wall or cold-start the render workers.
   for (const el of [cfgSize, cfgScaling, cfgLayout, cfgUpdatePattern, cfgOrientation]) {
     el.addEventListener("change", () => {
       if (el === cfgLayout || el === cfgSize) updateAutoGridControlState();
@@ -727,9 +768,12 @@ async function main() {
 }
 function scrollStageIntoView() {
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  requestAnimationFrame(() => stage.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" }));
+  requestAnimationFrame(() => {
+    stage.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  });
 }
 async function startStream(revealStage = false) {
+  var _a;
   const gen = ++generation;
   stopSendRenderer();
   resizeDisplay = null;
@@ -737,7 +781,9 @@ async function startStream(revealStage = false) {
   stageError.hidden = true;
   showStreamPanels(false);
   if (!selectedFile) {
-    releaseScreenWakeLock(); setStatus(""); return;
+    releaseScreenWakeLock();
+    setStatus("");
+    return;
   }
   await requestScreenWakeLock();
   const { name, size: fileSize, payload, payloadId, compression, transmittedSize } = selectedFile;
@@ -746,14 +792,18 @@ async function startStream(revealStage = false) {
   const autoSize = autoSizeEnabled();
   const sizeLevel = autoSize ? FRAME_BYTES_OPTIONS.length - 1 : Number(cfgSize.value);
   const fitScaling = cfgScaling.value === "fit";
-  const manualFrameBytes = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)] ?? FRAME_BYTES_OPTIONS[0];
+  const manualFrameBytes = (_a = FRAME_BYTES_OPTIONS[Math.min(sizeLevel, FRAME_BYTES_OPTIONS.length - 1)]) != null ? _a : FRAME_BYTES_OPTIONS[0];
   const ecc = "L";
   const configuredLayout = selectedLayout();
   const autoMode = isAutoLayout(configuredLayout);
+  // Numeric Size is exact. Auto Size may compare every available transport size,
+  // but only when explicitly selected by the user.
   const maximumFrameBytes = manualFrameBytes;
   if (!autoSize && !fitsInOneStream(payload.length, manualFrameBytes, autoMode)) {
     const suggestion = smallestSufficientFrameSize(payload.length, FRAME_BYTES_OPTIONS, autoMode);
-    showSettingsError(`${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ${suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer."}`);
+    showSettingsError(
+      `${formatBytes(payload.length)} needs ${sourceBlockCount(payload.length, manualFrameBytes, autoMode).toLocaleString()} blocks. ` + (suggestion ? `Choose ${formatBytes(suggestion)} or more in Size.` : "No available Size setting can carry this transfer.")
+    );
     return;
   }
   const snippetValue = currentMode() === "snippet" ? snippetText.value : null;
@@ -761,26 +811,60 @@ async function startStream(revealStage = false) {
   let frameBytes = manualFrameBytes;
   let autoGrid = null;
   let transport;
-  if (autoMode) { stage.hidden = false; if (sendStart) sendStart.hidden = true; showStreamPanels(true); }
+  if (autoMode) {
+    // Auto must solve against the box that will actually contain the QR wall.
+    // Previously the first solve happened while #stage was display:none, so it
+    // used the full viewport, then the visible controls made the chosen wall no
+    // longer fit and Pixel Perfect silently fell below 1x.
+    stage.hidden = false;
+    if (sendStart) sendStart.hidden = true;
+    showStreamPanels(true);
+  }
   if (autoMode && plainSnippet === null) {
     const directProbe = selectTransportPlan(payload.length, maximumFrameBytes, true, true);
-    if (directProbe.mode === "direct") { frameBytes = maximumFrameBytes; transport = directProbe; }
-    else { autoGrid = chooseAutoGrid(payload.length, txFps, fitScaling, autoGridTargetModulePx(configuredLayout), maximumFrameBytes, autoSize); frameBytes = autoGrid.maximumFrameBytes; transport = autoGrid.plan; }
-  } else transport = selectTransportPlan(payload.length, frameBytes, false, true);
+    if (directProbe.mode === "direct") {
+      frameBytes = maximumFrameBytes;
+      transport = directProbe;
+    } else {
+      autoGrid = chooseAutoGrid(
+        payload.length,
+        txFps,
+        fitScaling,
+        autoGridTargetModulePx(configuredLayout),
+        maximumFrameBytes,
+        autoSize
+      );
+      frameBytes = autoGrid.maximumFrameBytes;
+      transport = autoGrid.plan;
+    }
+  } else {
+    transport = selectTransportPlan(payload.length, frameBytes, false, true);
+  }
   const staticStream = plainSnippet !== null || transport.mode === "direct";
   const layoutMode = staticStream ? "single" : configuredLayout;
-  const resolvedGrid = !staticStream && autoGrid ? { cols: autoGrid.layout.cols, rows: autoGrid.layout.rows, codes: autoGrid.codes } : layoutGrid(layoutMode);
+  const resolvedGrid = !staticStream && autoGrid
+    ? { cols: autoGrid.layout.cols, rows: autoGrid.layout.rows, codes: autoGrid.codes }
+    : layoutGrid(layoutMode);
   const { cols: gridCols, rows: gridRows, codes: gridCodes } = resolvedGrid;
   const gridMargin = gridCodes === 1 ? 4 : GRID_MARGIN;
   const updatePattern = selectedUpdatePattern();
   const synchronousUpdates = updatePattern === "synchronous";
   const workerPageRenderer = !staticStream && typeof Worker === "function";
   const directSynchronousPages = workerPageRenderer && synchronousUpdates;
+  // Synchronous walls never use per-cell phase ordering. Avoid building and
+  // retaining scheduling state that cannot participate in this mode.
   const temporalOrder = synchronousUpdates ? null : spatiallyDispersedOrder(gridCols, gridRows);
   const phaseStep = synchronousUpdates ? 1 : temporalPhaseStep(gridCodes);
   const temporalSourceOffset = (pageId, phase) => {
     if (gridCodes <= 1 || updatePattern === "fixed" || updatePattern === "synchronous") return phase;
-    if (updatePattern === "fixed-columns") { const row = phase % gridRows; const col = Math.floor(phase / gridRows); return row * gridCols + col; }
+    if (updatePattern === "fixed-columns") {
+      // Transpose the existing row-major fixed schedule without changing packet
+      // assignment, page cadence, or aggregate rate: top-to-bottom through one
+      // logical column, then advance to the next column.
+      const row = phase % gridRows;
+      const col = Math.floor(phase / gridRows);
+      return row * gridCols + col;
+    }
     const rotation = pageId * phaseStep % gridCodes;
     let index = (phase + rotation) % gridCodes;
     if (pageId & 1) index = gridCodes - 1 - index;
@@ -788,24 +872,46 @@ async function startStream(revealStage = false) {
   };
   const updatePatternLabel = updatePattern === "synchronous" ? "synchronous wall" : updatePattern === "fixed" ? "fixed rows" : updatePattern === "fixed-columns" ? "fixed columns" : "dispersed rotating phases";
   const describeGrid = () => {
-    if (staticStream) return "";
-    if (!autoGrid) return `Update ${updatePatternLabel}`;
-    const displayCols = landscapeGrid() ? gridRows : gridCols;
-    const displayRows = landscapeGrid() ? gridCols : gridRows;
-    const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(transport.frameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
-    return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
-  };
+  if (staticStream) return "";
+  if (!autoGrid) return `Update ${updatePatternLabel}`;
+  const displayCols = landscapeGrid() ? gridRows : gridCols;
+  const displayRows = landscapeGrid() ? gridCols : gridRows;
+  const sizeLabel = autoGrid.autoSize ? `Auto Size→${formatBytes(transport.frameBytes)}` : `Size ${formatBytes(autoGrid.maximumFrameBytes)}`;
+  return `Auto ${autoGrid.targetModulePx}px · ${displayCols}×${displayRows} display · ${gridCodes} QR · ${sizeLabel} · v${transport.qrVersion} · ${formatBytes(transport.frameBytes)}/QR encoded · ${autoGrid.displayModulePx.toFixed(2)} physical px/module · ${Math.round(autoGrid.screenFill * 100)}% screen · ${txFps} fps · ${Math.round(autoGrid.refreshHz)} Hz display · ${autoGrid.changesPerRefresh.toFixed(2)} QR updates/refresh · ${updatePatternLabel}`;
+};
   const blockLen = transport.blockLen;
-  if (transport.mode === "raptorq") { await prepareRaptorQ(); if (gen !== generation) return; }
+  if (transport.mode === "raptorq") {
+    await prepareRaptorQ();
+    if (gen !== generation) return;
+  }
+  // Visual/layout changes do not alter the erasure code. Keep the expensive
+  // encoder and its payload/WASM state warm whenever transport parameters match.
   const transportKey = `${payloadId}:${transport.mode}:${transport.k}:${blockLen}:${payload.length}`;
   let encoder = activeTransportEncoder;
   if (!encoder || activeTransportEncoderKey !== transportKey) {
-    encoder?.free(); encoder = new TransportEncoder(payload, blockLen, transport.mode); activeTransportEncoder = encoder; activeTransportEncoderKey = transportKey;
+    encoder?.free();
+    encoder = new TransportEncoder(payload, blockLen, transport.mode);
+    activeTransportEncoder = encoder;
+    activeTransportEncoderKey = transportKey;
   }
+  // Continue at the next symbol that was actually painted. A transport Size
+  // change changes the key and correctly starts a fresh coding stream at ESI 0.
   let symbolOrdinal = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal : 0;
   activeTransportCursor = { key: transportKey, nextOrdinal: symbolOrdinal };
   const extendedGrid = Boolean(autoGrid && gridCodes > 1);
-  const header = { mode: encoder.mode, layoutId: extendedGrid ? 0 : gridLayoutId(gridCols, gridRows), extendedGrid, gridCols, gridRows, k: encoder.k, blockLen, totalLen: payload.length, payloadId, seq: 0, slotIndex: 0 };
+  const header = {
+    mode: encoder.mode,
+    layoutId: extendedGrid ? 0 : gridLayoutId(gridCols, gridRows),
+    extendedGrid,
+    gridCols,
+    gridRows,
+    k: encoder.k,
+    blockLen,
+    totalLen: payload.length,
+    payloadId,
+    seq: 0,
+    slotIndex: 0
+  };
   let version;
   let modules = 0;
   let scale = 1;
@@ -825,63 +931,675 @@ async function startStream(revealStage = false) {
     const midH = Math.min(sourceH, Math.max(targetH, Math.round(targetH * 2)));
     let filtered = fitStaging;
     if (midW !== sourceW || midH !== sourceH) {
-      if (fitFiltered.width !== midW || fitFiltered.height !== midH) { fitFiltered.width = midW; fitFiltered.height = midH; }
+      if (fitFiltered.width !== midW || fitFiltered.height !== midH) {
+        fitFiltered.width = midW;
+        fitFiltered.height = midH;
+      }
       const filterCtx = fitFiltered.getContext("2d");
-      filterCtx.setTransform(1,0,0,1,0,0); filterCtx.globalCompositeOperation="copy"; filterCtx.imageSmoothingEnabled=true; filterCtx.imageSmoothingQuality="high";
-      filterCtx.drawImage(fitStaging,0,0,sourceW,sourceH,0,0,midW,midH); filterCtx.globalCompositeOperation="source-over"; filtered=fitFiltered;
+      filterCtx.setTransform(1, 0, 0, 1, 0, 0);
+      filterCtx.globalCompositeOperation = "copy";
+      filterCtx.imageSmoothingEnabled = true;
+      filterCtx.imageSmoothingQuality = "high";
+      filterCtx.drawImage(fitStaging, 0, 0, sourceW, sourceH, 0, 0, midW, midH);
+      filterCtx.globalCompositeOperation = "source-over";
+      filtered = fitFiltered;
     }
     const ctx = canvas.getContext("2d");
-    ctx.setTransform(1,0,0,1,0,0); ctx.globalCompositeOperation="copy"; ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high";
-    if (landscape) { ctx.setTransform(0,1,-1,0,canvas.width,0); ctx.drawImage(filtered,0,0,filtered.width,filtered.height,0,0,canvas.height,canvas.width); }
-    else ctx.drawImage(filtered,0,0,filtered.width,filtered.height,0,0,canvas.width,canvas.height);
-    ctx.globalCompositeOperation="source-over";
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "copy";
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    if (landscape) {
+      ctx.setTransform(0, 1, -1, 0, canvas.width, 0);
+      ctx.drawImage(filtered, 0, 0, filtered.width, filtered.height, 0, 0, canvas.height, canvas.width);
+    } else {
+      ctx.drawImage(filtered, 0, 0, filtered.width, filtered.height, 0, 0, canvas.width, canvas.height);
+    }
+    ctx.globalCompositeOperation = "source-over";
   };
-  stage.hidden=false; if(sendStart) sendStart.hidden=true; showStreamPanels(true);
+  stage.hidden = false;
+  if (sendStart) sendStart.hidden = true;
+  showStreamPanels(true);
   const sizeCanvas = () => {
-    const dpr=window.devicePixelRatio||1; const stride=modules+gridMargin; const extent=gridRasterExtent(modules,gridCols,gridRows,gridMargin); const totalW=extent.width; const totalH=extent.height;
-    const landscape=landscapeGrid(); const displayW=landscape?totalH:totalW; const displayH=landscape?totalW:totalH; const budget=senderDisplayBudgetCss(); const budgetW=budget.width; const budgetH=budget.height;
-    const cssAvailableScale=Math.min(budgetW/displayW,budgetH/displayH); const physicalAvailableScale=Math.min(Math.max(1,Math.floor(budgetW*dpr))/displayW,Math.max(1,Math.floor(budgetH*dpr))/displayH);
-    if(fitScaling) scale=Math.max(Number.EPSILON,physicalAvailableScale); else if(autoMode) scale=Math.max(1,Math.floor(physicalAvailableScale)); else scale=cssAvailableScale<1?Math.max(Number.EPSILON,cssAvailableScale):Math.floor(cssAvailableScale);
-    if(!directSynchronousPages&&(staging.width!==totalW||staging.height!==totalH)){staging.width=totalW;staging.height=totalH;}
-    const canvasW=Math.max(1,Math.round(displayW*scale)); const canvasH=Math.max(1,Math.round(displayH*scale)); if(canvas.width!==canvasW||canvas.height!==canvasH){canvas.width=canvasW;canvas.height=canvasH;}
-    const deviceBacked=fitScaling||autoMode; canvas.style.width=`${deviceBacked?canvasW/dpr:canvasW}px`; canvas.style.height=`${deviceBacked?canvasH/dpr:canvasH}px`; canvas.style.imageRendering=fitScaling?"auto":"pixelated";
-    canvas.style.position="";canvas.style.left="";canvas.style.top="";
-    if(!fitScaling){void canvas.offsetWidth;const rect=canvas.getBoundingClientRect();const dx=(Math.round(rect.left*dpr)-rect.left*dpr)/dpr;const dy=(Math.round(rect.top*dpr)-rect.top*dpr)/dpr;if(Math.abs(dx)>1e-7||Math.abs(dy)>1e-7){canvas.style.position="relative";canvas.style.left=`${dx}px`;canvas.style.top=`${dy}px`;}}
-    if(!directSynchronousPages){const stagingCtx=staging.getContext("2d");cells.forEach((img,i)=>{if(img)stagingCtx.putImageData(img,i%gridCols*stride,Math.floor(i/gridCols)*stride);});}
-    if(fitStaging){const fitW=totalW*FIT_SUPERSAMPLE;const fitH=totalH*FIT_SUPERSAMPLE;if(fitStaging.width!==fitW||fitStaging.height!==fitH){fitStaging.width=fitW;fitStaging.height=fitH;}if(!directSynchronousPages){const fitCtx=fitStaging.getContext("2d");fitCtx.imageSmoothingEnabled=false;fitCtx.drawImage(staging,0,0,fitStaging.width,fitStaging.height);renderFitCanvas();}}
-    else if(!directSynchronousPages){const ctx=canvas.getContext("2d");ctx.imageSmoothingEnabled=false;if(landscape)ctx.setTransform(0,canvas.height/totalW,-canvas.width/totalH,0,canvas.width,0);else ctx.setTransform(canvas.width/totalW,0,0,canvas.height/totalH,0,0);ctx.drawImage(staging,0,0);}
+    const dpr = window.devicePixelRatio || 1;
+    const stride = modules + gridMargin;
+    const extent = gridRasterExtent(modules, gridCols, gridRows, gridMargin);
+    const totalW = extent.width;
+    const totalH = extent.height;
+    const landscape = landscapeGrid();
+    const displayW = landscape ? totalH : totalW;
+    const displayH = landscape ? totalW : totalH;
+    const budget = senderDisplayBudgetCss();
+    const budgetW = budget.width;
+    const budgetH = budget.height;
+    const cssAvailableScale = Math.min(budgetW / displayW, budgetH / displayH);
+    const physicalAvailableScale = Math.min(
+      Math.max(1, Math.floor(budgetW * dpr)) / displayW,
+      Math.max(1, Math.floor(budgetH * dpr)) / displayH
+    );
+    if (fitScaling) {
+      // Fit uses a device-pixel backing store and filtered resampling.
+      scale = Math.max(Number.EPSILON, physicalAvailableScale);
+    } else if (autoMode) {
+      // Auto Pixel Perfect is integer device pixels/module. The CSS box below
+      // maps this backing bitmap 1:1 to device pixels on high-DPR phones.
+      scale = Math.max(1, Math.floor(physicalAvailableScale));
+    } else {
+      scale = cssAvailableScale < 1 ? Math.max(Number.EPSILON, cssAvailableScale) : Math.floor(cssAvailableScale);
+    }
+    if (!directSynchronousPages && (staging.width !== totalW || staging.height !== totalH)) {
+      staging.width = totalW;
+      staging.height = totalH;
+    }
+    const canvasW = Math.max(1, Math.round(displayW * scale));
+    const canvasH = Math.max(1, Math.round(displayH * scale));
+    if (canvas.width !== canvasW || canvas.height !== canvasH) {
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+    }
+    const deviceBacked = fitScaling || autoMode;
+    const cssNativeW = deviceBacked ? canvasW / dpr : canvasW;
+    const cssNativeH = deviceBacked ? canvasH / dpr : canvasH;
+    canvas.style.width = `${cssNativeW}px`;
+    canvas.style.height = `${cssNativeH}px`;
+    canvas.style.imageRendering = fitScaling ? "auto" : "pixelated";
+    // Auto Pixel Perfect uses an integer device-pixel backing scale and an
+    // exact backing/dpr CSS box. Manual layouts retain their existing CSS-pixel
+    // sizing. Snap the origin so flex centering cannot land between device pixels.
+    canvas.style.position = "";
+    canvas.style.left = "";
+    canvas.style.top = "";
+    if (!fitScaling) {
+      void canvas.offsetWidth;
+      const rect = canvas.getBoundingClientRect();
+      const dx = (Math.round(rect.left * dpr) - rect.left * dpr) / dpr;
+      const dy = (Math.round(rect.top * dpr) - rect.top * dpr) / dpr;
+      if (Math.abs(dx) > 1e-7 || Math.abs(dy) > 1e-7) {
+        canvas.style.position = "relative";
+        canvas.style.left = `${dx}px`;
+        canvas.style.top = `${dy}px`;
+      }
+    }
+    if (!directSynchronousPages) {
+      const stagingCtx = staging.getContext("2d");
+      cells.forEach((img, i) => {
+        if (img) stagingCtx.putImageData(img, i % gridCols * stride, Math.floor(i / gridCols) * stride);
+      });
+    }
+    if (fitStaging) {
+      const fitW = totalW * FIT_SUPERSAMPLE;
+      const fitH = totalH * FIT_SUPERSAMPLE;
+      if (fitStaging.width !== fitW || fitStaging.height !== fitH) {
+        fitStaging.width = fitW;
+        fitStaging.height = fitH;
+      }
+      if (!directSynchronousPages) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(staging, 0, 0, fitStaging.width, fitStaging.height);
+        renderFitCanvas();
+      }
+    } else if (!directSynchronousPages) {
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      if (landscape) {
+        ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+      } else {
+        ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+      }
+      ctx.drawImage(staging, 0, 0);
+    }
   };
-  const makeCode=()=>{if(plainSnippet!==null)return{qr:QRCode.create(plainSnippet,{errorCorrectionLevel:ecc,version,maskPattern:4}),ordinal:null};const senderOrdinal=symbolOrdinal++;const slotIndex=senderOrdinal%gridCodes;const repairRequestId=scheduledEncodingId(encoder.k,senderOrdinal);header.seq=encoder.mode==="mds"?repairRequestId:0;header.slotIndex=slotIndex;const bytes=packFrame(header,encoder.encode(repairRequestId));return{qr:QRCode.create([{data:bytes,mode:"byte"}],{errorCorrectionLevel:ecc,version,maskPattern:4}),ordinal:senderOrdinal};};
-  const makeCell=()=>{const{qr,ordinal}=makeCode();if(version===void 0){version=qr.version;modules=qr.modules.size;sizeCanvas();resizeDisplay=sizeCanvas;requestAnimationFrame(()=>requestAnimationFrame(()=>{if(gen===generation)sizeCanvas();}));setTimeout(()=>{if(gen===generation)sizeCanvas();},250);if(revealStage)scrollStageIntoView();showStreamPanels(true);setStatus("");}const raster=rasterizeQr(qr.modules.size,qr.modules.data,gridMargin);return{image:new ImageData(new Uint8ClampedArray(raster.pixels.buffer),raster.size,raster.size),ordinal};};
-  if(workerPageRenderer){
-    const hc=Math.max(1,navigator.hardwareConcurrency||4);const workerCount=Math.max(1,Math.min(8,hc-2||1));const maxPagesAhead=Math.max(3,Math.min(10,workerCount+2));const workers=[];const readyPages=new Map();let dispatchTimer=0,failed=false,nextPageId=0,nextPresentPageId=0,nextGenerateOrdinal=symbolOrdinal,currentPage=null,currentCellOffset=0,seededWall=false;
-    const closePage=(page)=>page?.bitmap?.close?.();
-    activeSendRendererCleanup=()=>{clearTimeout(dispatchTimer);dispatchTimer=0;for(const worker of workers)worker.terminate();for(const page of readyPages.values())closePage(page);closePage(currentPage);currentPage=null;readyPages.clear();};
-    const fail=(error)=>{if(failed||gen!==generation)return;failed=true;stopSendRenderer();showError(error instanceof Error?error.message:String(error));};
-    const buildFrames=(startOrdinal)=>{const frames=[],transfer=[];for(let offset=0;offset<gridCodes;++offset){const senderOrdinal=startOrdinal+offset;const slotIndex=senderOrdinal%gridCodes;const repairRequestId=scheduledEncodingId(encoder.k,senderOrdinal);header.seq=encoder.mode==="mds"?repairRequestId:0;header.slotIndex=slotIndex;const bytes=packFrame(header,encoder.encode(repairRequestId));const buffer=bytes.buffer;frames.push({slotIndex,buffer});transfer.push(buffer);}return{frames,transfer};};
-    const dispatchOne=(worker)=>{if(failed||gen!==generation||worker.busy||nextPageId-nextPresentPageId>=maxPagesAhead)return false;const pageId=nextPageId++;const startOrdinal=nextGenerateOrdinal;nextGenerateOrdinal+=gridCodes;try{const{frames,transfer}=buildFrames(startOrdinal);worker.busy=true;worker.postMessage({type:"render-page",pageId,startOrdinal,frames,cols:gridCols,rows:gridRows,margin:gridMargin,version:version??transport.qrVersion},transfer);return true;}catch(error){fail(error);return false;}};
-    const scheduleDispatch=()=>{if(dispatchTimer||failed||gen!==generation)return;dispatchTimer=setTimeout(()=>{dispatchTimer=0;const worker=workers.find(candidate=>!candidate.busy);if(worker&&dispatchOne(worker))scheduleDispatch();},0);};
-    const initializeGeometry=(page)=>{if(version!==undefined){if(modules!==page.modules)throw new Error("Sender QR geometry changed");return;}version=page.version;modules=page.modules;sizeCanvas();resizeDisplay=sizeCanvas;requestAnimationFrame(()=>requestAnimationFrame(()=>{if(gen===generation)sizeCanvas();}));setTimeout(()=>{if(gen===generation)sizeCanvas();},250);if(revealStage)scrollStageIntoView();showStreamPanels(true);setStatus("");};
-    const ensurePageSource=(page,totalW,totalH)=>{if(page.bitmap)return page.bitmap;if(page.sourceCanvas)return page.sourceCanvas;if(!page.pixels)return null;const source=document.createElement("canvas");source.width=totalW;source.height=totalH;source.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(page.pixels),totalW,totalH),0,0);page.sourceCanvas=source;return source;};
-    const validatePage=(page)=>{initializeGeometry(page);const totalW=modules*gridCols+gridMargin*(gridCols+1);const totalH=modules*gridRows+gridMargin*(gridRows+1);if(page.width!==totalW||page.height!==totalH)throw new Error(`Sender page geometry mismatch ${page.width}×${page.height}`);const source=ensurePageSource(page,totalW,totalH);if(!source)throw new Error("Sender worker returned no page pixels");return{source,totalW,totalH};};
-    const drawPage=(page)=>{const{source,totalW,totalH}=validatePage(page);let drawSource=source;if(!synchronousUpdates){const stagingCtx=staging.getContext("2d");stagingCtx.setTransform(1,0,0,1,0,0);stagingCtx.globalCompositeOperation="copy";stagingCtx.imageSmoothingEnabled=false;stagingCtx.drawImage(source,0,0,totalW,totalH);stagingCtx.globalCompositeOperation="source-over";drawSource=staging;}if(fitStaging){const fitCtx=fitStaging.getContext("2d");fitCtx.setTransform(1,0,0,1,0,0);fitCtx.globalCompositeOperation="copy";fitCtx.imageSmoothingEnabled=false;fitCtx.drawImage(drawSource,0,0,totalW,totalH,0,0,fitStaging.width,fitStaging.height);fitCtx.globalCompositeOperation="source-over";renderFitCanvas();}else{const ctx=canvas.getContext("2d");ctx.globalCompositeOperation="copy";ctx.imageSmoothingEnabled=false;if(landscapeGrid())ctx.setTransform(0,canvas.height/totalW,-canvas.width/totalH,0,canvas.width,0);else ctx.setTransform(canvas.width/totalW,0,0,canvas.height/totalH,0,0);ctx.drawImage(drawSource,0,0);ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation="source-over";}if(activeTransportCursor?.key===transportKey)activeTransportCursor.nextOrdinal=Math.max(activeTransportCursor.nextOrdinal,page.endOrdinal);};
-    const drawPageCell=(page,offset)=>{const{source,totalW,totalH}=validatePage(page);const ordinal=page.startOrdinal+offset;const slotIndex=ordinal%gridCodes;const stride=modules+gridMargin;const ox=slotIndex%gridCols*stride+gridMargin;const oy=Math.floor(slotIndex/gridCols)*stride+gridMargin;const stagingCtx=staging.getContext("2d");stagingCtx.setTransform(1,0,0,1,0,0);stagingCtx.globalCompositeOperation="source-over";stagingCtx.imageSmoothingEnabled=false;stagingCtx.drawImage(source,ox,oy,modules,modules,ox,oy,modules,modules);const landscape=landscapeGrid();const targetW=landscape?canvas.height:canvas.width;const targetH=landscape?canvas.width:canvas.height;const ctx=canvas.getContext("2d");if(landscape)ctx.setTransform(0,1,-1,0,canvas.width,0);else ctx.setTransform(1,0,0,1,0,0);if(fitStaging){const fitCtx=fitStaging.getContext("2d");fitCtx.imageSmoothingEnabled=false;fitCtx.drawImage(source,ox,oy,modules,modules,ox*FIT_SUPERSAMPLE,oy*FIT_SUPERSAMPLE,modules*FIT_SUPERSAMPLE,modules*FIT_SUPERSAMPLE);const rx=Math.max(0,ox-1),ry=Math.max(0,oy-1),rr=Math.min(totalW,ox+modules+1),rb=Math.min(totalH,oy+modules+1),rw=rr-rx,rh=rb-ry;ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";ctx.drawImage(fitStaging,rx*FIT_SUPERSAMPLE,ry*FIT_SUPERSAMPLE,rw*FIT_SUPERSAMPLE,rh*FIT_SUPERSAMPLE,rx*targetW/totalW,ry*targetH/totalH,rw*targetW/totalW,rh*targetH/totalH);}else{ctx.imageSmoothingEnabled=false;ctx.drawImage(staging,ox,oy,modules,modules,ox*targetW/totalW,oy*targetH/totalH,modules*targetW/totalW,modules*targetH/totalH);}ctx.setTransform(1,0,0,1,0,0);};
-    for(let i=0;i<workerCount;++i){const worker=new Worker(new URL(`./render-worker.js?build=${SEND_RUNTIME_BUILD}`,import.meta.url),{type:"module"});worker.busy=false;worker.onmessage=(event)=>{worker.busy=false;const page=event.data;if(gen!==generation||failed){closePage(page);return;}if(page?.type==="render-error"){fail(new Error(page.error||"Sender QR worker failed"));return;}if(page?.type!=="rendered-page"||!Number.isInteger(page.startOrdinal)||!Number.isInteger(page.endOrdinal)){closePage(page);fail(new Error("Sender QR worker returned an invalid page"));return;}readyPages.set(page.pageId,page);scheduleDispatch();};worker.onerror=(event)=>fail(new Error(event.message||"Sender QR worker failed"));workers.push(worker);}scheduleDispatch();
-    let pageInterval=1e3/txFps;let cellInterval=synchronousUpdates?pageInterval:pageInterval/gridCodes;let nextCellAt=0;activeSendFpsSetter=(fps)=>{pageInterval=1e3/Math.max(1,fps);cellInterval=synchronousUpdates?pageInterval:pageInterval/gridCodes;if(nextCellAt)nextCellAt=Math.min(nextCellAt,performance.now()+cellInterval);};activeSendClockRebase=()=>{nextCellAt=0;};
-    const takeReadyPage=()=>{const page=readyPages.get(nextPresentPageId);if(!page)return null;readyPages.delete(nextPresentPageId);return page;};
-    const tickParallel=(now)=>{if(gen!==generation||failed)return;requestAnimationFrame(tickParallel);if(!seededWall){const page=takeReadyPage();if(!page)return;try{drawPage(page);}catch(error){closePage(page);fail(error);return;}closePage(page);nextPresentPageId++;seededWall=true;nextCellAt=now+cellInterval;scheduleDispatch();return;}if(!currentPage){currentPage=takeReadyPage();currentCellOffset=0;if(!currentPage){nextCellAt=0;return;}if(!nextCellAt)nextCellAt=now;}if(!nextCellAt||now-nextCellAt>250)nextCellAt=now+cellInterval;if(synchronousUpdates){if(now+0.25<nextCellAt)return;try{drawPage(currentPage);}catch(error){closePage(currentPage);currentPage=null;fail(error);return;}closePage(currentPage);currentPage=null;currentCellOffset=0;nextPresentPageId++;scheduleDispatch();nextCellAt+=pageInterval;if(now-nextCellAt>pageInterval)nextCellAt=now+pageInterval;return;}let painted=0;while(currentPage&&now+0.25>=nextCellAt&&painted<gridCodes){try{drawPageCell(currentPage,temporalSourceOffset(currentPage.pageId,currentCellOffset));}catch(error){closePage(currentPage);currentPage=null;fail(error);return;}currentCellOffset++;painted++;nextCellAt+=cellInterval;if(currentCellOffset<gridCodes)continue;if(activeTransportCursor?.key===transportKey)activeTransportCursor.nextOrdinal=Math.max(activeTransportCursor.nextOrdinal,currentPage.endOrdinal);closePage(currentPage);currentPage=null;currentCellOffset=0;nextPresentPageId++;scheduleDispatch();if(now+0.25<nextCellAt)break;currentPage=takeReadyPage();if(!currentPage){nextCellAt=0;break;}}};
-    requestAnimationFrame(tickParallel);return;
+  const makeCode = () => {
+    if (plainSnippet !== null) {
+      return {
+        qr: QRCode.create(plainSnippet, {
+          errorCorrectionLevel: ecc,
+          version,
+          maskPattern: 4
+        }),
+        ordinal: null
+      };
+    }
+    const senderOrdinal = symbolOrdinal++;
+    const slotIndex = senderOrdinal % gridCodes;
+    const repairRequestId = scheduledEncodingId(encoder.k, senderOrdinal);
+    header.seq = encoder.mode === "mds" ? repairRequestId : 0;
+    header.slotIndex = slotIndex;
+    const bytes = packFrame(header, encoder.encode(repairRequestId));
+    return {
+      qr: QRCode.create([{ data: bytes, mode: "byte" }], {
+        errorCorrectionLevel: ecc,
+        version,
+        maskPattern: 4
+      }),
+      ordinal: senderOrdinal
+    };
+  };
+  const makeCell = () => {
+    const { qr, ordinal } = makeCode();
+    if (version === void 0) {
+      version = qr.version;
+      modules = qr.modules.size;
+      sizeCanvas();
+      resizeDisplay = sizeCanvas;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (gen === generation) sizeCanvas();
+      }));
+      setTimeout(() => {
+        if (gen === generation) sizeCanvas();
+      }, 250);
+      if (revealStage) scrollStageIntoView();
+      showStreamPanels(true);
+      setStatus("");
+    }
+    const raster = rasterizeQr(qr.modules.size, qr.modules.data, gridMargin);
+    return {
+      image: new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
+      ordinal
+    };
+  };
+  // Animated walls generate a complete QR page off the UI thread. At 4:7/30
+  // fps this moves 840 QR encodes/s away from the compositor/main thread. The
+  // main thread still owns transport encoding so the large source payload is
+  // not copied into every worker; workers receive only one page (~80 KiB) of
+  // framed QR bytes and return a transferable ImageBitmap.
+  if (workerPageRenderer) {
+    const hc = Math.max(1, navigator.hardwareConcurrency || 4);
+    const workerCount = Math.max(1, Math.min(8, hc - 2 || 1));
+    const maxPagesAhead = Math.max(3, Math.min(10, workerCount + 2));
+    const workers = [];
+    const readyPages = new Map();
+    let dispatchTimer = 0;
+    let failed = false;
+    let nextPageId = 0;
+    let nextPresentPageId = 0;
+    let nextGenerateOrdinal = symbolOrdinal;
+    let currentPage = null;
+    let currentCellOffset = 0;
+    let seededWall = false;
+
+    const closePage = (page) => page?.bitmap?.close?.();
+    activeSendRendererCleanup = () => {
+      clearTimeout(dispatchTimer);
+      dispatchTimer = 0;
+      for (const worker of workers) worker.terminate();
+      for (const page of readyPages.values()) closePage(page);
+      closePage(currentPage);
+      currentPage = null;
+      readyPages.clear();
+    };
+    const fail = (error) => {
+      if (failed || gen !== generation) return;
+      failed = true;
+      stopSendRenderer();
+      showError(error instanceof Error ? error.message : String(error));
+    };
+    const buildFrames = (startOrdinal) => {
+      const frames = [];
+      const transfer = [];
+      for (let offset = 0; offset < gridCodes; ++offset) {
+        const senderOrdinal = startOrdinal + offset;
+        const slotIndex = senderOrdinal % gridCodes;
+        const repairRequestId = scheduledEncodingId(encoder.k, senderOrdinal);
+        header.seq = encoder.mode === "mds" ? repairRequestId : 0;
+        header.slotIndex = slotIndex;
+        const bytes = packFrame(header, encoder.encode(repairRequestId));
+        const buffer = bytes.buffer;
+        frames.push({ slotIndex, buffer });
+        transfer.push(buffer);
+      }
+      return { frames, transfer };
+    };
+    const dispatchOne = (worker) => {
+      if (failed || gen !== generation || worker.busy || nextPageId - nextPresentPageId >= maxPagesAhead)
+        return false;
+      const pageId = nextPageId++;
+      const startOrdinal = nextGenerateOrdinal;
+      nextGenerateOrdinal += gridCodes;
+      try {
+        const { frames, transfer } = buildFrames(startOrdinal);
+        worker.busy = true;
+        worker.postMessage({
+          type: "render-page",
+          pageId,
+          startOrdinal,
+          frames,
+          cols: gridCols,
+          rows: gridRows,
+          margin: gridMargin,
+          // The transport planner already solved the exact byte capacity and
+          // therefore the QR version. Tell every worker immediately instead of
+          // making each worker rediscover it independently on its first page.
+          version: version ?? transport.qrVersion
+        }, transfer);
+        return true;
+      } catch (error) {
+        fail(error);
+        return false;
+      }
+    };
+    const scheduleDispatch = () => {
+      if (dispatchTimer || failed || gen !== generation) return;
+      dispatchTimer = setTimeout(() => {
+        dispatchTimer = 0;
+        const worker = workers.find((candidate) => !candidate.busy);
+        if (worker && dispatchOne(worker)) scheduleDispatch();
+      }, 0);
+    };
+    const initializeGeometry = (page) => {
+      if (version !== undefined) {
+        if (modules !== page.modules) throw new Error("Sender QR geometry changed");
+        return;
+      }
+      version = page.version;
+      modules = page.modules;
+      sizeCanvas();
+      resizeDisplay = sizeCanvas;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (gen === generation) sizeCanvas();
+      }));
+      setTimeout(() => {
+        if (gen === generation) sizeCanvas();
+      }, 250);
+      if (revealStage) scrollStageIntoView();
+      showStreamPanels(true);
+      setStatus("");
+    };
+    const ensurePageSource = (page, totalW, totalH) => {
+      if (page.bitmap) return page.bitmap;
+      if (page.sourceCanvas) return page.sourceCanvas;
+      if (!page.pixels) return null;
+      const source = document.createElement("canvas");
+      source.width = totalW;
+      source.height = totalH;
+      source.getContext("2d").putImageData(
+        new ImageData(new Uint8ClampedArray(page.pixels), totalW, totalH), 0, 0
+      );
+      page.sourceCanvas = source;
+      return source;
+    };
+    const validatePage = (page) => {
+      initializeGeometry(page);
+      const totalW = modules * gridCols + gridMargin * (gridCols + 1);
+      const totalH = modules * gridRows + gridMargin * (gridRows + 1);
+      if (page.width !== totalW || page.height !== totalH)
+        throw new Error(`Sender page geometry mismatch ${page.width}×${page.height}`);
+      const source = ensurePageSource(page, totalW, totalH);
+      if (!source) throw new Error("Sender worker returned no page pixels");
+      return { source, totalW, totalH };
+    };
+    const drawPage = (page) => {
+      const { source, totalW, totalH } = validatePage(page);
+      // A synchronous page is already a complete immutable wall from the
+      // worker. It never needs the persistent module-resolution staging wall
+      // used by phased/cell updates, so present it directly and remove one
+      // full-wall canvas copy from every sender frame.
+      let drawSource = source;
+      if (!synchronousUpdates) {
+        const stagingCtx = staging.getContext("2d");
+        stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
+        stagingCtx.globalCompositeOperation = "copy";
+        stagingCtx.imageSmoothingEnabled = false;
+        stagingCtx.drawImage(source, 0, 0, totalW, totalH);
+        stagingCtx.globalCompositeOperation = "source-over";
+        drawSource = staging;
+      }
+      if (fitStaging) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.setTransform(1, 0, 0, 1, 0, 0);
+        fitCtx.globalCompositeOperation = "copy";
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(drawSource, 0, 0, totalW, totalH, 0, 0, fitStaging.width, fitStaging.height);
+        fitCtx.globalCompositeOperation = "source-over";
+        renderFitCanvas();
+      } else {
+        const ctx = canvas.getContext("2d");
+        ctx.globalCompositeOperation = "copy";
+        ctx.imageSmoothingEnabled = false;
+        if (landscapeGrid())
+          ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+        else
+          ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+        ctx.drawImage(drawSource, 0, 0);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = "source-over";
+      }
+      if (activeTransportCursor?.key === transportKey)
+        activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, page.endOrdinal);
+    };
+    const drawPageCell = (page, offset) => {
+      const { source, totalW, totalH } = validatePage(page);
+      const ordinal = page.startOrdinal + offset;
+      const slotIndex = ordinal % gridCodes;
+      const stride = modules + gridMargin;
+      const ox = slotIndex % gridCols * stride + gridMargin;
+      const oy = Math.floor(slotIndex / gridCols) * stride + gridMargin;
+
+      // Keep a persistent module-resolution wall. This is what makes cell-phase
+      // presentation cheap: a QR update touches only its own module square, not
+      // a full 4:7 wall rescale/repaint.
+      const stagingCtx = staging.getContext("2d");
+      stagingCtx.setTransform(1, 0, 0, 1, 0, 0);
+      stagingCtx.globalCompositeOperation = "source-over";
+      stagingCtx.imageSmoothingEnabled = false;
+      stagingCtx.drawImage(source, ox, oy, modules, modules, ox, oy, modules, modules);
+      stagingCtx.globalCompositeOperation = "source-over";
+
+      const landscape = landscapeGrid();
+      const targetW = landscape ? canvas.height : canvas.width;
+      const targetH = landscape ? canvas.width : canvas.height;
+      const ctx = canvas.getContext("2d");
+      ctx.globalCompositeOperation = "source-over";
+      if (landscape)
+        ctx.setTransform(0, 1, -1, 0, canvas.width, 0);
+      else
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      if (fitStaging) {
+        const fitCtx = fitStaging.getContext("2d");
+        fitCtx.setTransform(1, 0, 0, 1, 0, 0);
+        fitCtx.globalCompositeOperation = "source-over";
+        fitCtx.imageSmoothingEnabled = false;
+        fitCtx.drawImage(
+          source,
+          ox, oy, modules, modules,
+          ox * FIT_SUPERSAMPLE, oy * FIT_SUPERSAMPLE,
+          modules * FIT_SUPERSAMPLE, modules * FIT_SUPERSAMPLE
+        );
+        fitCtx.globalCompositeOperation = "source-over";
+
+        // Include one logical white-border pixel so high-quality downsampling
+        // sees the same edge neighborhood as a whole-wall draw. The expensive
+        // operation is now proportional to one QR region, never the full wall.
+        const rx = Math.max(0, ox - 1);
+        const ry = Math.max(0, oy - 1);
+        const rr = Math.min(totalW, ox + modules + 1);
+        const rb = Math.min(totalH, oy + modules + 1);
+        const rw = rr - rx;
+        const rh = rb - ry;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(
+          fitStaging,
+          rx * FIT_SUPERSAMPLE, ry * FIT_SUPERSAMPLE,
+          rw * FIT_SUPERSAMPLE, rh * FIT_SUPERSAMPLE,
+          rx * targetW / totalW, ry * targetH / totalH,
+          rw * targetW / totalW, rh * targetH / totalH
+        );
+      } else {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(
+          staging,
+          ox, oy, modules, modules,
+          ox * targetW / totalW, oy * targetH / totalH,
+          modules * targetW / totalW, modules * targetH / totalH
+        );
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+
+      // The durable cursor advances only when this entire page completes;
+      // phase-hopped presentation is intentionally not ordinal order.
+    };
+
+    for (let i = 0; i < workerCount; ++i) {
+      const worker = new Worker(new URL(`./render-worker.js?build=${SEND_RUNTIME_BUILD}`, import.meta.url), { type: "module" });
+      worker.busy = false;
+      worker.onmessage = (event) => {
+        worker.busy = false;
+        const page = event.data;
+        if (gen !== generation || failed) {
+          closePage(page);
+          return;
+        }
+        if (page?.type === "render-error") {
+          fail(new Error(page.error || "Sender QR worker failed"));
+          return;
+        }
+        if (page?.type !== "rendered-page" || !Number.isInteger(page.startOrdinal) || !Number.isInteger(page.endOrdinal)) {
+          closePage(page);
+          fail(new Error("Sender QR worker returned an invalid page"));
+          return;
+        }
+        readyPages.set(page.pageId, page);
+        scheduleDispatch();
+      };
+      worker.onerror = (event) => fail(new Error(event.message || "Sender QR worker failed"));
+      workers.push(worker);
+    }
+    scheduleDispatch();
+
+    let pageInterval = 1e3 / txFps;
+    let cellInterval = synchronousUpdates ? pageInterval : pageInterval / gridCodes;
+    let nextCellAt = 0;
+    activeSendFpsSetter = (fps) => {
+      pageInterval = 1e3 / Math.max(1, fps);
+      cellInterval = synchronousUpdates ? pageInterval : pageInterval / gridCodes;
+      // Speed changes are live: keep the current sweep and warm workers. If the
+      // new rate is faster, pull the next phase forward; never blank/restart.
+      if (nextCellAt)
+        nextCellAt = Math.min(nextCellAt, performance.now() + cellInterval);
+    };
+    activeSendClockRebase = () => {
+      // Background tabs suspend rAF. Resume from the next real presentation
+      // opportunity; time spent hidden is not sender debt to be repaid.
+      nextCellAt = 0;
+    };
+    const takeReadyPage = () => {
+      const page = readyPages.get(nextPresentPageId);
+      if (!page) return null;
+      readyPages.delete(nextPresentPageId);
+      return page;
+    };
+    const tickParallel = (now) => {
+      if (gen !== generation || failed) return;
+      requestAnimationFrame(tickParallel);
+
+      // Seed the wall with one complete frame so startup never reveals a white
+      // checkerboard one QR at a time. Every following page transitions in
+      // phases over exactly one sender frame period.
+      if (!seededWall) {
+        const page = takeReadyPage();
+        if (!page) return;
+        try {
+          drawPage(page);
+        } catch (error) {
+          closePage(page);
+          fail(error);
+          return;
+        }
+        closePage(page);
+        nextPresentPageId++;
+        seededWall = true;
+        nextCellAt = now + cellInterval;
+        scheduleDispatch();
+        return;
+      }
+
+      if (!currentPage) {
+        currentPage = takeReadyPage();
+        currentCellOffset = 0;
+        if (!currentPage) {
+          // Encoding fell behind. Do not burst a whole stale page when it catches
+          // up; restart the phase clock when a fresh page is actually available.
+          nextCellAt = 0;
+          return;
+        }
+        if (!nextCellAt) nextCellAt = now;
+      }
+
+      // visibilitychange explicitly rebases this clock on tab restore. Also
+      // fence genuinely large scheduler stalls, but do not confuse an FPS above
+      // the display refresh rate with suspension: ordinary rAF lateness may
+      // still catch up exactly as before.
+      if (!nextCellAt || now - nextCellAt > 250)
+        nextCellAt = now + cellInterval;
+
+      if (synchronousUpdates) {
+        if (now + 0.25 < nextCellAt) return;
+        try {
+          // Commit one already-rendered wall in one compositor-facing paint.
+          // The physical display scanout may still create one rolling-shutter
+          // transition stripe, but JS never creates many independent QR seams.
+          drawPage(currentPage);
+        } catch (error) {
+          closePage(currentPage);
+          currentPage = null;
+          fail(error);
+          return;
+        }
+        closePage(currentPage);
+        currentPage = null;
+        currentCellOffset = 0;
+        nextPresentPageId++;
+        scheduleDispatch();
+        nextCellAt += pageInterval;
+        // Never repay missed wall frames as a burst of whole-screen changes.
+        if (now - nextCellAt > pageInterval) nextCellAt = now + pageInterval;
+        return;
+      }
+
+      let painted = 0;
+      while (currentPage && now + 0.25 >= nextCellAt && painted < gridCodes) {
+        try {
+          drawPageCell(currentPage, temporalSourceOffset(currentPage.pageId, currentCellOffset));
+        } catch (error) {
+          closePage(currentPage);
+          currentPage = null;
+          fail(error);
+          return;
+        }
+        currentCellOffset++;
+        painted++;
+        nextCellAt += cellInterval;
+        if (currentCellOffset < gridCodes) continue;
+
+        if (activeTransportCursor?.key === transportKey)
+          activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, currentPage.endOrdinal);
+        closePage(currentPage);
+        currentPage = null;
+        currentCellOffset = 0;
+        nextPresentPageId++;
+        scheduleDispatch();
+        if (now + 0.25 < nextCellAt) break;
+        currentPage = takeReadyPage();
+        if (!currentPage) {
+          nextCellAt = 0;
+          break;
+        }
+      }
+    };
+    requestAnimationFrame(tickParallel);
+    return;
   }
-  let generatorFailed=false;const lookahead=staticStream?1:LOOKAHEAD*gridCodes;const pump=(max=lookahead)=>{if(generatorFailed||gen!==generation)return;try{for(let n=0;n<max&&queue.length<lookahead;n++)queue.push(makeCell());}catch(err){generatorFailed=true;showError(err instanceof Error?err.message:String(err));}};
-  let cellCursor=activeTransportCursor?.key===transportKey?activeTransportCursor.nextOrdinal%gridCodes:0;pump();
-  const paintCell=(entry)=>{const img=entry.image;const cell=modules+2*gridMargin;const stride=modules+gridMargin;const cx=cellCursor%gridCols*stride;const cy=Math.floor(cellCursor/gridCols)*stride;cells[cellCursor]=img;staging.getContext("2d").putImageData(img,cx,cy);if(fitStaging){const fitCtx=fitStaging.getContext("2d");fitCtx.imageSmoothingEnabled=false;fitCtx.drawImage(staging,cx,cy,cell,cell,cx*FIT_SUPERSAMPLE,cy*FIT_SUPERSAMPLE,cell*FIT_SUPERSAMPLE,cell*FIT_SUPERSAMPLE);}if(entry.ordinal!==null&&activeTransportCursor?.key===transportKey)activeTransportCursor.nextOrdinal=Math.max(activeTransportCursor.nextOrdinal,entry.ordinal+1);cellCursor=(cellCursor+1)%gridCodes;};
-  const presentPage=()=>{if(fitStaging){renderFitCanvas();return;}const ctx=canvas.getContext("2d");ctx.imageSmoothingEnabled=false;const totalW=staging.width,totalH=staging.height;if(landscapeGrid())ctx.setTransform(0,canvas.height/totalW,-canvas.width/totalH,0,canvas.width,0);else ctx.setTransform(canvas.width/totalW,0,0,canvas.height/totalH,0,0);ctx.drawImage(staging,0,0);};
-  const paintPage=()=>{if(queue.length<gridCodes)return false;for(let i=0;i<gridCodes;++i)paintCell(queue.shift());presentPage();return true;};
-  paintPage();if(staticStream){activeSendFpsSetter=()=>{};return;}let interval=1e3/txFps;let nextAt=performance.now()+interval;activeSendFpsSetter=(fps)=>{interval=1e3/Math.max(1,fps);nextAt=Math.min(nextAt,performance.now()+interval);};activeSendClockRebase=()=>{nextAt=0;};
-  const tick=(now)=>{if(gen!==generation||generatorFailed)return;requestAnimationFrame(tick);if(!nextAt||now-nextAt>250)nextAt=now+interval;if(now<nextAt)return;if(now-nextAt>interval)nextAt=now;if(!paintPage()){pump(gridCodes);nextAt=now;return;}pump(gridCodes);nextAt+=interval;};requestAnimationFrame(tick);
+
+  let generatorFailed = false;
+  const lookahead = staticStream ? 1 : LOOKAHEAD * gridCodes;
+  const pump = (max = lookahead) => {
+    if (generatorFailed || gen !== generation) return;
+    try {
+      for (let n = 0; n < max && queue.length < lookahead; n++) queue.push(makeCell());
+    } catch (err) {
+      generatorFailed = true;
+      showError(err instanceof Error ? err.message : String(err));
+    }
+  };
+  let cellCursor = activeTransportCursor?.key === transportKey ? activeTransportCursor.nextOrdinal % gridCodes : 0;
+  const sweepOrigin = cellCursor;
+  pump();
+  const paintCell = (entry) => {
+    const img = entry.image;
+    const cell = modules + 2 * gridMargin;
+    const stride = modules + gridMargin;
+    const cx = cellCursor % gridCols * stride;
+    const cy = Math.floor(cellCursor / gridCols) * stride;
+    cells[cellCursor] = img;
+    staging.getContext("2d").putImageData(img, cx, cy);
+    if (fitStaging) {
+      const fitCtx = fitStaging.getContext("2d");
+      fitCtx.imageSmoothingEnabled = false;
+      fitCtx.drawImage(
+        staging,
+        cx, cy, cell, cell,
+        cx * FIT_SUPERSAMPLE, cy * FIT_SUPERSAMPLE,
+        cell * FIT_SUPERSAMPLE, cell * FIT_SUPERSAMPLE
+      );
+    }
+    if (entry.ordinal !== null && activeTransportCursor?.key === transportKey)
+      activeTransportCursor.nextOrdinal = Math.max(activeTransportCursor.nextOrdinal, entry.ordinal + 1);
+    cellCursor = (cellCursor + 1) % gridCodes;
+  };
+  const presentPage = () => {
+    if (fitStaging) {
+      renderFitCanvas();
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    const totalW = staging.width;
+    const totalH = staging.height;
+    if (landscapeGrid())
+      ctx.setTransform(0, canvas.height / totalW, -canvas.width / totalH, 0, canvas.width, 0);
+    else
+      ctx.setTransform(canvas.width / totalW, 0, 0, canvas.height / totalH, 0, 0);
+    // One compositor-facing draw per sender page. The old scheduler redrew
+    // the whole Fit wall once per QR cell (28x/page in 4:7), burning the main
+    // thread on resampling instead of generating new QR pages.
+    ctx.drawImage(staging, 0, 0);
+  };
+  const paintPage = () => {
+    if (queue.length < gridCodes) return false;
+    for (let i = 0; i < gridCodes; ++i) paintCell(queue.shift());
+    presentPage();
+    return true;
+  };
+  paintPage();
+  if (staticStream) {
+    activeSendFpsSetter = () => {};
+    return;
+  }
+  let interval = 1e3 / txFps;
+  let nextAt = performance.now() + interval;
+  activeSendFpsSetter = (fps) => {
+    interval = 1e3 / Math.max(1, fps);
+    nextAt = Math.min(nextAt, performance.now() + interval);
+  };
+  activeSendClockRebase = () => { nextAt = 0; };
+  const tick = (now) => {
+    if (gen !== generation || generatorFailed) return;
+    requestAnimationFrame(tick);
+    if (!nextAt || now - nextAt > 250) nextAt = now + interval;
+    if (now < nextAt) return;
+    if (now - nextAt > interval) nextAt = now;
+    if (!paintPage()) {
+      // QR generation, not rendering, is the limiting stage. Refill as much as
+      // possible now and present on the next animation callback rather than
+      // partially updating the visible wall.
+      pump(gridCodes);
+      nextAt = now;
+      return;
+    }
+    pump(gridCodes);
+    nextAt += interval;
+  };
+  requestAnimationFrame(tick);
 }
-window.addEventListener("airgapper:leave-mode",()=>{if(!document.getElementById("sendView")?.classList.contains("active"))return;stopTransfer();});
-window.addEventListener("pagehide",stopTransfer);
-window.addEventListener("airgapper:pause-mode",()=>{if(!document.getElementById("sendView")?.classList.contains("active"))return;releaseScreenWakeLock();});
-window.addEventListener("airgapper:resume-mode",()=>{if(!document.getElementById("sendView")?.classList.contains("active")||!selectedFile)return;activeSendClockRebase?.();void requestScreenWakeLock();});
+window.addEventListener("airgapper:leave-mode", () => {
+  var _a;
+  if (!((_a = document.getElementById("sendView")) == null ? void 0 : _a.classList.contains("active"))) return;
+  stopTransfer();
+});
+window.addEventListener("pagehide", stopTransfer);
+window.addEventListener("airgapper:pause-mode", () => {
+  var _a;
+  if (!((_a = document.getElementById("sendView")) == null ? void 0 : _a.classList.contains("active"))) return;
+  releaseScreenWakeLock();
+});
+window.addEventListener("airgapper:resume-mode", () => {
+  var _a;
+  if (!((_a = document.getElementById("sendView")) == null ? void 0 : _a.classList.contains("active")) || !selectedFile) return;
+  activeSendClockRebase?.();
+  void requestScreenWakeLock();
+});
 void main();
