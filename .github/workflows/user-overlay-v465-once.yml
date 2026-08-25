@@ -1,0 +1,465 @@
+name: user overlay v465 once
+on:
+  push:
+    paths:
+      - .github/workflows/user-overlay-v465-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply overlay convergence patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import textwrap
+
+          runtime_path = Path('receive/runtime.js')
+          version_path = Path('version.js')
+          runtime = runtime_path.read_text()
+          version = version_path.read_text()
+          if 'APP_VERSION = "0.5.464"' not in version:
+              raise SystemExit('expected v0.5.464 base')
+
+          def replace_once(old, new, label):
+              global runtime
+              count = runtime.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              runtime = runtime.replace(old, new)
+
+          replace_once(
+          '''function noteGridTransition(from, to, reason, at) {
+            const trace = activeBenchmarkFrame != null ? activeBenchmarkFrame : benchmarkTraces.at(-1);
+            trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
+          }''',
+          '''function noteGridTransition(from, to, reason, at) {
+            const trace = activeBenchmarkFrame != null ? activeBenchmarkFrame : benchmarkTraces.at(-1);
+            trace == null ? void 0 : trace.transitions.push({ from, to, reason, at });
+            globalThis.__airgapperUserOverlay?.latticeState(to);
+          }''',
+          'lattice state hook')
+
+          replace_once(
+          '''  expectedRegions = snapshot.slots.length;
+            expectedRegionsAt = now;
+            peakRegions = Math.max(peakRegions, snapshot.slots.length);
+            return decodedRegion;
+          }''',
+          '''  expectedRegions = snapshot.slots.length;
+            expectedRegionsAt = now;
+            peakRegions = Math.max(peakRegions, snapshot.slots.length);
+            globalThis.__airgapperUserOverlay?.geometry(snapshot, gridLattice.active && Boolean(snapshot.distributedFit));
+            return decodedRegion;
+          }''',
+          'geometry hook')
+
+          replace_once(
+          '''function queueOverlayDraw() {
+            if (overlayDrawQueued) return;
+            overlayDrawQueued = true;
+            requestAnimationFrame(() => {
+              overlayDrawQueued = false;
+              if (!done && stream) drawOverlay(receiverNow());
+            });
+          }''',
+          '''function queueOverlayDraw() {
+            // The legacy overlay is Developer Mode only. Normal receiving has an
+            // event-driven user overlay and must not schedule hidden diagnostic
+            // canvas work on every camera frame.
+            if (receiverDevActions.hidden || overlayDrawQueued) return;
+            overlayDrawQueued = true;
+            requestAnimationFrame(() => {
+              overlayDrawQueued = false;
+              if (!done && stream) drawOverlay(receiverNow());
+            });
+          }''',
+          'developer overlay scheduling')
+
+          replace_once(
+          '''    if (message.full) {
+              fullScanJobs.set(message.id, {
+                thorough: Boolean(message.thorough),
+                reacquire: gridLattice.locked,
+                acquisition: !gridLattice.locked,
+                acquisitionMode: message.acquisitionMode
+              });
+            }''',
+          '''    if (message.full) {
+              fullScanJobs.set(message.id, {
+                thorough: Boolean(message.thorough),
+                reacquire: gridLattice.locked,
+                acquisition: !gridLattice.locked,
+                acquisitionMode: message.acquisitionMode,
+                targets: message.acquisitionMode === "recovery"
+                  ? trackedRegions.map((region) => ({ slot: Number(region.gridSlot), quad: region.quad }))
+                    .filter((target) => Number.isInteger(target.slot) && validQuadObject(target.quad))
+                  : undefined
+              });
+            }''',
+          'recovery target capture')
+
+          replace_once(
+          '''  const fullJob = fullScanJobs.get(id);
+            const capturedAt = scanCapturedAt.get(id) ?? receiverNow();''',
+          '''  const fullJob = fullScanJobs.get(id);
+            const capturedAt = scanCapturedAt.get(id) ?? receiverNow();
+            if (!replayRunning && fullJob?.acquisitionMode === "recovery" && fullJob.targets?.length) {
+              globalThis.__airgapperUserOverlay?.recovery(
+                fullJob.targets,
+                completion.symbols ?? [],
+                completion.sightings ?? []
+              );
+            }''',
+          'recovery completion hook')
+
+          replace_once(
+          '''  if (decodedRegion && info?.decodePath) {
+              decodedRegion.decodePath = info.decodePath;
+              decodedRegion.decodePathAt = decodedAt;
+            }
+            if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);''',
+          '''  if (decodedRegion && info?.decodePath) {
+              decodedRegion.decodePath = info.decodePath;
+              decodedRegion.decodePathAt = decodedAt;
+            }
+            if (!optimizerAttribution && !replayRunning) {
+              const measuredOverlayQuad = info?.geometryMeasured !== false && validQuadObject(info?.quad) ? info.quad : void 0;
+              const overlayQuad = measuredOverlayQuad ?? (validQuadObject(decodedRegion?.quad) ? decodedRegion.quad : void 0);
+              if (overlayQuad) {
+                const fullJob = info?.scanId === void 0 ? void 0 : fullScanJobs.get(info.scanId);
+                const overlayPath = fullJob?.acquisition && fullJob?.acquisitionMode !== "recovery"
+                  ? "acquire"
+                  : info?.decodePath || decodedRegion?.decodePath || "hot";
+                globalThis.__airgapperUserOverlay?.success(header.slotIndex, overlayQuad, overlayPath);
+              }
+            }
+            if (decodedRegion) noteSequence(decodedRegion, header.seq, info?.scanId === void 0 ? decodedAt : scanCapturedAt.get(info.scanId) ?? decodedAt);''',
+          'successful decode hook')
+
+          direct_old = '''        "DIRECT RECOVERY Y8",
+                trace,
+                source.sequence,
+                source.callbackTimeMs
+              )) directFull.frame.close?.();'''
+          direct_new = '''        "DIRECT RECOVERY Y8",
+                trace,
+                source.sequence,
+                source.callbackTimeMs,
+                boundedScanCandidates
+              )) directFull.frame.close?.();'''
+          replace_once(direct_old, direct_new, 'direct recovery targets')
+
+          buffered_pattern = re.compile(
+              r'(\{ id, buf: img\.data\.buffer, w: scanW, h: scanH, ox: scanX, oy: scanY, full: true, tracks: recoveryTracks, acquisitionMode \},\n'
+              r'\s*\[img\.data\.buffer\],\n\s*"FULL FRAME",\n\s*trace,\n\s*source\.sequence,\n\s*source\.callbackTimeMs)(\n\s*\)\))'
+          )
+          runtime, count = buffered_pattern.subn(r'\1,\n      boundedScanCandidates\2', runtime, count=1)
+          if count != 1:
+              raise SystemExit(f'buffered recovery targets: expected 1 match, found {count}')
+
+          overlay = textwrap.dedent(r'''
+          const SUCCESS_FRAMES = 18;
+          const SIGHTING_FRAMES = 30;
+          const MISS_FRAMES = 24;
+          const SUCCESS_COLORS = Object.freeze({
+            hot: [0, 239, 255],
+            direct: [66, 165, 255],
+            sparse: [53, 214, 111],
+            fallback: [255, 178, 62],
+            robust: [255, 115, 92],
+            acquire: [180, 134, 255]
+          });
+
+          const preview = document.querySelector("#preview .preview");
+          const video = document.getElementById("video");
+          const legacyOverlay = document.getElementById("detect-overlay");
+          const receiverDevActions = document.querySelector(".receiver-dev-actions");
+          const canvas = document.createElement("canvas");
+          canvas.id = "user-detect-overlay";
+          canvas.setAttribute("aria-hidden", "true");
+          Object.assign(canvas.style, {
+            position: "absolute",
+            inset: "0",
+            width: "100%",
+            height: "100%",
+            pointerEvents: "none",
+            zIndex: "3"
+          });
+          if (preview && getComputedStyle(preview).position === "static") preview.style.position = "relative";
+          preview?.append(canvas);
+          const ctx = canvas.getContext("2d");
+
+          const activity = new Array(128);
+          let geometrySnapshot;
+          let geometryUsable = false;
+          let drawQueued = false;
+
+          function normalMode() {
+            return !receiverDevActions || receiverDevActions.hidden;
+          }
+
+          function validQuad(quad) {
+            return Boolean(quad) && [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft]
+              .every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+          }
+
+          function presentation() {
+            const mapped = globalThis.__airgapperOverlayPresentation?.();
+            if (mapped?.width > 0 && mapped?.height > 0 && typeof mapped.mapPoint === "function") return mapped;
+            const width = Number(video?.videoWidth) || 0;
+            const height = Number(video?.videoHeight) || 0;
+            return width > 0 && height > 0
+              ? { width, height, mapPoint(point) { return point; } }
+              : null;
+          }
+
+          function mapQuad(quad, view) {
+            if (!validQuad(quad) || !view) return null;
+            const mapped = {
+              topLeft: view.mapPoint(quad.topLeft),
+              topRight: view.mapPoint(quad.topRight),
+              bottomRight: view.mapPoint(quad.bottomRight),
+              bottomLeft: view.mapPoint(quad.bottomLeft)
+            };
+            return validQuad(mapped) ? mapped : null;
+          }
+
+          function wallQuad(snapshot) {
+            const cols = Number(snapshot?.layout?.cols);
+            const rows = Number(snapshot?.layout?.rows);
+            if (!Number.isInteger(cols) || cols < 1 || !Number.isInteger(rows) || rows < 1) return null;
+            const slots = snapshot?.slots;
+            if (!Array.isArray(slots) || slots.length < cols * rows) return null;
+            const byIndex = new Map(slots.map((slot) => [Number(slot?.index), slot]));
+            const tl = byIndex.get(0)?.quad;
+            const tr = byIndex.get(cols - 1)?.quad;
+            const br = byIndex.get(cols * rows - 1)?.quad;
+            const bl = byIndex.get((rows - 1) * cols)?.quad;
+            if (![tl, tr, br, bl].every(validQuad)) return null;
+            return {
+              topLeft: tl.topLeft,
+              topRight: tr.topRight,
+              bottomRight: br.bottomRight,
+              bottomLeft: bl.bottomLeft
+            };
+          }
+
+          function pathQuad(quad, scale, offX, offY) {
+            const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+            ctx.beginPath();
+            for (let index = 0; index < points.length; index++) {
+              const x = offX + points[index].x * scale;
+              const y = offY + points[index].y * scale;
+              if (index) ctx.lineTo(x, y);
+              else ctx.moveTo(x, y);
+            }
+            ctx.closePath();
+          }
+
+          function drawCornerOutline(quad, scale, offX, offY, color, width) {
+            const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].map((point) => ({
+              x: offX + point.x * scale,
+              y: offY + point.y * scale
+            }));
+            const fraction = 0.23;
+            ctx.save();
+            ctx.beginPath();
+            points.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
+            ctx.closePath();
+            ctx.clip();
+            ctx.beginPath();
+            for (let index = 0; index < points.length; index++) {
+              const point = points[index];
+              const previous = points[(index + 3) % 4];
+              const next = points[(index + 1) % 4];
+              ctx.moveTo(
+                point.x + (previous.x - point.x) * fraction,
+                point.y + (previous.y - point.y) * fraction
+              );
+              ctx.lineTo(point.x, point.y);
+              ctx.lineTo(
+                point.x + (next.x - point.x) * fraction,
+                point.y + (next.y - point.y) * fraction
+              );
+            }
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.lineJoin = "round";
+            ctx.lineCap = "round";
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          function scheduleDraw() {
+            if (drawQueued || !normalMode()) return;
+            drawQueued = true;
+            requestAnimationFrame(draw);
+          }
+
+          function draw() {
+            drawQueued = false;
+            if (!ctx || !normalMode() || document.hidden) return;
+            const cw = canvas.clientWidth;
+            const ch = canvas.clientHeight;
+            const view = presentation();
+            if (!cw || !ch || !view) return;
+            const dpr = window.devicePixelRatio || 1;
+            const width = Math.round(cw * dpr);
+            const height = Math.round(ch * dpr);
+            if (canvas.width !== width || canvas.height !== height) {
+              canvas.width = width;
+              canvas.height = height;
+            }
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+
+            const scale = Math.min(width / view.width, height / view.height);
+            const offX = (width - view.width * scale) * 0.5;
+            const offY = (height - view.height * scale) * 0.5;
+
+            if (geometryUsable && geometrySnapshot?.distributedFit) {
+              const rawWall = wallQuad(geometrySnapshot);
+              const wall = mapQuad(rawWall, view);
+              if (wall) {
+                pathQuad(wall, scale, offX, offY);
+                ctx.strokeStyle = "rgba(184, 132, 255, 0.78)";
+                ctx.lineWidth = Math.max(1.25, 1.45 * dpr);
+                ctx.lineJoin = "round";
+                ctx.stroke();
+              }
+            }
+
+            let animate = false;
+            for (let slot = 0; slot < activity.length; slot++) {
+              const item = activity[slot];
+              if (!item || item.frames <= 0) continue;
+              const quad = mapQuad(item.quad, view);
+              if (!quad) {
+                item.frames = 0;
+                continue;
+              }
+              const fade = item.frames / item.maxFrames;
+              if (item.kind === "success") {
+                const color = SUCCESS_COLORS[item.path] || SUCCESS_COLORS.hot;
+                pathQuad(quad, scale, offX, offY);
+                ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${0.10 + 0.18 * fade})`;
+                ctx.fill();
+              } else {
+                const sighting = item.kind === "sighting";
+                const color = sighting ? [255, 180, 45] : [255, 56, 72];
+                const alpha = (sighting ? 0.24 : 0.20) + (sighting ? 0.50 : 0.44) * fade;
+                drawCornerOutline(
+                  quad, scale, offX, offY,
+                  `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`,
+                  Math.max(1, 1.2 * dpr)
+                );
+              }
+              item.frames--;
+              if (item.frames > 0) animate = true;
+            }
+            if (animate) scheduleDraw();
+          }
+
+          function mark(slot, quad, kind, path, frames) {
+            const index = Number(slot);
+            if (!Number.isInteger(index) || index < 0 || index >= activity.length || !validQuad(quad)) return;
+            let item = activity[index];
+            if (!item) item = activity[index] = {};
+            item.quad = quad;
+            item.kind = kind;
+            item.path = path;
+            item.frames = frames;
+            item.maxFrames = frames;
+            scheduleDraw();
+          }
+
+          function sightingNear(quad, sightings) {
+            if (!validQuad(quad) || !Array.isArray(sightings) || !sightings.length) return false;
+            const points = [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft];
+            const left = Math.min(...points.map((point) => point.x));
+            const right = Math.max(...points.map((point) => point.x));
+            const top = Math.min(...points.map((point) => point.y));
+            const bottom = Math.max(...points.map((point) => point.y));
+            const pad = Math.max(12, Math.max(right - left, bottom - top) * 0.55);
+            return sightings.some((box) => {
+              const x = Number(box?.x) + Number(box?.w) * 0.5;
+              const y = Number(box?.y) + Number(box?.h) * 0.5;
+              return Number.isFinite(x) && Number.isFinite(y) &&
+                x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad;
+            });
+          }
+
+          globalThis.__airgapperUserOverlay = {
+            success(slot, quad, path = "hot") {
+              if (!normalMode()) return;
+              mark(slot, quad, "success", SUCCESS_COLORS[path] ? path : "hot", SUCCESS_FRAMES);
+            },
+            recovery(targets, symbols, sightings) {
+              if (!normalMode() || !Array.isArray(targets)) return;
+              const hits = new Set((symbols || [])
+                .map((symbol) => Number(symbol?.header?.slotIndex))
+                .filter(Number.isInteger));
+              for (const target of targets) {
+                const slot = Number(target?.slot);
+                if (!Number.isInteger(slot) || hits.has(slot) || !validQuad(target?.quad)) continue;
+                const seen = sightingNear(target.quad, sightings);
+                mark(slot, target.quad, seen ? "sighting" : "miss", undefined, seen ? SIGHTING_FRAMES : MISS_FRAMES);
+              }
+            },
+            geometry(snapshot, usable) {
+              geometrySnapshot = snapshot || undefined;
+              geometryUsable = Boolean(usable && snapshot?.distributedFit);
+              scheduleDraw();
+            },
+            latticeState(state) {
+              if (state === "SEARCH" || state === "REACQUIRE" || state === "DORMANT") {
+                geometryUsable = false;
+                scheduleDraw();
+              }
+            },
+            reset() {
+              geometrySnapshot = undefined;
+              geometryUsable = false;
+              activity.fill(undefined);
+              scheduleDraw();
+            }
+          };
+
+          function syncOverlayMode() {
+            const developer = !normalMode();
+            if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
+            canvas.style.display = developer ? "none" : "";
+            if (!developer) scheduleDraw();
+          }
+
+          if (receiverDevActions) {
+            new MutationObserver(syncOverlayMode).observe(receiverDevActions, {
+              attributes: true,
+              attributeFilter: ["hidden"]
+            });
+          }
+          video?.addEventListener("resize", scheduleDraw);
+          window.addEventListener("resize", scheduleDraw);
+          globalThis.screen?.orientation?.addEventListener?.("change", scheduleDraw);
+          window.addEventListener("orientationchange", scheduleDraw);
+          syncOverlayMode();
+          ''').lstrip()
+
+          runtime_path.write_text(runtime)
+          Path('receive/user-overlay.js').write_text(overlay)
+          version_path.write_text('export const APP_VERSION = "0.5.465";\nexport const APP_BUILD = `v${APP_VERSION}`;')
+          PY
+
+          rm .github/workflows/user-overlay-v465-once.yml
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add receive/runtime.js receive/user-overlay.js version.js .github/workflows/user-overlay-v465-once.yml
+          git commit -m "Simplify and fix user overlay v0.5.465"
+          git push
