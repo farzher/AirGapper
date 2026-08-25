@@ -3,6 +3,11 @@ import {
   FocusController as CoreFocusController
 } from "./focus-controller-core.js";
 
+// applyConstraints() resolving is not a per-frame sensor timestamp. Three fresh
+// frames keeps exposure sampling behind the receiver's ~100 ms sensor-epoch
+// guard without making blind acquisition materially slower.
+CAMERA_TUNING.exposureDiscardFrames = Math.max(3, Number(CAMERA_TUNING.exposureDiscardFrames) || 0);
+
 // Keep camera ownership generations at the public controller boundary. The core
 // owns focus/optics policy; this subclass only prevents async work authorized by
 // an older camera/strategy generation from mutating or relabeling the new one.
