@@ -2,8 +2,6 @@ import "./camera-constraints.js";
 import "./camera-constraint-guard.js";
 import "./exposure-ev.js";
 import "./track-processor-proxy.js";
-import "./overlay-coordinate-guard.js";
-import "./track-processor-watchdog.js";
 import "./worker-capacity-guard.js";
 import "./dev-settings-unlock.js";
 import "./status-neutral.js";
