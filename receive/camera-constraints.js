@@ -53,30 +53,37 @@ function cameraReleaseBarrier(ms = 120) {
 }
 
 function scheduleAutoCameraReopen(track) {
-  if (!track || blockedForReopen.has(track)) return;
+  if (!track || blockedForReopen.has(track) || reopenScheduled) return;
+  const receiveView = document.getElementById("receiveView");
+  if (!receiveView?.classList.contains("active")) return;
+
   blockedForReopen.add(track);
-  if (reopenScheduled) return;
   reopenScheduled = true;
   const generation = ++reopenGeneration;
 
-  setTimeout(async () => {
+  // Capture-phase ownership is deliberate: pauseReceiver() stops the old manual
+  // track synchronously before the EV/runtime checkbox handlers can enqueue any
+  // focus or exposure mutation. Runtime's camera mutation queue accepts writes
+  // only for the current live track, so a dead old HAL needs no global
+  // MediaStreamTrack.applyConstraints interception.
+  window.dispatchEvent(new Event("airgapper:pause-mode"));
+  if (track.readyState === "live") {
+    try { track.stop(); } catch {}
+  }
+
+  void (async () => {
     try {
-      const receiveView = document.getElementById("receiveView");
-      if (!receiveView?.classList.contains("active")) return;
-
-      window.dispatchEvent(new Event("airgapper:pause-mode"));
       await cameraReleaseBarrier();
-
       if (generation !== reopenGeneration) return;
       if (!receiveView.classList.contains("active")) return;
       window.dispatchEvent(new Event("airgapper:resume-mode"));
     } finally {
       if (generation === reopenGeneration) reopenScheduled = false;
     }
-  }, 0);
+  })();
 }
 
-function installManualToAutoReopenGuard() {
+function installManualToAutoReopen() {
   document.addEventListener("change", (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.id !== "camera-exposure-auto" || !input.checked) return;
@@ -86,17 +93,6 @@ function installManualToAutoReopenGuard() {
     const manualPanel = document.getElementById("camera-optics-manual");
     if (actual.exposureMode === "manual" || manualPanel && !manualPanel.hidden) scheduleAutoCameraReopen(track);
   }, true);
-
-  const proto = globalThis.MediaStreamTrack?.prototype;
-  const nativeApply = proto?.applyConstraints;
-  if (typeof nativeApply !== "function" || nativeApply.__airgapperManualToAutoGuard) return;
-
-  const guardedApply = function(constraints) {
-    if (blockedForReopen.has(this)) return Promise.resolve();
-    return nativeApply.call(this, constraints);
-  };
-  Object.defineProperty(guardedApply, "__airgapperManualToAutoGuard", { value: true });
-  try { proto.applyConstraints = guardedApply; } catch {}
 }
 
 function closeNumber(a, b, ratio = 0.02) {
@@ -302,7 +298,7 @@ async function applyAdvancedConstraint(track, set) {
   return applied;
 }
 
-installManualToAutoReopenGuard();
+installManualToAutoReopen();
 installSettledExposureSync();
 
-export { applyAdvancedConstraint }; 
+export { applyAdvancedConstraint };
