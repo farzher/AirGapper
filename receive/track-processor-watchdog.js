@@ -1,155 +1,82 @@
-// Low-allocation MediaStreamTrackProcessor stall guard.
-//
-// A transient camera/driver stall must not permanently demote Receive to the
-// much slower rVFC -> canvas -> RGBA path. Keep one coarse watchdog per reader;
-// when a native read stalls, cancel only that processor instance, recreate it on
-// the same live track, and retry the outstanding read without surfacing an error
-// to runtime.js. Normal non-stall processor errors still escape to runtime's
-// compatibility fallback.
-
+// Native MediaStreamTrackProcessor stall recovery. The mobile worker-backed
+// processor already owns its own worker/error/snapshot lifecycle, so never wrap
+// that proxy a second time.
 const TRACK_PROCESSOR_STALL_MS = 900;
 const TRACK_PROCESSOR_WATCHDOG_MS = 200;
 
-function stallError() {
+function abortError(message = "MediaStreamTrackProcessor stalled") {
   return typeof DOMException === "function"
-    ? new DOMException("MediaStreamTrackProcessor stalled", "AbortError")
-    : new Error("MediaStreamTrackProcessor stalled");
-}
-
-function cancelError(reason) {
-  if (reason instanceof Error) return reason;
-  return typeof DOMException === "function"
-    ? new DOMException("MediaStreamTrackProcessor cancelled", "AbortError")
-    : new Error("MediaStreamTrackProcessor cancelled");
+    ? new DOMException(message, "AbortError")
+    : new Error(message);
 }
 
 function installTrackProcessorWatchdog() {
   const NativeTrackProcessor = globalThis.MediaStreamTrackProcessor;
   if (typeof NativeTrackProcessor !== "function" || NativeTrackProcessor.__airgapperStallGuard) return;
 
+  // track-processor-proxy installs a JS class with these private methods on
+  // mobile/coarse-pointer devices. It already handles worker failure and rVFC
+  // snapshot fallback, so wrapping it here only duplicates lifecycle state.
+  const proxyPrototype = NativeTrackProcessor.prototype;
+  if (typeof proxyPrototype?._onMessage === "function" && typeof proxyPrototype?._requestSnapshot === "function") return;
+
   class GuardedTrackProcessor {
     constructor(options) {
       this.options = options;
       this.processor = null;
-      this.nativeReader = null;
+      this.reader = null;
       this.readerTaken = false;
       this.closed = false;
-      this.generation = 0;
       this.pending = false;
       this.pendingSince = 0;
-      this.restartRequested = false;
-      this.restartPromise = null;
-      this.cumulativeTotal = 0;
-      this.cumulativeDiscarded = 0;
       this.deliveredFrames = 0;
-      this.openNative();
-
+      this.totalBeforeRestart = 0;
+      this.discardedBeforeRestart = 0;
+      this.open();
       this.watchdog = setInterval(() => {
-        if (this.closed || !this.pending || !this.pendingSince || this.restartRequested ||
-            performance.now() - this.pendingSince < TRACK_PROCESSOR_STALL_MS) return;
-        this.requestRestart(stallError());
+        if (!this.closed && this.pending && this.pendingSince &&
+            performance.now() - this.pendingSince >= TRACK_PROCESSOR_STALL_MS) {
+          void this.restart();
+        }
       }, TRACK_PROCESSOR_WATCHDOG_MS);
-
-      this.readable = {
-        getReader: () => this.getReader()
-      };
+      this.readable = { getReader: () => this.getReader() };
     }
 
-    openNative() {
-      const processor = new NativeTrackProcessor(this.options);
-      const reader = processor.readable.getReader();
-      this.processor = processor;
-      this.nativeReader = reader;
+    open() {
+      this.processor = new NativeTrackProcessor(this.options);
+      this.reader = this.processor.readable.getReader();
     }
 
-    snapshotCounters(processor = this.processor) {
-      if (!processor) return;
-      const total = Number(processor.totalFrames);
-      const discarded = Number(processor.discardedFrames);
-      if (Number.isFinite(total) && total > 0) this.cumulativeTotal += total;
-      if (Number.isFinite(discarded) && discarded > 0) this.cumulativeDiscarded += discarded;
+    captureCounters() {
+      const total = Number(this.processor?.totalFrames);
+      const discarded = Number(this.processor?.discardedFrames);
+      if (Number.isFinite(total) && total > 0) this.totalBeforeRestart += total;
+      if (Number.isFinite(discarded) && discarded > 0) this.discardedBeforeRestart += discarded;
     }
 
     get totalFrames() {
       const current = Number(this.processor?.totalFrames);
-      const nativeTotal = this.cumulativeTotal + (Number.isFinite(current) && current > 0 ? current : 0);
-      return Math.max(this.deliveredFrames, nativeTotal);
+      return Math.max(this.deliveredFrames,
+        this.totalBeforeRestart + (Number.isFinite(current) && current > 0 ? current : 0));
     }
 
     get discardedFrames() {
       const current = Number(this.processor?.discardedFrames);
-      return this.cumulativeDiscarded + (Number.isFinite(current) && current > 0 ? current : 0);
+      return this.discardedBeforeRestart + (Number.isFinite(current) && current > 0 ? current : 0);
     }
 
-    requestRestart(reason) {
-      if (this.closed || this.restartRequested) return;
-      this.restartRequested = true;
-      const processor = this.processor;
-      const reader = this.nativeReader;
-      this.snapshotCounters(processor);
+    async restart() {
+      if (this.closed || !this.reader) return;
+      const old = this.reader;
+      this.captureCounters();
+      this.reader = null;
       this.processor = null;
-      this.nativeReader = null;
-
-      let cancel;
-      try {
-        cancel = reader?.cancel(reason);
-      } catch {
-        cancel = null;
-      }
-      this.restartPromise = Promise.resolve(cancel).catch(() => void 0).then(() => {
-        try { reader?.releaseLock(); } catch {}
-      });
-    }
-
-    finishRestart() {
-      const pending = this.restartPromise ?? Promise.resolve();
-      return pending.then(() => {
-        if (this.closed) throw cancelError();
-        if (!this.nativeReader) this.openNative();
-        this.restartRequested = false;
-        this.restartPromise = null;
-        this.pendingSince = performance.now();
-      });
-    }
-
-    readNative(token) {
-      if (this.closed || token !== this.generation) return Promise.reject(cancelError());
-      const reader = this.nativeReader;
-      if (!reader) {
-        return this.finishRestart().then(() => this.readNative(token));
-      }
-
-      let nativeRead;
-      try {
-        nativeRead = reader.read();
-      } catch (error) {
-        this.pending = false;
-        this.pendingSince = 0;
-        return Promise.reject(error);
-      }
-
-      return nativeRead.then((value) => {
-        if (this.closed || token !== this.generation) {
-          value?.value?.close?.();
-          throw cancelError();
-        }
-        if (this.restartRequested) {
-          value?.value?.close?.();
-          return this.finishRestart().then(() => this.readNative(token));
-        }
-        this.pending = false;
-        this.pendingSince = 0;
-        if (!value?.done && value?.value) this.deliveredFrames++;
-        return value;
-      }, (error) => {
-        if (this.closed || token !== this.generation) throw cancelError(error);
-        if (this.restartRequested) {
-          return this.finishRestart().then(() => this.readNative(token));
-        }
-        this.pending = false;
-        this.pendingSince = 0;
-        throw error;
-      });
+      try { await old.cancel(abortError()); } catch {}
+      try { old.releaseLock(); } catch {}
+      if (this.closed) return;
+      this.open();
+      this.pending = false;
+      this.pendingSince = 0;
     }
 
     getReader() {
@@ -157,13 +84,38 @@ function installTrackProcessorWatchdog() {
       this.readerTaken = true;
       let released = false;
       return {
-        read: () => {
-          if (released || this.closed) return Promise.reject(cancelError());
-          if (this.pending) return Promise.reject(new TypeError("Concurrent TrackProcessor reads are unsupported"));
-          const token = ++this.generation;
+        read: async () => {
+          if (released || this.closed) throw abortError("MediaStreamTrackProcessor cancelled");
+          if (this.pending) throw new TypeError("Concurrent TrackProcessor reads are unsupported");
           this.pending = true;
           this.pendingSince = performance.now();
-          return this.readNative(token);
+          try {
+            while (!this.closed) {
+              const reader = this.reader;
+              if (!reader) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                continue;
+              }
+              try {
+                const value = await reader.read();
+                this.pending = false;
+                this.pendingSince = 0;
+                if (!value?.done && value?.value) this.deliveredFrames++;
+                return value;
+              } catch (error) {
+                if (reader !== this.reader) continue;
+                this.pending = false;
+                this.pendingSince = 0;
+                throw error;
+              }
+            }
+            throw abortError("MediaStreamTrackProcessor cancelled");
+          } finally {
+            if (this.closed) {
+              this.pending = false;
+              this.pendingSince = 0;
+            }
+          }
         },
         cancel: (reason) => {
           if (released) return Promise.resolve();
@@ -180,32 +132,23 @@ function installTrackProcessorWatchdog() {
       };
     }
 
-    shutdown(reason) {
-      if (this.closed) return Promise.resolve();
+    async shutdown(reason) {
+      if (this.closed) return;
       this.closed = true;
-      ++this.generation;
       this.pending = false;
       this.pendingSince = 0;
       clearInterval(this.watchdog);
-      const reader = this.nativeReader;
-      this.nativeReader = null;
+      const reader = this.reader;
+      this.reader = null;
       this.processor = null;
-      let cancelled;
-      try {
-        cancelled = reader?.cancel(reason);
-      } catch {
-        cancelled = null;
-      }
-      return Promise.resolve(cancelled).catch(() => void 0).finally(() => {
-        try { reader?.releaseLock(); } catch {}
-      });
+      try { await reader?.cancel(reason); } catch {}
+      try { reader?.releaseLock(); } catch {}
     }
   }
 
   Object.defineProperty(GuardedTrackProcessor, "__airgapperStallGuard", { value: true });
-  try {
-    globalThis.MediaStreamTrackProcessor = GuardedTrackProcessor;
-  } catch {
+  try { globalThis.MediaStreamTrackProcessor = GuardedTrackProcessor; }
+  catch {
     try {
       Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
         configurable: true,
