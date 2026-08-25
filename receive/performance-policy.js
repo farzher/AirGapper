@@ -1,6 +1,7 @@
 export const ACQUISITION_ESCALATE_MS = 180;
 export const ACQUISITION_HUNT_AFTER_MS = 900;
 export const ACQUISITION_HUNT_EVERY_SCANS = 12;
+export const ACQUISITION_SIGHTING_EVERY_SCANS = 4;
 export const TEMPORAL_HARD_SKIP_CONFIDENCE = 0.62;
 export const TEMPORAL_HARD_SKIP_RISK = 0.48;
 
@@ -20,14 +21,18 @@ export function acquisitionRacePolicy({
 
   // Acquisition should spend almost all of its time on the cheap dense finder.
   // A generic robust hunt can take hundreds of milliseconds (or hit the worker
-  // timeout) on older phones, which used to block the single acquisition lane
-  // every other full scan. Keep dense full-frame seeds flowing and use actual
-  // finder sightings for targeted retries; the expensive generic finder is only
-  // a sparse escape hatch after a sustained blind stall.
+  // timeout) on older phones, which used to block acquisition every other scan.
+  // Keep dense full-frame seeds flowing; robust search is a sparse escape hatch
+  // after a sustained blind stall.
   const fullEvery = stalled ? 2 : 4;
   const fullFrame = (index - 1) % fullEvery === 0;
 
-  if (!fullFrame && hasSighting)
+  // Finder-only sightings are useful evidence, but the runtime keeps them alive
+  // for several seconds. Retrying the same sighting on every intervening scan
+  // can turn one bad finder into dozens of identical crops. Give a sighting one
+  // bounded retry per small acquisition cycle, then resume spatial seed search.
+  const sightingDue = hasSighting && !fullFrame && index % ACQUISITION_SIGHTING_EVERY_SCANS === 0;
+  if (sightingDue)
     return { mode: "sighting", fullFrame: false, targetSighting: true, stalled };
 
   if (fullFrame) {
