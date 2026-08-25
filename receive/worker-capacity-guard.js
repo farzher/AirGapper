@@ -126,12 +126,6 @@ function keepTrackedCameraOnGuided(message, live) {
   }
 }
 
-function boundLiveAcquisition(message, live) {
-  if (!live || !message?.full || message.thorough) return;
-  const mode = message.acquisitionMode;
-  if (mode === undefined || mode === "fast") message.acquisitionMode = "seed";
-}
-
 function capDenseRepairMask(message, live) {
   const tracks = message?.tracks;
   if (!live || message?.full || !message?.guidedDecode || !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
@@ -276,12 +270,11 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
     }
 
     const cameraLive = liveReceiveCamera();
-    // Normalize the production full-scan mode before deciding whether this job
-    // consumes an acquisition lane. Otherwise an undefined mode is converted to
-    // "seed" only after the concurrency test and can bypass the cap entirely.
-    boundLiveAcquisition(message, cameraLive);
     const native = nativeFrame(message?.videoFrame);
-    const fullAcquisition = Boolean(message?.full && message?.acquisitionMode);
+    // Capacity is a resource concern, not an acquisition-algorithm concern.
+    // Every live full-frame job consumes a bounded acquisition lane while the
+    // acquisition policy remains the sole owner of seed/fast/hunt/thorough mode.
+    const fullAcquisition = Boolean(cameraLive && message?.full);
     const acquisitionConcurrency = this.workers.length >= 4 ? 2 : 1;
     if (fullAcquisition && this.activeFullCount >= acquisitionConcurrency) {
       closeMessageFrame(message);
