@@ -156,17 +156,22 @@ function keepTrackedCameraOnGuided(message, live) {
   }
 }
 
-function capDenseRepairMask(message, live) {
+function capDenseOptionalMasks(message, live) {
   const tracks = message?.tracks;
   if (!live || message?.full || !message?.guidedDecode || !Array.isArray(tracks) || tracks.length < DENSE_REPAIR_MIN_TRACKS) return;
   const laneMask = tracks.length >= 32 ? 0xffffffff : (2 ** tracks.length - 1) >>> 0;
-  const requested = message.guidedRepairMask === undefined ? laneMask : Number(message.guidedRepairMask) >>> 0;
-  const allowed = requested & laneMask;
-  if (!allowed || (allowed & (allowed - 1)) === 0) return;
-  const chosen = (allowed & -allowed) >>> 0;
-  message.guidedRepairMask = chosen;
-  if (message.guidedFallbackMask !== undefined)
-    message.guidedFallbackMask = (Number(message.guidedFallbackMask) >>> 0) & chosen;
+
+  const requestedRepair = message.guidedRepairMask === undefined ? laneMask : Number(message.guidedRepairMask) >>> 0;
+  const allowedRepair = requestedRepair & laneMask;
+  message.guidedRepairMask = allowedRepair ? (allowedRepair & -allowedRepair) >>> 0 : 0;
+
+  // worker-core treats an omitted fallback mask as 0xffffffff. The old limiter
+  // only intersected fallback when a mask happened to be supplied, so dense live
+  // jobs could still send every sparse miss through the expensive generic QR
+  // decoder. Bound fallback independently to one eligible lane as well.
+  const requestedFallback = message.guidedFallbackMask === undefined ? laneMask : Number(message.guidedFallbackMask) >>> 0;
+  const allowedFallback = requestedFallback & laneMask;
+  message.guidedFallbackMask = allowedFallback ? (allowedFallback & -allowedFallback) >>> 0 : 0;
 }
 
 function attachPackedResultScratch(message, transfer) {
@@ -344,7 +349,7 @@ class DecodeWorkerPool extends CoreDecodeWorkerPool {
     }
     stripIdentityOutputMap(message);
     keepTrackedCameraOnGuided(message, live);
-    capDenseRepairMask(message, live);
+    capDenseOptionalMasks(message, live);
     transfer = attachPackedResultScratch(message, transfer);
     transfer = packTracks(message, transfer);
 
