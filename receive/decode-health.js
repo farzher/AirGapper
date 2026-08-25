@@ -3,6 +3,10 @@ const EVENT_CAPACITY = 1024;
 const HEALTH_WINDOW_MS = 800;
 const HEALTH_FRESH_MS = 250;
 const RECOVERY_FRESH_MS = 700;
+const SUSTAIN_WINDOW_MS = 700;
+const SUSTAIN_FRESH_MS = 350;
+const SUSTAIN_MIN_EVENTS = 6;
+const EXPOSURE_TRANSITION_GUARD_MS = 100;
 
 const slotSuccessAt = new Float64Array(SLOT_CAPACITY);
 const eventSuccessAt = new Float64Array(EVENT_CAPACITY);
@@ -11,6 +15,7 @@ let eventCount = 0;
 let lastSuccessAt = 0;
 let latticeState = "SEARCH";
 let geometrySlotCount = 0;
+let exposureTransitionAt = -Infinity;
 
 function clearRecentDecodeHealth() {
   slotSuccessAt.fill(0);
@@ -20,13 +25,30 @@ function clearRecentDecodeHealth() {
   lastSuccessAt = 0;
 }
 
-export function noteDecodeSuccess(slot, at = performance.now()) {
+// Exposure changes and decode completions live on different timelines. A worker
+// can finish an old camera frame hundreds of milliseconds after the sensor has
+// already moved to a new EV/ISO state. Fence those old source frames out, while
+// measuring freshness from the time the valid QR result actually becomes known.
+export function noteExposureTransition(at = performance.now()) {
+  const value = Number(at);
+  exposureTransitionAt = Number.isFinite(value) ? value : performance.now();
+  clearRecentDecodeHealth();
+}
+
+export function noteDecodeSuccess(slot, sourceAt = performance.now(), observedAt = performance.now()) {
+  const source = Number(sourceAt);
+  const observed = Number(observedAt);
+  const now = Number.isFinite(observed) ? observed : performance.now();
+  if (Number.isFinite(exposureTransitionAt)) {
+    if (!Number.isFinite(source) || source < exposureTransitionAt + EXPOSURE_TRANSITION_GUARD_MS) return false;
+  }
   const index = Number(slot);
-  if (Number.isInteger(index) && index >= 0 && index < SLOT_CAPACITY) slotSuccessAt[index] = at;
-  eventSuccessAt[eventWrite] = at;
+  if (Number.isInteger(index) && index >= 0 && index < SLOT_CAPACITY) slotSuccessAt[index] = now;
+  eventSuccessAt[eventWrite] = now;
   eventWrite = (eventWrite + 1) % EVENT_CAPACITY;
   eventCount = Math.min(EVENT_CAPACITY, eventCount + 1);
-  lastSuccessAt = at;
+  lastSuccessAt = now;
+  return true;
 }
 
 export function noteDecodeGeometry(snapshot, frameWidth, frameHeight) {
@@ -73,6 +95,7 @@ export function noteDecodeLatticeState(state) {
 export function resetDecodeHealth() {
   latticeState = "SEARCH";
   geometrySlotCount = 0;
+  exposureTransitionAt = -Infinity;
   clearRecentDecodeHealth();
 }
 
@@ -80,9 +103,7 @@ export function resetDecodeHealth() {
 // rescue command chosen while blind can otherwise execute after the preceding
 // exposure has already produced a verified QR and seeded/locked the lattice.
 // Treat that first real progress as a short provisional lease on the current
-// sensor state. This is intentionally much weaker than HOLD: if progress was a
-// lucky packet and does not continue, the lease expires quickly and exploration
-// is free to resume.
+// sensor state. If progress was luck and does not continue, the lease expires.
 export function decodeExposureRecovering(at = performance.now()) {
   if (latticeState !== "GRID_LOCK" && latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") return false;
   return Boolean(lastSuccessAt && at - lastSuccessAt <= RECOVERY_FRESH_MS);
@@ -103,6 +124,15 @@ function recentSlotCount(cutoff) {
     if (at > 0 && at >= cutoff) count++;
   }
   return count;
+}
+
+// HOLD collapse uses a laggy submission/completion window in runtime. This
+// completion-clock signal is deliberately weaker than broad health but strong
+// enough to say that a supposedly held exposure is still producing real QRs.
+export function decodeExposureSustaining(at = performance.now()) {
+  if (latticeState !== "TRACK" && latticeState !== "PARTIAL_LOSS") return false;
+  if (!lastSuccessAt || at - lastSuccessAt > SUSTAIN_FRESH_MS) return false;
+  return recentEventCount(at - SUSTAIN_WINDOW_MS) >= SUSTAIN_MIN_EVENTS;
 }
 
 export function decodeExposureHealthy(at = performance.now()) {

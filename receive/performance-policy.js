@@ -1,4 +1,8 @@
-import { decodeExposureHealthy } from "./decode-health.js";
+import {
+  decodeExposureHealthy,
+  decodeExposureRecovering,
+  decodeExposureSustaining
+} from "./decode-health.js";
 
 export const ACQUISITION_ESCALATE_MS = 180;
 export const ACQUISITION_HUNT_AFTER_MS = 900;
@@ -190,8 +194,17 @@ export function legacyTemporalRiskWeight(confidence) {
 
 export function automaticOpticsHoldThreshold(heldYield, collapseYield = 0.12) {
   const held = Math.max(0, Math.min(1, Number(heldYield) || 0));
-  // A winner should not be abandoned for normal frame noise, but losing roughly
-  // 30% of its proven QR yield is meaningful. Keep a modest absolute floor so
-  // a mediocre startup winner does not make "bad forever" the new normal.
-  return Math.max(Number(collapseYield) || 0, 0.38, Math.min(0.72, held * 0.70));
+  const collapseFloor = Math.max(0, Math.min(1, Number(collapseYield) || 0));
+  const normalThreshold = Math.max(collapseFloor, 0.38, Math.min(0.72, held * 0.70));
+
+  // Runtime's HOLD window currently subtracts tracks at submission time from QR
+  // outputs at completion time. Under a worker backlog those clocks can be more
+  // than half a second apart, manufacturing a low yield for a perfectly usable
+  // exposure. Real CRC completions are the authoritative veto: broad or simply
+  // sustained completed progress means do not abandon the held camera state.
+  if (decodeExposureHealthy() || decodeExposureSustaining()) return 0;
+  // A sparse trickle is weaker evidence, but it still proves the state is not
+  // totally blind. Only the true near-dead collapse floor may override it.
+  if (decodeExposureRecovering()) return collapseFloor;
+  return normalThreshold;
 }

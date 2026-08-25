@@ -162,8 +162,10 @@ class GridLattice extends GeometryGridLattice {
   accept(detection, frameWidth, frameHeight) {
     const at = Number(detection?.at);
     const slot = Number(detection?.slotIndex);
-    if (Number.isInteger(slot) && slot >= 0 && slot < 128)
-      noteDecodeSuccess(slot, Number.isFinite(at) ? at : monotonicNow());
+    if (Number.isInteger(slot) && slot >= 0 && slot < 128) {
+      const observedAt = monotonicNow();
+      noteDecodeSuccess(slot, Number.isFinite(at) ? at : observedAt, observedAt);
+    }
 
     if (this.sameFrameCompatible(detection)) {
       const lastFullFit = Number(this.lastFullFitAt);

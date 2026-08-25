@@ -1,4 +1,8 @@
-import { decodeExposureHealthy, decodeExposureRecovering } from "./decode-health.js";
+import {
+  decodeExposureHealthy,
+  decodeExposureRecovering,
+  noteExposureTransition
+} from "./decode-health.js";
 
 const blockedForReopen = new WeakSet();
 let reopenScheduled = false;
@@ -315,7 +319,14 @@ async function applyAdvancedConstraint(track, set, { allowHealthyPerturbation = 
     return false;
   }
   const applied = await applyConstraint(track, supported);
-  if (applied && touchesExposure) rememberSettledExposure(track, supported);
+  if (applied && touchesExposure) {
+    // applyConstraints() resolving is the earliest trustworthy point at which a
+    // new sensor epoch can begin. Decode health additionally fences the first
+    // short source-frame interval because Android HALs can expose old frames
+    // after this promise resolves.
+    noteExposureTransition(performance.now());
+    rememberSettledExposure(track, supported);
+  }
   return applied;
 }
 
