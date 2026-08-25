@@ -24,6 +24,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("receive/runtime.js")
           source = path.read_text()
@@ -34,6 +35,16 @@ jobs:
               if count != 1:
                   raise SystemExit(f"{label}: expected exactly one match, found {count}")
               source = source.replace(old, new, 1)
+
+          def replace_after(marker, old, new, label):
+              global source
+              start = source.find(marker)
+              if start < 0:
+                  raise SystemExit(f"{label}: marker not found")
+              at = source.find(old, start)
+              if at < 0:
+                  raise SystemExit(f"{label}: target not found after marker")
+              source = source[:at] + new + source[at + len(old):]
 
           replace_once(
           '''import {
@@ -52,19 +63,6 @@ jobs:
           "performance policy imports")
 
           replace_once(
-          '''const AUTO_QR_EV_BIAS = -0.75;
-          const AUTO_QR_LIGHT_SCALE = Math.pow(2, AUTO_QR_EV_BIAS);''',
-          '''const AUTO_QR_EV_BIAS = -0.75;''',
-          "obsolete fixed optics light scale")
-
-          replace_once(
-          '''const AUTO_OPTICS_SHUTTER_FRAME_FRACTION = 0.10;
-          const AUTO_OPTICS_MAX_SHORT_EXPOSURE = 35; // 3.5 ms; exposureTime uses 0.1 ms units
-          // After the motion-safe shutter handoff, tune gain against the decoder itself.''',
-          '''// After the motion-safe shutter handoff, tune gain against the decoder itself.''',
-          "obsolete fixed short-shutter constants")
-
-          replace_once(
           '''let autoOpticsAeRescueStep = 0;
           let autoOpticsAeBias = 0;''',
           '''let autoOpticsAeRescueStep = 0;
@@ -72,15 +70,23 @@ jobs:
           let autoOpticsAeBias = 0;''',
           "auto optics seed state")
 
-          reset_pair = '''  autoOpticsAeRescueStep = 0;
-            autoOpticsAeBias = 0;'''
-          reset_replacement = '''  autoOpticsAeRescueStep = 0;
+          replace_after(
+          "function resetAutomaticOpticsRuntime() {",
+          '''  autoOpticsAeRescueStep = 0;
+            autoOpticsAeBias = 0;''',
+          '''  autoOpticsAeRescueStep = 0;
             autoOpticsSeedAttempt = 0;
-            autoOpticsAeBias = 0;'''
-          reset_count = source.count(reset_pair)
-          if reset_count < 2:
-              raise SystemExit(f"auto optics reset sites: expected at least two matches, found {reset_count}")
-          source = source.replace(reset_pair, reset_replacement)
+            autoOpticsAeBias = 0;''',
+          "auto optics runtime reset")
+
+          replace_after(
+          "async function primeAutomaticQrOpticsStartup(track) {",
+          '''    autoOpticsAeRescueStep = 0;
+            autoOpticsAeBias = 0;''',
+          '''    autoOpticsAeRescueStep = 0;
+            autoOpticsSeedAttempt = 0;
+            autoOpticsAeBias = 0;''',
+          "auto optics startup reset")
 
           replace_once(
           '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
@@ -95,8 +101,8 @@ jobs:
           '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
             const aeProduct = baseline.exposure * baseline.iso;
             const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
-            // Keep the acquisition shutter motion-safe, but allow a tiny bounded
-            // QR-specific light ladder before giving photographic AE control back.
+            // Keep acquisition motion-safe while trying a tiny QR-specific light
+            // ladder before giving photographic AE control back.
             const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);
             let exposure = quantizeCameraRange(
               Math.min(exposureRange.max, seedPolicy.maxExposure, 1e4 / fps * seedPolicy.frameFraction),
@@ -116,37 +122,13 @@ jobs:
           '''  autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;''',
           "short shutter diagnostics")
 
-          replace_once(
-          '''async function abandonAutomaticShortSeed(track, reason = "fast-dark seed produced no QR") {
+          pattern = re.compile(r'''async function abandonAutomaticShortSeed\(track, reason = "fast-dark seed produced no QR"\) \{.*?\n\}\n(?=async function abandonAutomaticOpticsStartupMemory)''', re.S)
+          replacement = '''async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
             if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
             autoOpticsMutationRunning = true;
             try {
-              const baseline = await readAutomaticAeBaseline(track);
-              if (!automaticOpticsSessionAlive(track)) return;
-              const now = receiverNow();
-              autoOpticsAeBaseline = baseline;
-              autoOpticsRuntimeState = "ae";
-              autoOpticsMemoryBootAt = 0;
-              autoOpticsMemoryBoot = void 0;
-              autoOpticsLockSince = 0;
-              autoOpticsAcquisitionSince = now;
-              autoOpticsRetryAt = 0;
-              autoOpticsRescueRetryAt = now + 300;
-              autoOpticsHoldSample = void 0;
-              autoOpticsHoldCollapseSince = 0;
-              autoOpticsHeldYield = 0;
-              autoOpticsTuneSummary = `${reason} · neutral AE rescue`;
-              focusController.adoptAutomaticCameraState("fast-dark startup failed; hardware AE rescue enabled");
-            } finally {
-              autoOpticsMutationRunning = false;
-            }
-          }''',
-          '''async function abandonAutomaticShortSeed(track, reason = "short-shutter seed produced no QR") {
-            if (autoOpticsMutationRunning || !automaticOpticsSessionAlive(track) || autoOpticsRuntimeState !== "seed") return;
-            autoOpticsMutationRunning = true;
-            try {
-              // Acquisition may spend optics. Exhaust the tiny QR-specific short-
-              // shutter ladder before returning control to photographic AE.
+              // Acquisition may spend optics. Exhaust the bounded QR-specific
+              // short-shutter ladder before returning control to photographic AE.
               if (automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt) && autoOpticsAeBaseline) {
                 autoOpticsSeedAttempt++;
                 const next = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
@@ -173,8 +155,11 @@ jobs:
             } finally {
               autoOpticsMutationRunning = false;
             }
-          }''',
-          "bounded auto optics acquisition ladder")
+          }
+          '''
+          source, count = pattern.subn(replacement, source, count=1)
+          if count != 1:
+              raise SystemExit(f"bounded auto optics acquisition ladder: expected exactly one match, found {count}")
 
           replace_once(
           '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
@@ -196,9 +181,8 @@ jobs:
                       }''',
           '''            if (geometryEligible && recoveryNow >= slotGeometryRetryAt[slot]) {
                         const healed = gridLattice.dropSlotCorrection(slot);
-                        // A miss streak is not itself proof that a local lens residual
-                        // exists or is bad. If there was nothing to remove, leave hot
-                        // scheduling/history alone and only rate-limit the next check.
+                        // A miss streak is not proof that a local lens residual exists.
+                        // If there was nothing to remove, leave hot scheduling alone.
                         slotGeometryRetryAt[slot] = recoveryNow + 3000;
                         if (healed) {
                           resetSlotSchedulingHistory(slot, recoveryNow);
@@ -242,8 +226,7 @@ jobs:
             });
             // Three tracked misses are evidence for local predicted-slot repair, not
             // evidence that the wall vanished. Full-frame reacquisition is reserved
-            // for sustained payload silence; valid stream traffic keeps global finder
-            // work out of the hot locked path.''',
+            // for sustained payload silence so healthy locks keep the CPU hot path.''',
           "locked recovery policy wiring")
 
           replace_once(
@@ -293,11 +276,12 @@ jobs:
           heal = s.index("const healed = gridLattice.dropSlotCorrection(slot);")
           guard = s.index("if (healed) {", heal)
           reset = s.index("resetSlotSchedulingHistory(slot, recoveryNow);", heal)
-          assert heal < guard < reset, "slot scheduler reset is not guarded by a real correction removal"
+          assert heal < guard < reset, "slot scheduler reset is not guarded by real correction removal"
           assert "lockedRecovery.globalRecovery" in s
           assert "lockedRecovery.localRecovery" in s
           assert "allLockedCandidatesCold || lockedDecodeSilenceMs >= GEOMETRY_PROBE_SILENCE_MS" not in s
           assert "automaticOpticsHasAnotherAcquisitionSeed(autoOpticsSeedAttempt)" in s
+          assert s.count("autoOpticsSeedAttempt = 0;") >= 3
           print("receiver convergence invariants: ok")
           PY
           git diff --check
