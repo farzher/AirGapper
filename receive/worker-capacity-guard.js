@@ -10,7 +10,6 @@ const MAX_CONCURRENT_NATIVE_COPIES = 2;
 const receiveVideo = document.getElementById("video");
 const packedTrackBufferPool = [];
 const packedResultBufferPool = [];
-const readyWorkers = new WeakSet();
 
 // A rare damaged optical frame can drive Guided into a very slow synchronous
 // WASM path. The pool's normal job timeout is the single timeout authority.
@@ -233,12 +232,6 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
     const baseOnMessage = worker.onmessage;
     worker.onmessage = (event) => {
       const message = event?.data;
-      if (message?.id === -1) {
-        readyWorkers.add(worker);
-        const result = baseOnMessage?.call(worker, event);
-        this.onAvailable?.(slot);
-        return result;
-      }
       const activeMeta = this.activeMeta?.[slot];
       if (message?.__airgapperCameraCopyComplete) {
         if (activeMeta && activeMeta.id === message.id) {
@@ -277,12 +270,7 @@ if (typeof baseConfigureWorker === "function" && !baseConfigureWorker.__airgappe
 const baseSubmitAtSlot = DecodeWorkerPool.prototype.submitAtSlot;
 if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorkerPolicy) {
   const submitAtSlot = function(slot, message, transfer) {
-    if (slot < 0 || slot >= this.workers.length || this.busy[slot]) {
-      closeMessageFrame(message);
-      return false;
-    }
-    const worker = this.workers[slot];
-    if (!readyWorkers.has(worker)) {
+    if (slot < 0 || slot >= this.workers.length || this.ready?.[slot] !== true || this.busy[slot]) {
       closeMessageFrame(message);
       return false;
     }
@@ -344,36 +332,6 @@ if (typeof baseSubmitAtSlot === "function" && !baseSubmitAtSlot.__airgapperWorke
   };
   Object.defineProperty(submitAtSlot, "__airgapperWorkerPolicy", { value: true });
   DecodeWorkerPool.prototype.submitAtSlot = submitAtSlot;
-}
-
-const freeSlotsDescriptor = Object.getOwnPropertyDescriptor(DecodeWorkerPool.prototype, "freeSlots");
-if (freeSlotsDescriptor?.configurable && !freeSlotsDescriptor.get?.__airgapperReadyWorkers) {
-  const getFreeSlots = function() {
-    const slots = [];
-    for (let slot = 0; slot < this.workers.length; slot++) {
-      if (!this.busy[slot] && readyWorkers.has(this.workers[slot])) slots.push(slot);
-    }
-    return slots;
-  };
-  Object.defineProperty(getFreeSlots, "__airgapperReadyWorkers", { value: true });
-  Object.defineProperty(DecodeWorkerPool.prototype, "freeSlots", {
-    configurable: true,
-    get: getFreeSlots
-  });
-}
-
-const baseSubmit = DecodeWorkerPool.prototype.submit;
-if (typeof baseSubmit === "function" && !baseSubmit.__airgapperReadyWorkers) {
-  const submit = function(message, transfer) {
-    for (let slot = 0; slot < this.workers.length; slot++) {
-      if (!this.busy[slot] && readyWorkers.has(this.workers[slot]))
-        return this.submitAtSlot(slot, message, transfer);
-    }
-    closeMessageFrame(message);
-    return false;
-  };
-  Object.defineProperty(submit, "__airgapperReadyWorkers", { value: true });
-  DecodeWorkerPool.prototype.submit = submit;
 }
 
 window.airgapperTrackedTimeoutState = () => ({
