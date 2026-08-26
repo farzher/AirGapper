@@ -122,22 +122,21 @@ const FRAME_SAMPLES = PREAMBLE_SAMPLES + DATA_SYMBOLS * SYMBOL_SAMPLES + TAIL_SA
 const QUIET_ESTIMATED_KBPS =
   (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
-const TONE_OMEGA = new Float64Array(TONE_COUNT);
 const TONE_COEFF = new Float64Array(TONE_COUNT);
+const TONE_OMEGA = new Float64Array(TONE_COUNT);
 for (let tone = 0; tone < TONE_COUNT; tone++) {
   const omega = 2 * Math.PI * (TONE_BASE_HZ + tone * TONE_SPACING_HZ) / SAMPLE_RATE;
   TONE_OMEGA[tone] = omega;
   TONE_COEFF[tone] = 2 * Math.cos(omega);
 }
-const WINDOW = new Float64Array(SYMBOL_SAMPLES);
-for (let i = 0; i < SYMBOL_SAMPLES; i++) WINDOW[i] = Math.sin(Math.PI * (i + 0.5) / SYMBOL_SAMPLES) ** 2;
 
 function packetBytes(payloadId, totalLen, mode, encodingId, block) {
-  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Quiet transport block size.");
+  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected audio transport block size.");
   if (!Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Audio payload is too large.");
   const modeCode = MODE_CODES.get(mode);
-  if (modeCode === undefined) throw new Error("Unknown Quiet transport mode.");
+  if (modeCode === undefined) throw new Error("Unknown audio transport mode.");
   const id = Number(encodingId) >>> 0;
+  if (id > 0xffffff) throw new Error("Audio encoding ID is out of range.");
   const out = new Uint8Array(AUDIO_PACKET_BYTES);
   out.set(MAGIC, 0);
   const view = new DataView(out.buffer);
@@ -152,13 +151,14 @@ function packetBytes(payloadId, totalLen, mode, encodingId, block) {
   return out;
 }
 function parsePacket(raw) {
+  if (!(raw instanceof Uint8Array) || raw.length !== AUDIO_PACKET_BYTES) return null;
   for (let i = 0; i < MAGIC.length; i++) if (raw[i] !== MAGIC[i]) return null;
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   if (view.getUint32(AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES, true) !==
       crc32(raw.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES))) return null;
   const totalLen = view.getUint32(8, true);
   const mode = MODE_NAMES[raw[12]];
-  if (!mode || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return null;
+  if (totalLen < 1 || totalLen > MAX_AUDIO_BYTES || !mode) return null;
   const encodingId = raw[13] * 65536 + raw[14] * 256 + raw[15];
   const sourceSize = mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
   const k = Math.max(1, Math.ceil(totalLen / sourceSize));
@@ -191,8 +191,8 @@ function toneEnergy(samples, offset, tone) {
   let s1 = 0;
   let s2 = 0;
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const value = samples[offset + i] * WINDOW[i];
-    const s0 = value + coeff * s1 - s2;
+    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (SYMBOL_SAMPLES - 1));
+    const s0 = samples[offset + i] * window + coeff * s1 - s2;
     s2 = s1;
     s1 = s0;
   }
@@ -205,17 +205,18 @@ function allToneEnergies(samples, offset) {
 }
 function syncScore(samples, offset) {
   let score = 0;
-  let totalPower = 0;
-  for (let symbol = 0; symbol < PREAMBLE.length; symbol++) {
-    const energies = allToneEnergies(samples, offset + symbol * SYMBOL_SAMPLES);
-    let total = 0;
-    for (const energy of energies) total += energy;
-    const expected = energies[PREAMBLE[symbol]];
-    const other = Math.max(1e-12, (total - expected) / (TONE_COUNT - 1));
-    totalPower += total;
-    score += (expected - other) / Math.max(1e-12, expected + other);
+  let power = 0;
+  for (let i = 0; i < PREAMBLE.length; i++) {
+    const energies = allToneEnergies(samples, offset + i * SYMBOL_SAMPLES);
+    const expected = energies[PREAMBLE[i]];
+    let alternate = 0;
+    for (let tone = 0; tone < TONE_COUNT; tone++) {
+      if (tone !== PREAMBLE[i]) alternate = Math.max(alternate, energies[tone]);
+    }
+    power += expected + alternate;
+    score += (expected - alternate) / Math.max(1e-12, expected + alternate);
   }
-  if (totalPower < 1e-5) return -1;
+  if (power < 1e-6) return -1;
   return score / PREAMBLE.length;
 }
 function decodeFrame(samples, offset, shift = 0) {
@@ -232,14 +233,18 @@ function decodeFrame(samples, offset, shift = 0) {
         if (tone >>> bit & 1) e1 += energies[tone];
         else e0 += energies[tone];
       }
-      const ratio = Math.log((e1 + 1e-12) / (e0 + 1e-12));
-      slots[write++] = clamp(ratio * 0.55, -1, 1);
+      slots[write++] = clamp((e1 - e0) / Math.max(1e-12, e1 + e0), -1, 1);
     }
   }
-  return parsePacket(bitsToBytes(convolutionalDecode(deinterleaveSoft(slots), RAW_PACKET_BITS), AUDIO_PACKET_BYTES));
+  const coded = deinterleaveSoft(slots);
+  const decoded = convolutionalDecode(coded, RAW_PACKET_BITS);
+  return parsePacket(bitsToBytes(decoded, AUDIO_PACKET_BYTES));
 }
+
 function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
-  const slots = interleave(convolutionalEncode(bytesToBits(packetBytes(payloadId, totalLen, mode, encodingId, block))));
+  const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
+  const coded = convolutionalEncode(bytesToBits(raw));
+  const slots = interleave(coded);
   const tones = new Uint8Array(PREAMBLE.length + DATA_SYMBOLS);
   tones.set(PREAMBLE, 0);
   let read = 0;
@@ -256,7 +261,7 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
     for (let i = 0; i < SYMBOL_SAMPLES; i++) {
       waveform[out++] = 0.72 * Math.sin(phase);
       phase += omega;
-      if (phase >= Math.PI * 2) phase -= Math.PI * 2;
+      if (phase > Math.PI * 2) phase -= Math.PI * 2;
     }
   }
   const fade = Math.min(96, out);
@@ -287,51 +292,40 @@ class QuietScanner {
     this.length += chunk.length;
     this.process();
   }
-  tryDecode(center, maxCandidate, window = TRACK_WINDOW) {
-    let bestOffset = -1;
-    let bestScore = -1;
-    const start = Math.max(this.scan, center - window, 0);
-    const end = Math.min(maxCandidate, center + window);
-    for (let offset = start; offset <= end; offset += 8) {
-      const score = syncScore(this.samples, offset);
-      if (score > bestScore) {
-        bestScore = score;
-        bestOffset = offset;
+  tryAt(offset, maxCandidate) {
+    let refinedOffset = offset;
+    let refinedScore = syncScore(this.samples, offset);
+    for (let candidate = Math.max(0, offset - TRACK_WINDOW); candidate <= Math.min(maxCandidate, offset + TRACK_WINDOW); candidate += 4) {
+      const score = syncScore(this.samples, candidate);
+      if (score > refinedScore) {
+        refinedScore = score;
+        refinedOffset = candidate;
       }
     }
-    if (bestOffset < 0 || bestScore < SYNC_THRESHOLD) return null;
-    const coarse = bestOffset;
-    for (let offset = Math.max(start, coarse - 12); offset <= Math.min(end, coarse + 12); offset += 2) {
-      const score = syncScore(this.samples, offset);
-      if (score > bestScore) {
-        bestScore = score;
-        bestOffset = offset;
-      }
-    }
-    let packet = decodeFrame(this.samples, bestOffset, 0);
+    if (refinedScore < SYNC_THRESHOLD) return null;
+    let packet = decodeFrame(this.samples, refinedOffset, 0);
     if (!packet) {
       for (const shift of [-8, 8, -16, 16, -24, 24, -32, 32, -48, 48]) {
-        packet = decodeFrame(this.samples, bestOffset, shift);
+        packet = decodeFrame(this.samples, refinedOffset, shift);
         if (packet) break;
       }
     }
-    return packet ? { packet, offset: bestOffset } : null;
+    return { packet, offset: refinedOffset };
   }
   process() {
     while (true) {
       const maxCandidate = this.length - FRAME_SAMPLES;
       if (maxCandidate < this.scan) return;
-      if (this.expected >= 0) {
-        if (this.expected - TRACK_WINDOW > maxCandidate) return;
-        const decoded = this.tryDecode(this.expected, maxCandidate);
-        if (decoded) {
-          this.onPacket(decoded.packet);
-          this.expected = decoded.offset + FRAME_SAMPLES;
-          this.scan = decoded.offset + FRAME_SAMPLES;
+
+      if (this.expected >= 0 && this.expected <= maxCandidate) {
+        const tracked = this.tryAt(this.expected, maxCandidate);
+        if (tracked?.packet) {
+          this.onPacket(tracked.packet);
+          this.expected = tracked.offset + FRAME_SAMPLES;
+          this.scan = Math.max(this.scan, tracked.offset + PREAMBLE_SAMPLES);
           this.compact();
           continue;
         }
-        if (this.expected + TRACK_WINDOW > maxCandidate) return;
         this.expected = -1;
       }
 
@@ -344,16 +338,16 @@ class QuietScanner {
           bestOffset = offset;
         }
       }
-      if (bestOffset < 0 || bestScore < SYNC_THRESHOLD) {
+      if (bestScore < SYNC_THRESHOLD) {
         this.scan = maxCandidate + 1;
         this.compact();
         return;
       }
-      const decoded = this.tryDecode(bestOffset, maxCandidate, 48);
-      if (decoded) {
+      const decoded = this.tryAt(bestOffset, maxCandidate);
+      if (decoded?.packet) {
         this.onPacket(decoded.packet);
         this.expected = decoded.offset + FRAME_SAMPLES;
-        this.scan = decoded.offset + FRAME_SAMPLES;
+        this.scan = Math.max(this.scan, decoded.offset + PREAMBLE_SAMPLES);
       } else {
         this.scan = bestOffset + PREAMBLE_SAMPLES;
       }
@@ -376,4 +370,11 @@ class QuietScanner {
   }
 }
 
-export { QUIET_ESTIMATED_KBPS, QuietScanner, modulateQuietPacket };
+export {
+  QUIET_ESTIMATED_KBPS,
+  QuietScanner,
+  TONE_BASE_HZ as QUIET_TONE_BASE_HZ,
+  TONE_COUNT as QUIET_TONE_COUNT,
+  TONE_SPACING_HZ as QUIET_TONE_SPACING_HZ,
+  modulateQuietPacket
+};
