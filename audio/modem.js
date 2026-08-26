@@ -19,6 +19,9 @@ const PRE_GUARD = 64;
 const TAIL_GUARD = 64;
 const FFT_WINDOW_EARLY = 16;
 const SYNC_THRESHOLD = 0.11;
+const SYNC_TX_GAIN = 1.35;
+const REFERENCE_TX_GAIN = 1.12;
+const TRACK_WINDOW = 1024;
 const AUDIO_BLOCK_SIZE = 260;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
@@ -316,9 +319,9 @@ function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
   const slots = interleave(coded);
   const waveform = new Float32Array(FRAME_TOTAL_SAMPLES);
   let offset = PRE_GUARD;
-  waveform.set(SYNC, offset);
+  for (let i = 0; i < SYNC_SAMPLES; i++) waveform[offset + i] = clamp(SYNC[i] * SYNC_TX_GAIN, -0.95, 0.95);
   offset += SYNC_SAMPLES;
-  waveform.set(REFERENCE_SYMBOL, offset);
+  for (let i = 0; i < SYMBOL_SAMPLES; i++) waveform[offset + i] = clamp(REFERENCE_SYMBOL[i] * REFERENCE_TX_GAIN, -0.95, 0.95);
   offset += SYMBOL_SAMPLES;
   const carrierReal = REFERENCE.real.slice();
   const carrierImag = REFERENCE.imag.slice();
@@ -469,6 +472,26 @@ function syncCorrelation(samples, offset, stride = 1) {
   const referenceEnergy = stride === 4 ? syncEnergyCoarse : syncEnergy;
   return Math.abs(dot) / Math.sqrt(Math.max(1e-20, energy * referenceEnergy));
 }
+function decodeAt(samples, offset, maxCandidate) {
+  let refinedOffset = offset;
+  let refinedScore = syncCorrelation(samples, offset, 4);
+  for (let candidate = Math.max(0, offset - 8); candidate <= Math.min(maxCandidate, offset + 8); candidate++) {
+    const score = syncCorrelation(samples, candidate, 1);
+    if (score > refinedScore) {
+      refinedScore = score;
+      refinedOffset = candidate;
+    }
+  }
+  if (refinedScore < SYNC_THRESHOLD) return null;
+  let packet = decodeFrame(samples, refinedOffset, 0);
+  if (!packet) {
+    for (const shift of [-8, 8, -16, 16, -24, 24]) {
+      packet = decodeFrame(samples, refinedOffset, shift);
+      if (packet) break;
+    }
+  }
+  return { packet, offset: refinedOffset, score: refinedScore };
+}
 
 class ReliableScanner {
   constructor(onPacket, onSignal = () => void 0) {
@@ -477,6 +500,7 @@ class ReliableScanner {
     this.samples = new Float32Array(65536);
     this.length = 0;
     this.scan = 0;
+    this.expectedSync = -1;
   }
   append(chunk) {
     if (!chunk?.length) return;
@@ -492,6 +516,37 @@ class ReliableScanner {
   process() {
     while (true) {
       const maxCandidate = this.length - FRAME_FROM_SYNC_SAMPLES;
+      if (maxCandidate < 0) return;
+
+      if (this.expectedSync >= 0) {
+        if (this.expectedSync - TRACK_WINDOW > maxCandidate) return;
+        const start = Math.max(this.scan, this.expectedSync - TRACK_WINDOW, 0);
+        const end = Math.min(maxCandidate, this.expectedSync + TRACK_WINDOW);
+        let bestOffset = -1;
+        let bestScore = 0;
+        for (let offset = start; offset <= end; offset += 4) {
+          const score = syncCorrelation(this.samples, offset, 4);
+          if (score > bestScore) {
+            bestScore = score;
+            bestOffset = offset;
+          }
+        }
+        if (bestOffset >= 0 && bestScore >= SYNC_THRESHOLD * 0.72) {
+          const decoded = decodeAt(this.samples, bestOffset, maxCandidate);
+          if (decoded?.packet) {
+            this.onSignal(decoded.score);
+            this.onPacket(decoded.packet);
+            this.expectedSync = decoded.offset + FRAME_TOTAL_SAMPLES;
+            this.scan = Math.max(this.scan, decoded.offset + FRAME_FROM_SYNC_SAMPLES);
+            this.compact();
+            continue;
+          }
+        }
+        if (end < this.expectedSync + TRACK_WINDOW) return;
+        this.expectedSync = -1;
+        this.scan = Math.max(this.scan, start);
+      }
+
       if (maxCandidate < this.scan) return;
       let bestOffset = -1;
       let bestScore = 0;
@@ -503,32 +558,18 @@ class ReliableScanner {
         }
       }
       if (bestScore < SYNC_THRESHOLD) {
-        this.scan = Math.max(this.scan, maxCandidate - SYNC_SAMPLES);
+        this.scan = maxCandidate + 1;
         this.compact();
         return;
       }
-      let refinedOffset = bestOffset;
-      let refinedScore = bestScore;
-      for (let offset = Math.max(this.scan, bestOffset - 8); offset <= Math.min(maxCandidate, bestOffset + 8); offset++) {
-        const score = syncCorrelation(this.samples, offset, 1);
-        if (score > refinedScore) {
-          refinedScore = score;
-          refinedOffset = offset;
-        }
-      }
-      this.onSignal(refinedScore);
-      let packet = decodeFrame(this.samples, refinedOffset, 0);
-      if (!packet) {
-        for (const shift of [-8, 8, -16, 16, -24, 24]) {
-          packet = decodeFrame(this.samples, refinedOffset, shift);
-          if (packet) break;
-        }
-      }
-      if (packet) {
-        this.onPacket(packet);
-        this.scan = refinedOffset + FRAME_FROM_SYNC_SAMPLES;
+      const decoded = decodeAt(this.samples, bestOffset, maxCandidate);
+      if (decoded?.packet) {
+        this.onSignal(decoded.score);
+        this.onPacket(decoded.packet);
+        this.expectedSync = decoded.offset + FRAME_TOTAL_SAMPLES;
+        this.scan = decoded.offset + FRAME_FROM_SYNC_SAMPLES;
       } else {
-        this.scan = refinedOffset + CYCLIC_PREFIX;
+        this.scan = bestOffset + Math.max(CYCLIC_PREFIX * 2, 256);
       }
       this.compact();
     }
@@ -539,10 +580,12 @@ class ReliableScanner {
     this.samples.copyWithin(0, keepFrom, this.length);
     this.length -= keepFrom;
     this.scan -= keepFrom;
+    if (this.expectedSync >= 0) this.expectedSync -= keepFrom;
   }
   reset() {
     this.length = 0;
     this.scan = 0;
+    this.expectedSync = -1;
   }
 }
 
@@ -584,26 +627,26 @@ class AcousticReceiver {
     this.silent = null;
     this.resampler = null;
     this.worker = null;
+    this.quietWorker = null;
     this.running = false;
   }
   async start() {
     if (this.running) return;
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone access is not available in this browser.");
+    const audio = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 1,
+      sampleRate: SAMPLE_RATE
+    };
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1,
-          sampleRate: SAMPLE_RATE
-        },
-        video: false
-      });
+      stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
     } catch (error) {
       if (error?.name === "NotAllowedError" || error?.name === "SecurityError") throw error;
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const { sampleRate, ...withoutRate } = audio;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: withoutRate, video: false });
     }
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextType) {
@@ -618,26 +661,36 @@ class AcousticReceiver {
     }
     const workerUrl = new URL("./reliable-worker.js", import.meta.url);
     workerUrl.search = new URL(import.meta.url).search;
+    const quietWorkerUrl = new URL("./quiet-worker.js", import.meta.url);
+    quietWorkerUrl.search = new URL(import.meta.url).search;
     const worker = new Worker(workerUrl, { type: "module" });
+    const quietWorker = new Worker(quietWorkerUrl, { type: "module" });
+    const handlePacket = (event) => {
+      if (!this.running) return;
+      const packet = event.data?.packet;
+      if (!packet || !(packet.block instanceof ArrayBuffer)) return;
+      this.onPacket({ ...packet, block: new Uint8Array(packet.block) });
+    };
     worker.onmessage = (event) => {
       if (!this.running) return;
       if (event.data?.type === "signal") {
         this.onSignal(Number(event.data.quality) || 0);
         return;
       }
-      const packet = event.data?.packet;
-      if (!packet || !(packet.block instanceof ArrayBuffer)) return;
-      this.onPacket({ ...packet, block: new Uint8Array(packet.block) });
+      handlePacket(event);
     };
+    quietWorker.onmessage = handlePacket;
     await context.resume();
     this.stream = stream;
     this.context = context;
     this.worker = worker;
+    this.quietWorker = quietWorker;
     this.resampler = new StreamingResampler(context.sampleRate);
     this.source = context.createMediaStreamSource(stream);
-    this.processor = context.createScriptProcessor(2048, 1, 1);
+    this.processor = context.createScriptProcessor(1024, 1, 1);
     this.silent = context.createGain();
     this.silent.gain.value = 0;
+    this.running = true;
     this.processor.onaudioprocess = (event) => {
       if (!this.running) return;
       this.append(this.resampler.push(event.inputBuffer.getChannelData(0)));
@@ -645,15 +698,20 @@ class AcousticReceiver {
     this.source.connect(this.processor);
     this.processor.connect(this.silent);
     this.silent.connect(context.destination);
-    this.running = true;
   }
   append(chunk) {
-    if (!this.worker || !chunk?.length) return;
-    const copy = new Float32Array(chunk);
-    this.worker.postMessage({ type: "samples", samples: copy.buffer }, [copy.buffer]);
+    if (!chunk?.length) return;
+    if (this.worker) {
+      const copy = new Float32Array(chunk);
+      this.worker.postMessage({ type: "samples", samples: copy.buffer }, [copy.buffer]);
+    }
+    if (this.quietWorker) {
+      const copy = new Float32Array(chunk);
+      this.quietWorker.postMessage({ type: "samples", samples: copy.buffer }, [copy.buffer]);
+    }
   }
   async stop() {
-    if (!this.running && !this.stream && !this.context && !this.worker) return;
+    if (!this.running && !this.stream && !this.context && !this.worker && !this.quietWorker) return;
     this.running = false;
     if (this.processor) this.processor.onaudioprocess = null;
     try { this.source?.disconnect(); } catch {}
@@ -661,8 +719,9 @@ class AcousticReceiver {
     try { this.silent?.disconnect(); } catch {}
     for (const track of this.stream?.getTracks?.() ?? []) track.stop();
     this.worker?.terminate();
+    this.quietWorker?.terminate();
     const context = this.context;
-    this.stream = this.context = this.source = this.processor = this.silent = this.resampler = this.worker = null;
+    this.stream = this.context = this.source = this.processor = this.silent = this.resampler = this.worker = this.quietWorker = null;
     if (context && context.state !== "closed") await context.close().catch(() => void 0);
   }
 }
