@@ -6,6 +6,18 @@ import {
   modulateReliablePacket
 } from "./reliable-stream.js";
 
+function quietBandLabel(db) {
+  if (!Number.isFinite(db)) return "—";
+  if (db >= -55) return "strong";
+  if (db >= -75) return "weak";
+  return "none";
+}
+function updateQuietReadout(element, levels) {
+  if (!element || !Array.isArray(levels) || levels.length < 3) return;
+  element.textContent = `Quiet band · 17–18k ${quietBandLabel(levels[0])} · 18–19k ${quietBandLabel(levels[1])} · 19–21k ${quietBandLabel(levels[2])}`;
+  element.title = `Received peaks · 17–18 kHz ${levels[0].toFixed(0)} dBFS · 18–19 kHz ${levels[1].toFixed(0)} dBFS · 19–21 kHz ${levels[2].toFixed(0)} dBFS`;
+}
+
 class StreamingResampler {
   constructor(inputRate) {
     this.ratio = inputRate / SAMPLE_RATE;
@@ -45,6 +57,7 @@ class AcousticReceiver {
     this.resampler = null;
     this.worker = null;
     this.quietWorker = null;
+    this.quietReadout = null;
     this.running = false;
   }
   async start() {
@@ -97,7 +110,14 @@ class AcousticReceiver {
       }
       handlePacket(event);
     };
-    quietWorker.onmessage = handlePacket;
+    quietWorker.onmessage = (event) => {
+      if (!this.running) return;
+      if (event.data?.type === "spectrum") {
+        updateQuietReadout(this.quietReadout, event.data.levels);
+        return;
+      }
+      handlePacket(event);
+    };
 
     await context.resume();
     this.stream = stream;
@@ -109,6 +129,16 @@ class AcousticReceiver {
     this.processor = context.createScriptProcessor(1024, 1, 1);
     this.silent = context.createGain();
     this.silent.gain.value = 0;
+    const readout = document.createElement("small");
+    readout.className = "audio-channel-readout";
+    readout.textContent = "Quiet band · listening…";
+    readout.style.display = "block";
+    readout.style.margin = "8px 0 0";
+    readout.style.textAlign = "center";
+    readout.style.color = "var(--muted)";
+    readout.style.fontVariantNumeric = "tabular-nums";
+    document.querySelector("#audio-receive-pane .preview-zone")?.after(readout);
+    this.quietReadout = readout;
     this.running = true;
     this.processor.onaudioprocess = (event) => {
       if (!this.running) return;
@@ -139,8 +169,9 @@ class AcousticReceiver {
     for (const track of this.stream?.getTracks?.() ?? []) track.stop();
     this.worker?.terminate();
     this.quietWorker?.terminate();
+    this.quietReadout?.remove();
     const context = this.context;
-    this.stream = this.context = this.source = this.processor = this.silent = this.resampler = this.worker = this.quietWorker = null;
+    this.stream = this.context = this.source = this.processor = this.silent = this.resampler = this.worker = this.quietWorker = this.quietReadout = null;
     if (context && context.state !== "closed") await context.close().catch(() => void 0);
   }
 }
