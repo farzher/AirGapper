@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.graphics.Color;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -141,7 +142,6 @@ public final class MainActivity extends Activity {
 
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-            // Recovery stays in-page/bounded: never kill or restart the Activity process.
             return true;
         }
 
@@ -152,7 +152,6 @@ public final class MainActivity extends Activity {
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, uri));
             } catch (Exception ignored) {
-                // The offline app remains usable when no activity handles a received link.
             }
             return true;
         }
@@ -279,7 +278,6 @@ public final class MainActivity extends Activity {
             byte[] buffer = new byte[64 * 1024];
             for (int read; (read = input.read(buffer)) != -1; ) output.write(buffer, 0, read);
         } catch (Exception ignored) {
-            // The document provider owns user-visible write errors.
         } finally {
             source.delete();
         }
@@ -357,6 +355,17 @@ public final class MainActivity extends Activity {
                 if (enabled) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             });
+        }
+
+        @JavascriptInterface
+        public double getMediaOutputLevel() {
+            AudioManager audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) return 1.0;
+            int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            int current = audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audio.isStreamMute(AudioManager.STREAM_MUSIC)) return 0.0;
+            if (max <= 0) return current > 0 ? 1.0 : 0.0;
+            return Math.max(0.0, Math.min(1.0, (double) current / (double) max));
         }
 
         @JavascriptInterface
