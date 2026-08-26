@@ -1,8 +1,9 @@
 import { formatBytes } from "../shared/format.js";
 import { completedGoodputKbs, estimateTransferProgress, formatDuration } from "../shared/progress.js";
 import { fnv1a, packFile, unpackFile, verifyFile } from "../shared/protocol.js";
-import { RaptorDecoder, RaptorEncoder, prepareRaptorQ } from "../shared/raptorq.js";
-import { raptorPacketEsi } from "../shared/coding-mode.js";
+import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
+import { prepareRaptorQ } from "../shared/raptorq.js";
+import { scheduledEncodingId, TransportDecoder, TransportEncoder } from "../shared/transport.js";
 import { isSnippet, packSnippet, snippetText } from "../shared/snippet.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
 import {
@@ -11,8 +12,8 @@ import {
   showReceivedSnippet
 } from "../receive/result.js";
 import {
+  AUDIO_BLOCK_SIZE,
   AUDIO_ESTIMATED_KBPS,
-  AUDIO_SYMBOL_SIZE,
   AcousticReceiver,
   MAX_AUDIO_BYTES,
   SAMPLE_RATE,
@@ -89,11 +90,26 @@ const sizeLabel = document.createElement("span");
 const etaLabel = document.createElement("span");
 receiveEstimate.append(progressLabel, sizeLabel, etaLabel);
 const codingLabel = document.createElement("span");
-codingLabel.textContent = "RaptorQ";
 receiveMeta.append(receiveEstimate, codingLabel);
 receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
 receivePanel.append(receiveProgress);
 receivePane.append(result, receivePanel);
+
+function transportName(mode) {
+  return mode === "direct" ? "Direct" : mode === "mds" ? "MDS" : "RaptorQ";
+}
+
+function sourceBlockSize(mode) {
+  return mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
+}
+
+function sourceBlockCount(totalLen, mode) {
+  return Math.max(1, Math.ceil(totalLen / sourceBlockSize(mode)));
+}
+
+function selectAudioTransport(totalLen) {
+  return codingMode(Math.max(1, Math.ceil(totalLen / AUDIO_BLOCK_SIZE)));
+}
 
 function setStatus(text, error = false) {
   status.textContent = text;
@@ -113,6 +129,7 @@ function resetReceiveUi(state = "Ready") {
   progressLabel.textContent = "0%";
   sizeLabel.textContent = "";
   etaLabel.textContent = "";
+  codingLabel.textContent = "";
   progressBar.classList.remove("finalizing", "error");
   progressBar.style.width = "0%";
   progressTrack.setAttribute("aria-valuenow", "0");
@@ -132,14 +149,15 @@ async function showReceivedResult(file) {
 }
 
 function updateReceiveProgress(session) {
-  if (!session.identity || !session.startedAt) return;
+  if (!session.identity || !session.startedAt || !session.decoder) return;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
-  const sourceRank = Math.min(session.targetPackets - 1, session.seen.size);
+  const rank = session.decoder.solvedCount;
+  const usefulSymbols = session.decoder.usefulSymbols;
   const estimate = estimateTransferProgress(
     session.targetPackets,
-    session.seen.size,
+    usefulSymbols,
     elapsedSeconds,
-    Math.max(0, sourceRank)
+    rank
   );
   const percent = Math.min(98, Math.max(0, estimate.fraction * 100));
   progressBar.style.width = `${percent}%`;
@@ -147,8 +165,9 @@ function updateReceiveProgress(session) {
   progressLabel.textContent = `${Math.floor(percent)}%`;
   sizeLabel.textContent = formatBytes(session.totalLen);
   etaLabel.textContent = estimate.etaSeconds === undefined ? "" : `${formatDuration(estimate.etaSeconds)} left`;
-  const liveKbs = session.seen.size * AUDIO_SYMBOL_SIZE / 1024 / elapsedSeconds;
-  speedValue.textContent = session.seen.size >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "👂";
+  const liveKbs = usefulSymbols * session.sourceBlockSize / 1024 / elapsedSeconds;
+  speedValue.textContent = usefulSymbols >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "👂";
+  codingLabel.textContent = transportName(session.mode);
   setReceiveState("Receiving");
 }
 
@@ -163,6 +182,7 @@ function completeReceiveUi(session, file) {
   progressLabel.hidden = true;
   sizeLabel.textContent = formatBytes(file.bytes.length);
   etaLabel.textContent = "";
+  codingLabel.textContent = transportName(session.mode);
   speedValue.textContent = `${goodput.toFixed(goodput >= 10 ? 0 : 1)} KB/s`;
 }
 
@@ -256,17 +276,20 @@ async function startSending(container, label) {
     return;
   }
   try {
-    await prepareRaptorQ();
+    const mode = selectAudioTransport(container.length);
+    if (mode === "raptorq") await prepareRaptorQ();
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextType) throw new Error("Web Audio is not available in this browser.");
     const context = new AudioContextType({ latencyHint: "playback" });
     await context.resume();
+    const encoder = new TransportEncoder(container, AUDIO_BLOCK_SIZE, mode);
     const session = {
       context,
-      encoder: new RaptorEncoder(container, AUDIO_SYMBOL_SIZE),
+      encoder,
+      mode,
       payloadId: fnv1a(container),
       totalLen: container.length,
-      esi: 0,
+      ordinal: 0,
       source: null,
       stopped: false
     };
@@ -275,15 +298,21 @@ async function startSending(container, label) {
     sendActive.hidden = false;
     fileInput.disabled = true;
     sendTextButton.disabled = true;
-    setStatus(`Sending ${label} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
+    setStatus(`Sending ${label} · ${transportName(mode)} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
     void requestScreenWakeLock();
 
     while (sendSession === session && !session.stopped) {
       const frames = [];
       for (let i = 0; i < 4; i++) {
-        const packet = session.encoder.repair(session.esi);
-        session.esi = (session.esi + 1) % 0x00ff0000;
-        frames.push(modulateAudioPacket(session.payloadId, session.totalLen, packet));
+        const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
+        const block = session.encoder.encode(encodingId);
+        frames.push(modulateAudioPacket(
+          session.payloadId,
+          session.totalLen,
+          session.mode,
+          encodingId,
+          block
+        ));
       }
       await playWaveform(session, joinedWaveform(frames));
     }
@@ -324,23 +353,29 @@ async function sendText() {
 
 async function acceptPacket(session, frame) {
   if (receiveSession !== session || session.finishing) return;
-  const identity = `${frame.payloadId}:${frame.totalLen}:${frame.symbolSize}`;
+  const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
   if (identity !== session.identity) {
     session.decoder?.free?.();
-    session.decoder = new RaptorDecoder(frame.totalLen, frame.symbolSize);
+    const k = sourceBlockCount(frame.totalLen, frame.mode);
+    if (codingMode(k) !== frame.mode) return;
+    if (frame.mode === "raptorq") await prepareRaptorQ();
+    if (receiveSession !== session || session.finishing) return;
+    session.decoder = new TransportDecoder(k, frame.blockSize, frame.totalLen);
     session.identity = identity;
     session.payloadId = frame.payloadId;
     session.totalLen = frame.totalLen;
-    session.seen.clear();
-    session.targetPackets = Math.max(1, Math.ceil(frame.totalLen / frame.symbolSize));
+    session.mode = frame.mode;
+    session.sourceBlockSize = sourceBlockSize(frame.mode);
+    session.targetPackets = k;
     session.startedAt = performance.now();
     sizeLabel.textContent = formatBytes(frame.totalLen);
+    codingLabel.textContent = transportName(frame.mode);
   }
-  const esi = raptorPacketEsi(frame.packet);
-  if (esi < 0 || session.seen.has(esi)) return;
-  session.seen.add(esi);
-  const recovered = session.decoder.add(frame.packet);
+
+  session.decoder.addFrame(frame.encodingId, frame.block);
   updateReceiveProgress(session);
+  if (!session.decoder.isComplete) return;
+  const recovered = session.decoder.assemble();
   if (!recovered) return;
 
   session.finishing = true;
@@ -367,20 +402,25 @@ async function startListening() {
   clearResult();
   resetReceiveUi("Starting microphone…");
   try {
-    await prepareRaptorQ();
     const session = {
       receiver: null,
       decoder: null,
       identity: "",
       payloadId: 0,
       totalLen: 0,
+      mode: "",
+      sourceBlockSize: AUDIO_BLOCK_SIZE,
       targetPackets: 0,
-      seen: new Set(),
       startedAt: 0,
-      finishing: false
+      finishing: false,
+      queue: Promise.resolve()
     };
     const receiver = new AcousticReceiver(
-      (frame) => void acceptPacket(session, frame),
+      (frame) => {
+        session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
+          if (receiveSession === session) failReceiveUi(error?.message || "Audio receive failed.");
+        });
+      },
       () => {
         if (receiveSession === session && !session.identity) setReceiveState("Signal found…");
       }
