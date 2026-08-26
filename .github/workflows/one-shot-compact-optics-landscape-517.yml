@@ -19,7 +19,9 @@ jobs:
         with:
           node-version: '22'
       - name: Apply guarded patch
-        run: python3 benchmark/one-shot-patch-517.py
+        run: |
+          sed -i 's/"v0\.5\.516"/"0.5.516"/g; s/"v0\.5\.517"/"0.5.517"/g' benchmark/one-shot-patch-517.py
+          python3 benchmark/one-shot-patch-517.py
       - name: Test
         run: |
           set -euo pipefail
