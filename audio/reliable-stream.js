@@ -3,28 +3,28 @@ import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
 const FFT_SIZE = 1024;
-const CYCLIC_PREFIX = 256;
+const CYCLIC_PREFIX = 384;
 const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
-const FFT_WINDOW_EARLY = 48;
+const FFT_WINDOW_EARLY = 64;
 const ACTIVE_FIRST = 32; // 1.50 kHz
-const ACTIVE_LAST = 266; // 12.47 kHz
+const ACTIVE_LAST = 192; // 9.00 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
 const PILOT_EVERY = 8;
 const FRAME_SYMBOLS = 12;
 const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
 const BITS_PER_CARRIER = 2;
 const SPREAD_COPIES = 2;
-const SYMBOL_RMS = 0.21;
-const PEAK_LIMIT = 0.90;
+const SYMBOL_RMS = 0.23;
+const PEAK_LIMIT = 0.92;
 const ACQUIRE_SYMBOLS = 3;
-const ACQUIRE_THRESHOLD = 0.085;
-const TRACK_THRESHOLD = 0.03;
+const ACQUIRE_THRESHOLD = 0.065;
+const TRACK_THRESHOLD = 0.022;
 const MARKER_MAX_RESIDUAL = 1.05;
 const AUDIO_BLOCK_SIZE = 24;
 const FRAME_HEADER_BYTES = 16;
 const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x35]); // AGR5
+const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x36]); // AGR6
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -599,7 +599,7 @@ class ReliableScanner {
       const predicted = this.nextSymbolStart;
       let start = predicted;
       let cpScore = cpCorrelation(this.samples, start, 2);
-      for (let candidate = Math.max(0, predicted - 14); candidate <= predicted + 14; candidate++) {
+      for (let candidate = Math.max(0, predicted - 18); candidate <= predicted + 18; candidate++) {
         if (candidate + SYMBOL_SAMPLES > this.length) break;
         const score = cpCorrelation(this.samples, candidate, 2);
         if (score > cpScore) {
