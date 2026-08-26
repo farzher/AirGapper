@@ -109,20 +109,21 @@ assert.equal(lattice.locked, true);
 assert.equal(lattice.active, true);
 assert.equal(lattice.state, "PARTIAL_LOSS");
 
-// A stale pose must never pin the receiver indefinitely. Hard loss preserves
-// stream identity but drops the old homography so main.js can enter fresh acquisition.
+// A stale pose must never stay on the hot path. After whole-wall payload and
+// geometry silence, retain it only as an inactive acquisition prior.
 snapshot = lattice.tick(2361);
-assert.equal(snapshot, null, "hard loss should discard stale pose geometry");
-assert.equal(lattice.state, "REACQUIRE");
+assert(snapshot, "dormant loss should retain a cheap re-anchor prior");
+assert.equal(lattice.state, "DORMANT");
 assert.equal(lattice.locked, false);
 assert.equal(lattice.active, false);
+assert.equal(snapshot.provisional, true);
 
-// One CRC-valid QR at a radically different camera pose can immediately seed
-// the same transfer again after the hard geometry reset.
+// The first fresh CRC-valid QR owns the new pose. Even a radically different
+// camera position must re-seed from that packet instead of mixing stale anchors.
 snapshot = lattice.accept(detection(10, 2380, { dx: -260, dy: 310, scale: 1.75 }), frameWidth, frameHeight);
 assert(snapshot, "one verified QR must relock after hard geometry reacquire");
 assert.equal(lattice.locked, true);
-assert.equal(lattice.state, "GRID_LOCK");
+assert.equal(lattice.state, "TRACK", "fresh CRC payload should immediately promote the re-seeded wall to TRACK");
 assert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");
 assert.equal(snapshot.fitSlots, 1);
 
@@ -134,8 +135,8 @@ assert.equal(snapshot, null);
 assert.equal(lattice.state, "REACQUIRE");
 
 // Repeated per-slot self-heals are local failures. They must not destroy a wall
-// that still has a valid global pose; only whole-wall silence or explicit pose
-// invalidation is allowed to hard-reacquire.
+// that still has a valid global pose. Whole-wall silence moves the prior off the
+// hot path into DORMANT; explicit pose invalidation is the immediate hard reset.
 const healing = new GridLattice();
 for (const [slot, at] of [[0, 0], [1, 20], [4, 40], [5, 60]]) {
   assert(healing.accept(detection(slot, at), frameWidth, frameHeight));
@@ -146,8 +147,12 @@ for (const [slot, at] of [[0, 300], [1, 320], [4, 340], [5, 360]]) {
 assert(healing.tick(370), "local self-heals must keep the global wall alive");
 assert.equal(healing.locked, true);
 assert.notEqual(healing.state, "REACQUIRE");
-assert.equal(healing.tick(961), null, "actual whole-wall silence must still hard-reacquire");
-assert.equal(healing.state, "REACQUIRE");
+const dormantHealing = healing.tick(2000);
+assert(dormantHealing, "whole-wall silence should retain only an inactive re-anchor prior");
+assert.equal(healing.state, "DORMANT");
+assert.equal(healing.locked, false);
+assert.equal(healing.active, false);
+assert.equal(dormantHealing.provisional, true);
 
 // Extended-grid regression: Auto can declare a wall above the old 32-slot
 // ceiling and the lattice must expose every physical slot.

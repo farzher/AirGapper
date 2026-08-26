@@ -63,9 +63,17 @@ function selectedOrientation() {
   const orientation = cfgOrientation.value;
   return orientation === "portrait" || orientation === "landscape" ? orientation : "auto";
 }
+function senderViewportCss() {
+  const viewport = window.visualViewport;
+  let width = Math.max(1, Number(viewport?.width) || window.innerWidth);
+  let height = Math.max(1, Number(viewport?.height) || window.innerHeight);
+  if (document.body.classList.contains("portrait-fallback")) [width, height] = [height, width];
+  return { width, height };
+}
 function landscapeGrid() {
   const orientation = selectedOrientation();
-  return orientation === "landscape" || orientation === "auto" && window.innerWidth > window.innerHeight;
+  const viewport = senderViewportCss();
+  return orientation === "landscape" || orientation === "auto" && viewport.width > viewport.height;
 }
 function layoutGrid(mode = selectedLayout()) {
   switch (mode) {
@@ -279,31 +287,30 @@ function gridRasterExtent(modules, cols, rows, margin = GRID_MARGIN) {
   };
 }
 function senderDisplayBudgetCss() {
+  const logicalViewport = senderViewportCss();
   if (document.body.classList.contains("qr-full")) {
-    // On mobile the layout viewport is integer-rounded while visualViewport can
-    // retain the fractional CSS size implied by a fractional devicePixelRatio.
-    // Solving against innerWidth/innerHeight can therefore create a bitmap that
-    // Chrome has to resample when true fullscreen settles.
-    const viewport = window.visualViewport;
-    return {
-      width: Math.max(1, Number(viewport?.width) || window.innerWidth),
-      height: Math.max(1, Number(viewport?.height) || window.innerHeight)
-    };
+    // visualViewport is physical-browser geometry. senderViewportCss swaps it
+    // when the app is using the portrait fallback so QR sizing matches the
+    // transformed fullscreen stage exactly.
+    return logicalViewport;
   }
   if (!stage.hidden) {
     const rect = stage.getBoundingClientRect();
     const style = getComputedStyle(stage);
+    const portraitFallback = document.body.classList.contains("portrait-fallback");
+    const width = portraitFallback ? stage.clientWidth : rect.width;
+    const height = portraitFallback ? stage.clientHeight : rect.height;
     return {
-      width: Math.max(1, rect.width - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight)),
-      height: Math.max(1, rect.height - stageBottom.offsetHeight - Number.parseFloat(style.paddingTop) - Number.parseFloat(style.paddingBottom))
+      width: Math.max(1, width - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight)),
+      height: Math.max(1, height - stageBottom.offsetHeight - Number.parseFloat(style.paddingTop) - Number.parseFloat(style.paddingBottom))
     };
   }
   // Match the CSS stage before it is measurable. startStream normally makes
   // Auto's stage/controls measurable before selection, but this conservative
   // fallback must never pretend the non-fullscreen wall owns the whole viewport.
   return {
-    width: Math.max(1, Math.min(1400, window.innerWidth - 24)),
-    height: Math.max(1, window.innerHeight - 180)
+    width: Math.max(1, Math.min(1400, logicalViewport.width - 24)),
+    height: Math.max(1, logicalViewport.height - 180)
   };
 }
 function chooseAutoGrid(

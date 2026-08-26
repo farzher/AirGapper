@@ -1,17 +1,13 @@
-import { DecodeWorkerPool } from "../shared/worker-pool.js";
-
-// The receiver imports worker-capacity-guard.js before constructing its pool.
-// Mock the tiny browser surface it needs so this smoke exercises the same
-// patched submitAtSlot() prototype instead of only the unwrapped base class.
+// shared/worker-pool.js now owns receiver capacity policy directly. Install the
+// fake receiver DOM before importing it because the live camera element is
+// intentionally captured once at module initialization.
 const receiveVideo = { srcObject: { active: true } };
 globalThis.document = {
   getElementById: (id) => id === "video" ? receiveVideo : null,
   body: { classList: { contains: (name) => name === "receive-mode" } }
 };
 globalThis.window = globalThis;
-await import("../receive/worker-capacity-guard.js");
-if (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperWorkerPolicy)
-  throw new Error("worker-capacity guard did not patch submitAtSlot");
+const { DecodeWorkerPool } = await import("../shared/worker-pool.js");
 
 class FakeWorker {
   constructor() {
@@ -201,7 +197,11 @@ if (!preflights[1].sameIdentity) throw new Error("preflight envelope was not reu
 if (preflights[1].id !== 2 || preflights[1].sourceSequence !== 18 || preflights[1].signature?.key !== "b")
   throw new Error("reused preflight envelope did not receive fresh fields");
 
+receiveVideo.srcObject.active = false;
 pool.resize(0);
+await Promise.resolve();
+if (pool.size !== 0) throw new Error("stopped receiver unexpectedly respawned primary worker pool");
+receiveVideo.srcObject.active = true;
 
 // Acquisition timeout ownership belongs to DecodeWorkerPool. The receiver guard
 // may bound concurrency, but it must not silently replace the pool's recovery
@@ -226,7 +226,11 @@ if (!timeoutPool.submit({ id: 40, full: true, acquisitionMode: "seed", w: 64, h:
 const acquisitionMeta = timeoutPool.activeMeta[0];
 if (!acquisitionMeta || acquisitionMeta.timeoutMs < 6000)
   throw new Error(`acquisition timeout was unexpectedly shortened: ${acquisitionMeta?.timeoutMs}`);
+receiveVideo.srcObject.active = false;
 timeoutPool.resize(0);
+await Promise.resolve();
+if (timeoutPool.size !== 0) throw new Error("stopped receiver unexpectedly respawned timeout worker pool");
+receiveVideo.srcObject.active = true;
 
 // Capacity and acquisition algorithm are separate concerns. With four workers,
 // exactly two live full-frame lanes are allowed, but the guard must preserve the
@@ -256,10 +260,13 @@ if (capPool.submit(acquisitionC, []))
   throw new Error("third concurrent acquisition scan bypassed the two-lane cap");
 if (capPool.activeFullCount !== 2)
   throw new Error(`expected two active acquisition jobs, got ${capPool.activeFullCount}`);
+receiveVideo.srcObject.active = false;
 capPool.resize(0);
+await Promise.resolve();
+if (capPool.size !== 0) throw new Error("stopped receiver unexpectedly respawned capacity worker pool");
 
 console.log("AIRGAPPER_WORKER_POOL_REUSE_PASS", JSON.stringify({
-  guardedSubmitPath: true,
+  integratedCapacityPolicy: true,
   coldWorkerRejected: true,
   completionIdentityReused: completions[1].sameIdentity && completions[2].sameIdentity,
   preflightIdentityReused: preflights[1].sameIdentity,

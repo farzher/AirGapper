@@ -22,7 +22,13 @@ export async function runAgcap({
   page.on("console", (message) => { if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) errors.push(message.text()); });
   try {
     await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
-    await page.waitForFunction(() => typeof window.__airgapperRunLoadedCorpus === "function");
+    // Receiver benchmark APIs are intentionally lazy-loaded with Receive. Follow
+    // the product path rather than making normal Home/Send load receiver code.
+    await page.locator('[data-mode="receive"]').click();
+    await page.waitForFunction(() =>
+      typeof window.__airgapperRunLoadedCorpus === "function" &&
+      typeof window.__airgapperLoadedCorpusHeader === "function",
+      { timeout: 30000 });
     await page.locator("#corpus-file").setInputFiles(absolute);
     await page.waitForFunction(() => {
       const button = document.getElementById("run-benchmark");

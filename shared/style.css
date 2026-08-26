@@ -271,18 +271,13 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .focus-tuning summary { cursor: pointer; }
 .focus-tuning > div { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 6px; padding-top: 6px; }
 .focus-tuning input { width: 100%; }
-.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; align-items: center; }
 .optics-manual[hidden], .optics-manual .axis-control[hidden] { display: none !important; }
-.axis-control { display: grid; grid-template-rows: auto 34px auto; gap: 6px; min-width: 0; padding: 9px 10px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
-.axis-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; min-width: 0; }
-.axis-title { min-width: 0; color: var(--ink); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.axis-heading output { min-width: 0; color: var(--ink); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.axis-heading .axis-auto-toggle { display: flex; flex-direction: row; align-items: center; gap: 4px; width: auto; min-height: 24px; padding: 2px 6px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; font-size: 10px; font-weight: 650; text-transform: none; letter-spacing: 0; cursor: pointer; }
-.axis-heading .axis-auto-toggle input { width: auto; margin: 0; accent-color: #222; }
-.axis-control input[type="range"] { min-width: 0; width: 100%; height: 34px; margin: 0; padding-inline: 4px; }
-.axis-control input[type="range"]:disabled { opacity: .42; cursor: default; }
-.axis-scale { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; line-height: 1; letter-spacing: .02em; }
-.axis-control.is-auto .axis-scale { opacity: .55; }
+.axis-control { display: grid; grid-template-columns: auto minmax(72px, 1fr); align-items: center; gap: 6px; min-width: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.axis-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; min-width: 76px; }
+.axis-title { min-width: 0; color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.axis-heading output { min-width: 0; color: var(--ink); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.axis-control input[type="range"] { min-width: 0; width: 100%; min-height: 18px; height: 18px; margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
 .setting-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 8px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .setting-toggle input { margin: 0; accent-color: #222; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
@@ -478,4 +473,50 @@ dialog::backdrop { background: #0004; }
   .receiver-settings .row { grid-template-columns: minmax(0, 1.5fr) minmax(62px, .7fr) auto auto; gap: 6px; }
   .receiver-settings .optics-manual { grid-column: 1 / -1; grid-row: 2; }
   .receiver-settings { padding-inline: 9px; }
+}
+
+
+/* Keep AirGapper logically portrait even when a browser refuses orientation.lock().
+   The transformed shell uses the swapped viewport dimensions; hit testing follows
+   the transform, so controls remain ordinary DOM controls. */
+@media (orientation: landscape) {
+  body.portrait-fallback { width: 100vw; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+  body.portrait-fallback .app {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 100vh;
+    width: 100dvh;
+    height: 100vw;
+    height: 100dvw;
+    min-height: 0;
+    overflow: auto;
+    transform: translate(-50%, -50%) rotate(var(--portrait-fallback-rotation, -90deg));
+    transform-origin: center;
+  }
+  body.portrait-fallback.qr-full .app { overflow: hidden; }
+  body.portrait-fallback.qr-full #stage { width: 100%; height: 100%; min-height: 100%; }
+
+  /* The viewport media queries still see the physical landscape width. Mirror
+     the normal mobile layout against the shell's logical portrait width. */
+  body.portrait-fallback .app-header { padding-top: 14px; }
+  body.portrait-fallback .app-main { padding-top: 0; }
+  body.portrait-fallback .home,
+  body.portrait-fallback .send-inputs { grid-template-columns: 1fr; }
+  body.portrait-fallback .mode { min-height: 130px; }
+  body.portrait-fallback .file-picker,
+  body.portrait-fallback .note-composer { min-height: 130px; }
+  body.portrait-fallback .send-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  body.portrait-fallback .stage { min-height: 0; }
+  body.portrait-fallback .receiver-primary { gap: 8px; }
+  body.portrait-fallback .preview { min-height: 0; }
+  body.portrait-fallback .transfer-panel { padding: 10px 12px; }
+  body.portrait-fallback .transfer-meta { margin-top: 7px; }
+  body.portrait-fallback .pipeline-metrics { gap: 10px; }
+}
+
+@media (orientation: landscape) and (max-height: 390px) {
+  body.portrait-fallback .receiver-settings .row { grid-template-columns: minmax(0, 1.5fr) minmax(62px, .7fr) auto auto; gap: 6px; }
+  body.portrait-fallback .receiver-settings .optics-manual { grid-column: 1 / -1; grid-row: 2; }
+  body.portrait-fallback .receiver-settings { padding-inline: 9px; }
 }

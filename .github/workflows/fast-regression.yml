@@ -72,30 +72,28 @@ jobs:
           node --input-type=module --check < version.js
           node --input-type=module --check < main.js
           node --input-type=module --check < receive/main.js
+          node --input-type=module --check < receive/runtime.js
           node --input-type=module --check < receive/camera-constraints.js
-          node --input-type=module --check < receive/camera-constraint-guard.js
-          node --input-type=module --check < receive/acquisition-focus-recovery.js
           node --input-type=module --check < receive/auto-phase.js
           node --input-type=module --check < receive/auto-phase-policy.js
           node --input-type=module --check < receive/performance-policy.js
           node --input-type=module --check < receive/grid-lattice.js
-          node --input-type=module --check < receive/lattice-cache-guard.js
           node --input-type=module --check < receive/guided-motion.js
           node --input-type=module --check < receive/rgba-luma.js
-          node --input-type=module --check < receive/overlay-coordinate-guard.js
           node --input-type=module --check < receive/track-processor-proxy.js
-          node --input-type=module --check < receive/track-processor-watchdog.js
           node --input-type=module --check < receive/track-processor-worker.js
-          node --input-type=module --check < receive/worker-capacity-guard.js
           node --input-type=module --check < receive/worker-camera.js
           node --input-type=module --check < receive/worker-rvfc.js
           node --input-type=module --check < receive/worker.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
           node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
+          node --input-type=module --check < benchmark/direct-y8-worker-smoke.mjs
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
-          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
+          node --input-type=module --check < benchmark/offline-runner.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
+          node --input-type=module --check < benchmark/run-agcap.mjs
+          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
           node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
           node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
           node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
@@ -123,11 +121,13 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
+          # Run the lightweight worker/browser smokes first so their startup
+          # deadlines are not polluted by the multi-trial stress regression.
           node benchmark/direct-y8-worker-smoke.mjs
           node benchmark/repeat-signature-worker-smoke.mjs
           node benchmark/rvfc-wrapper-smoke.mjs
           node benchmark/corpus-suite.mjs
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
 
       - name: Build Android app
         if: always()

@@ -28,15 +28,6 @@ endif()
 
 add_definitions("-s DISABLE_EXCEPTION_CATCHING=0")
 
-# The AirGapper wrapper calls deeply into zxing's QR internals. Without LTO the
-# wrapper and static ZXing library are optimized as separate translation units,
-# leaving cross-boundary inlining/dead-code elimination on the table. Build and
-# link the whole QR-only codec with LLVM LTO; behavior is unchanged, while hot
-# sampling/decoder helpers can be optimized together and unused library paths
-# can be stripped before wasm emission.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
-
 # WASM SIMD for the whole tree — zxing-cpp's hot loops (binarize, sampling)
 # are written for auto-vectorization (BinaryBitmap.cpp documents 16× on AVX2)
 # and run scalar without this. iOS Safari has shipped wasm SIMD since 16.4;
