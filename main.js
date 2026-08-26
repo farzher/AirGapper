@@ -159,6 +159,24 @@ installMenu.addEventListener("keydown", (event) => {
   }
 });
 syncInstallUi();
+
+// Keep the home screen as one simple 2×2 choice. Audio is a transport variant,
+// not a third mode that needs another Send/Receive chooser after entering it.
+const homeModes = document.querySelector("#homeView .home");
+const oldAudioMode = homeModes?.querySelector('[data-mode="audio"]');
+if (homeModes && oldAudioMode) {
+  oldAudioMode.remove();
+  for (const [direction, label] of [["send", "Send (audio)"], ["receive", "Receive (audio)"]]) {
+    const button = document.createElement("button");
+    button.className = "mode";
+    button.type = "button";
+    button.dataset.mode = "audio";
+    button.dataset.audioDirection = direction;
+    button.textContent = label;
+    homeModes.append(button);
+  }
+}
+
 const views = {
   home: document.getElementById("homeView"),
   send: document.getElementById("sendView"),
@@ -183,6 +201,14 @@ function dispatchReceiveWhenReady(type = "airgapper:enter-receive") {
     }
   }).catch(() => {
     receiveLoadDispatchQueued = false;
+  });
+}
+function dispatchAudioDirection(direction) {
+  if (direction !== "send" && direction !== "receive") return;
+  void ensureAudioModule().then(() => {
+    if (active === "audio") {
+      window.dispatchEvent(new CustomEvent("airgapper:audio-direction", { detail: { direction } }));
+    }
   });
 }
 function historyView() {
@@ -215,21 +241,35 @@ receiverLinkDialog.addEventListener("click", (event) => {
     event.clientY >= rect.top && event.clientY <= rect.bottom;
   if (!inside) receiverLinkDialog.close();
 });
-function showView(name, historyMode = "push") {
+function showView(name, historyMode = "push", audioDirection = null) {
   if (name === active) {
-    if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");
+    if (historyMode === "replace") {
+      history.replaceState({
+        ...history.state,
+        airgapperView: name,
+        ...(name === "audio" && audioDirection ? { airgapperAudioDirection: audioDirection } : {})
+      }, "");
+    }
+    if (name === "audio" && audioDirection) dispatchAudioDirection(audioDirection);
     return;
   }
   if (active !== "home") window.dispatchEvent(new CustomEvent("airgapper:leave-mode"));
   active = name;
-  if (historyMode === "push") history.pushState({ ...history.state, airgapperView: name }, "");
-  else if (historyMode === "replace") history.replaceState({ ...history.state, airgapperView: name }, "");
+  const nextState = {
+    ...history.state,
+    airgapperView: name,
+    ...(name === "audio" && audioDirection ? { airgapperAudioDirection: audioDirection } : {})
+  };
+  if (historyMode === "push") history.pushState(nextState, "");
+  else if (historyMode === "replace") history.replaceState(nextState, "");
   for (const [key, view] of Object.entries(views)) view.classList.toggle("active", key === name);
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name !== "home";
   if (name === "receive") dispatchReceiveWhenReady();
-  else if (name === "audio") void ensureAudioModule();
-  else if (name === "send" || name === "home") void ensureSendModule();
+  else if (name === "audio") {
+    void ensureAudioModule();
+    if (audioDirection) dispatchAudioDirection(audioDirection);
+  } else if (name === "send" || name === "home") void ensureSendModule();
   const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
   if (name === "send" && !hasMobileInput) {
     document.getElementById("snippet-text").focus({ preventScroll: true });
@@ -237,11 +277,20 @@ function showView(name, historyMode = "push") {
   window.scrollTo(0, 0);
 }
 for (const button of document.querySelectorAll("[data-mode]")) {
-  button.addEventListener("click", () => showView(button.dataset.mode));
+  button.addEventListener("click", () => showView(button.dataset.mode, "push", button.dataset.audioDirection || null));
 }
 document.getElementById("home-button").addEventListener("click", () => showView("home"));
 const initialParams = new URLSearchParams(location.search);
-if (initialParams.has("r") || initialParams.has("receive")) {
+if (initialParams.has("a")) {
+  initialParams.delete("a");
+  const query = initialParams.toString();
+  history.replaceState(
+    { ...history.state, airgapperView: "audio", airgapperAudioDirection: "receive" },
+    "",
+    `${location.pathname}${query ? `?${query}` : ""}${location.hash}`
+  );
+  showView("audio", "none", "receive");
+} else if (initialParams.has("r") || initialParams.has("receive")) {
   initialParams.delete("r");
   initialParams.delete("receive");
   const query = initialParams.toString();
@@ -257,7 +306,8 @@ if (initialParams.has("r") || initialParams.has("receive")) {
 }
 window.addEventListener("popstate", () => {
   var _a2;
-  return showView((_a2 = historyView()) != null ? _a2 : "home", "none");
+  const view = (_a2 = historyView()) != null ? _a2 : "home";
+  showView(view, "none", view === "audio" ? history.state?.airgapperAudioDirection ?? null : null);
 });
 let suspended = false;
 let receiveHealthToken = 0;
