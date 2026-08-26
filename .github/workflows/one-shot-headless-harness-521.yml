@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Apply harness patch
+      - name: Apply current harness patch
         run: |
           python3 benchmark/one-shot-headless-harness-521.py
           node --input-type=module --check < benchmark/offline-runner.mjs
