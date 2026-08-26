@@ -18,48 +18,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Scope portrait fallback to mobile
+      - name: Apply mobile scope patch
+        run: python3 benchmark/one-shot-mobile-scope.py
+      - name: Verify
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('main.js')
-          s = p.read_text()
-          old = '''function syncPortraitFallback() {
-  const landscape = window.innerWidth > window.innerHeight;
-  document.body.classList.toggle("portrait-fallback", landscape);
-  if (landscape) document.documentElement.style.setProperty("--portrait-fallback-rotation", portraitFallbackRotation());
-  else document.documentElement.style.removeProperty("--portrait-fallback-rotation");
-}
-async function requestPortraitLock() {
-  try {
-    await screen.orientation?.lock?.("portrait-primary");
-  } catch {
-'''
-          new = '''const portraitLockEnabled = isIOS || isAndroid || isAndroidApp();
-function syncPortraitFallback() {
-  const landscape = portraitLockEnabled && window.innerWidth > window.innerHeight;
-  document.body.classList.toggle("portrait-fallback", landscape);
-  if (landscape) document.documentElement.style.setProperty("--portrait-fallback-rotation", portraitFallbackRotation());
-  else document.documentElement.style.removeProperty("--portrait-fallback-rotation");
-}
-async function requestPortraitLock() {
-  if (!portraitLockEnabled) return;
-  try {
-    await screen.orientation?.lock?.("portrait-primary");
-  } catch {
-'''
-          if s.count(old) != 1:
-            raise SystemExit(f'orientation scope anchor count {s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
-          PY
+          set -euo pipefail
           node --input-type=module --check < main.js
           node benchmark/version-source-smoke.mjs
           node benchmark/camera-start-guard-smoke.mjs
+          grep -q 'const portraitLockEnabled = isIOS || isAndroid || isAndroidApp();' main.js
           git diff --check
       - name: Commit
         run: |
           set -euo pipefail
-          git rm .github/workflows/one-shot-mobile-orientation-scope.yml
+          git rm .github/workflows/one-shot-mobile-orientation-scope.yml benchmark/one-shot-mobile-scope.py
           git config user.name 'AirGapper Agent'
           git config user.email 'actions@github.com'
           git add main.js
