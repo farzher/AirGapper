@@ -20,6 +20,17 @@ jobs:
         with:
           node-version: 22
 
+      - name: Repair one-shot guard matcher
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/scripts/one-shot-manual-optics-fix.py')
+          text = path.read_text()
+          text = text.replace('populateManualSelect\\\\(cameraExposure', 'populateManualSelect\\\\(\\\\s*cameraExposure')
+          text = text.replace('populateManualSelect\\\\(cameraIso', 'populateManualSelect\\\\(\\\\s*cameraIso')
+          path.write_text(text)
+          PY
+
       - name: Apply manual optics UI repair
         run: python3 .github/scripts/one-shot-manual-optics-fix.py
 
