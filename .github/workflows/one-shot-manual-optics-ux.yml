@@ -50,15 +50,20 @@ jobs:
           assert re.search(r"\.optics-manual\s*\{[^}]*grid-template-columns:\s*repeat\(2,", css, re.S)
 
           for dead in (
-              "manualFocusMode", "preferredFocusDistance", "focusMode", "focusDistanceControl",
+              "manualFocusMode", "preferredFocusDistance", "focusDistanceControl",
               "focusDistanceValue", "focusAxisReset", "exposureAxisReset", "isoAxisReset"
           ):
               assert dead not in runtime, dead
+          assert 'document.getElementById("focus-mode")' not in runtime
+          assert 'document.getElementById("focus-distance")' not in runtime
           assert "focusController.setStrategy(" not in runtime
           assert "focusController.setManualDistance(" not in runtime
           assert '  "auto",\n  void 0,\n  "auto",' in runtime
           assert "slider.disabled = automatic;" in runtime
           assert "syncManualOpticsReadback" in runtime
+          # Internal focusMode camera constraints remain intentionally allowed:
+          # autofocus and the HAL exposure-write workaround still need them.
+          assert "patch.focusMode" in runtime
           print("AIRGAPPER_MANUAL_OPTICS_UX_PASS")
           PY
           git diff --check
