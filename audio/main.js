@@ -240,6 +240,24 @@ function setVisualizerSignal(active) {
 }
 
 // Receive -------------------------------------------------------------------
+const STATS_WINDOW_MS = 1000;
+const STATS_TICK_MS = 200;
+function pruneTimestampSamples(samples, cutoff) {
+  let count = 0;
+  while (count < samples.length && samples[count] < cutoff) count++;
+  if (count) samples.splice(0, count);
+}
+function stopReceiveStats(session) {
+  if (!session?.statsTimer) return;
+  clearInterval(session.statsTimer);
+  session.statsTimer = 0;
+}
+function liveGoodputKbs(session, now) {
+  pruneTimestampSamples(session.usefulFrameTimes, now - STATS_WINDOW_MS);
+  if (!session.decoder || !session.usefulFrameTimes.length) return 0;
+  return session.usefulFrameTimes.length * session.sourceBlockSize / 1024 / (STATS_WINDOW_MS / 1000);
+}
+
 receivePane.replaceChildren();
 receivePane.className = "receiver-primary";
 listenButton.textContent = "Enable microphone";
@@ -307,10 +325,10 @@ function resetReceiveUi() {
   receivePreview.zone.hidden = false;
   drawVisualizer(receivePreview.canvas, null, false, true);
 }
-function updateReceiveProgress(session) {
-  if (!session.identity || !session.startedAt || !session.decoder) return;
+function updateReceiveProgress(session, now = performance.now()) {
+  if (receiveSession !== session || session.finishing || !session.identity || !session.startedAt || !session.decoder) return;
   receivePanel.hidden = false;
-  const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
+  const elapsedSeconds = Math.max(1e-3, (now - session.startedAt) / 1000);
   const rank = session.decoder.solvedCount;
   const usefulSymbols = session.decoder.usefulSymbols;
   const estimate = estimateTransferProgress(session.targetPackets, usefulSymbols, elapsedSeconds, rank);
@@ -320,8 +338,8 @@ function updateReceiveProgress(session) {
   progressLabel.textContent = `${Math.floor(percent)}%`;
   sizeLabel.textContent = formatBytes(session.totalLen);
   etaLabel.textContent = estimate.etaSeconds === undefined ? "" : `${formatDuration(estimate.etaSeconds)} left`;
-  const liveKbs = usefulSymbols * session.sourceBlockSize / 1024 / elapsedSeconds;
-  speedValue.textContent = usefulSymbols >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "";
+  const liveKbs = liveGoodputKbs(session, now);
+  speedValue.textContent = `${liveKbs.toFixed(1)} KB/s`;
 }
 function completeReceiveUi(session, file) {
   receivePanel.hidden = false;
@@ -335,11 +353,12 @@ function completeReceiveUi(session, file) {
   progressLabel.hidden = true;
   sizeLabel.textContent = formatBytes(file.bytes.length);
   etaLabel.textContent = "";
-  speedValue.textContent = `${goodput.toFixed(goodput >= 10 ? 0 : 1)} KB/s`;
+  speedValue.textContent = `${goodput.toFixed(1)} KB/s`;
   receivePreview.zone.hidden = true;
   stopVisualizer();
 }
 async function failReceiveSession(session, message) {
+  stopReceiveStats(session);
   if (receiveSession === session) receiveSession = null;
   try { session.decoder?.free?.(); } catch {}
   try { session.analyser?.disconnect(); } catch {}
@@ -376,14 +395,19 @@ async function acceptPacket(session, frame) {
     session.sourceBlockSize = sourceBlockSize(frame.mode);
     session.targetPackets = k;
     session.startedAt = performance.now();
+    session.usefulFrameTimes.length = 0;
     sizeLabel.textContent = formatBytes(frame.totalLen);
   }
+  const usefulBefore = session.decoder.usefulSymbols;
   session.decoder.addFrame(frame.encodingId, frame.block);
-  updateReceiveProgress(session);
+  const now = performance.now();
+  if (session.decoder.usefulSymbols > usefulBefore) session.usefulFrameTimes.push(now);
+  updateReceiveProgress(session, now);
   if (!session.decoder.isComplete) return;
   const recovered = session.decoder.assemble();
   if (!recovered) return;
   session.finishing = true;
+  stopReceiveStats(session);
   try {
     if (fnv1a(recovered) !== session.payloadId) throw new Error("Recovered audio data did not verify.");
     const file = await unpackFile(recovered);
@@ -403,6 +427,7 @@ async function stopReceiver(reset = true) {
   const session = receiveSession;
   receiveSession = null;
   if (session) {
+    stopReceiveStats(session);
     session.decoder?.free?.();
     try { session.analyser?.disconnect(); } catch {}
     await session.receiver.stop();
@@ -429,6 +454,8 @@ async function startListening() {
       sourceBlockSize: AUDIO_BLOCK_SIZE,
       targetPackets: 0,
       startedAt: 0,
+      usefulFrameTimes: [],
+      statsTimer: 0,
       finishing: false,
       queue: Promise.resolve()
     };
@@ -460,6 +487,7 @@ async function startListening() {
     receiver.source.connect(analyser);
     session.analyser = analyser;
     setVisualizerAnalyser(analyser);
+    session.statsTimer = setInterval(() => updateReceiveProgress(session), STATS_TICK_MS);
     void requestScreenWakeLock();
   } catch (error) {
     if (receiveSession) await stopReceiver(false);
