@@ -21,6 +21,12 @@ import {
   SAMPLE_RATE,
   modulateAudioPacket
 } from "./modem.js";
+import { QUIET_ESTIMATED_KBPS } from "./quiet-modem.js";
+import {
+  FAST_ESTIMATED_KBPS,
+  FAST_PACKETS_PER_FRAME,
+  modulateFastFrame
+} from "./fast-modem.js";
 
 const audioView = document.getElementById("audioView");
 const directionChooser = document.querySelector(".audio-mode-switch");
@@ -44,7 +50,9 @@ const receiverLinkUrl = document.getElementById("receiver-link-url");
 const headerReceiverQr = document.getElementById("receiver-link-qr");
 
 const VALID_PACKET_FLASH_MS = 120;
-const SEND_BATCH_FRAMES = 4;
+const FAST_FRAME_MS = 3326;
+const SPEED_KEY = "airgapper:audio-speed:v1";
+const SOUND_KEY = "airgapper:audio-sound:v1";
 
 let currentMode = null;
 let sendSession = null;
@@ -383,6 +391,7 @@ async function failReceiveSession(session, message) {
   stopReceiveStats(session);
   if (receiveSession === session) receiveSession = null;
   try { session.decoder?.free?.(); } catch {}
+  try { session.fast?.stop?.(); } catch {}
   try { session.analyser?.disconnect(); } catch {}
   try { await session.receiver?.stop?.(); } catch {}
   releaseScreenWakeLock();
@@ -418,15 +427,15 @@ async function acceptPacket(session, frame) {
     session.mode = frame.mode;
     session.sourceBlockSize = sourceBlockSize(frame.mode);
     session.targetPackets = k;
-    session.startedAt = performance.now();
+    session.startedAt = frame.profile === "fast" ? performance.now() - FAST_FRAME_MS : performance.now();
     session.usefulFrameTimes.length = 0;
     sizeLabel.textContent = formatBytes(frame.totalLen);
   }
   const usefulBefore = session.decoder.usefulSymbols;
   session.decoder.addFrame(frame.encodingId, frame.block);
-  const now = performance.now();
+  const now = Number.isFinite(frame.receivedAt) ? frame.receivedAt : performance.now();
   if (session.decoder.usefulSymbols > usefulBefore) session.usefulFrameTimes.push(now);
-  updateReceiveProgress(session, now);
+  updateReceiveProgress(session, performance.now());
   if (!session.decoder.isComplete) return;
   const recovered = session.decoder.assemble();
   if (!recovered) return;
@@ -436,6 +445,7 @@ async function acceptPacket(session, frame) {
     if (fnv1a(recovered) !== session.payloadId) throw new Error("Recovered audio data did not verify.");
     const file = await unpackFile(recovered);
     if (!await verifyFile(file)) throw new Error("Received file did not verify.");
+    session.fast?.stop?.();
     await session.receiver.stop();
     session.decoder.free();
     if (receiveSession === session) receiveSession = null;
@@ -447,12 +457,41 @@ async function acceptPacket(session, frame) {
     await failReceiveSession(session, error?.message || "Audio receive failed.");
   }
 }
+class FastWorkerClient {
+  constructor(onPackets) {
+    const url = new URL("./fast-worker.js", import.meta.url);
+    url.search = new URL(import.meta.url).search;
+    this.worker = new Worker(url, { type: "module" });
+    this.worker.onmessage = (event) => {
+      const packets = event.data?.packets;
+      if (!Array.isArray(packets) || !packets.length) return;
+      const now = performance.now();
+      const first = now - FAST_FRAME_MS;
+      const hydrated = packets.map((packet, index) => ({
+        ...packet,
+        block: new Uint8Array(packet.block),
+        receivedAt: first + FAST_FRAME_MS * (index + 1) / packets.length
+      }));
+      onPackets(hydrated);
+    };
+  }
+  append(chunk) {
+    if (!this.worker || !chunk?.length) return;
+    const copy = new Float32Array(chunk);
+    this.worker.postMessage({ type: "samples", samples: copy.buffer }, [copy.buffer]);
+  }
+  stop() {
+    this.worker?.terminate();
+    this.worker = null;
+  }
+}
 async function stopReceiver(reset = true) {
   const session = receiveSession;
   receiveSession = null;
   if (session) {
     stopReceiveStats(session);
     session.decoder?.free?.();
+    session.fast?.stop?.();
     try { session.analyser?.disconnect(); } catch {}
     await session.receiver.stop();
   }
@@ -469,6 +508,7 @@ async function startListening() {
   try {
     const session = {
       receiver: null,
+      fast: null,
       analyser: null,
       decoder: null,
       identity: "",
@@ -483,15 +523,25 @@ async function startListening() {
       finishing: false,
       queue: Promise.resolve()
     };
-    const receiver = new AcousticReceiver((frame) => {
-      session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
+    const enqueue = (frames) => {
+      session.queue = session.queue.then(async () => {
+        for (const frame of frames) await acceptPacket(session, frame);
+      }).catch((error) => {
         if (receiveSession === session) void failReceiveSession(session, error?.message || "Audio receive failed.");
       });
-    });
+    };
+    const receiver = new AcousticReceiver((frame) => enqueue([frame]));
+    const nativeAppend = receiver.append.bind(receiver);
+    session.fast = new FastWorkerClient(enqueue);
+    receiver.append = (chunk) => {
+      session.fast?.append(chunk);
+      nativeAppend(chunk);
+    };
     session.receiver = receiver;
     receiveSession = session;
     await receiver.start();
     if (receiveSession !== session) {
+      session.fast?.stop();
       await receiver.stop();
       return;
     }
@@ -534,39 +584,69 @@ settingsPanel.className = "send-settings-panel";
 settingsPanel.hidden = true;
 const settingsGrid = document.createElement("div");
 settingsGrid.className = "send-settings-grid";
-const volumeLabel = document.createElement("label");
-const volumeTitle = document.createElement("span");
-volumeTitle.textContent = "Volume";
-const volumeInput = document.createElement("input");
-volumeInput.type = "range";
-volumeInput.min = "20";
-volumeInput.max = "100";
-volumeInput.step = "5";
-volumeInput.value = "100";
-volumeInput.setAttribute("aria-label", "Audio output volume");
-const volumeValue = document.createElement("span");
-volumeValue.style.fontSize = "11px";
-volumeValue.style.textTransform = "none";
-volumeValue.style.letterSpacing = "0";
-volumeLabel.append(volumeTitle, volumeInput, volumeValue);
-settingsGrid.append(volumeLabel);
+
+const speedLabel = document.createElement("label");
+const speedTitle = document.createElement("span");
+speedTitle.textContent = "Speed";
+const speedInput = document.createElement("select");
+speedInput.setAttribute("aria-label", "Audio speed profile");
+speedInput.append(new Option("Reliable", "reliable"), new Option("Fast", "fast"));
+speedLabel.append(speedTitle, speedInput);
+
+const soundLabel = document.createElement("label");
+soundLabel.dataset.audioSound = "";
+const soundTitle = document.createElement("span");
+soundTitle.textContent = "Sound";
+const soundInput = document.createElement("select");
+soundInput.setAttribute("aria-label", "Audio sound profile");
+soundInput.append(new Option("Normal", "normal"), new Option("Quiet", "quiet"));
+soundLabel.append(soundTitle, soundInput);
+settingsGrid.append(speedLabel, soundLabel);
 settingsPanel.append(settingsGrid);
 sendToolbar.append(settingsButton, receiverQrButton, stopSendButton, settingsPanel);
 sendActive.append(sendToolbar);
 
-const VOLUME_KEY = "airgapper:audio-volume:v1";
 try {
-  const saved = Number(localStorage.getItem(VOLUME_KEY));
-  if (Number.isFinite(saved) && saved >= 20 && saved <= 100) volumeInput.value = String(saved);
+  const savedSpeed = localStorage.getItem(SPEED_KEY);
+  if (savedSpeed === "fast" || savedSpeed === "reliable") speedInput.value = savedSpeed;
+  const savedSound = localStorage.getItem(SOUND_KEY);
+  if (savedSound === "quiet" || savedSound === "normal") soundInput.value = savedSound;
 } catch {}
-function syncVolume() {
-  const percent = Math.max(20, Math.min(100, Number(volumeInput.value) || 100));
-  volumeValue.textContent = `${percent}%`;
-  if (sendSession?.gain) sendSession.gain.gain.setTargetAtTime(percent / 100, sendSession.context.currentTime, 0.015);
-  try { localStorage.setItem(VOLUME_KEY, String(percent)); } catch {}
+if (!speedInput.value) speedInput.value = "reliable";
+if (!soundInput.value) soundInput.value = "normal";
+try {
+  localStorage.setItem(SPEED_KEY, speedInput.value);
+  localStorage.setItem(SOUND_KEY, soundInput.value);
+} catch {}
+
+function activeProfile(session = sendSession) {
+  if (soundInput.value === "quiet") return "quiet";
+  if (speedInput.value === "fast") return "fast";
+  return "reliable";
 }
-syncVolume();
-volumeInput.addEventListener("input", syncVolume);
+function profileEstimate(profile) {
+  if (profile === "fast") return FAST_ESTIMATED_KBPS;
+  if (profile === "quiet") return QUIET_ESTIMATED_KBPS;
+  return AUDIO_ESTIMATED_KBPS;
+}
+function updateSendStatus(session) {
+  if (!session || sendSession !== session) return;
+  const profile = activeProfile(session);
+  setStatus(`Sending ${session.label} · ~${profileEstimate(profile).toFixed(1)} KB/s`);
+}
+function syncProfileSettings() {
+  try {
+    localStorage.setItem(SPEED_KEY, speedInput.value === "fast" ? "fast" : "reliable");
+    localStorage.setItem(SOUND_KEY, soundInput.value === "quiet" ? "quiet" : "normal");
+  } catch {}
+  const session = sendSession;
+  if (!session || session.stopped) return;
+  session.profileEpoch++;
+  updateSendStatus(session);
+  try { session.source?.stop(); } catch {}
+}
+speedInput.addEventListener("change", syncProfileSettings);
+soundInput.addEventListener("change", syncProfileSettings);
 settingsButton.addEventListener("click", () => {
   settingsPanel.hidden = !settingsPanel.hidden;
   settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
@@ -587,7 +667,6 @@ function cleanupSendSession(session) {
   try { session.source?.stop(); } catch {}
   try { session.source?.disconnect(); } catch {}
   try { session.analyser?.disconnect(); } catch {}
-  try { session.gain?.disconnect(); } catch {}
   try { session.encoder?.free(); } catch {}
   if (session.context?.state !== "closed") void session.context?.close().catch(() => void 0);
 }
@@ -626,30 +705,34 @@ async function stopAll(reset = true) {
   stopSender(reset);
   await stopReceiver(reset);
 }
-function joinedWaveform(frames) {
-  let length = 0;
-  for (const frame of frames) length += frame.length;
-  const joined = new Float32Array(length);
-  let offset = 0;
-  for (const frame of frames) {
-    joined.set(frame, offset);
-    offset += frame.length;
-  }
-  return joined;
-}
 function buildSendWaveform(session) {
-  const frames = [];
-  for (let i = 0; i < SEND_BATCH_FRAMES; i++) {
-    const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
-    const block = session.encoder.encode(encodingId);
-    frames.push(modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block));
+  const profile = activeProfile(session);
+  const epoch = session.profileEpoch;
+  if (profile === "fast") {
+    const startOrdinal = session.ordinal;
+    const blocks = [];
+    for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
+      const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
+      blocks.push(session.encoder.encode(encodingId));
+    }
+    return {
+      epoch,
+      profile,
+      waveform: modulateFastFrame(session.payloadId, session.totalLen, session.mode, startOrdinal, blocks)
+    };
   }
-  return joinedWaveform(frames);
+  const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
+  const block = session.encoder.encode(encodingId);
+  return {
+    epoch,
+    profile,
+    waveform: modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
+  };
 }
-async function playWaveform(session, waveform) {
-  if (sendSession !== session || session.stopped) return;
-  const buffer = session.context.createBuffer(1, waveform.length, SAMPLE_RATE);
-  buffer.copyToChannel(waveform, 0);
+async function playWaveform(session, prepared) {
+  if (sendSession !== session || session.stopped || prepared.epoch !== session.profileEpoch) return;
+  const buffer = session.context.createBuffer(1, prepared.waveform.length, SAMPLE_RATE);
+  buffer.copyToChannel(prepared.waveform, 0);
   const source = session.context.createBufferSource();
   source.buffer = buffer;
   source.connect(session.analyser);
@@ -681,19 +764,17 @@ async function startSending(container, label) {
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.8;
-    const gain = context.createGain();
-    gain.gain.value = Math.max(0.2, Math.min(1, Number(volumeInput.value) / 100));
-    analyser.connect(gain);
-    gain.connect(context.destination);
+    analyser.connect(context.destination);
     const session = {
       context,
       encoder,
       analyser,
-      gain,
       mode,
+      label,
       payloadId: fnv1a(container),
       totalLen: container.length,
       ordinal: 0,
+      profileEpoch: 0,
       source: null,
       stopped: false,
       backgroundPaused: false
@@ -703,16 +784,18 @@ async function startSending(container, label) {
     sendActive.hidden = false;
     fileInput.disabled = true;
     sendTextButton.disabled = true;
-    setStatus(`Sending ${label} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
+    updateSendStatus(session);
     startVisualizer(sendPreview.canvas, analyser, true);
     void requestScreenWakeLock();
-    let waveform = buildSendWaveform(session);
+    let prepared = buildSendWaveform(session);
     while (sendSession === session && !session.stopped) {
-      const playback = playWaveform(session, waveform);
-      const nextWaveform = buildSendWaveform(session);
+      const playing = prepared;
+      const playback = playWaveform(session, playing);
+      let next = null;
+      if (playing.epoch === session.profileEpoch) next = buildSendWaveform(session);
       await playback;
       if (sendSession !== session || session.stopped) break;
-      waveform = nextWaveform;
+      prepared = next && next.epoch === session.profileEpoch ? next : buildSendWaveform(session);
     }
   } catch (error) {
     if (sendSession) stopSender(false);
