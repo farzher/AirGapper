@@ -1,0 +1,51 @@
+name: retest dark auto optics
+
+on:
+  push:
+    branches: [chatgpt/auto-optics-dark-start-515]
+    paths: [.github/workflows/one-shot-dark-auto-optics-final.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reuse guarded source patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/one-shot-dark-auto-optics-v4.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(source) if "python3 - <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(source)) if source[i].strip() == 'PY')
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in source[start:end]) + '\n'
+          Path('/tmp/dark-auto-optics-patch.py').write_text(body)
+          PY
+          python3 /tmp/dark-auto-optics-patch.py
+      - name: Run targeted regressions
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node --input-type=module --check < benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+          git diff --check
+      - name: Commit tested patch
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-dark-auto-optics.yml .github/workflows/one-shot-dark-auto-optics-v4.yml .github/workflows/one-shot-dark-auto-optics-final.yml
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add receive/runtime.js receive/performance-policy.js version.js benchmark/browser-performance-policy-smoke.mjs benchmark/camera-constraints-smoke.mjs
+          git commit -m "Stage dark Auto Optics startup v0.5.515"
+          git push
