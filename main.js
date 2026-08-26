@@ -160,23 +160,6 @@ installMenu.addEventListener("keydown", (event) => {
 });
 syncInstallUi();
 
-// Keep the home screen as one simple 2×2 choice. Audio is a transport variant,
-// not a third mode that needs another Send/Receive chooser after entering it.
-const homeModes = document.querySelector("#homeView .home");
-const oldAudioMode = homeModes?.querySelector('[data-mode="audio"]');
-if (homeModes && oldAudioMode) {
-  oldAudioMode.remove();
-  for (const [direction, label] of [["send", "Send (audio)"], ["receive", "Receive (audio)"]]) {
-    const button = document.createElement("button");
-    button.className = "mode";
-    button.type = "button";
-    button.dataset.mode = "audio";
-    button.dataset.audioDirection = direction;
-    button.textContent = label;
-    homeModes.append(button);
-  }
-}
-
 const views = {
   home: document.getElementById("homeView"),
   send: document.getElementById("sendView"),
