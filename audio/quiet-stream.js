@@ -6,23 +6,23 @@ const FFT_SIZE = 1024;
 const CYCLIC_PREFIX = 256;
 const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
 const FFT_WINDOW_EARLY = 48;
-const ACTIVE_FIRST = 341; // 15.98 kHz
-const ACTIVE_LAST = 395; // 18.52 kHz
+const ACTIVE_FIRST = 299; // 14.02 kHz
+const ACTIVE_LAST = 384; // 18.00 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
 const PILOT_EVERY = 4;
-const FRAME_SYMBOLS = 28;
+const FRAME_SYMBOLS = 20;
 const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
-const SYMBOL_RMS = 0.24;
+const SYMBOL_RMS = 0.22;
 const PEAK_LIMIT = 0.92;
 const ACQUIRE_SYMBOLS = 3;
-const ACQUIRE_THRESHOLD = 0.05;
-const TRACK_THRESHOLD = 0.018;
-const MARKER_MAX_RESIDUAL = 1.15;
+const ACQUIRE_THRESHOLD = 0.04;
+const TRACK_THRESHOLD = 0.015;
+const MARKER_MAX_RESIDUAL = 1.20;
 const AUDIO_BLOCK_SIZE = 24;
 const FRAME_HEADER_BYTES = 16;
 const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x39]); // AGQ9
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x41]); // AGQA
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -567,7 +567,7 @@ class QuietScanner {
       const predicted = this.nextSymbolStart;
       let start = predicted;
       let cpScore = cpCorrelation(this.samples, start, 2);
-      for (let candidate = Math.max(0, predicted - 16); candidate <= predicted + 16; candidate++) {
+      for (let candidate = Math.max(0, predicted - 20); candidate <= predicted + 20; candidate++) {
         if (candidate + SYMBOL_SAMPLES > this.length) break;
         const score = cpCorrelation(this.samples, candidate, 2);
         if (score > cpScore) {
@@ -616,7 +616,7 @@ class QuietScanner {
       this.previousSpectrum = current;
       this.nextSymbolStart = start + SYMBOL_SAMPLES;
       this.scan = this.nextSymbolStart;
-      if (this.markerFailures >= 4) {
+      if (this.markerFailures >= 5) {
         this.loseLock(start);
         continue;
       }
