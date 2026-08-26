@@ -592,6 +592,27 @@ function stopSender(reset = true) {
   }
   releaseScreenWakeLock();
 }
+async function pauseSender() {
+  const session = sendSession;
+  if (!session || session.stopped) return;
+  session.backgroundPaused = true;
+  releaseScreenWakeLock();
+  stopVisualizer();
+  try {
+    if (session.context?.state === "running") await session.context.suspend();
+  } catch {}
+}
+async function resumeSender() {
+  const session = sendSession;
+  if (!session || session.stopped) return;
+  try {
+    if (session.context?.state !== "closed") await session.context.resume();
+  } catch {}
+  if (sendSession !== session || session.stopped) return;
+  session.backgroundPaused = false;
+  startVisualizer(sendPreview.canvas, session.analyser, true);
+  void requestScreenWakeLock();
+}
 async function stopAll(reset = true) {
   stopSender(reset);
   await stopReceiver(reset);
@@ -656,7 +677,8 @@ async function startSending(container, label) {
       totalLen: container.length,
       ordinal: 0,
       source: null,
-      stopped: false
+      stopped: false,
+      backgroundPaused: false
     };
     sendSession = session;
     sendInputs.hidden = true;
@@ -768,12 +790,19 @@ window.addEventListener("airgapper:leave-mode", () => {
 });
 window.addEventListener("airgapper:pause-mode", () => {
   if (!audioView.classList.contains("active") || !currentMode) return;
-  void stopAll(false).then(() => {
-    if (currentMode === "send") resetSendUi();
-    if (currentMode === "receive") resetReceiveUi();
-  });
+  if (currentMode === "send" && sendSession) {
+    void pauseSender();
+    return;
+  }
+  if (currentMode === "receive") {
+    void stopReceiver(false).then(() => resetReceiveUi());
+  }
 });
 window.addEventListener("airgapper:resume-mode", () => {
   if (!audioView.classList.contains("active")) return;
+  if (currentMode === "send" && sendSession) {
+    void resumeSender();
+    return;
+  }
   if (currentMode === "receive" && !receiveSession) void startListening();
 });
