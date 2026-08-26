@@ -20,11 +20,11 @@ const ACQUIRE_THRESHOLD = 0.14;
 const TRACK_THRESHOLD = 0.045;
 const MARKER_MAX_RESIDUAL = 0.90;
 const PUNCTURE = new Uint8Array([1, 1, 0, 1]); // rate 2/3
-const FAST_AUDIO_BLOCK_SIZE = 160;
+const FAST_AUDIO_BLOCK_SIZE = 156;
 const FRAME_HEADER_BYTES = 16;
 const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x38]); // AGF8
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x39]); // AGF9
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -391,7 +391,9 @@ function cpCorrelation(samples, offset, stride = 2) {
 }
 function acquisitionScore(samples, offset) {
   let score = 0;
-  for (let symbol = 0; symbol < ACQUIRE_SYMBOLS; symbol++) score += Math.max(0, cpCorrelation(samples, offset + symbol * SYMBOL_SAMPLES, 4));
+  for (let symbol = 0; symbol < ACQUIRE_SYMBOLS; symbol++) {
+    score += Math.max(0, cpCorrelation(samples, offset + symbol * SYMBOL_SAMPLES, 4));
+  }
   return score / ACQUIRE_SYMBOLS;
 }
 function fitPhaseCorrection(errorReal, errorImag) {
@@ -485,13 +487,13 @@ function demod8Dpsk(previous, current, correction, slots, write) {
     const pi = previous.imag[bin];
     const cr = current.real[bin];
     const ci = current.imag[bin];
-    const dr = cr * pr + ci * pi;
-    const di = ci * pr - cr * pi;
+    let r = cr * pr + ci * pi;
+    let q = ci * pr - cr * pi;
     const angle = -(correction.cpe + correction.slope * carrier);
     const ar = Math.cos(angle);
     const ai = Math.sin(angle);
-    const nr = dr * ar - di * ai;
-    const nq = dr * ai + di * ar;
+    const nr = r * ar - q * ai;
+    const nq = r * ai + q * ar;
     const magnitude = Math.hypot(nr, nq);
     if (!Number.isFinite(magnitude) || magnitude < 1e-12) {
       slots[write++] = 0;
@@ -499,8 +501,8 @@ function demod8Dpsk(previous, current, correction, slots, write) {
       slots[write++] = 0;
       continue;
     }
-    const r = nr / magnitude;
-    const q = nq / magnitude;
+    r = nr / magnitude;
+    q = nq / magnitude;
     const d0 = [Infinity, Infinity, Infinity];
     const d1 = [Infinity, Infinity, Infinity];
     for (let phaseIndex = 0; phaseIndex < 8; phaseIndex++) {
