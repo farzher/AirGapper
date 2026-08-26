@@ -7,24 +7,22 @@ const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x32]); // AGQ2
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x33]); // AGQ3
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
-const PUNCTURE = new Uint8Array([1, 1]);
 const TAIL_BITS = 6;
 
-// Non-coherent near-ultrasonic FSK. 19.1-21.75 kHz stays much farther from
-// Nyquist than the old 20.1-22.75 kHz band, where phone audio paths commonly
-// roll off sharply, while remaining effectively inaudible for normal use.
+// Non-coherent near-ultrasonic FSK. Stay below the extreme 21-24 kHz phone
+// rolloff while keeping the signal at the edge of normal audibility.
 const TONE_COUNT = 8;
 const BITS_PER_TONE = 3;
 const SYMBOL_SAMPLES = 128;
-const TONE_BASE_HZ = 19125;
+const TONE_BASE_HZ = 18000;
 const TONE_SPACING_HZ = 375;
 const PREAMBLE = new Uint8Array([0, 7, 1, 6, 2, 5, 3, 4, 7, 0, 6, 1]);
 const PREAMBLE_SAMPLES = PREAMBLE.length * SYMBOL_SAMPLES;
 const TAIL_SAMPLES = SYMBOL_SAMPLES * 2;
-const SYNC_THRESHOLD = 0.28;
+const SYNC_THRESHOLD = 0.20;
 const PROFILE_KEY = "airgapper:audio-sound:v1";
 
 function parity(value) {
@@ -307,7 +305,7 @@ class QuietScanner {
       }
     }
     if (bestScore < SYNC_THRESHOLD) {
-      this.scan = Math.max(this.scan, maxCandidate - PREAMBLE_SAMPLES);
+      this.scan = maxCandidate + 1;
       this.compact();
       return;
     }
@@ -331,7 +329,7 @@ class QuietScanner {
       this.onPacket(packet);
       this.scan = refinedOffset + FRAME_SAMPLES;
     } else {
-      this.scan = refinedOffset + SYMBOL_SAMPLES;
+      this.scan = refinedOffset + SYMBOL_SAMPLES * 4;
     }
     this.compact();
   }
