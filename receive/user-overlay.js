@@ -404,11 +404,9 @@ function syncOverlayMode() {
   const developer = !normalMode();
   if (legacyOverlay) legacyOverlay.style.display = developer ? "" : "none";
   canvas.style.display = developer ? "none" : "";
-  status.style.display = developer ? "none" : "";
-  if (!developer) {
-    updateStatus();
-    scheduleDraw();
-  }
+  status.style.display = developer ? "" : "none";
+  updateStatus();
+  if (!developer) scheduleDraw();
 }
 
 if (devActions) {

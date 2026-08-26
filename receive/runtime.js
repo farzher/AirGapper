@@ -78,10 +78,6 @@ const cameraExposureControl = document.getElementById("camera-exposure-control")
 const cameraExposureAuto = document.getElementById("camera-exposure-auto");
 const cameraOpticsManual = document.getElementById("camera-optics-manual");
 const opticsAutoActions = document.getElementById("optics-auto-actions");
-const exposureAxisAuto = document.getElementById("exposure-axis-auto");
-const isoAxisAuto = document.getElementById("iso-axis-auto");
-const exposureAxisToggle = document.getElementById("exposure-axis-toggle");
-const isoAxisToggle = document.getElementById("iso-axis-toggle");
 const cameraExposureManual = document.getElementById("camera-exposure-manual");
 const cameraExposure = document.getElementById("camera-exposure");
 const cameraExposureValue = document.getElementById("camera-exposure-value");
@@ -309,8 +305,8 @@ let requestedHeight = 1440;
 let requestedFps = 60;
 const AUTO_QR_EV_BIAS = -0.75;
 let automaticOptics = true;
-let automaticExposureAxis = true;
-let automaticIsoAxis = true;
+let automaticExposureAxis = false;
+let automaticIsoAxis = false;
 const AUTO_OPTICS_LOCK_SETTLE_MS = 700;
 const AUTO_OPTICS_RECENT_DECODE_MS = 900;
 const AUTO_OPTICS_MIN_SETTLE_QR_PER_SECOND = 12;
@@ -641,8 +637,6 @@ function restoreCameraSettings() {
       cameraResolution.value = saved.resolution;
     }
     if (typeof saved.automaticOptics === "boolean") automaticOptics = saved.automaticOptics;
-    if (typeof saved.automaticExposureAxis === "boolean") automaticExposureAxis = saved.automaticExposureAxis;
-    if (typeof saved.automaticIsoAxis === "boolean") automaticIsoAxis = saved.automaticIsoAxis;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
     if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
@@ -655,8 +649,6 @@ function saveCameraSettings() {
       deviceId: preferredCameraDeviceId,
       resolution: cameraResolution.value,
       automaticOptics,
-      automaticExposureAxis,
-      automaticIsoAxis,
       exposureTime: preferredExposureTime,
       workers: decodeWorkers.value,
       iso: preferredIso
@@ -3388,53 +3380,14 @@ function formatExposureMs(value) {
 function showExposureTime(value) {
   cameraExposureValue.value = formatExposureMs(value);
 }
-function quantizedInputValue(input, value) {
-  if (!(Number.isFinite(value) && value > 0)) return void 0;
-  const min = Number(input.min);
-  const max = Number(input.max);
-  const step = Number(input.step);
-  if (!(Number.isFinite(min) && Number.isFinite(max) && min < max)) return value;
-  return quantizeCameraRange(value, { min, max, step: Number.isFinite(step) && step > 0 ? step : 0 });
-}
-function seedManualAxisFromTrack(track, key, input) {
-  return quantizedInputValue(input, Number(track?.getSettings?.()?.[key]));
-}
-function syncManualOpticsReadback(track = stream?.getVideoTracks?.()[0]) {
-  if (!track || cameraOpticsManual.hidden) return;
-  const actual = track.getSettings();
-  if (automaticExposureAxis) {
-    const value = quantizedInputValue(cameraExposure, Number(actual.exposureTime));
-    if (value !== void 0) {
-      cameraExposure.value = String(value);
-      cameraExposureValue.value = `Auto · ${formatExposureMs(value)}`;
-    } else cameraExposureValue.value = "Auto";
-  }
-  if (automaticIsoAxis) {
-    const value = quantizedInputValue(cameraIso, Number(actual.iso));
-    if (value !== void 0) {
-      cameraIso.value = String(value);
-      cameraIsoValue.value = `Auto · ${Number(value.toPrecision(4))}`;
-    } else cameraIsoValue.value = "Auto";
-  }
-}
 function syncExposureControls() {
   cameraExposureAuto.checked = automaticOptics;
-  exposureAxisAuto.checked = automaticExposureAxis;
-  isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
   opticsAutoActions.hidden = !automaticOptics;
-  for (const [automatic, control, slider, output, manualLabel] of [
-    [automaticExposureAxis, cameraExposureManual, cameraExposure, cameraExposureValue,
-      preferredExposureTime > 0 ? formatExposureMs(preferredExposureTime) : "—"],
-    [automaticIsoAxis, cameraIsoControl, cameraIso, cameraIsoValue,
-      preferredIso > 0 ? String(Number(preferredIso.toPrecision(4))) : "—"]
-  ]) {
-    control.classList.toggle("is-auto", automatic);
-    slider.disabled = automatic;
-    slider.setAttribute("aria-disabled", String(automatic));
-    output.value = automatic ? "Auto" : manualLabel;
-  }
-  syncManualOpticsReadback();
+  cameraExposure.disabled = false;
+  cameraIso.disabled = false;
+  cameraExposureValue.value = preferredExposureTime > 0 ? formatExposureMs(preferredExposureTime) : "—";
+  cameraIsoValue.value = preferredIso > 0 ? String(Number(preferredIso.toPrecision(4))) : "—";
 }
 async function applyExposureSetting(track) {
   var _a, _b;
@@ -5268,6 +5221,8 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 });
 cameraExposureAuto.addEventListener("change", () => {
   automaticOptics = cameraExposureAuto.checked;
+  automaticExposureAxis = false;
+  automaticIsoAxis = false;
   resetAutomaticOpticsRuntime();
   clearTimeout(exposureApplyTimer);
   syncExposureControls();
@@ -5279,34 +5234,6 @@ cameraExposureAuto.addEventListener("change", () => {
     if (track) void applyAndValidateManualExposure(track);
     return;
   }
-  if (track) void applyExposureSetting(track);
-});
-exposureAxisAuto.addEventListener("change", () => {
-  automaticExposureAxis = exposureAxisAuto.checked;
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (!automaticExposureAxis && track) {
-    const value = seedManualAxisFromTrack(track, "exposureTime", cameraExposure);
-    if (value !== void 0) {
-      preferredExposureTime = value;
-      cameraExposure.value = String(value);
-    }
-  }
-  syncExposureControls();
-  saveCameraSettings();
-  if (track) void applyExposureSetting(track);
-});
-isoAxisAuto.addEventListener("change", () => {
-  automaticIsoAxis = isoAxisAuto.checked;
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (!automaticIsoAxis && track) {
-    const value = seedManualAxisFromTrack(track, "iso", cameraIso);
-    if (value !== void 0) {
-      preferredIso = value;
-      cameraIso.value = String(value);
-    }
-  }
-  syncExposureControls();
-  saveCameraSettings();
   if (track) void applyExposureSetting(track);
 });
 function queueExposureChange(immediate = false) {
@@ -5330,7 +5257,6 @@ function queueIsoChange(immediate = false) {
   resetGuidedRollout();
   preferredIso = Number(cameraIso.value);
   automaticIsoAxis = false;
-  isoAxisAuto.checked = false;
   cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
   syncExposureControls();
   saveCameraSettings();
