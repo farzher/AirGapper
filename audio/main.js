@@ -159,7 +159,7 @@ function makePreviewCanvas(label) {
   canvas.style.inset = "0";
   preview.append(canvas);
   zone.append(preview);
-  return { zone, preview, canvas };
+  return { zone, canvas };
 }
 function resizeVisualizer(canvas) {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -269,44 +269,13 @@ listenButton.textContent = "Enable microphone";
 listenButton.className = "enable-camera";
 listenButton.hidden = false;
 const receivePreview = makePreviewCanvas("Live audio level visualizer");
-const receiveOverlay = document.createElement("div");
-receiveOverlay.textContent = "Listening";
-receiveOverlay.setAttribute("aria-hidden", "true");
-Object.assign(receiveOverlay.style, {
-  position: "absolute",
-  left: "10px",
-  bottom: "10px",
-  zIndex: "4",
-  pointerEvents: "none",
-  padding: "5px 8px",
-  borderRadius: "7px",
-  borderLeft: "3px solid #8d9298",
-  background: "rgba(12, 14, 18, 0.58)",
-  color: "rgba(255,255,255,0.78)",
-  font: "700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace",
-  letterSpacing: ".01em",
-  whiteSpace: "nowrap",
-  transition: "border-color 100ms ease, color 100ms ease, background 100ms ease"
-});
-receivePreview.preview.append(receiveOverlay);
-function setReceiveOverlayListening() {
-  receiveOverlay.textContent = "Listening";
-  receiveOverlay.style.borderLeftColor = "#8d9298";
-  receiveOverlay.style.background = "rgba(12, 14, 18, 0.58)";
-  receiveOverlay.style.color = "rgba(255,255,255,0.78)";
-}
 function flashValidPacket() {
   clearTimeout(packetFlashTimer);
   setVisualizerSignal(true);
-  receiveOverlay.textContent = "Packet ✓";
-  receiveOverlay.style.borderLeftColor = "#35d66f";
-  receiveOverlay.style.background = "rgba(12, 34, 22, 0.70)";
-  receiveOverlay.style.color = "#fff";
   packetFlashTimer = setTimeout(() => {
     packetFlashTimer = 0;
     if (currentMode !== "receive") return;
     setVisualizerSignal(false);
-    setReceiveOverlayListening();
   }, VALID_PACKET_FLASH_MS);
 }
 const receivePanel = document.createElement("section");
@@ -372,7 +341,6 @@ function resetReceiveUi() {
   listenButton.hidden = false;
   receivePreview.zone.hidden = false;
   setVisualizerSignal(false);
-  setReceiveOverlayListening();
   drawVisualizer(receivePreview.canvas, null, false, true);
 }
 function updateReceiveProgress(session, now = performance.now()) {
@@ -430,10 +398,6 @@ function showReceiveError(message) {
   listenButton.hidden = false;
   receivePanel.hidden = false;
   speedValue.textContent = "—";
-  receiveOverlay.textContent = "Microphone off";
-  receiveOverlay.style.borderLeftColor = "#8d9298";
-  receiveOverlay.style.background = "rgba(12, 14, 18, 0.58)";
-  receiveOverlay.style.color = "rgba(255,255,255,0.78)";
   setVisualizerAnalyser(null);
   setVisualizerSignal(false);
 }
@@ -501,7 +465,6 @@ async function startListening() {
   clearResult();
   receivePanel.hidden = false;
   listenButton.hidden = true;
-  setReceiveOverlayListening();
   startVisualizer(receivePreview.canvas, null, false);
   try {
     const session = {
