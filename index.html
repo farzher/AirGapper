@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>AirGapper — Air-gapped file transfer</title>
-  <meta name="description" content="Transfer a file or text offline with animated QR codes." />
+  <meta name="description" content="Transfer a file or text offline with animated QR codes or sound." />
   <meta name="theme-color" content="#f7f7f5" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'" />
   <link rel="canonical" href="https://farzher.github.io/AirGapper/" />
@@ -16,6 +16,28 @@
        runtime already paints 100% before assembling; make that final width a
        snap instead of a 220ms transition so it cannot visibly freeze at 97–99%. */
     #bar[style*="width: 100%"] { transition: none !important; animation: none !important; opacity: 1 !important; }
+    .audio-home-mode { grid-column: 1 / -1; min-height: 105px; font-size: 22px; }
+    .audio-shell { width: min(720px, 100%); margin-inline: auto; }
+    .audio-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .audio-mode-switch button { min-height: 42px; border: 1px solid var(--line); background: var(--card); border-radius: 11px; cursor: pointer; font-weight: 650; }
+    .audio-mode-switch button.active { border-color: #171717; background: #171717; color: white; }
+    .audio-send-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .audio-card { min-height: 180px; border: 1px solid var(--line); background: var(--card); border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 22px; text-align: center; }
+    .audio-card strong { font-size: 18px; }
+    .audio-card p { margin: 0; color: var(--muted); font-size: 12px; }
+    .audio-status { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; text-align: center; }
+    .audio-status.error { color: var(--bad); font-weight: 650; }
+    .audio-progress { height: 6px; margin-top: 8px; overflow: hidden; background: var(--line); border-radius: 999px; }
+    .audio-progress > div { width: 0; height: 100%; background: #171717; transition: width .16s ease; }
+    .audio-result { display: grid; gap: 10px; margin-top: 12px; }
+    .audio-file-result { display: flex; align-items: center; justify-content: center; gap: 10px; }
+    @media (max-width: 700px) {
+      .audio-send-inputs { grid-template-columns: 1fr; }
+      .audio-home-mode { min-height: 92px; }
+    }
+    @media (orientation: landscape) {
+      body.portrait-fallback .audio-send-inputs { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -45,6 +67,7 @@
       <div class="home">
         <button class="mode" data-mode="send" type="button">Send</button>
         <button class="mode" data-mode="receive" type="button">Receive</button>
+        <button class="mode audio-home-mode" data-mode="audio" type="button">Audio</button>
       </div>
     </section>
 
@@ -84,6 +107,40 @@
         </div>
       </div>
       <div class="hint status-line" id="specs"></div>
+    </section>
+
+    <section id="audioView" class="view audio-shell">
+      <div class="audio-mode-switch" role="tablist" aria-label="Audio transfer direction">
+        <button id="audio-mode-send" class="active" type="button" role="tab" aria-selected="true">Send</button>
+        <button id="audio-mode-receive" type="button" role="tab" aria-selected="false">Receive</button>
+      </div>
+      <section id="audio-send-pane">
+        <div class="audio-send-inputs" id="audio-send-inputs">
+          <label class="file-picker drop" id="audio-file-picker">
+            <input id="audio-file" type="file" />
+            <span><strong>Send a file</strong><span class="sub">Small files work best</span></span>
+          </label>
+          <div class="note-composer text-wrap">
+            <label for="audio-text" class="sr-only">Text to send over audio</label>
+            <textarea id="audio-text" rows="7" placeholder="Or paste text…"></textarea>
+            <button id="audio-send-text" type="button">Send text</button>
+          </div>
+        </div>
+        <div class="audio-card" id="audio-send-active" hidden>
+          <strong>Sending audio</strong>
+          <p>Stop when the other device receives it.</p>
+          <button class="secondary-button" id="audio-stop-send" type="button">Stop</button>
+        </div>
+      </section>
+      <section id="audio-receive-pane" hidden>
+        <div class="audio-card">
+          <strong>Receive audio</strong>
+          <button class="download" id="audio-listen" type="button">Listen</button>
+        </div>
+      </section>
+      <div class="audio-status" id="audio-status" role="status" aria-live="polite"></div>
+      <div class="audio-progress" id="audio-progress" role="progressbar" aria-label="Audio transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div id="audio-progress-bar"></div></div>
+      <div class="audio-result" id="audio-result"></div>
     </section>
 
     <section id="receiveView" class="view receiver-shell">

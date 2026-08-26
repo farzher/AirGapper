@@ -10,6 +10,8 @@
     "./icon-512.png",
     "./index.html",
     "./manifest.webmanifest",
+    "./audio/main.js",
+    "./audio/modem.js",
     "./receive/agcap.js",
     "./receive/auto-phase-policy.js",
     "./receive/auto-phase.js",

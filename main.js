@@ -71,6 +71,17 @@ function ensureReceiveModule() {
   }
   return receiveModulePromise;
 }
+let audioModulePromise;
+let audioModuleLoaded = false;
+function ensureAudioModule() {
+  if (!audioModulePromise) {
+    audioModulePromise = import(`./audio/main.js?build=${APP_BUILD}`).then((module) => {
+      audioModuleLoaded = true;
+      return module;
+    });
+  }
+  return audioModulePromise;
+}
 
 if (serviceWorkers) {
   window.addEventListener("load", () => void registration?.update().catch(() => void 0), { once: true });
@@ -151,7 +162,8 @@ syncInstallUi();
 const views = {
   home: document.getElementById("homeView"),
   send: document.getElementById("sendView"),
-  receive: document.getElementById("receiveView")
+  receive: document.getElementById("receiveView"),
+  audio: document.getElementById("audioView")
 };
 const receiveVideo = document.getElementById("video");
 let active = "home";
@@ -176,7 +188,7 @@ function dispatchReceiveWhenReady(type = "airgapper:enter-receive") {
 function historyView() {
   var _a2;
   const view = (_a2 = history.state) == null ? void 0 : _a2.airgapperView;
-  return view === "home" || view === "send" || view === "receive" ? view : null;
+  return view === "home" || view === "send" || view === "receive" || view === "audio" ? view : null;
 }
 const headerQr = document.getElementById("receiver-link-qr");
 const headerQrButton = document.getElementById("receiver-link-open");
@@ -216,6 +228,7 @@ function showView(name, historyMode = "push") {
   document.body.classList.toggle("receive-mode", name === "receive");
   headerQrButton.hidden = name !== "home";
   if (name === "receive") dispatchReceiveWhenReady();
+  else if (name === "audio") void ensureAudioModule();
   else if (name === "send" || name === "home") void ensureSendModule();
   const hasMobileInput = isIOS || isAndroid || matchMedia("(pointer: coarse)").matches;
   if (name === "send" && !hasMobileInput) {
@@ -305,7 +318,7 @@ window.airgapperSuspend = () => {
   // Pause belongs to the active mode. Send owns its wake lock and scheduler;
   // Receive owns camera teardown. Do not require Receive to be loaded merely to
   // tell an already-running sender that the document became hidden.
-  if (active === "send" || active === "receive" && receiveModuleLoaded)
+  if (active === "send" || active === "receive" && receiveModuleLoaded || active === "audio" && audioModuleLoaded)
     window.dispatchEvent(new CustomEvent("airgapper:pause-mode"));
 };
 function resumeActiveView() {
@@ -313,7 +326,7 @@ function resumeActiveView() {
   const wasSuspended = suspended;
   if (suspended) {
     suspended = false;
-    if (active === "send") {
+    if (active === "send" || active === "audio" && audioModuleLoaded) {
       window.dispatchEvent(new CustomEvent("airgapper:resume-mode"));
     } else if (active === "receive") {
       dispatchReceiveWhenReady(receiveModuleLoaded ? "airgapper:resume-mode" : "airgapper:enter-receive");
