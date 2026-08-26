@@ -19,8 +19,11 @@ const PRE_GUARD = 64;
 const TAIL_GUARD = 64;
 const FFT_WINDOW_EARLY = 16;
 const SYNC_THRESHOLD = 0.11;
-const SYNC_TX_GAIN = 1.35;
-const REFERENCE_TX_GAIN = 1.12;
+const SYMBOL_RMS = 0.19;
+const SYNC_TX_GAIN = 1.14;
+const REFERENCE_TX_GAIN = 1.05;
+const PINK_TILT = 0.65;
+const HIGH_BAND_FLOOR = 0.35;
 const TRACK_WINDOW = 1024;
 const AUDIO_BLOCK_SIZE = 260;
 const AUDIO_HEADER_BYTES = 16;
@@ -180,7 +183,8 @@ function fft(real, imag, inverse = false) {
 const CARRIER_WEIGHT = new Float64Array(CARRIER_COUNT);
 for (let carrier = 0; carrier < CARRIER_COUNT; carrier++) {
   const ratio = (ACTIVE_FIRST + carrier) / ACTIVE_FIRST;
-  CARRIER_WEIGHT[carrier] = Math.pow(ratio, -0.18);
+  const pink = Math.pow(ratio, -PINK_TILT);
+  CARRIER_WEIGHT[carrier] = HIGH_BAND_FLOOR + (1 - HIGH_BAND_FLOOR) * pink;
 }
 function phaseVector(seed) {
   const real = new Float64Array(CARRIER_COUNT);
@@ -217,7 +221,7 @@ function ofdmSymbol(carrierReal, carrierImag) {
     peak = Math.max(peak, Math.abs(sample));
   }
   const rms = Math.sqrt(energy / FFT_SIZE) || 1;
-  const scale = Math.min(0.16 / rms, 0.72 / Math.max(peak, 1e-9));
+  const scale = Math.min(SYMBOL_RMS / rms, 0.72 / Math.max(peak, 1e-9));
   const out = new Float32Array(SYMBOL_SAMPLES);
   for (let i = 0; i < CYCLIC_PREFIX; i++) out[i] = real[FFT_SIZE - CYCLIC_PREFIX + i] * scale;
   for (let i = 0; i < FFT_SIZE; i++) out[CYCLIC_PREFIX + i] = real[i] * scale;
