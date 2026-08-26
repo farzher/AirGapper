@@ -7,23 +7,26 @@ const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x36]); // AGQ6
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x37]); // AGQ7
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
 
 const TONE_COUNT = 4;
 const BITS_PER_TONE = 2;
-const SYMBOL_SAMPLES = 384; // 8 ms
+const ACTIVE_SAMPLES = 384; // 8 ms tone integration
+const GUARD_SAMPLES = 192; // 4 ms for room/speaker decay
+const SYMBOL_SAMPLES = ACTIVE_SAMPLES + GUARD_SAMPLES;
 const TONE_BASE_HZ = 17000;
 const TONE_SPACING_HZ = 1000;
 const PREAMBLE = new Uint8Array([0, 3, 1, 2, 3, 0, 2, 1, 0, 2, 3, 1, 3, 2, 0, 1]);
 const PREAMBLE_SAMPLES = PREAMBLE.length * SYMBOL_SAMPLES;
-const SYNC_THRESHOLD = 0.12;
-const TRACK_WINDOW = 144;
+const SYNC_THRESHOLD = 0.13;
+const TRACK_WINDOW = 192;
 const DATA_TRACK_WINDOW = 20;
-const DECODE_MARGIN = 384;
+const DECODE_MARGIN = SYMBOL_SAMPLES;
 const FREQ_OFFSETS = new Int16Array([-100, -50, 0, 50, 100]);
+const CENTER_FREQ_INDEX = 2;
 
 function parity(value) {
   value ^= value >>> 4;
@@ -129,8 +132,8 @@ const TONE_COEFF = Array.from({ length: FREQ_OFFSETS.length }, () => new Float64
 for (let tone = 0; tone < TONE_COUNT; tone++) {
   const frequency = TONE_BASE_HZ + tone * TONE_SPACING_HZ;
   TONE_OMEGA[tone] = 2 * Math.PI * frequency / SAMPLE_RATE;
-  for (let offset = 0; offset < FREQ_OFFSETS.length; offset++) {
-    TONE_COEFF[offset][tone] = 2 * Math.cos(2 * Math.PI * (frequency + FREQ_OFFSETS[offset]) / SAMPLE_RATE);
+  for (let index = 0; index < FREQ_OFFSETS.length; index++) {
+    TONE_COEFF[index][tone] = 2 * Math.cos(2 * Math.PI * (frequency + FREQ_OFFSETS[index]) / SAMPLE_RATE);
   }
 }
 
@@ -194,8 +197,8 @@ function toneEnergy(samples, offset, tone, frequencyIndex) {
   const coeff = TONE_COEFF[frequencyIndex][tone];
   let s1 = 0;
   let s2 = 0;
-  for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (SYMBOL_SAMPLES - 1));
+  for (let i = 0; i < ACTIVE_SAMPLES; i++) {
+    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (ACTIVE_SAMPLES - 1));
     const s0 = samples[offset + i] * window + coeff * s1 - s2;
     s2 = s1;
     s1 = s0;
@@ -206,6 +209,11 @@ function allToneEnergies(samples, offset, frequencyIndex) {
   const energies = new Float64Array(TONE_COUNT);
   for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone, frequencyIndex);
   return energies;
+}
+function normalizeEnergies(energies, gains) {
+  const out = new Float64Array(TONE_COUNT);
+  for (let tone = 0; tone < TONE_COUNT; tone++) out[tone] = energies[tone] / Math.max(1e-12, gains[tone]);
+  return out;
 }
 function toneConfidence(energies) {
   let first = 0;
@@ -220,67 +228,73 @@ function toneConfidence(energies) {
   }
   return (first - second) / Math.max(1e-12, first + second);
 }
-function bestFrequencyEnergies(samples, offset, preferredIndex = -1) {
-  let best = null;
-  for (let index = 0; index < FREQ_OFFSETS.length; index++) {
-    if (preferredIndex >= 0 && Math.abs(index - preferredIndex) > 1) continue;
-    const energies = allToneEnergies(samples, offset, index);
-    const confidence = toneConfidence(energies);
-    if (!best || confidence > best.confidence) best = { energies, confidence, frequencyIndex: index };
-  }
-  return best;
-}
-function syncScore(samples, offset, frequencyIndex) {
-  let score = 0;
-  let power = 0;
+function preambleMetrics(samples, offset, frequencyIndex) {
+  const raw = new Array(PREAMBLE.length);
+  const sums = new Float64Array(TONE_COUNT);
+  const counts = new Uint8Array(TONE_COUNT);
   for (let i = 0; i < PREAMBLE.length; i++) {
     const energies = allToneEnergies(samples, offset + i * SYMBOL_SAMPLES, frequencyIndex);
+    raw[i] = energies;
+    sums[PREAMBLE[i]] += energies[PREAMBLE[i]];
+    counts[PREAMBLE[i]]++;
+  }
+  const gains = new Float64Array(TONE_COUNT);
+  let maxGain = 0;
+  for (let tone = 0; tone < TONE_COUNT; tone++) {
+    gains[tone] = sums[tone] / Math.max(1, counts[tone]);
+    maxGain = Math.max(maxGain, gains[tone]);
+  }
+  if (maxGain < 1e-8) return { score: -1, gains };
+  const floor = maxGain * 0.04;
+  for (let tone = 0; tone < TONE_COUNT; tone++) gains[tone] = Math.max(gains[tone], floor);
+
+  let score = 0;
+  for (let i = 0; i < PREAMBLE.length; i++) {
+    const energies = normalizeEnergies(raw[i], gains);
     const expected = energies[PREAMBLE[i]];
     let alternate = 0;
-    for (let tone = 0; tone < TONE_COUNT; tone++) if (tone !== PREAMBLE[i]) alternate = Math.max(alternate, energies[tone]);
-    power += expected + alternate;
+    for (let tone = 0; tone < TONE_COUNT; tone++) {
+      if (tone !== PREAMBLE[i]) alternate = Math.max(alternate, energies[tone]);
+    }
     score += (expected - alternate) / Math.max(1e-12, expected + alternate);
   }
-  if (power < 1e-6) return -1;
-  return score / PREAMBLE.length;
+  return { score: score / PREAMBLE.length, gains };
 }
-function decodeFrame(samples, offset, frequencyIndex) {
+function softFromEnergies(energies, confidence) {
+  const soft = new Float32Array(BITS_PER_TONE);
+  for (let bit = BITS_PER_TONE - 1, write = 0; bit >= 0; bit--, write++) {
+    let best0 = 0;
+    let best1 = 0;
+    for (let tone = 0; tone < TONE_COUNT; tone++) {
+      if (tone >> bit & 1) best1 = Math.max(best1, energies[tone]);
+      else best0 = Math.max(best0, energies[tone]);
+    }
+    soft[write] = clamp((best1 - best0) / Math.max(1e-12, best1 + best0), -1, 1)
+      * clamp(0.3 + confidence, 0.15, 1);
+  }
+  return soft;
+}
+function decodeFrame(samples, offset, frequencyIndex, gains) {
   let cursor = offset + PREAMBLE_SAMPLES;
   const slots = new Float32Array(SLOT_BITS);
   let write = 0;
+  let preferredFrequency = frequencyIndex;
   for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
-    if (cursor < 0 || cursor + SYMBOL_SAMPLES > samples.length) return null;
-    const predicted = Math.round(cursor);
-    let initial = bestFrequencyEnergies(samples, predicted, frequencyIndex);
-    if (!initial) return null;
-    let bestStart = predicted;
-    let best = initial;
-    let strongestTone = 0;
-    for (let tone = 1; tone < TONE_COUNT; tone++) if (best.energies[tone] > best.energies[strongestTone]) strongestTone = tone;
+    let best = null;
     for (let delta = -DATA_TRACK_WINDOW; delta <= DATA_TRACK_WINDOW; delta += 4) {
-      const start = predicted + delta;
-      if (start < 0 || start + SYMBOL_SAMPLES > samples.length) continue;
-      const energy = toneEnergy(samples, start, strongestTone, best.frequencyIndex);
-      const baseline = best.energies[strongestTone];
-      if (energy <= baseline) continue;
-      const candidate = bestFrequencyEnergies(samples, start, best.frequencyIndex);
-      if (candidate && candidate.confidence >= best.confidence) {
-        best = candidate;
-        bestStart = start;
+      const start = Math.round(cursor + delta);
+      if (start < 0 || start + ACTIVE_SAMPLES > samples.length) continue;
+      for (let fi = Math.max(0, preferredFrequency - 1); fi <= Math.min(FREQ_OFFSETS.length - 1, preferredFrequency + 1); fi++) {
+        const normalized = normalizeEnergies(allToneEnergies(samples, start, fi), gains);
+        const confidence = toneConfidence(normalized);
+        if (!best || confidence > best.confidence) best = { start, normalized, confidence, frequencyIndex: fi };
       }
     }
-    frequencyIndex = best.frequencyIndex;
-    for (let bit = BITS_PER_TONE - 1; bit >= 0; bit--) {
-      let best0 = 0;
-      let best1 = 0;
-      for (let tone = 0; tone < TONE_COUNT; tone++) {
-        if (tone >> bit & 1) best1 = Math.max(best1, best.energies[tone]);
-        else best0 = Math.max(best0, best.energies[tone]);
-      }
-      slots[write++] = clamp((best1 - best0) / Math.max(1e-12, best1 + best0), -1, 1)
-        * clamp(0.25 + best.confidence, 0.15, 1);
-    }
-    cursor = bestStart + SYMBOL_SAMPLES;
+    if (!best) return null;
+    preferredFrequency = best.frequencyIndex;
+    const soft = softFromEnergies(best.normalized, best.confidence);
+    for (let bit = 0; bit < BITS_PER_TONE; bit++) slots[write++] = soft[bit];
+    cursor = best.start + SYMBOL_SAMPLES;
   }
   const coded = deinterleaveSoft(slots);
   const decoded = convolutionalDecode(coded, RAW_PACKET_BITS);
@@ -291,18 +305,26 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
   const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
   const coded = convolutionalEncode(bytesToBits(raw));
   const slots = interleave(coded);
-  const waveform = new Float32Array(FRAME_SAMPLES);
-  let out = 0;
+  const tones = new Uint8Array(PREAMBLE.length + DATA_SYMBOLS);
+  tones.set(PREAMBLE, 0);
   let read = 0;
-  for (const tone of PREAMBLE) {
-    const omega = TONE_OMEGA[tone];
-    for (let i = 0; i < SYMBOL_SAMPLES; i++) waveform[out++] = 0.76 * Math.sin(omega * i);
-  }
   for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
     let tone = 0;
     for (let bit = 0; bit < BITS_PER_TONE; bit++) tone = tone << 1 | (slots[read++] || 0);
+    tones[PREAMBLE.length + symbol] = tone;
+  }
+  const waveform = new Float32Array(FRAME_SAMPLES);
+  let out = 0;
+  const fadeSamples = 48;
+  for (const tone of tones) {
     const omega = TONE_OMEGA[tone];
-    for (let i = 0; i < SYMBOL_SAMPLES; i++) waveform[out++] = 0.76 * Math.sin(omega * i);
+    for (let i = 0; i < ACTIVE_SAMPLES; i++) {
+      let envelope = 1;
+      if (i < fadeSamples) envelope = Math.sin((i + 1) / fadeSamples * Math.PI / 2) ** 2;
+      else if (i >= ACTIVE_SAMPLES - fadeSamples) envelope = Math.sin((ACTIVE_SAMPLES - i) / fadeSamples * Math.PI / 2) ** 2;
+      waveform[out + i] = 0.76 * Math.sin(omega * i) * envelope;
+    }
+    out += SYMBOL_SAMPLES;
   }
   return waveform;
 }
@@ -310,11 +332,10 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
 class QuietScanner {
   constructor(onPacket) {
     this.onPacket = onPacket;
-    this.samples = new Float32Array(262144);
+    this.samples = new Float32Array(524288);
     this.length = 0;
     this.scan = 0;
     this.expected = -1;
-    this.frequencyIndex = 2;
   }
   append(chunk) {
     if (!chunk?.length) return;
@@ -328,29 +349,16 @@ class QuietScanner {
     this.process();
   }
   tryAt(offset, maxCandidate) {
-    let refinedOffset = offset;
-    let bestFrequency = this.frequencyIndex;
-    let refinedScore = -1;
-    for (let frequencyIndex = 0; frequencyIndex < FREQ_OFFSETS.length; frequencyIndex++) {
-      const score = syncScore(this.samples, offset, frequencyIndex);
-      if (score > refinedScore) {
-        refinedScore = score;
-        bestFrequency = frequencyIndex;
+    let best = null;
+    for (let candidate = Math.max(0, offset - TRACK_WINDOW); candidate <= Math.min(maxCandidate, offset + TRACK_WINDOW); candidate += 8) {
+      for (let fi = 0; fi < FREQ_OFFSETS.length; fi++) {
+        const metrics = preambleMetrics(this.samples, candidate, fi);
+        if (!best || metrics.score > best.score) best = { offset: candidate, frequencyIndex: fi, ...metrics };
       }
     }
-    for (let candidate = Math.max(0, offset - TRACK_WINDOW); candidate <= Math.min(maxCandidate, offset + TRACK_WINDOW); candidate += 4) {
-      for (let frequencyIndex = Math.max(0, bestFrequency - 1); frequencyIndex <= Math.min(FREQ_OFFSETS.length - 1, bestFrequency + 1); frequencyIndex++) {
-        const score = syncScore(this.samples, candidate, frequencyIndex);
-        if (score > refinedScore) {
-          refinedScore = score;
-          refinedOffset = candidate;
-          bestFrequency = frequencyIndex;
-        }
-      }
-    }
-    if (refinedScore < SYNC_THRESHOLD) return null;
-    const packet = decodeFrame(this.samples, refinedOffset, bestFrequency);
-    return { packet, offset: refinedOffset, frequencyIndex: bestFrequency };
+    if (!best || best.score < SYNC_THRESHOLD) return null;
+    const packet = decodeFrame(this.samples, best.offset, best.frequencyIndex, best.gains);
+    return { packet, offset: best.offset };
   }
   process() {
     while (true) {
@@ -361,7 +369,6 @@ class QuietScanner {
         const tracked = this.tryAt(this.expected, maxCandidate);
         if (tracked?.packet) {
           this.onPacket(tracked.packet);
-          this.frequencyIndex = tracked.frequencyIndex;
           this.expected = tracked.offset + FRAME_SAMPLES;
           this.scan = Math.max(this.scan, tracked.offset + PREAMBLE_SAMPLES);
           this.compact();
@@ -372,8 +379,8 @@ class QuietScanner {
 
       let bestOffset = -1;
       let bestScore = -1;
-      for (let offset = this.scan; offset <= maxCandidate; offset += 32) {
-        const score = syncScore(this.samples, offset, 2);
+      for (let offset = this.scan; offset <= maxCandidate; offset += 96) {
+        const score = preambleMetrics(this.samples, offset, CENTER_FREQ_INDEX).score;
         if (score > bestScore) {
           bestScore = score;
           bestOffset = offset;
@@ -387,18 +394,17 @@ class QuietScanner {
       const decoded = this.tryAt(bestOffset, maxCandidate);
       if (decoded?.packet) {
         this.onPacket(decoded.packet);
-        this.frequencyIndex = decoded.frequencyIndex;
         this.expected = decoded.offset + FRAME_SAMPLES;
         this.scan = Math.max(this.scan, decoded.offset + PREAMBLE_SAMPLES);
       } else {
-        this.scan = bestOffset + Math.floor(PREAMBLE_SAMPLES / 2);
+        this.scan = bestOffset + PREAMBLE_SAMPLES;
       }
       this.compact();
     }
   }
   compact() {
     const cursor = this.expected >= 0 ? Math.min(this.scan, this.expected) : this.scan;
-    if (cursor < 65536) return;
+    if (cursor < 131072) return;
     const keepFrom = Math.max(0, cursor - PREAMBLE_SAMPLES);
     this.samples.copyWithin(0, keepFrom, this.length);
     this.length -= keepFrom;
@@ -409,12 +415,10 @@ class QuietScanner {
     this.length = 0;
     this.scan = 0;
     this.expected = -1;
-    this.frequencyIndex = 2;
   }
 }
 
 export {
-  AUDIO_BLOCK_SIZE as QUIET_BLOCK_SIZE,
   QUIET_ESTIMATED_KBPS,
   QuietScanner,
   TONE_BASE_HZ as QUIET_TONE_BASE_HZ,
