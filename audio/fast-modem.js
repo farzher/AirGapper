@@ -14,7 +14,7 @@ const CHIRP_SAMPLES = 4096;
 const GUARD_SAMPLES = 2048;
 const INTER_FRAME_GAP = 12000;
 const F_LO = 1100;
-const F_HI = 23000;
+const F_HI = 18000;
 const BIN_HZ = SAMPLE_RATE / NFFT;
 const BIN_LO = Math.ceil(F_LO / BIN_HZ);
 const BIN_HI = Math.floor(F_HI / BIN_HZ);
@@ -35,12 +35,12 @@ const FRAME_SAMPLES = CHIRP_SAMPLES + GUARD_SAMPLES + (2 + DATA_SYMBOLS) * SYMBO
 const TX_FRAME_SAMPLES = FRAME_SAMPLES + INTER_FRAME_GAP;
 const AUDIO_BLOCK_SIZE = 260;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const FAST_HEADER_BLOCKS = new Set([0, 54]);
+const FAST_HEADER_BLOCKS = new Set([0, Math.floor(PHY_BLOCKS / 2)]);
 const DATA_SLOT_INDEXES = Array.from({ length: PHY_BLOCKS }, (_, i) => i).filter((i) => !FAST_HEADER_BLOCKS.has(i));
 const FAST_PACKETS_PER_FRAME = Math.floor(DATA_SLOT_INDEXES.length * PHY_PAYLOAD_BYTES / AUDIO_BLOCK_SIZE);
 const FAST_ESTIMATED_KBPS = FAST_PACKETS_PER_FRAME * (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
   (TX_FRAME_SAMPLES / SAMPLE_RATE) / 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x31]); // AGF1
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x32]); // AGF2
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, i) => [mode, i]));
 const PUNCTURE = new Uint8Array([1, 1, 0, 1]);
