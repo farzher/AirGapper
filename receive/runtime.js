@@ -80,10 +80,7 @@ const exposureAxisAuto = document.getElementById("exposure-axis-auto");
 const isoAxisAuto = document.getElementById("iso-axis-auto");
 const exposureAxisToggle = document.getElementById("exposure-axis-toggle");
 const isoAxisToggle = document.getElementById("iso-axis-toggle");
-const exposureAxisReset = document.getElementById("exposure-axis-reset");
-const isoAxisReset = document.getElementById("iso-axis-reset");
-const exposureAxisName = document.getElementById("exposure-axis-name");
-const isoAxisName = document.getElementById("iso-axis-name");
+const cameraExposureManual = document.getElementById("camera-exposure-manual");
 const cameraExposure = document.getElementById("camera-exposure");
 const cameraExposureValue = document.getElementById("camera-exposure-value");
 const captureScanBtn = document.getElementById("capture-scan");
@@ -113,15 +110,9 @@ function loadReceiverDevTools() {
 const mobileCameraUi = isAndroid || isIOS || navigator.userAgentData?.mobile === true;
 if (mobileCameraUi && cameraDeviceControl && receiverDevActions) receiverDevActions.prepend(cameraDeviceControl);
 const focusDev = document.getElementById("focus-dev");
-const focusMode = document.getElementById("focus-mode");
-const focusAxisName = document.getElementById("focus-axis-name");
-const focusAxisReset = document.getElementById("focus-axis-reset");
 const opticsOptimize = document.getElementById("optics-optimize");
 const opticsKeep = document.getElementById("optics-keep");
 const opticsOptimizeStatus = document.getElementById("optics-optimize-status");
-const focusDistanceControl = document.getElementById("focus-distance-control");
-const focusDistance = document.getElementById("focus-distance");
-const focusDistanceValue = document.getElementById("focus-distance-value");
 const cameraIsoControl = document.getElementById("camera-iso-control");
 const cameraIso = document.getElementById("camera-iso");
 const cameraIsoValue = document.getElementById("camera-iso-value");
@@ -394,8 +385,6 @@ let autoOpticsHoldPoseStableSince = 0;
 // These are the user's persistent MANUAL optics profile. Automatic optics
 // may use arbitrary temporary sensor values, but must never overwrite these.
 let preferredExposureTime;
-let manualFocusMode = "camera-auto";
-let preferredFocusDistance;
 let preferredIso;
 let exposureApplyGeneration = 0;
 let manualOpticsReapplyGeneration = 0;
@@ -638,7 +627,7 @@ function populateCameraOptions() {
   cameraResolution.value = "auto";
 }
 function restoreCameraSettings() {
-  var _a, _b;
+  var _a;
   try {
     const saved = JSON.parse((_a = localStorage.getItem(CAMERA_SETTINGS_KEY)) != null ? _a : "null");
     if (!saved) return;
@@ -651,8 +640,6 @@ function restoreCameraSettings() {
     if (typeof saved.automaticIsoAxis === "boolean") automaticIsoAxis = saved.automaticIsoAxis;
     if (typeof saved.exposureTime === "number" && Number.isFinite(saved.exposureTime)) preferredExposureTime = saved.exposureTime;
     if (saved.workers && [...decodeWorkers.options].some((option) => option.value === saved.workers)) decodeWorkers.value = saved.workers;
-    if (["camera-auto", "single-shot", "manual"].includes((_b = saved.manualFocusMode) != null ? _b : "")) manualFocusMode = saved.manualFocusMode;
-    if (typeof saved.focusDistance === "number" && Number.isFinite(saved.focusDistance)) preferredFocusDistance = saved.focusDistance;
     if (typeof saved.iso === "number" && Number.isFinite(saved.iso)) preferredIso = saved.iso;
   } catch {
   }
@@ -667,8 +654,6 @@ function saveCameraSettings() {
       automaticIsoAxis,
       exposureTime: preferredExposureTime,
       workers: decodeWorkers.value,
-      manualFocusMode,
-      focusDistance: preferredFocusDistance,
       iso: preferredIso
     }));
   } catch {
@@ -758,7 +743,7 @@ const focusController = new FocusController(
   applyCameraConstraint,
   renderFocusDiagnostics,
   "auto",
-  preferredFocusDistance,
+  void 0,
   "auto",
   () => frameId
 );
@@ -855,7 +840,6 @@ async function maintainManualOptics(now) {
     manualOpticsRepairRunning = false;
   }
 }
-focusMode.value = manualFocusMode;
 const DEV_SETTINGS_TOGGLE_WINDOW_MS = 500;
 const DEVELOPER_MODE_EVER_KEY = "airgapper:developer-mode-ever:v1";
 let developerModeEverUsed = false;
@@ -3392,30 +3376,53 @@ function formatExposureMs(value) {
 function showExposureTime(value) {
   cameraExposureValue.value = formatExposureMs(value);
 }
+function quantizedInputValue(input, value) {
+  if (!(Number.isFinite(value) && value > 0)) return void 0;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const step = Number(input.step);
+  if (!(Number.isFinite(min) && Number.isFinite(max) && min < max)) return value;
+  return quantizeCameraRange(value, { min, max, step: Number.isFinite(step) && step > 0 ? step : 0 });
+}
+function seedManualAxisFromTrack(track, key, input) {
+  return quantizedInputValue(input, Number(track?.getSettings?.()?.[key]));
+}
+function syncManualOpticsReadback(track = stream?.getVideoTracks?.()[0]) {
+  if (!track || cameraOpticsManual.hidden) return;
+  const actual = track.getSettings();
+  if (automaticExposureAxis) {
+    const value = quantizedInputValue(cameraExposure, Number(actual.exposureTime));
+    if (value !== void 0) {
+      cameraExposure.value = String(value);
+      cameraExposureValue.value = `Auto · ${formatExposureMs(value)}`;
+    } else cameraExposureValue.value = "Auto";
+  }
+  if (automaticIsoAxis) {
+    const value = quantizedInputValue(cameraIso, Number(actual.iso));
+    if (value !== void 0) {
+      cameraIso.value = String(value);
+      cameraIsoValue.value = `Auto · ${Number(value.toPrecision(4))}`;
+    } else cameraIsoValue.value = "Auto";
+  }
+}
 function syncExposureControls() {
   cameraExposureAuto.checked = automaticOptics;
   exposureAxisAuto.checked = automaticExposureAxis;
   isoAxisAuto.checked = automaticIsoAxis;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
   opticsAutoActions.hidden = !automaticOptics;
-  focusMode.value = manualFocusMode;
-  const manualFocus = manualFocusMode === "manual";
-  focusDistanceControl.classList.toggle("manual-focus", manualFocus);
-  focusMode.hidden = false;
-  focusDistance.hidden = !manualFocus;
-  focusDistanceValue.hidden = !manualFocus;
-  focusAxisReset.hidden = !manualFocus;
-  focusAxisName.hidden = manualFocus;
-  for (const [automatic, toggle, slider, output, reset, name] of [
-    [automaticExposureAxis, exposureAxisToggle, cameraExposure, cameraExposureValue, exposureAxisReset, exposureAxisName],
-    [automaticIsoAxis, isoAxisToggle, cameraIso, cameraIsoValue, isoAxisReset, isoAxisName]
+  for (const [automatic, control, slider, output, manualLabel] of [
+    [automaticExposureAxis, cameraExposureManual, cameraExposure, cameraExposureValue,
+      preferredExposureTime > 0 ? formatExposureMs(preferredExposureTime) : "—"],
+    [automaticIsoAxis, cameraIsoControl, cameraIso, cameraIsoValue,
+      preferredIso > 0 ? String(Number(preferredIso.toPrecision(4))) : "—"]
   ]) {
-    toggle.hidden = !automatic;
-    slider.hidden = automatic;
-    output.hidden = automatic;
-    reset.hidden = automatic;
-    name.hidden = !automatic;
+    control.classList.toggle("is-auto", automatic);
+    slider.disabled = automatic;
+    slider.setAttribute("aria-disabled", String(automatic));
+    output.value = automatic ? "Auto" : manualLabel;
   }
+  syncManualOpticsReadback();
 }
 async function applyExposureSetting(track) {
   var _a, _b;
@@ -3461,12 +3468,15 @@ async function applyExposureSetting(track) {
     ...requestedIso !== void 0 ? { iso: requestedIso } : {}
   });
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-  cameraExposure.value = String(requestedExposure);
-  showExposureTime(requestedExposure);
-  if (requestedIso !== void 0) {
+  if (!automaticExposureAxis) {
+    cameraExposure.value = String(requestedExposure);
+    showExposureTime(requestedExposure);
+  }
+  if (!automaticIsoAxis && requestedIso !== void 0) {
     cameraIso.value = String(requestedIso);
     cameraIsoValue.value = String(Number(requestedIso.toPrecision(4)));
   }
+  syncExposureControls();
 }
 function resetAutomaticOpticsRuntime() {
   autoOpticsRuntimeState = "ae";
@@ -4917,17 +4927,6 @@ function renderFocusDiagnostics() {
   const diagnostic = focusController == null ? void 0 : focusController.diagnostics();
   if (!diagnostic) return;
   focusDev.hidden = diagnostic.state === "UNAVAILABLE";
-  focusMode.value = manualFocusMode;
-  for (const option of focusMode.options) option.disabled = !diagnostic.availableModes.includes(option.value);
-  const range = diagnostic.distanceRange;
-  focusDistanceControl.hidden = automaticOptics || !range && diagnostic.availableModes.length === 0;
-  if (range) {
-    focusDistance.min = String(range.min);
-    focusDistance.max = String(range.max);
-    focusDistance.step = String(range.step || (range.max - range.min) / 100 || 0.01);
-    if (document.activeElement !== focusDistance) focusDistance.value = String((_a = preferredFocusDistance != null ? preferredFocusDistance : diagnostic.actualDistance) != null ? _a : range.min);
-    focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
-  }
   for (const input of focusTuningInputs) {
     const key = input.dataset.cameraTuning;
     if (document.activeElement !== input) input.value = String(CAMERA_TUNING[key]);
@@ -5080,20 +5079,6 @@ ${manualVerdict}` : "",
 ${diagnostic.transitions.join("\n")}` : ""
   ].filter(Boolean).join("\n");
 }
-focusMode.addEventListener("change", () => {
-  holdDecoderForCameraMutation("manual focus mode changing", 500);
-  manualFocusMode = focusMode.value;
-  syncExposureControls();
-  saveCameraSettings();
-  focusController.setStrategy(manualFocusMode);
-});
-focusDistance.addEventListener("input", () => {
-  holdDecoderForCameraMutation("manual focus changing", 500);
-  preferredFocusDistance = Number(focusDistance.value);
-  focusDistanceValue.value = Number(focusDistance.value).toPrecision(4);
-  saveCameraSettings();
-  focusController.setManualDistance(preferredFocusDistance);
-});
 for (const input of focusTuningInputs) input.addEventListener("change", () => {
   const key = input.dataset.cameraTuning;
   const value = Number(input.value);
@@ -5198,30 +5183,30 @@ cameraExposureAuto.addEventListener("change", () => {
 });
 exposureAxisAuto.addEventListener("change", () => {
   automaticExposureAxis = exposureAxisAuto.checked;
+  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
+  if (!automaticExposureAxis && track) {
+    const value = seedManualAxisFromTrack(track, "exposureTime", cameraExposure);
+    if (value !== void 0) {
+      preferredExposureTime = value;
+      cameraExposure.value = String(value);
+    }
+  }
   syncExposureControls();
   saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (track) void applyExposureSetting(track);
 });
 isoAxisAuto.addEventListener("change", () => {
   automaticIsoAxis = isoAxisAuto.checked;
+  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
+  if (!automaticIsoAxis && track) {
+    const value = seedManualAxisFromTrack(track, "iso", cameraIso);
+    if (value !== void 0) {
+      preferredIso = value;
+      cameraIso.value = String(value);
+    }
+  }
   syncExposureControls();
   saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-exposureAxisReset.addEventListener("click", () => {
-  automaticExposureAxis = true;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-  if (track) void applyExposureSetting(track);
-});
-isoAxisReset.addEventListener("click", () => {
-  automaticIsoAxis = true;
-  syncExposureControls();
-  saveCameraSettings();
-  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
   if (track) void applyExposureSetting(track);
 });
 function queueExposureChange(immediate = false) {
@@ -8645,6 +8630,7 @@ function updateStats(forceDiagnostics = false) {
   if (done) return;
   const now = receiverNow();
   if (optimizeEnabled) beginOptimizeWhenReady();
+  if (!cameraOpticsManual.hidden) syncManualOpticsReadback();
   const paintDiagnostics = forceDiagnostics || !receiverDevActions.hidden && now - lastDiagnosticsPaintAt >= DIAGNOSTICS_TICK_MS;
   if (paintDiagnostics) {
     lastDiagnosticsPaintAt = now;

@@ -271,17 +271,18 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .focus-tuning summary { cursor: pointer; }
 .focus-tuning > div { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 6px; padding-top: 6px; }
 .focus-tuning input { width: 100%; }
-.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.optics-manual[hidden], .optics-manual .axis-control[hidden], .optics-manual [hidden] { display: none !important; }
-.axis-control { position: relative; display: grid; grid-template-rows: auto 34px; gap: 3px; min-width: 0; }
-.axis-heading { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-.axis-heading output { color: var(--ink); font-size: 10px; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
-.axis-heading button { padding: 0; color: var(--ink); background: none; border: 0; font: inherit; text-transform: uppercase; cursor: pointer; }
-.axis-control.manual-focus #focus-axis-reset { pointer-events: none; }
-.axis-control.manual-focus #focus-mode { position: absolute; left: 0; top: 0; z-index: 1; width: 42px; min-height: 16px; height: 16px; padding: 0; opacity: 0; cursor: pointer; }
-.axis-control .setting-toggle { flex-direction: row; justify-content: flex-start; width: 100%; }
-.axis-control input[type="range"] { min-width: 0; width: 100%; height: 34px; }
-.axis-control input[type="checkbox"] { margin: 0; accent-color: #222; }
+.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.optics-manual[hidden], .optics-manual .axis-control[hidden] { display: none !important; }
+.axis-control { display: grid; grid-template-rows: auto 34px auto; gap: 6px; min-width: 0; padding: 9px 10px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
+.axis-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; min-width: 0; }
+.axis-title { min-width: 0; color: var(--ink); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.axis-heading output { min-width: 0; color: var(--ink); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.axis-heading .axis-auto-toggle { display: flex; flex-direction: row; align-items: center; gap: 4px; width: auto; min-height: 24px; padding: 2px 6px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; font-size: 10px; font-weight: 650; text-transform: none; letter-spacing: 0; cursor: pointer; }
+.axis-heading .axis-auto-toggle input { width: auto; margin: 0; accent-color: #222; }
+.axis-control input[type="range"] { min-width: 0; width: 100%; height: 34px; margin: 0; padding-inline: 4px; }
+.axis-control input[type="range"]:disabled { opacity: .42; cursor: default; }
+.axis-scale { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; line-height: 1; letter-spacing: .02em; }
+.axis-control.is-auto .axis-scale { opacity: .55; }
 .setting-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 8px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .setting-toggle input { margin: 0; accent-color: #222; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
