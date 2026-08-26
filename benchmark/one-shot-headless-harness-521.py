@@ -12,13 +12,6 @@ def replace_once(path, old, new, label):
 
 replace_once(
     "benchmark/offline-runner.mjs",
-    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 5;''',
-    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 6;''',
-    "acquisition scan budget",
-)
-
-replace_once(
-    "benchmark/offline-runner.mjs",
     '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
     '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    firstProductionFrame: median(trials.map((item) => item.firstProductionFrame == null ? NaN : Number(item.firstProductionFrame))),\n    firstLockedStateFrame: median(trials.map((item) => item.firstLockedStateFrame == null ? NaN : Number(item.firstLockedStateFrame))),\n    fullJobs: median(trials.map((item) => Number(item.fullJobs))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
     "startup trial medians",
