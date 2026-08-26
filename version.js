@@ -1,6 +1,6 @@
 import "./audio/output-level.js";
 
-export const APP_VERSION = "0.5.552";
+export const APP_VERSION = "0.5.553";
 export const APP_BUILD = `v${APP_VERSION}`;
 
 let updateCheckPending = false;
@@ -38,4 +38,5 @@ if (typeof window !== "undefined") {
   document.getElementById("home-button")?.addEventListener("click", () => {
     setTimeout(() => void checkForAppUpdate(), 0);
   });
+  setInterval(() => void checkForAppUpdate(), 5000);
 }
