@@ -58,6 +58,7 @@ const headerReceiverQr = document.getElementById("receiver-link-qr");
 
 const VALID_PACKET_FLASH_MS = 120;
 const PROFILE_KEY = "airgapper:audio-profile:v1";
+const ULTRA_REPEAT = 4;
 
 let currentMode = null;
 let sendSession = null;
@@ -309,8 +310,8 @@ const completeLabel = document.createElement("strong");
 completeLabel.className = "complete-label";
 completeLabel.textContent = "✓ Complete";
 const speedFeedback = document.createElement("span");
-speedFeedback.className = "speed-feedback";
 const speedValue = document.createElement("strong");
+speedFeedback.className = "speed-feedback";
 speedFeedback.append(speedValue);
 receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
 const progressTrack = document.createElement("div");
@@ -598,6 +599,7 @@ const profileInput = document.createElement("select");
 profileInput.setAttribute("aria-label", "Audio profile");
 profileInput.append(
   new Option("Reliable", "reliable"),
+  new Option("Ultra Reliable", "ultra"),
   new Option("Fast", "fast"),
   new Option("Quiet", "quiet")
 );
@@ -609,7 +611,7 @@ sendActive.append(sendToolbar);
 
 try {
   const savedProfile = localStorage.getItem(PROFILE_KEY);
-  if (savedProfile === "reliable" || savedProfile === "fast" || savedProfile === "quiet") profileInput.value = savedProfile;
+  if (savedProfile === "reliable" || savedProfile === "ultra" || savedProfile === "fast" || savedProfile === "quiet") profileInput.value = savedProfile;
   localStorage.removeItem("airgapper:audio-speed:v1");
   localStorage.removeItem("airgapper:audio-sound:v1");
 } catch {}
@@ -620,16 +622,22 @@ function syncStoredProfile() {
 syncStoredProfile();
 
 function activeProfile() {
-  return profileInput.value === "fast" || profileInput.value === "quiet" ? profileInput.value : "reliable";
+  return profileInput.value === "fast" || profileInput.value === "quiet" || profileInput.value === "ultra"
+    ? profileInput.value
+    : "reliable";
 }
 function profileEstimate(profile) {
   if (profile === "fast") return FAST_ESTIMATED_KBPS;
   if (profile === "quiet") return QUIET_ESTIMATED_KBPS;
+  if (profile === "ultra") return AUDIO_ESTIMATED_KBPS / ULTRA_REPEAT;
   return AUDIO_ESTIMATED_KBPS;
+}
+function formatProfileRate(kbs) {
+  return kbs < 0.1 ? `~${Math.max(1, Math.round(kbs * 1024))} B/s` : `~${kbs.toFixed(1)} KB/s`;
 }
 function updateSendStatus(session) {
   if (!session || sendSession !== session) return;
-  setStatus(`Sending ${session.label} · ~${profileEstimate(activeProfile()).toFixed(1)} KB/s`);
+  setStatus(`Sending ${session.label} · ${formatProfileRate(profileEstimate(activeProfile()))}`);
 }
 function stopScheduledSources(session) {
   if (!session) return;
@@ -716,6 +724,11 @@ function takeBlocks(transport, count) {
   }
   return { startOrdinal, blocks };
 }
+function repeatWaveform(waveform, count) {
+  const out = new Float32Array(waveform.length * count);
+  for (let i = 0; i < count; i++) out.set(waveform, i * waveform.length);
+  return out;
+}
 function buildSendWaveform(session) {
   const profile = activeProfile();
   const epoch = session.profileEpoch;
@@ -737,10 +750,11 @@ function buildSendWaveform(session) {
     };
   }
   const { startOrdinal, blocks } = takeBlocks(transport, RELIABLE_PACKETS_PER_FRAME);
+  const waveform = modulateReliableFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks);
   return {
     epoch,
     profile,
-    waveform: modulateReliableFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
+    waveform: profile === "ultra" ? repeatWaveform(waveform, ULTRA_REPEAT) : waveform
   };
 }
 function scheduleWaveform(session, prepared) {
