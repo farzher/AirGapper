@@ -3,28 +3,28 @@ import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
 const FFT_SIZE = 1024;
-const CYCLIC_PREFIX = 384;
+const CYCLIC_PREFIX = 512;
 const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
-const FFT_WINDOW_EARLY = 64;
+const FFT_WINDOW_EARLY = 80;
 const ACTIVE_FIRST = 32; // 1.50 kHz
-const ACTIVE_LAST = 192; // 9.00 kHz
+const ACTIVE_LAST = 171; // 8.02 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
-const PILOT_EVERY = 8;
+const PILOT_EVERY = 6;
 const FRAME_SYMBOLS = 12;
 const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
 const BITS_PER_CARRIER = 2;
 const SPREAD_COPIES = 2;
-const SYMBOL_RMS = 0.23;
-const PEAK_LIMIT = 0.92;
+const SYMBOL_RMS = 0.25;
+const PEAK_LIMIT = 0.93;
 const ACQUIRE_SYMBOLS = 3;
-const ACQUIRE_THRESHOLD = 0.065;
-const TRACK_THRESHOLD = 0.022;
-const MARKER_MAX_RESIDUAL = 1.05;
+const ACQUIRE_THRESHOLD = 0.05;
+const TRACK_THRESHOLD = 0.018;
+const MARKER_MAX_RESIDUAL = 1.15;
 const AUDIO_BLOCK_SIZE = 24;
 const FRAME_HEADER_BYTES = 16;
 const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x36]); // AGR6
+const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x37]); // AGR7
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -165,7 +165,12 @@ function interleaveStep(capacity) {
 }
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
 const SPREAD_SLOTS = new Uint16Array(CODED_BITS * SPREAD_COPIES);
-for (let i = 0; i < SPREAD_SLOTS.length; i++) SPREAD_SLOTS[i] = i * INTERLEAVE_STEP % SLOT_BITS;
+const USED_SPREAD_SLOTS = new Uint8Array(SLOT_BITS);
+for (let i = 0; i < SPREAD_SLOTS.length; i++) {
+  const slot = i * INTERLEAVE_STEP % SLOT_BITS;
+  SPREAD_SLOTS[i] = slot;
+  USED_SPREAD_SLOTS[slot] = 1;
+}
 
 function modeSourceSize(mode) {
   return mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
@@ -246,6 +251,26 @@ function combineSpreadSoft(slots) {
     coded[bit] = clamp((a + b) * 0.5, -1, 1);
   }
   return coded;
+}
+function fillerCorrelation(a, b) {
+  let dot = 0;
+  let aa = 0;
+  let bb = 0;
+  for (let i = 0; i < SLOT_BITS; i++) {
+    if (USED_SPREAD_SLOTS[i]) continue;
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    aa += x * x;
+    bb += y * y;
+  }
+  if (aa < 1e-8 || bb < 1e-8) return 0;
+  return dot / Math.sqrt(aa * bb);
+}
+function combineSoftFrames(a, b) {
+  const out = new Float32Array(SLOT_BITS);
+  for (let i = 0; i < SLOT_BITS; i++) out[i] = clamp(a[i] + b[i], -1, 1);
+  return out;
 }
 
 function fft(real, imag, inverse = false) {
@@ -453,7 +478,7 @@ function fitPhaseCorrection(errorReal, errorImag) {
     residual += (ur - 1) * (ur - 1) + ui * ui;
   }
   residual /= PILOT_COUNT;
-  return { slope: slopeTotal, cpe, residual, strengths, reliability: clamp(1 / (1 + 5 * residual), 0.04, 1) };
+  return { slope: slopeTotal, cpe, residual, strengths, reliability: clamp(1 / (1 + 5 * residual), 0.03, 1) };
 }
 function classifyMarker(previous, current) {
   let best = null;
@@ -531,6 +556,7 @@ class ReliableScanner {
     this.frameSlots = null;
     this.frameWrite = 0;
     this.frameNextSymbol = -1;
+    this.previousFailedSlots = null;
     this.markerFailures = 0;
   }
   append(chunk) {
@@ -599,7 +625,7 @@ class ReliableScanner {
       const predicted = this.nextSymbolStart;
       let start = predicted;
       let cpScore = cpCorrelation(this.samples, start, 2);
-      for (let candidate = Math.max(0, predicted - 18); candidate <= predicted + 18; candidate++) {
+      for (let candidate = Math.max(0, predicted - 28); candidate <= predicted + 28; candidate++) {
         if (candidate + SYMBOL_SAMPLES > this.length) break;
         const score = cpCorrelation(this.samples, candidate, 2);
         if (score > cpScore) {
@@ -630,7 +656,18 @@ class ReliableScanner {
             if (this.frameSlots && symbol === this.frameNextSymbol) {
               this.frameWrite = decodeTransition(this.previousSpectrum, current, marker, this.frameSlots, this.frameWrite);
               if (symbol === FRAME_SYMBOLS - 1) {
-                const packets = decodeSlots(this.frameSlots);
+                let packets = decodeSlots(this.frameSlots);
+                if (!packets.length) {
+                  if (this.previousFailedSlots && fillerCorrelation(this.previousFailedSlots, this.frameSlots) >= 0.55) {
+                    const combined = combineSoftFrames(this.previousFailedSlots, this.frameSlots);
+                    packets = decodeSlots(combined);
+                    this.previousFailedSlots = packets.length ? null : combined;
+                  } else {
+                    this.previousFailedSlots = this.frameSlots.slice();
+                  }
+                } else {
+                  this.previousFailedSlots = null;
+                }
                 for (const packet of packets) this.onPacket(packet);
                 this.frameSlots = null;
                 this.frameWrite = 0;
@@ -649,7 +686,7 @@ class ReliableScanner {
       this.previousSpectrum = current;
       this.nextSymbolStart = start + SYMBOL_SAMPLES;
       this.scan = this.nextSymbolStart;
-      if (this.markerFailures >= 4) {
+      if (this.markerFailures >= 5) {
         this.loseLock(start);
         continue;
       }
@@ -673,6 +710,7 @@ class ReliableScanner {
     this.frameSlots = null;
     this.frameWrite = 0;
     this.frameNextSymbol = -1;
+    this.previousFailedSlots = null;
     this.markerFailures = 0;
   }
 }
