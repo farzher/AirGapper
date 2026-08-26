@@ -6,30 +6,28 @@ const FFT_SIZE = 1024;
 const CYCLIC_PREFIX = 128;
 const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
 const FFT_WINDOW_EARLY = 16;
-const ACTIVE_FIRST = 24;
-const ACTIVE_LAST = 384;
+const ACTIVE_FIRST = 24; // 1.125 kHz
+const ACTIVE_LAST = 437; // 20.48 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
 const PILOT_EVERY = 16;
 const FRAME_SYMBOLS = 16;
 const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
-const BITS_PER_CARRIER = 3;
+const BITS_PER_CARRIER = 4;
 const SYMBOL_RMS = 0.18;
 const PEAK_LIMIT = 0.86;
 const ACQUIRE_SYMBOLS = 3;
 const ACQUIRE_THRESHOLD = 0.16;
 const TRACK_THRESHOLD = 0.05;
 const MARKER_MAX_RESIDUAL = 0.86;
-const PUNCTURE = new Uint8Array([1, 1, 0, 1]);
+const PUNCTURE = new Uint8Array([1, 1, 1, 0, 0, 1]); // rate 3/4
 const AUDIO_BLOCK_SIZE = 24;
 const FRAME_HEADER_BYTES = 16;
 const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x36]); // AGF6
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x37]); // AGF7
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
-const GRAY_TO_PHASE = new Uint8Array([0, 1, 3, 2, 7, 6, 4, 5]);
-const PHASE_TO_GRAY = new Uint8Array([0, 1, 3, 2, 6, 7, 5, 4]);
 
 const PILOT_POSITIONS = [];
 const DATA_POSITIONS = [];
@@ -41,14 +39,6 @@ const PILOT_COUNT = PILOT_POSITIONS.length;
 const DATA_CARRIERS = DATA_POSITIONS.length;
 const BITS_PER_SYMBOL = DATA_CARRIERS * BITS_PER_CARRIER;
 const SLOT_BITS = DATA_SYMBOLS * BITS_PER_SYMBOL;
-const INFO_BITS = Math.floor(SLOT_BITS * 2 / 3) - TAIL_BITS;
-const INFO_BYTES = Math.floor(INFO_BITS / 8);
-const FAST_PACKETS_PER_FRAME = Math.floor((INFO_BYTES - FRAME_HEADER_BYTES - FRAME_CRC_BYTES) / AUDIO_BLOCK_SIZE);
-const FRAME_BYTES = FRAME_HEADER_BYTES + FAST_PACKETS_PER_FRAME * AUDIO_BLOCK_SIZE + FRAME_CRC_BYTES;
-const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
-const FAST_FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000;
-const FAST_ESTIMATED_KBPS = FAST_PACKETS_PER_FRAME * (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
-  (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -123,16 +113,38 @@ function convolutionalEncode(info) {
   }
   return out;
 }
+function puncturedLength(infoBits) {
+  const codedLength = (infoBits + TAIL_BITS) * 2;
+  let kept = 0;
+  for (let i = 0; i < codedLength; i++) if (PUNCTURE[i % PUNCTURE.length]) kept++;
+  return kept;
+}
+let INFO_BITS = Math.max(8, Math.floor(SLOT_BITS * 3 / 4) - TAIL_BITS);
+while (puncturedLength(INFO_BITS) > SLOT_BITS) INFO_BITS--;
+while (puncturedLength(INFO_BITS + 1) <= SLOT_BITS) INFO_BITS++;
+const PUNCTURED_BITS = puncturedLength(INFO_BITS);
+const INFO_BYTES = Math.floor(INFO_BITS / 8);
+const FAST_PACKETS_PER_FRAME = Math.floor((INFO_BYTES - FRAME_HEADER_BYTES - FRAME_CRC_BYTES) / AUDIO_BLOCK_SIZE);
+const FRAME_BYTES = FRAME_HEADER_BYTES + FAST_PACKETS_PER_FRAME * AUDIO_BLOCK_SIZE + FRAME_CRC_BYTES;
+const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
+const FAST_FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000;
+const FAST_ESTIMATED_KBPS = FAST_PACKETS_PER_FRAME * (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
+  (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
+
 function puncture(coded) {
-  const out = new Uint8Array(SLOT_BITS);
+  const out = new Uint8Array(PUNCTURED_BITS);
   let write = 0;
-  for (let i = 0; i < coded.length; i++) if (PUNCTURE[i & 3]) out[write++] = coded[i];
+  for (let i = 0; i < coded.length && write < out.length; i++) {
+    if (PUNCTURE[i % PUNCTURE.length]) out[write++] = coded[i];
+  }
   return out;
 }
 function depuncture(soft) {
   const full = new Float32Array((INFO_BITS + TAIL_BITS) * 2);
   let read = 0;
-  for (let i = 0; i < full.length; i++) if (PUNCTURE[i & 3]) full[i] = soft[read++] || 0;
+  for (let i = 0; i < full.length; i++) {
+    if (PUNCTURE[i % PUNCTURE.length] && read < soft.length) full[i] = soft[read++];
+  }
   return full;
 }
 function softBitCost(expected, observation) {
@@ -190,14 +202,16 @@ function interleaveStep(capacity) {
   return step;
 }
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
-function interleave(coded) {
-  const slots = new Uint8Array(SLOT_BITS);
-  for (let i = 0; i < coded.length; i++) slots[i * INTERLEAVE_STEP % SLOT_BITS] = coded[i];
+const INTERLEAVE_POSITIONS = new Uint16Array(PUNCTURED_BITS);
+for (let i = 0; i < PUNCTURED_BITS; i++) INTERLEAVE_POSITIONS[i] = i * INTERLEAVE_STEP % SLOT_BITS;
+function interleave(coded, seed) {
+  const slots = randomBits(SLOT_BITS, seed);
+  for (let i = 0; i < coded.length; i++) slots[INTERLEAVE_POSITIONS[i]] = coded[i];
   return slots;
 }
 function deinterleaveSoft(slots) {
-  const coded = new Float32Array(SLOT_BITS);
-  for (let i = 0; i < coded.length; i++) coded[i] = slots[i * INTERLEAVE_STEP % SLOT_BITS];
+  const coded = new Float32Array(PUNCTURED_BITS);
+  for (let i = 0; i < coded.length; i++) coded[i] = slots[INTERLEAVE_POSITIONS[i]];
   return coded;
 }
 
@@ -244,6 +258,13 @@ function fft(real, imag, inverse = false) {
   }
 }
 
+const GRAY_TO_PHASE = new Uint8Array(16);
+const PHASE_TO_GRAY = new Uint8Array(16);
+for (let phase = 0; phase < 16; phase++) {
+  const gray = phase ^ phase >> 1;
+  PHASE_TO_GRAY[phase] = gray;
+  GRAY_TO_PHASE[gray] = phase;
+}
 const PILOT_REAL = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
 const PILOT_IMAG = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
 for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
@@ -252,60 +273,62 @@ for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
   PILOT_IMAG[symbol].set(vector.imag);
 }
 
-function buildInfo(payloadId, totalLen, mode, startOrdinal, blocks) {
-  if (!Array.isArray(blocks) || blocks.length !== FAST_PACKETS_PER_FRAME) throw new Error("Fast frame block count mismatch.");
+function buildFrameBytes(payloadId, totalLen, mode, startOrdinal, blocks) {
+  if (!Array.isArray(blocks) || blocks.length !== FAST_PACKETS_PER_FRAME) throw new Error("Fast frame packet count mismatch.");
   const modeCode = MODE_CODES.get(mode);
   if (modeCode === undefined || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Invalid Fast transport metadata.");
-  const raw = new Uint8Array(FRAME_BYTES);
-  raw.set(MAGIC, 0);
-  const view = new DataView(raw.buffer);
+  const out = new Uint8Array(FRAME_BYTES);
+  out.set(MAGIC, 0);
+  const view = new DataView(out.buffer);
   view.setUint32(4, payloadId >>> 0, true);
   view.setUint32(8, totalLen >>> 0, true);
-  raw[12] = modeCode;
+  out[12] = modeCode;
   const ordinal = Number(startOrdinal) >>> 0;
-  raw[13] = ordinal >>> 16 & 255;
-  raw[14] = ordinal >>> 8 & 255;
-  raw[15] = ordinal & 255;
-  let offset = FRAME_HEADER_BYTES;
+  out[13] = ordinal >>> 16 & 255;
+  out[14] = ordinal >>> 8 & 255;
+  out[15] = ordinal & 255;
+  let write = FRAME_HEADER_BYTES;
   for (const block of blocks) {
     if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Fast transport block size.");
-    raw.set(block, offset);
-    offset += AUDIO_BLOCK_SIZE;
+    out.set(block, write);
+    write += AUDIO_BLOCK_SIZE;
   }
-  view.setUint32(FRAME_BYTES - FRAME_CRC_BYTES, crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES)), true);
-  const rawBits = bytesToBits(raw);
-  const info = new Uint8Array(INFO_BITS);
-  info.set(rawBits);
-  if (rawBits.length < info.length) info.set(randomBits(info.length - rawBits.length, 0x51f15e), rawBits.length);
-  return info;
+  view.setUint32(FRAME_BYTES - FRAME_CRC_BYTES, crc32(out.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES)), true);
+  return out;
 }
-function parseFrame(info) {
-  const raw = bitsToBytes(info, FRAME_BYTES);
+function parseFrame(raw) {
+  if (!(raw instanceof Uint8Array) || raw.length < FRAME_BYTES) return [];
   for (let i = 0; i < MAGIC.length; i++) if (raw[i] !== MAGIC[i]) return [];
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   if (view.getUint32(FRAME_BYTES - FRAME_CRC_BYTES, true) !== crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES))) return [];
   const totalLen = view.getUint32(8, true);
   const mode = MODE_NAMES[raw[12]];
   if (!mode || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return [];
+  const startOrdinal = raw[13] * 65536 + raw[14] * 256 + raw[15];
   const k = sourceCount(totalLen, mode);
   if (codingMode(k) !== mode) return [];
-  const payloadId = view.getUint32(4, true) >>> 0;
-  const startOrdinal = raw[13] * 65536 + raw[14] * 256 + raw[15];
   const packets = [];
-  let offset = FRAME_HEADER_BYTES;
   for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
+    const encodingId = scheduledId(mode, startOrdinal + i);
+    const start = FRAME_HEADER_BYTES + i * AUDIO_BLOCK_SIZE;
     packets.push({
-      payloadId,
+      payloadId: view.getUint32(4, true) >>> 0,
       totalLen,
       mode,
-      encodingId: scheduledId(mode, startOrdinal + i),
+      encodingId,
       blockSize: AUDIO_BLOCK_SIZE,
-      block: raw.slice(offset, offset + AUDIO_BLOCK_SIZE),
+      block: raw.slice(start, start + AUDIO_BLOCK_SIZE),
       profile: "fast"
     });
-    offset += AUDIO_BLOCK_SIZE;
   }
   return packets;
+}
+function buildInfo(payloadId, totalLen, mode, startOrdinal, blocks) {
+  const raw = buildFrameBytes(payloadId, totalLen, mode, startOrdinal, blocks);
+  const rawBits = bytesToBits(raw);
+  const info = randomBits(INFO_BITS, payloadId ^ Math.imul((startOrdinal >>> 0) + 1, 0x51f15e));
+  info.set(rawBits.subarray(0, Math.min(rawBits.length, info.length)));
+  return info;
 }
 
 function ofdmSymbol(carrierReal, carrierImag) {
@@ -329,11 +352,12 @@ function ofdmSymbol(carrierReal, carrierImag) {
   out.set(body, CYCLIC_PREFIX);
   return out;
 }
-function apply8Dpsk(real, imag, slots, read) {
+function apply16Dpsk(real, imag, slots, read) {
   for (const carrier of DATA_POSITIONS) {
-    const gray = (slots[read++] || 0) << 2 | (slots[read++] || 0) << 1 | (slots[read++] || 0);
+    let gray = 0;
+    for (let bit = 0; bit < BITS_PER_CARRIER; bit++) gray = gray << 1 | (slots[read++] || 0);
     const phaseIndex = GRAY_TO_PHASE[gray];
-    const angle = phaseIndex * Math.PI / 4;
+    const angle = phaseIndex * Math.PI / 8;
     const cr = Math.cos(angle);
     const ci = Math.sin(angle);
     const r = real[carrier];
@@ -345,7 +369,8 @@ function apply8Dpsk(real, imag, slots, read) {
 }
 function modulateFastFrame(payloadId, totalLen, mode, startOrdinal, blocks) {
   const info = buildInfo(payloadId, totalLen, mode, startOrdinal, blocks);
-  const slots = interleave(puncture(convolutionalEncode(info)));
+  const coded = puncture(convolutionalEncode(info));
+  const slots = interleave(coded, payloadId ^ Math.imul((startOrdinal >>> 0) + 1, 0x7f4a7c15));
   const waveform = new Float32Array(FRAME_SAMPLES);
   const anchor = randomPhaseVector((payloadId ^ Math.imul((startOrdinal >>> 0) + 1, 0x9e3779b1)) >>> 0, CARRIER_COUNT);
   const carrierReal = anchor.real;
@@ -358,7 +383,7 @@ function modulateFastFrame(payloadId, totalLen, mode, startOrdinal, blocks) {
   waveform.set(ofdmSymbol(carrierReal, carrierImag), 0);
   let read = 0;
   for (let symbol = 1; symbol < FRAME_SYMBOLS; symbol++) {
-    read = apply8Dpsk(carrierReal, carrierImag, slots, read);
+    read = apply16Dpsk(carrierReal, carrierImag, slots, read);
     for (let p = 0; p < PILOT_COUNT; p++) {
       const carrier = PILOT_POSITIONS[p];
       carrierReal[carrier] = PILOT_REAL[symbol][p];
@@ -454,7 +479,7 @@ function fitPhaseCorrection(errorReal, errorImag) {
     residual += (ur - 1) * (ur - 1) + ui * ui;
   }
   residual /= PILOT_COUNT;
-  return { slope: slopeTotal, cpe, residual, reliability: clamp(1 / (1 + 5 * residual), 0.06, 1) };
+  return { slope: slopeTotal, cpe, residual, reliability: clamp(1 / (1 + 5 * residual), 0.05, 1) };
 }
 function classifyMarker(previous, current) {
   let best = null;
@@ -483,50 +508,53 @@ function classifyMarker(previous, current) {
   }
   return best && best.residual <= MARKER_MAX_RESIDUAL ? best : null;
 }
-function demod8Dpsk(previous, current, correction, slots, write) {
+function demod16Dpsk(previous, current, correction, slots, write) {
   for (const carrier of DATA_POSITIONS) {
     const bin = ACTIVE_FIRST + carrier;
     const pr = previous.real[bin];
     const pi = previous.imag[bin];
     const cr = current.real[bin];
     const ci = current.imag[bin];
-    let r = cr * pr + ci * pi;
-    let q = ci * pr - cr * pi;
+    const dr = cr * pr + ci * pi;
+    const di = ci * pr - cr * pi;
     const angle = -(correction.cpe + correction.slope * carrier);
     const ar = Math.cos(angle);
     const ai = Math.sin(angle);
-    const nr = r * ar - q * ai;
-    const nq = r * ai + q * ar;
+    const nr = dr * ar - di * ai;
+    const nq = dr * ai + di * ar;
     const magnitude = Math.hypot(nr, nq);
     if (!Number.isFinite(magnitude) || magnitude < 1e-12) {
-      slots[write++] = 0;
-      slots[write++] = 0;
-      slots[write++] = 0;
+      for (let bit = 0; bit < BITS_PER_CARRIER; bit++) slots[write++] = 0;
       continue;
     }
-    r = nr / magnitude;
-    q = nq / magnitude;
-    const d0 = [Infinity, Infinity, Infinity];
-    const d1 = [Infinity, Infinity, Infinity];
-    for (let phaseIndex = 0; phaseIndex < 8; phaseIndex++) {
-      const theta = phaseIndex * Math.PI / 4;
-      const dr = r - Math.cos(theta);
-      const di = q - Math.sin(theta);
-      const distance = dr * dr + di * di;
+    const r = nr / magnitude;
+    const q = nq / magnitude;
+    const d0 = new Float64Array(BITS_PER_CARRIER);
+    const d1 = new Float64Array(BITS_PER_CARRIER);
+    d0.fill(Infinity);
+    d1.fill(Infinity);
+    for (let phaseIndex = 0; phaseIndex < 16; phaseIndex++) {
+      const theta = phaseIndex * Math.PI / 8;
+      const xr = r - Math.cos(theta);
+      const xq = q - Math.sin(theta);
+      const distance = xr * xr + xq * xq;
       const gray = PHASE_TO_GRAY[phaseIndex];
-      for (let bit = 0; bit < 3; bit++) {
-        if (gray >> (2 - bit) & 1) d1[bit] = Math.min(d1[bit], distance);
+      for (let bit = 0; bit < BITS_PER_CARRIER; bit++) {
+        if (gray >> (BITS_PER_CARRIER - 1 - bit) & 1) d1[bit] = Math.min(d1[bit], distance);
         else d0[bit] = Math.min(d0[bit], distance);
       }
     }
-    for (let bit = 0; bit < 3; bit++) {
-      slots[write++] = clamp((d0[bit] - d1[bit]) * 1.4, -1, 1) * correction.reliability;
+    for (let bit = 0; bit < BITS_PER_CARRIER; bit++) {
+      slots[write++] = clamp((d0[bit] - d1[bit]) * 1.25, -1, 1) * correction.reliability;
     }
   }
   return write;
 }
 function decodePackets(slots) {
-  return parseFrame(convolutionalDecode(depuncture(deinterleaveSoft(slots))));
+  const coded = deinterleaveSoft(slots);
+  const info = convolutionalDecode(depuncture(coded));
+  const raw = bitsToBytes(info, FRAME_BYTES);
+  return parseFrame(raw);
 }
 
 class FastScanner {
@@ -635,7 +663,7 @@ class FastScanner {
           } else {
             if (!this.frameSlots && symbol === 1) this.beginFrame();
             if (this.frameSlots && symbol === this.frameNextSymbol) {
-              this.frameWrite = demod8Dpsk(this.previousSpectrum, current, marker, this.frameSlots, this.frameWrite);
+              this.frameWrite = demod16Dpsk(this.previousSpectrum, current, marker, this.frameSlots, this.frameWrite);
               if (symbol === FRAME_SYMBOLS - 1) {
                 const packets = decodePackets(this.frameSlots);
                 if (packets.length) this.onPackets(packets);
