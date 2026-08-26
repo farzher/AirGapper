@@ -1,3 +1,5 @@
+import QRCode from "../vendor/qrcode.js";
+import { rasterizeQr } from "../shared/qr-raster.js";
 import { formatBytes } from "../shared/format.js";
 import { completedGoodputKbs, estimateTransferProgress, formatDuration } from "../shared/progress.js";
 import { fnv1a, packFile, unpackFile, verifyFile } from "../shared/protocol.js";
@@ -22,8 +24,6 @@ import {
 
 const audioView = document.getElementById("audioView");
 const directionChooser = document.querySelector(".audio-mode-switch");
-const sendModeButton = document.getElementById("audio-mode-send");
-const receiveModeButton = document.getElementById("audio-mode-receive");
 const sendPane = document.getElementById("audio-send-pane");
 const receivePane = document.getElementById("audio-receive-pane");
 const sendInputs = document.getElementById("audio-send-inputs");
@@ -38,8 +38,12 @@ const status = document.getElementById("audio-status");
 const legacyProgress = document.getElementById("audio-progress");
 const result = document.getElementById("audio-result");
 const standardResult = document.getElementById("result");
+const receiverLinkDialog = document.getElementById("receiver-link-dialog");
+const receiverLinkQrLarge = document.getElementById("receiver-link-qr-large");
+const receiverLinkUrl = document.getElementById("receiver-link-url");
+const headerReceiverQr = document.getElementById("receiver-link-qr");
 
-let currentMode = "choose";
+let currentMode = null;
 let sendSession = null;
 let receiveSession = null;
 let visualizerFrame = 0;
@@ -47,55 +51,90 @@ let visualizerCanvas = null;
 let visualizerAnalyser = null;
 let visualizerSignal = false;
 let smoothedBars = new Float32Array(48);
+let audioDialogActive = false;
 
-// Audio is a transport, not a second miniature app. The direction choice is a
-// one-time entry screen and disappears once Send or Receive is selected.
 audioView.classList.remove("audio-shell");
 audioView.style.width = "100%";
-directionChooser.className = "home";
-directionChooser.removeAttribute("role");
-directionChooser.removeAttribute("aria-label");
-sendModeButton.className = "mode";
-receiveModeButton.className = "mode";
-sendModeButton.textContent = "Send audio";
-receiveModeButton.textContent = "Receive audio";
-sendModeButton.removeAttribute("role");
-receiveModeButton.removeAttribute("role");
-sendModeButton.removeAttribute("aria-selected");
-receiveModeButton.removeAttribute("aria-selected");
+directionChooser.hidden = true;
 legacyProgress.hidden = true;
 status.hidden = true;
+sendPane.hidden = true;
+receivePane.hidden = true;
 result.remove();
 
 function sourceBlockSize(mode) {
   return mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
 }
-
 function sourceBlockCount(totalLen, mode) {
   return Math.max(1, Math.ceil(totalLen / sourceBlockSize(mode)));
 }
-
 function selectAudioTransport(totalLen) {
   return codingMode(Math.max(1, Math.ceil(totalLen / AUDIO_BLOCK_SIZE)));
 }
-
 function setStatus(text, error = false) {
   status.textContent = text;
   status.classList.toggle("error", error);
   status.hidden = currentMode !== "send" || !text;
 }
-
 function clearResult() {
   result.replaceChildren();
   clearReceivedResult();
 }
-
 async function showReceivedResult(file) {
   clearResult();
   if (isSnippet(file)) showReceivedSnippet(snippetText(file));
   else await showStandardReceivedFile(file);
   result.replaceChildren(...standardResult.childNodes);
 }
+
+function receiverUrl(audio = false) {
+  const fallback = audio ? "https://farzher.github.io/AirGapper/?a" : "https://farzher.github.io/AirGapper/?r";
+  try {
+    const url = new URL(headerReceiverQr?.dataset.receiverUrl || fallback);
+    url.search = audio ? "?a" : "?r";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return fallback;
+  }
+}
+function renderDialogQr(url) {
+  const qr = QRCode.create(url, { errorCorrectionLevel: "L" });
+  const raster = rasterizeQr(qr.modules.size, qr.modules.data, 4);
+  const dpr = window.devicePixelRatio || 1;
+  const scale = Math.max(1, Math.round(240 * dpr / raster.size));
+  const source = document.createElement("canvas");
+  source.width = source.height = raster.size;
+  source.getContext("2d").putImageData(
+    new ImageData(new Uint8ClampedArray(raster.pixels.buffer), raster.size, raster.size),
+    0,
+    0
+  );
+  receiverLinkQrLarge.width = receiverLinkQrLarge.height = raster.size * scale;
+  receiverLinkQrLarge.style.width = receiverLinkQrLarge.style.height = `${receiverLinkQrLarge.width / dpr}px`;
+  receiverLinkQrLarge.style.imageRendering = "pixelated";
+  const ctx = receiverLinkQrLarge.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, receiverLinkQrLarge.width, receiverLinkQrLarge.height);
+  ctx.drawImage(source, 0, 0, receiverLinkQrLarge.width, receiverLinkQrLarge.height);
+  receiverLinkUrl.href = url;
+  try {
+    const parsed = new URL(url);
+    receiverLinkUrl.textContent = `${parsed.host}${parsed.pathname.replace(/\/$/, "")}${parsed.search}`;
+  } catch {
+    receiverLinkUrl.textContent = url.replace(/^https?:\/\//, "");
+  }
+}
+function openAudioReceiverQr() {
+  audioDialogActive = true;
+  renderDialogQr(receiverUrl(true));
+  receiverLinkDialog.showModal();
+}
+receiverLinkDialog.addEventListener("close", () => {
+  if (!audioDialogActive) return;
+  audioDialogActive = false;
+  renderDialogQr(receiverUrl(false));
+});
 
 function makePreviewCanvas(label) {
   const zone = document.createElement("div");
@@ -117,7 +156,6 @@ function makePreviewCanvas(label) {
   zone.append(preview);
   return { zone, canvas };
 }
-
 function resizeVisualizer(canvas) {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
@@ -129,7 +167,6 @@ function resizeVisualizer(canvas) {
   }
   return { width, height, dpr };
 }
-
 function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
   if (!canvas?.isConnected) return;
   const { width, height, dpr } = resizeVisualizer(canvas);
@@ -141,7 +178,6 @@ function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = styles.getPropertyValue("--card").trim() || "#fff";
   ctx.fillRect(0, 0, width, height);
-
   const bars = smoothedBars.length;
   let bins = null;
   if (analyser) {
@@ -154,17 +190,13 @@ function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
   const barWidth = Math.max(2 * dpr, (availableWidth - gap * (bars - 1)) / bars);
   const center = height * 0.5;
   const maxHalf = Math.max(12 * dpr, height * 0.34);
-
   ctx.fillStyle = muted;
   ctx.globalAlpha = 0.65;
   ctx.fillRect(padding, center - 0.5 * dpr, availableWidth, dpr);
   ctx.globalAlpha = 1;
-
   for (let i = 0; i < bars; i++) {
     let target = idle ? 0.025 + 0.012 * Math.sin(performance.now() / 700 + i * 0.55) : 0.018;
     if (bins?.length) {
-      // Bias the display toward the useful speech/music band while still showing
-      // the modem's wide upper carriers. Log-ish bin spacing keeps it readable.
       const t = i / Math.max(1, bars - 1);
       const index = Math.min(bins.length - 1, Math.round((0.025 + Math.pow(t, 1.45) * 0.86) * bins.length));
       target = Math.pow(bins[index] / 255, 1.3);
@@ -181,7 +213,6 @@ function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
   }
   ctx.globalAlpha = 1;
 }
-
 function stopVisualizer() {
   cancelAnimationFrame(visualizerFrame);
   visualizerFrame = 0;
@@ -189,7 +220,6 @@ function stopVisualizer() {
   visualizerAnalyser = null;
   visualizerSignal = false;
 }
-
 function startVisualizer(canvas, analyser = null, signal = false) {
   stopVisualizer();
   visualizerCanvas = canvas;
@@ -202,11 +232,9 @@ function startVisualizer(canvas, analyser = null, signal = false) {
   };
   tick();
 }
-
 function setVisualizerAnalyser(analyser) {
   visualizerAnalyser = analyser;
 }
-
 function setVisualizerSignal(active) {
   visualizerSignal = active;
 }
@@ -214,12 +242,10 @@ function setVisualizerSignal(active) {
 // Receive -------------------------------------------------------------------
 receivePane.replaceChildren();
 receivePane.className = "receiver-primary";
-
 listenButton.textContent = "Enable microphone";
 listenButton.className = "enable-camera";
 listenButton.hidden = false;
 const receivePreview = makePreviewCanvas("Live audio level visualizer");
-
 const receivePanel = document.createElement("section");
 receivePanel.className = "transfer-panel";
 receivePanel.setAttribute("aria-live", "polite");
@@ -281,7 +307,6 @@ function resetReceiveUi() {
   receivePreview.zone.hidden = false;
   drawVisualizer(receivePreview.canvas, null, false, true);
 }
-
 function updateReceiveProgress(session) {
   if (!session.identity || !session.startedAt || !session.decoder) return;
   receivePanel.hidden = false;
@@ -298,7 +323,6 @@ function updateReceiveProgress(session) {
   const liveKbs = usefulSymbols * session.sourceBlockSize / 1024 / elapsedSeconds;
   speedValue.textContent = usefulSymbols >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "";
 }
-
 function completeReceiveUi(session, file) {
   receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
@@ -315,7 +339,6 @@ function completeReceiveUi(session, file) {
   receivePreview.zone.hidden = true;
   stopVisualizer();
 }
-
 async function failReceiveSession(session, message) {
   if (receiveSession === session) receiveSession = null;
   try { session.decoder?.free?.(); } catch {}
@@ -324,7 +347,6 @@ async function failReceiveSession(session, message) {
   releaseScreenWakeLock();
   showReceiveError(message);
 }
-
 function showReceiveError(message) {
   clearResult();
   const error = document.createElement("p");
@@ -337,7 +359,6 @@ function showReceiveError(message) {
   setVisualizerAnalyser(null);
   setVisualizerSignal(false);
 }
-
 async function acceptPacket(session, frame) {
   if (receiveSession !== session || session.finishing) return;
   const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
@@ -357,13 +378,11 @@ async function acceptPacket(session, frame) {
     session.startedAt = performance.now();
     sizeLabel.textContent = formatBytes(frame.totalLen);
   }
-
   session.decoder.addFrame(frame.encodingId, frame.block);
   updateReceiveProgress(session);
   if (!session.decoder.isComplete) return;
   const recovered = session.decoder.assemble();
   if (!recovered) return;
-
   session.finishing = true;
   try {
     if (fnv1a(recovered) !== session.payloadId) throw new Error("Recovered audio data did not verify.");
@@ -380,7 +399,6 @@ async function acceptPacket(session, frame) {
     await failReceiveSession(session, error?.message || "Audio receive failed.");
   }
 }
-
 async function stopReceiver(reset = true) {
   const session = receiveSession;
   receiveSession = null;
@@ -392,7 +410,6 @@ async function stopReceiver(reset = true) {
   if (reset) resetReceiveUi();
   releaseScreenWakeLock();
 }
-
 async function startListening() {
   stopSender(false);
   await stopReceiver(false);
@@ -456,14 +473,18 @@ sendActive.className = "";
 sendActive.replaceChildren();
 sendActive.style.width = "100%";
 sendActive.append(sendPreview.zone);
-
 const sendToolbar = document.createElement("div");
 sendToolbar.className = "send-toolbar";
+sendToolbar.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
 const settingsButton = document.createElement("button");
 settingsButton.type = "button";
 settingsButton.className = "secondary-button send-toolbar-button";
 settingsButton.textContent = "Settings";
 settingsButton.setAttribute("aria-expanded", "false");
+const receiverQrButton = document.createElement("button");
+receiverQrButton.type = "button";
+receiverQrButton.className = "secondary-button send-toolbar-button";
+receiverQrButton.textContent = "Receive QR";
 stopSendButton.className = "secondary-button send-toolbar-button";
 stopSendButton.textContent = "Stop";
 const settingsPanel = document.createElement("div");
@@ -488,7 +509,7 @@ volumeValue.style.letterSpacing = "0";
 volumeLabel.append(volumeTitle, volumeInput, volumeValue);
 settingsGrid.append(volumeLabel);
 settingsPanel.append(settingsGrid);
-sendToolbar.append(settingsButton, stopSendButton, settingsPanel);
+sendToolbar.append(settingsButton, receiverQrButton, stopSendButton, settingsPanel);
 sendActive.append(sendToolbar);
 
 const VOLUME_KEY = "airgapper:audio-volume:v1";
@@ -508,7 +529,7 @@ settingsButton.addEventListener("click", () => {
   settingsPanel.hidden = !settingsPanel.hidden;
   settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
 });
-
+receiverQrButton.addEventListener("click", openAudioReceiverQr);
 function resetSendUi() {
   sendInputs.hidden = false;
   sendActive.hidden = true;
@@ -518,7 +539,6 @@ function resetSendUi() {
   settingsButton.setAttribute("aria-expanded", "false");
   stopVisualizer();
 }
-
 function cleanupSendSession(session) {
   if (!session) return;
   session.stopped = true;
@@ -529,7 +549,6 @@ function cleanupSendSession(session) {
   try { session.encoder?.free(); } catch {}
   if (session.context?.state !== "closed") void session.context?.close().catch(() => void 0);
 }
-
 function stopSender(reset = true) {
   const session = sendSession;
   sendSession = null;
@@ -540,12 +559,10 @@ function stopSender(reset = true) {
   }
   releaseScreenWakeLock();
 }
-
 async function stopAll(reset = true) {
   stopSender(reset);
   await stopReceiver(reset);
 }
-
 function joinedWaveform(frames) {
   let length = 0;
   for (const frame of frames) length += frame.length;
@@ -557,7 +574,6 @@ function joinedWaveform(frames) {
   }
   return joined;
 }
-
 async function playWaveform(session, waveform) {
   if (sendSession !== session || session.stopped) return;
   const buffer = session.context.createBuffer(1, waveform.length, SAMPLE_RATE);
@@ -573,7 +589,6 @@ async function playWaveform(session, waveform) {
   try { source.disconnect(); } catch {}
   if (session.source === source) session.source = null;
 }
-
 async function startSending(container, label) {
   await stopReceiver(false);
   stopSender(false);
@@ -618,7 +633,6 @@ async function startSending(container, label) {
     setStatus(`Sending ${label} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
     startVisualizer(sendPreview.canvas, analyser, true);
     void requestScreenWakeLock();
-
     while (sendSession === session && !session.stopped) {
       const frames = [];
       for (let i = 0; i < 4; i++) {
@@ -634,7 +648,6 @@ async function startSending(container, label) {
     setStatus(error?.message || "Audio send failed.", true);
   }
 }
-
 async function sendFile(file) {
   if (!file) return;
   if (file.size > MAX_AUDIO_BYTES) {
@@ -652,7 +665,6 @@ async function sendFile(file) {
     fileInput.value = "";
   }
 }
-
 async function sendText() {
   setStatus("Preparing…");
   try {
@@ -678,35 +690,16 @@ async function setMode(mode) {
   setStatus("");
   resetSendUi();
   resetReceiveUi();
-  if (mode === "receive") startVisualizer(receivePreview.canvas, null, false);
-  if (mode === "send" && !matchMedia("(pointer: coarse)").matches) textInput.focus({ preventScroll: true });
+  if (mode === "receive") void startListening();
+  else if (!matchMedia("(pointer: coarse)").matches) textInput.focus({ preventScroll: true });
 }
 
-async function showDirectionChooser() {
-  await stopAll(false);
-  currentMode = "choose";
-  audioView.classList.remove("receiver-shell");
-  document.body.classList.remove("receive-mode");
-  directionChooser.hidden = false;
-  sendPane.hidden = true;
-  receivePane.hidden = true;
-  status.hidden = true;
-  clearResult();
-  setStatus("");
-  resetSendUi();
-  resetReceiveUi();
-  stopVisualizer();
-}
-
-sendModeButton.addEventListener("click", () => void setMode("send"));
-receiveModeButton.addEventListener("click", () => void setMode("receive"));
 sendTextButton.addEventListener("click", () => void sendText());
 fileInput.addEventListener("change", () => void sendFile(fileInput.files?.[0]));
 stopSendButton.addEventListener("click", () => stopSender(true));
 listenButton.addEventListener("click", () => {
   if (!receiveSession) void startListening();
 });
-
 for (const type of ["dragenter", "dragover"]) {
   filePicker.addEventListener(type, (event) => {
     event.preventDefault();
@@ -721,25 +714,33 @@ for (const type of ["dragleave", "drop"]) {
 }
 filePicker.addEventListener("drop", (event) => void sendFile(event.dataTransfer?.files?.[0]));
 
+window.addEventListener("airgapper:audio-direction", (event) => {
+  const direction = event.detail?.direction;
+  if (direction === "send" || direction === "receive") void setMode(direction);
+});
 window.addEventListener("resize", () => {
   if (visualizerCanvas) drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerSignal, !visualizerAnalyser);
 });
 window.addEventListener("airgapper:leave-mode", () => {
-  if (audioView.classList.contains("active") || sendSession || receiveSession) {
-    void showDirectionChooser();
-  }
+  if (!audioView.classList.contains("active") && !sendSession && !receiveSession) return;
+  void stopAll(false).then(() => {
+    currentMode = null;
+    document.body.classList.remove("receive-mode");
+    audioView.classList.remove("receiver-shell");
+    sendPane.hidden = true;
+    receivePane.hidden = true;
+    status.hidden = true;
+    stopVisualizer();
+  });
 });
 window.addEventListener("airgapper:pause-mode", () => {
-  if (audioView.classList.contains("active") && (sendSession || receiveSession)) {
-    void stopAll(false).then(() => {
-      if (currentMode === "send") resetSendUi();
-      if (currentMode === "receive") resetReceiveUi();
-    });
-  }
+  if (!audioView.classList.contains("active") || !currentMode) return;
+  void stopAll(false).then(() => {
+    if (currentMode === "send") resetSendUi();
+    if (currentMode === "receive") resetReceiveUi();
+  });
 });
 window.addEventListener("airgapper:resume-mode", () => {
   if (!audioView.classList.contains("active")) return;
-  if (currentMode === "receive" && !receiveSession) startVisualizer(receivePreview.canvas, null, false);
+  if (currentMode === "receive" && !receiveSession) void startListening();
 });
-
-void showDirectionChooser();
