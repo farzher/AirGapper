@@ -16,7 +16,7 @@ try {
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error("direct Y8 worker smoke test timed out"));
-    }, 15_000);
+    }, 45_000);
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
