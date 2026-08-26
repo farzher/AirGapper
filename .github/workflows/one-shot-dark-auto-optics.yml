@@ -2,10 +2,8 @@ name: stage dark auto optics startup
 
 on:
   push:
-    branches:
-      - chatgpt/auto-optics-dark-start-515
-    paths:
-      - .github/workflows/one-shot-dark-auto-optics.yml
+    branches: [chatgpt/auto-optics-dark-start-515]
+    paths: [.github/workflows/one-shot-dark-auto-optics.yml]
 
 permissions:
   contents: write
@@ -17,125 +15,68 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
       - name: Apply guarded source edits
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:120]!r}")
-              p.write_text(text.replace(old, new, 1))
+          def rep(path, old, new):
+              p = Path(path); s = p.read_text(); n = s.count(old)
+              if n != 1: raise SystemExit(f"{path}: anchor count {n}: {old[:100]!r}")
+              p.write_text(s.replace(old, new, 1))
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               'const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v5";',
-              'const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v6";'
-          )
+              'const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v6";')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''let autoOpticsHeldYield = 0;\nlet autoOpticsAeBaseline;\nlet autoOpticsMemoryBootAt = 0;''',
-              '''let autoOpticsHeldYield = 0;\nlet autoOpticsAeBaseline;\n// A pre-play manual seed is only needed on cameras that expose shutter+ISO but\n// no negative EV compensation. Keep that bootstrap evidence outside the normal\n// runtime reset so capability/UI initialization cannot erase it before attach.\nconst autoOpticsPreplaySeeds = new WeakMap();\nlet autoOpticsMemoryBootAt = 0;'''
-          )
+              '''let autoOpticsHeldYield = 0;\nlet autoOpticsAeBaseline;\n// Pre-play manual bootstrap for cameras with shutter+ISO but no negative EV axis.\nconst autoOpticsPreplaySeeds = new WeakMap();\nlet autoOpticsMemoryBootAt = 0;''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {\n  const aeProduct = baseline.exposure * baseline.iso;\n  const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);\n  // Acquisition can explore both sides of the meter, but every seed keeps a\n  // short shutter so rolling-shutter safety is never traded away.\n  const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);''',
-              '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt) {\n  const aeProduct = baseline.exposure * baseline.iso;\n  const seedPolicy = automaticOpticsAcquisitionSeed(attempt);\n  // Seed lightScale is absolute relative to photographic neutral. The baseline\n  // may already be dark-biased hardware AE, so normalize against the actual EV\n  // scale instead of accidentally applying the dark bias twice.\n  const baselineScale = Number.isFinite(baseline.lightScale) && baseline.lightScale > 0\n    ? baseline.lightScale : 1;\n  const targetProduct = Math.max(\n    exposureRange.min * isoRange.min,\n    aeProduct * seedPolicy.lightScale / baselineScale\n  );'''
-          )
+              '''function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt) {\n  const aeProduct = baseline.exposure * baseline.iso;\n  const seedPolicy = automaticOpticsAcquisitionSeed(attempt);\n  // lightScale is absolute relative to photographic neutral. Normalize against\n  // the EV scale the meter actually accepted so a biased baseline is not darkened twice.\n  const baselineScale = Number.isFinite(baseline.lightScale) && baseline.lightScale > 0 ? baseline.lightScale : 1;\n  const targetProduct = Math.max(\n    exposureRange.min * isoRange.min,\n    aeProduct * seedPolicy.lightScale / baselineScale\n  );''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''  const patch = { exposureMode: "continuous" };\n  if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {\n    patch.exposureCompensation = quantizeCameraRange(0, caps.exposureCompensation);\n  }''',
-              '''  const patch = { exposureMode: "continuous" };\n  if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {\n    // Hardware AE remains useful as a meter, but photographic neutral is not a\n    // QR operating point. Re-meter at the same dark bias used before playback.\n    patch.exposureCompensation = quantizeCameraRange(\n      Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS)),\n      caps.exposureCompensation\n    );\n  }'''
-          )
+              '''  const patch = { exposureMode: "continuous" };\n  if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {\n    // Meter below photographic neutral; do not brighten back to 0 EV while settling.\n    patch.exposureCompensation = quantizeCameraRange(\n      Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS)),\n      caps.exposureCompensation\n    );\n  }''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''  const exposure = Number(settings.exposureTime);\n  const iso = Number(settings.iso);\n  if (!(exposure > 0) || !(iso > 0)) return void 0;\n  return { exposure, iso, at: receiverNow(), neutral: true };\n}\nasync function applyAutomaticShortSeed''',
-              '''  const exposure = Number(settings.exposureTime);\n  const iso = Number(settings.iso);\n  if (!(exposure > 0) || !(iso > 0)) return void 0;\n  const actualEv = Number(settings.exposureCompensation);\n  const lightScale = Number.isFinite(actualEv) ? Math.min(1, Math.pow(2, actualEv)) : 1;\n  return { exposure, iso, at: receiverNow(), neutral: lightScale >= 0.999, lightScale };\n}\nasync function applyAutomaticShortSeed'''
-          )
+              '''  const exposure = Number(settings.exposureTime);\n  const iso = Number(settings.iso);\n  if (!(exposure > 0) || !(iso > 0)) return void 0;\n  const actualEv = Number(settings.exposureCompensation);\n  const lightScale = Number.isFinite(actualEv) ? Math.min(1, Math.pow(2, actualEv)) : 1;\n  return { exposure, iso, at: receiverNow(), neutral: lightScale >= 0.999, lightScale };\n}\nasync function applyAutomaticShortSeed''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");\n  return true;\n}\nasync function applyAutomaticOpticsMemoryBoot''',
-              '''  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");\n  return true;\n}\nasync function primeAutomaticQrOpticsBeforePlayback(track) {\n  if (!track || track.readyState !== "live") return false;\n  const caps = track.getCapabilities?.() ?? {};\n  const evRange = caps.exposureCompensation;\n\n  // Preferred path: put hardware AE below photographic neutral before the video\n  // element or frame pump can observe a frame. The later AE meter uses the same\n  // bias, so startup never flashes back to neutral while it settles.\n  if (evRange && evRange.min < 0 && evRange.max >= 0) {\n    await applyExposureSetting(track);\n    return true;\n  }\n\n  // Some cameras expose real shutter+ISO but no EV axis. We can still honor the\n  // dark-start invariant: snapshot the camera's initial AE only as a numerical\n  // reference, then switch to the first dark short-shutter seed before playback.\n  const exposureRange = caps.exposureTime;\n  const isoRange = caps.iso;\n  const modes = Array.isArray(caps.exposureMode) ? caps.exposureMode : [];\n  const settings = track.getSettings();\n  const exposure = Number(settings.exposureTime);\n  const iso = Number(settings.iso);\n  if (modes.includes("manual") && exposureRange && isoRange && exposure > 0 && iso > 0) {\n    const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));\n    const baseline = { exposure, iso, at: receiverNow(), neutral: true, lightScale: 1 };\n    const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, 0);\n    const accepted = await applyCameraConstraint(track, {\n      exposureMode: "manual",\n      exposureTime: seed.exposure,\n      iso: seed.iso\n    });\n    if (accepted && track.readyState === "live") {\n      const actual = track.getSettings();\n      autoOpticsPreplaySeeds.set(track, {\n        baseline,\n        exposure: Number(actual.exposureTime) || seed.exposure,\n        iso: Number(actual.iso) || seed.iso,\n        policy: seed.seedPolicy\n      });\n      return true;\n    }\n  }\n\n  // If the browser exposes neither a negative EV axis nor manual shutter+ISO,\n  // it gives us no mechanism to force a darker sensor state. Keep normal camera\n  // startup rather than inventing an unsupported constraint.\n  await applyExposureSetting(track);\n  return false;\n}\nasync function applyAutomaticOpticsMemoryBoot'''
-          )
+              '''  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");\n  return true;\n}\nasync function primeAutomaticQrOpticsBeforePlayback(track) {\n  if (!track || track.readyState !== "live") return false;\n  const caps = track.getCapabilities?.() ?? {};\n  const evRange = caps.exposureCompensation;\n\n  // Preferred path: install the negative QR EV bias before preview/frame capture.\n  if (evRange && evRange.min < 0 && evRange.max >= 0) {\n    await applyExposureSetting(track);\n    return true;\n  }\n\n  // No EV axis: if real sensor controls exist, derive a dark short-shutter seed\n  // from the initial AE numbers without ever presenting that AE state to decoding.\n  const exposureRange = caps.exposureTime;\n  const isoRange = caps.iso;\n  const modes = Array.isArray(caps.exposureMode) ? caps.exposureMode : [];\n  const settings = track.getSettings();\n  const exposure = Number(settings.exposureTime);\n  const iso = Number(settings.iso);\n  if (modes.includes("manual") && exposureRange && isoRange && exposure > 0 && iso > 0) {\n    const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));\n    const baseline = { exposure, iso, at: receiverNow(), neutral: true, lightScale: 1 };\n    const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, 0);\n    const accepted = await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: seed.exposure, iso: seed.iso });\n    if (accepted && track.readyState === "live") {\n      const actual = track.getSettings();\n      autoOpticsPreplaySeeds.set(track, {\n        baseline,\n        exposure: Number(actual.exposureTime) || seed.exposure,\n        iso: Number(actual.iso) || seed.iso,\n        policy: seed.seedPolicy\n      });\n      return true;\n    }\n  }\n\n  // No browser-exposed way to darken this camera; preserve compatibility.\n  await applyExposureSetting(track);\n  return false;\n}\nasync function applyAutomaticOpticsMemoryBoot''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''    const memory = usableAutomaticOpticsMemory(track);\n    if (memory && await applyAutomaticOpticsMemoryBoot(track, memory)) return;\n\n    // No usable memory: consult AE only as a brief light meter, then immediately\n    // leave it for a faster, deliberately darker shutter seed. Neutral AE remains\n    // the final rescue path, not the default operating point.\n    const baseline = await readAutomaticAeBaseline(track);''',
-              '''    const preplaySeed = autoOpticsPreplaySeeds.get(track);\n    autoOpticsPreplaySeeds.delete(track);\n    const memory = usableAutomaticOpticsMemory(track);\n    if (memory && await applyAutomaticOpticsMemoryBoot(track, memory)) return;\n\n    // A manual-capable/no-EV camera was already dark-seeded before playback. Do\n    // not switch it back through neutral AE merely to re-measure the reference.\n    if (preplaySeed) {\n      const now = receiverNow();\n      autoOpticsAeBaseline = preplaySeed.baseline;\n      autoOpticsRuntimeState = "seed";\n      autoOpticsSeedFullScansAt = fullScans;\n      autoOpticsLockSince = 0;\n      autoOpticsAcquisitionSince = now;\n      autoOpticsRetryAt = 0;\n      autoOpticsRescueRetryAt = now + AUTO_OPTICS_ACQUISITION_RESCUE_MS;\n      autoOpticsTuneSummary = `pre-play ${preplaySeed.policy.label} · ${formatExposureMs(preplaySeed.exposure)} · ISO ${Math.round(preplaySeed.iso)}`;\n      focusController.adoptAutomaticCameraState("dark short-shutter seed installed before first receiver frame");\n      return;\n    }\n\n    // No usable memory: consult already-biased AE only as a light meter, then\n    // immediately leave it for a short-shutter QR seed.\n    const baseline = await readAutomaticAeBaseline(track);'''
-          )
+              '''    const preplaySeed = autoOpticsPreplaySeeds.get(track);\n    autoOpticsPreplaySeeds.delete(track);\n    const memory = usableAutomaticOpticsMemory(track);\n    if (memory && await applyAutomaticOpticsMemoryBoot(track, memory)) return;\n\n    if (preplaySeed) {\n      const now = receiverNow();\n      autoOpticsAeBaseline = preplaySeed.baseline;\n      autoOpticsRuntimeState = "seed";\n      autoOpticsSeedFullScansAt = fullScans;\n      autoOpticsLockSince = 0;\n      autoOpticsAcquisitionSince = now;\n      autoOpticsRetryAt = 0;\n      autoOpticsRescueRetryAt = now + AUTO_OPTICS_ACQUISITION_RESCUE_MS;\n      autoOpticsTuneSummary = `pre-play ${preplaySeed.policy.label} · ${formatExposureMs(preplaySeed.exposure)} · ISO ${Math.round(preplaySeed.iso)}`;\n      focusController.adoptAutomaticCameraState("dark short-shutter seed installed before first receiver frame");\n      return;\n    }\n\n    // No usable memory: use already-biased AE only as a meter, then switch short.\n    const baseline = await readAutomaticAeBaseline(track);''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''  stream = acquiredStream;\n  const startupOpticsTrack = stream.getVideoTracks()[0];\n  if (startupOpticsTrack && !automaticOptics) {\n    seedDesiredCamera(startupOpticsTrack);\n    await applyExposureSetting(startupOpticsTrack);\n  }''',
-              '''  stream = acquiredStream;\n  const startupOpticsTrack = stream.getVideoTracks()[0];\n  if (startupOpticsTrack) {\n    seedDesiredCamera(startupOpticsTrack);\n    if (automaticOptics) await primeAutomaticQrOpticsBeforePlayback(startupOpticsTrack);\n    else await applyExposureSetting(startupOpticsTrack);\n  }'''
-          )
+              '''  stream = acquiredStream;\n  const startupOpticsTrack = stream.getVideoTracks()[0];\n  if (startupOpticsTrack) {\n    seedDesiredCamera(startupOpticsTrack);\n    if (automaticOptics) await primeAutomaticQrOpticsBeforePlayback(startupOpticsTrack);\n    else await applyExposureSetting(startupOpticsTrack);\n  }''')
 
-          replace_once(
-              "receive/runtime.js",
+          rep("receive/runtime.js",
               '''  if (range.min < 0) add(Math.max(range.min, -1), "dark rescue");\n  if (range.max > 0) add(Math.min(range.max, 1), "bright rescue");\n  add(0, "neutral retry");''',
-              '''  // Rescue explores around the QR-biased meter but never crosses back to\n  // photographic neutral. Low contrast alone does not justify a +EV brightness\n  // excursion on an emissive binary target.\n  if (range.min < 0) {\n    add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");\n    add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");\n    if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");\n  }'''
-          )
+              '''  // Stay below photographic neutral during AE rescue too.\n  if (range.min < 0) {\n    add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");\n    add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");\n    if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");\n  }''')
 
-          replace_once(
-              "receive/runtime.js",
-              '''// until live per-QR yield falls far enough below that measured winner to prove\n// the scene/optics changed, then recalibrate from neutral hardware AE.''',
-              '''// until live per-QR yield falls far enough below that measured winner to prove\n// the scene/optics changed, then recalibrate from QR-biased hardware AE.'''
-          )
-
-          replace_once(
-              "receive/runtime.js",
-              '''    // Roll back to the camera's own meter, not another guessed manual candidate.\n    // Once AE produces live QR again the normal post-lock path freezes that exact\n    // QR-proven setting and, only if weak, performs one bounded local bracket.''',
-              '''    // Roll back to the camera's own meter with the QR-specific dark bias retained,\n    // not another guessed manual candidate. Once biased AE produces live QR again\n    // the normal post-lock path freezes that exact QR-proven setting and, only if\n    // weak, performs one bounded local bracket.'''
-          )
-
-          replace_once(
-              "receive/runtime.js",
-              '''    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · neutral hardware AE recovery`;\n    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; neutral hardware AE restored");''',
-              '''    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · QR-biased hardware AE recovery`;\n    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; QR-biased hardware AE restored");'''
-          )
-
-          replace_once(
-              "receive/performance-policy.js",
+          rep("receive/performance-policy.js",
               '''const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([\n  // Default QR seed: short enough to avoid rolling-shutter smear and darker\n  // than photographic AE so white modules do not bloom into their neighbors.\n  Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),\n  // A noisy/max-ISO camera can still be much too bright for a binary modem.\n  // Explore the darker direction before assuming the first miss meant "more light".\n  Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),\n  // Then try neutral short-shutter exposure if the darker seeds were starved.\n  Object.freeze({ lightScale: 1, maxExposure: 45, frameFraction: 0.14, label: "neutral-short" }),\n  // Last QR-specific rescue before handing control back to hardware AE.\n  Object.freeze({ lightScale: Math.pow(2, 0.5), maxExposure: 55, frameFraction: 0.18, label: "bright-short" })\n]);''',
-              '''const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([\n  // Absolute light products relative to photographic neutral. Every candidate is\n  // deliberately darker; runtime normalizes these against whatever AE bias the\n  // camera actually accepted.\n  Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),\n  Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),\n  // If darker candidates are starved, approach neutral in bounded steps without\n  // ever reaching it.\n  Object.freeze({ lightScale: Math.pow(2, -0.5), maxExposure: 45, frameFraction: 0.14, label: "less-dark-short" }),\n  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 55, frameFraction: 0.18, label: "least-dark-short" })\n]);'''
-          )
+              '''const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([\n  // Absolute light products relative to photographic neutral. Every candidate\n  // stays darker; runtime normalizes these against the AE bias actually accepted.\n  Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),\n  Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),\n  Object.freeze({ lightScale: Math.pow(2, -0.5), maxExposure: 45, frameFraction: 0.14, label: "less-dark-short" }),\n  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 55, frameFraction: 0.18, label: "least-dark-short" })\n]);''')
 
-          replace_once(
-              "receive/performance-policy.js",
-              '''// designed for animated QR capture rather than immediately handing control back\n// to photographic AE. The ladder is intentionally tiny and bounded; once all\n// entries fail, hardware AE remains the universal fallback.''',
-              '''// designed for animated QR capture rather than immediately handing control back\n// to photographic AE. The ladder is intentionally tiny and bounded; every QR\n// candidate remains darker than photographic neutral.'''
-          )
-
-          replace_once(
-              "benchmark/browser-performance-policy-smoke.mjs",
+          rep("benchmark/browser-performance-policy-smoke.mjs",
               '''const source = fs.readFileSync(new URL("../receive/performance-policy.js", import.meta.url), "utf8");\nconst policy = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);''',
-              '''const decodeHealthSource = fs.readFileSync(new URL("../receive/decode-health.js", import.meta.url), "utf8");\nconst decodeHealthUrl = `data:text/javascript;base64,${Buffer.from(decodeHealthSource).toString("base64")}`;\nconst source = fs.readFileSync(new URL("../receive/performance-policy.js", import.meta.url), "utf8")\n  .replace('from "./decode-health.js";', `from "${decodeHealthUrl}";`);\nconst policy = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);'''
-          )
+              '''const decodeHealthSource = fs.readFileSync(new URL("../receive/decode-health.js", import.meta.url), "utf8");\nconst decodeHealthUrl = `data:text/javascript;base64,${Buffer.from(decodeHealthSource).toString("base64")}`;\nconst source = fs.readFileSync(new URL("../receive/performance-policy.js", import.meta.url), "utf8")\n  .replace('from "./decode-health.js";', `from "${decodeHealthUrl}";`);\nconst policy = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);''')
 
-          replace_once(
-              "benchmark/browser-performance-policy-smoke.mjs",
+          rep("benchmark/browser-performance-policy-smoke.mjs",
               '''// Auto Optics explores both sides of the initial QR exposure before AE fallback.\nconst seeds = [0, 1, 2, 3].map((index) => policy.automaticOpticsAcquisitionSeed(index));\nassert.deepEqual(seeds.map((seed) => seed.label), ["fast-dark", "extra-dark", "neutral-short", "bright-short"]);\nassert(seeds[1].lightScale < seeds[0].lightScale);\nassert(seeds[2].lightScale > seeds[0].lightScale);\nassert(seeds[3].lightScale > seeds[2].lightScale);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(0), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);''',
-              '''// Every QR-specific acquisition candidate is absolute relative to photographic\n// neutral and must stay below it.\nconst seeds = [0, 1, 2, 3].map((index) => policy.automaticOpticsAcquisitionSeed(index));\nassert.deepEqual(seeds.map((seed) => seed.label), ["fast-dark", "extra-dark", "less-dark-short", "least-dark-short"]);\nassert(seeds.every((seed) => seed.lightScale < 1));\nassert(seeds[1].lightScale < seeds[0].lightScale);\nassert(seeds[2].lightScale > seeds[0].lightScale);\nassert(seeds[3].lightScale > seeds[2].lightScale);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(0), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);\n\n// Production must bias exposure before playback/frame capture. Cameras without\n// an EV axis must use a dark manual seed when shutter+ISO are available, and AE\n// re-meter/rescue paths may not deliberately request neutral or positive EV.\nconst runtimeSource = fs.readFileSync(new URL("../receive/runtime.js", import.meta.url), "utf8");\nassert(runtimeSource.includes('const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v6";'));\nassert.match(runtimeSource, /if \\(automaticOptics\\) await primeAutomaticQrOpticsBeforePlayback\\(startupOpticsTrack\\);/);\nconst preplay = /async function primeAutomaticQrOpticsBeforePlayback\\(track\\) \\{([\\s\\S]*?)\\n\\}/.exec(runtimeSource)?.[1] ?? "";\nassert(preplay.includes("AUTO_QR_EV_BIAS"));\nassert(preplay.includes('exposureMode: "manual"'));\nconst aeBaseline = /async function readAutomaticAeBaseline\\(track\\) \\{([\\s\\S]*?)\\n\\}/.exec(runtimeSource)?.[1] ?? "";\nassert(aeBaseline.includes("AUTO_QR_EV_BIAS"));\nassert(!aeBaseline.includes("quantizeCameraRange(0, caps.exposureCompensation)"));\nassert(!runtimeSource.includes('"bright rescue"'));\nassert(!runtimeSource.includes('"neutral retry"'));'''
-          )
+              '''// Every QR-specific acquisition candidate stays below photographic neutral.\nconst seeds = [0, 1, 2, 3].map((index) => policy.automaticOpticsAcquisitionSeed(index));\nassert.deepEqual(seeds.map((seed) => seed.label), ["fast-dark", "extra-dark", "less-dark-short", "least-dark-short"]);\nassert(seeds.every((seed) => seed.lightScale < 1));\nassert(seeds[1].lightScale < seeds[0].lightScale);\nassert(seeds[2].lightScale > seeds[0].lightScale);\nassert(seeds[3].lightScale > seeds[2].lightScale);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(0), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), true);\nassert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);\n\nconst runtimeSource = fs.readFileSync(new URL("../receive/runtime.js", import.meta.url), "utf8");\nassert(runtimeSource.includes('const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v6";'));\nassert(runtimeSource.includes('if (automaticOptics) await primeAutomaticQrOpticsBeforePlayback(startupOpticsTrack);'));\nassert(runtimeSource.includes('async function primeAutomaticQrOpticsBeforePlayback(track)'));\nassert(runtimeSource.includes('const evRange = caps.exposureCompensation;'));\nassert(runtimeSource.includes('const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, 0);'));\nassert(runtimeSource.includes('Math.min(0, AUTO_QR_EV_BIAS)'));\nassert(!runtimeSource.includes('"bright rescue"'));\nassert(!runtimeSource.includes('"neutral retry"'));''')
 
-          replace_once(
-              "version.js",
-              'export const APP_VERSION = "0.5.514";',
-              'export const APP_VERSION = "0.5.515";'
-          )
+          rep("version.js", 'export const APP_VERSION = "0.5.514";', 'export const APP_VERSION = "0.5.515";')
           PY
 
       - name: Run targeted regressions
@@ -149,7 +90,6 @@ jobs:
           node benchmark/camera-constraints-smoke.mjs
           node benchmark/version-source-smoke.mjs
           git diff --check
-
       - name: Commit tested patch
         run: |
           set -euo pipefail
