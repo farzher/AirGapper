@@ -1,7 +1,7 @@
 import { QuietScanner } from "./quiet-stream.js";
 
 const SAMPLE_RATE = 48000;
-const FREQUENCIES = new Int32Array([17000, 18000, 19000, 20000]);
+const FREQUENCIES = new Int32Array([16000, 17000, 18000, 18500]);
 const WINDOW_SAMPLES = 512;
 const WINDOW_STEP = 128;
 const DIAGNOSTIC_SAMPLES = 2048;
