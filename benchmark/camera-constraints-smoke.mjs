@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 
 const events = [];
+globalThis.document = {
+  addEventListener() {},
+  getElementById() { return null; }
+};
 globalThis.window = {
+  addEventListener() {},
   dispatchEvent(event) {
     events.push(event);
     return true;
@@ -24,6 +29,7 @@ let settings = {
 };
 let writes = 0;
 const track = {
+  readyState: "live",
   getCapabilities() {
     return {
       exposureMode: ["continuous", "manual"],
