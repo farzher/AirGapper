@@ -118,11 +118,13 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
+          # Run the lightweight worker/browser smokes first so their startup
+          # deadlines are not polluted by the multi-trial stress regression.
           node benchmark/direct-y8-worker-smoke.mjs
           node benchmark/repeat-signature-worker-smoke.mjs
           node benchmark/rvfc-wrapper-smoke.mjs
           node benchmark/corpus-suite.mjs
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
 
       - name: Build Android app
         if: always()
