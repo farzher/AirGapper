@@ -1,0 +1,48 @@
+name: headless-harness-521
+
+on:
+  push:
+    branches:
+      - chatgpt/auto-optics-dark-ci-515
+    paths:
+      - .github/workflows/one-shot-headless-harness-521.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply harness patch
+        run: |
+          python3 benchmark/one-shot-headless-harness-521.py
+          node --input-type=module --check < benchmark/offline-runner.mjs
+          node --input-type=module --check < benchmark/run-agcap.mjs
+          git diff --check
+      - name: Run browser regression
+        run: |
+          set -euo pipefail
+          npm install --no-save --package-lock=false playwright@1.55.0
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
+          node benchmark/direct-y8-worker-smoke.mjs
+          node benchmark/repeat-signature-worker-smoke.mjs
+          node benchmark/rvfc-wrapper-smoke.mjs
+          node benchmark/corpus-suite.mjs
+      - name: Commit tested harness
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-headless-harness-521.yml benchmark/one-shot-headless-harness-521.py
+          git config user.name 'AirGapper Agent'
+          git config user.email 'actions@github.com'
+          git add benchmark/offline-runner.mjs benchmark/run-agcap.mjs
+          git commit -m 'Update lazy-loaded browser regression harness'
+          git push
