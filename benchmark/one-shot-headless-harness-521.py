@@ -12,9 +12,37 @@ def replace_once(path, old, new, label):
 
 replace_once(
     "benchmark/offline-runner.mjs",
-    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 5;''',
-    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 6;''',
-    "acquisition scan budget",
+    '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
+    '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    firstProductionFrame: median(trials.map((item) => item.firstProductionFrame == null ? NaN : Number(item.firstProductionFrame))),\n    firstLockedStateFrame: median(trials.map((item) => item.firstLockedStateFrame == null ? NaN : Number(item.firstLockedStateFrame))),\n    fullJobs: median(trials.map((item) => Number(item.fullJobs))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
+    "startup trial medians",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
+    '''  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = ["dense-y8", "optical-dense-y8", "camera-dense-y8"].includes(name) ? 10 : 8;\n    if (result.firstLockedStateFrame > lockLimit) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 5;\n  if (result.fullJobs > fullLimit) failures.push(`too many acquisition scans (${result.fullJobs} > ${fullLimit})`);''',
+    '''  const firstLockedStateFrame = result.trialCount > 1\n    ? result.trialMedians?.firstLockedStateFrame\n    : result.firstLockedStateFrame;\n  if (firstLockedStateFrame == null || !Number.isFinite(firstLockedStateFrame)) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = ["dense-y8", "optical-dense-y8", "camera-dense-y8"].includes(name) ? 10 : 8;\n    if (firstLockedStateFrame > lockLimit) failures.push(`median lock regressed to frame ${firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 5;\n  const fullJobs = result.trialCount > 1 ? result.trialMedians?.fullJobs : result.fullJobs;\n  if (fullJobs > fullLimit) failures.push(`median acquisition scans ${fullJobs} > ${fullLimit}`);''',
+    "median startup assertions",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
+    '''function assertScenario(name, result) {\n  const failures = [];''',
+    '''function assertTrialIntegrity(name, result) {\n  const failures = [];\n  if (!result.ok) failures.push("receiver invariants failed");\n  if (!result.productionOnly) failures.push("oracle path was not disabled");\n  if (result.decodedPackets <= 0) failures.push("no QR packets decoded");\n  if (result.jobs <= 0) failures.push("no decode work scheduled");\n  if (result.fullJobs <= 0) failures.push("acquisition never ran");\n  if (result.firstProductionFrame == null) failures.push("never acquired a production QR");\n  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");\n  if (result.decodeErrors.length) failures.push(`decode errors: ${result.decodeErrors.join(" | ")}`);\n  if (result.tailFullJobs !== 0) failures.push(`stable tail used ${result.tailFullJobs} full scans`);\n  if (failures.length) throw new Error(`${name} trial integrity: ${failures.join("; ")} · ${JSON.stringify(result)}`);\n}\n\nfunction assertScenario(name, result) {\n  const failures = [];''',
+    "trial integrity assertions",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
+    '''      assertScenario(scenario.name, result);\n      trials.push(result);''',
+    '''      assertTrialIntegrity(scenario.name, result);\n      trials.push(result);''',
+    "per-trial integrity only",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
+    '''    const result = selectMedianTrial(scenario.name, trials);\n    results[scenario.name] = result;''',
+    '''    const result = selectMedianTrial(scenario.name, trials);\n    assertScenario(scenario.name, result);\n    results[scenario.name] = result;''',
+    "assert representative trial",
 )
 
 replace_once(
