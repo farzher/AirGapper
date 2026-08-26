@@ -15,7 +15,7 @@ function quietBandLabel(db) {
 }
 function updateQuietReadout(element, levels) {
   if (!element || !Array.isArray(levels) || levels.length < 4) return;
-  const frequencies = [17, 18, 19, 20];
+  const frequencies = [16, 17, 18, 18.5];
   element.textContent = `Quiet · ${frequencies.map((frequency, i) => `${frequency}k ${quietBandLabel(levels[i])}`).join(" · ")}`;
   element.title = `Received peaks · ${frequencies.map((frequency, i) => `${frequency} kHz ${levels[i].toFixed(0)} dBFS`).join(" · ")}`;
 }
