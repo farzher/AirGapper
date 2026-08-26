@@ -20,12 +20,11 @@ const ACQUIRE_THRESHOLD = 0.16;
 const TRACK_THRESHOLD = 0.05;
 const MARKER_MAX_RESIDUAL = 0.86;
 const PUNCTURE = new Uint8Array([1, 1, 0, 1]);
-const AUDIO_BLOCK_SIZE = 32;
-const AUDIO_HEADER_BYTES = 16;
-const AUDIO_CRC_BYTES = 4;
-const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
+const AUDIO_BLOCK_SIZE = 24;
+const FRAME_HEADER_BYTES = 16;
+const FRAME_CRC_BYTES = 4;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x35]); // AGF5
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x36]); // AGF6
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -43,7 +42,9 @@ const DATA_CARRIERS = DATA_POSITIONS.length;
 const BITS_PER_SYMBOL = DATA_CARRIERS * BITS_PER_CARRIER;
 const SLOT_BITS = DATA_SYMBOLS * BITS_PER_SYMBOL;
 const INFO_BITS = Math.floor(SLOT_BITS * 2 / 3) - TAIL_BITS;
-const FAST_PACKETS_PER_FRAME = Math.floor(INFO_BITS / (AUDIO_PACKET_BYTES * 8));
+const INFO_BYTES = Math.floor(INFO_BITS / 8);
+const FAST_PACKETS_PER_FRAME = Math.floor((INFO_BYTES - FRAME_HEADER_BYTES - FRAME_CRC_BYTES) / AUDIO_BLOCK_SIZE);
+const FRAME_BYTES = FRAME_HEADER_BYTES + FAST_PACKETS_PER_FRAME * AUDIO_BLOCK_SIZE + FRAME_CRC_BYTES;
 const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
 const FAST_FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000;
 const FAST_ESTIMATED_KBPS = FAST_PACKETS_PER_FRAME * (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
@@ -251,59 +252,60 @@ for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
   PILOT_IMAG[symbol].set(vector.imag);
 }
 
-function packetBytes(payloadId, totalLen, mode, encodingId, block) {
-  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Fast transport block size.");
+function buildInfo(payloadId, totalLen, mode, startOrdinal, blocks) {
+  if (!Array.isArray(blocks) || blocks.length !== FAST_PACKETS_PER_FRAME) throw new Error("Fast frame block count mismatch.");
   const modeCode = MODE_CODES.get(mode);
   if (modeCode === undefined || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Invalid Fast transport metadata.");
-  const id = Number(encodingId) >>> 0;
-  const out = new Uint8Array(AUDIO_PACKET_BYTES);
-  out.set(MAGIC, 0);
-  const view = new DataView(out.buffer);
+  const raw = new Uint8Array(FRAME_BYTES);
+  raw.set(MAGIC, 0);
+  const view = new DataView(raw.buffer);
   view.setUint32(4, payloadId >>> 0, true);
   view.setUint32(8, totalLen >>> 0, true);
-  out[12] = modeCode;
-  out[13] = id >>> 16 & 255;
-  out[14] = id >>> 8 & 255;
-  out[15] = id & 255;
-  out.set(block, AUDIO_HEADER_BYTES);
-  view.setUint32(AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES, crc32(out.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES)), true);
-  return out;
-}
-function parsePacket(raw) {
-  for (let i = 0; i < MAGIC.length; i++) if (raw[i] !== MAGIC[i]) return null;
-  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-  if (view.getUint32(AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES, true) !==
-      crc32(raw.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES))) return null;
-  const totalLen = view.getUint32(8, true);
-  const mode = MODE_NAMES[raw[12]];
-  if (!mode || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return null;
-  const encodingId = raw[13] * 65536 + raw[14] * 256 + raw[15];
-  const k = sourceCount(totalLen, mode);
-  if (codingMode(k) !== mode) return null;
-  if (mode === "direct" && encodingId !== 0) return null;
-  if (mode === "mds" && encodingId >= 256) return null;
-  if (mode === "raptorq" && encodingId >= 0xff0000) return null;
-  return {
-    payloadId: view.getUint32(4, true) >>> 0,
-    totalLen,
-    mode,
-    encodingId,
-    blockSize: AUDIO_BLOCK_SIZE,
-    block: raw.slice(AUDIO_HEADER_BYTES, AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE),
-    profile: "fast"
-  };
-}
-function buildInfo(payloadId, totalLen, mode, startOrdinal, blocks) {
-  if (!Array.isArray(blocks) || blocks.length !== FAST_PACKETS_PER_FRAME) throw new Error("Fast frame packet count mismatch.");
-  const raw = new Uint8Array(FAST_PACKETS_PER_FRAME * AUDIO_PACKET_BYTES);
-  for (let i = 0; i < blocks.length; i++) {
-    raw.set(packetBytes(payloadId, totalLen, mode, scheduledId(mode, startOrdinal + i), blocks[i]), i * AUDIO_PACKET_BYTES);
+  raw[12] = modeCode;
+  const ordinal = Number(startOrdinal) >>> 0;
+  raw[13] = ordinal >>> 16 & 255;
+  raw[14] = ordinal >>> 8 & 255;
+  raw[15] = ordinal & 255;
+  let offset = FRAME_HEADER_BYTES;
+  for (const block of blocks) {
+    if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Fast transport block size.");
+    raw.set(block, offset);
+    offset += AUDIO_BLOCK_SIZE;
   }
+  view.setUint32(FRAME_BYTES - FRAME_CRC_BYTES, crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES)), true);
   const rawBits = bytesToBits(raw);
   const info = new Uint8Array(INFO_BITS);
   info.set(rawBits);
   if (rawBits.length < info.length) info.set(randomBits(info.length - rawBits.length, 0x51f15e), rawBits.length);
   return info;
+}
+function parseFrame(info) {
+  const raw = bitsToBytes(info, FRAME_BYTES);
+  for (let i = 0; i < MAGIC.length; i++) if (raw[i] !== MAGIC[i]) return [];
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  if (view.getUint32(FRAME_BYTES - FRAME_CRC_BYTES, true) !== crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES))) return [];
+  const totalLen = view.getUint32(8, true);
+  const mode = MODE_NAMES[raw[12]];
+  if (!mode || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return [];
+  const k = sourceCount(totalLen, mode);
+  if (codingMode(k) !== mode) return [];
+  const payloadId = view.getUint32(4, true) >>> 0;
+  const startOrdinal = raw[13] * 65536 + raw[14] * 256 + raw[15];
+  const packets = [];
+  let offset = FRAME_HEADER_BYTES;
+  for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
+    packets.push({
+      payloadId,
+      totalLen,
+      mode,
+      encodingId: scheduledId(mode, startOrdinal + i),
+      blockSize: AUDIO_BLOCK_SIZE,
+      block: raw.slice(offset, offset + AUDIO_BLOCK_SIZE),
+      profile: "fast"
+    });
+    offset += AUDIO_BLOCK_SIZE;
+  }
+  return packets;
 }
 
 function ofdmSymbol(carrierReal, carrierImag) {
@@ -524,14 +526,7 @@ function demod8Dpsk(previous, current, correction, slots, write) {
   return write;
 }
 function decodePackets(slots) {
-  const info = convolutionalDecode(depuncture(deinterleaveSoft(slots)));
-  const raw = bitsToBytes(info, FAST_PACKETS_PER_FRAME * AUDIO_PACKET_BYTES);
-  const packets = [];
-  for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
-    const packet = parsePacket(raw.subarray(i * AUDIO_PACKET_BYTES, (i + 1) * AUDIO_PACKET_BYTES));
-    if (packet) packets.push(packet);
-  }
-  return packets;
+  return parseFrame(convolutionalDecode(depuncture(deinterleaveSoft(slots))));
 }
 
 class FastScanner {
