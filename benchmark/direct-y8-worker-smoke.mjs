@@ -13,13 +13,12 @@ try {
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
     const jobId = 991351;
     const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
-    // This is a correctness smoke, not a cold-start performance benchmark. A
-    // hosted CI runner can spend tens of seconds compiling/instantiating the
-    // first SIMD WASM module and starve page timers while Chrome does so.
+    // This is a transport/correctness smoke, not a decoder stress benchmark.
+    // Keep enough room for first-use WASM startup without hiding a hung worker.
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error("direct Y8 worker smoke test timed out"));
-    }, 90_000);
+    }, 30_000);
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
@@ -36,10 +35,11 @@ try {
     const height = 120;
     const y = new Uint8Array(width * height);
     y.fill(235);
-    // Add harmless contrast so this also exercises the full-frame Y scanner,
-    // not just an all-white early exit.
-    for (let row = 32; row < 88; row++) {
-      for (let col = 48; col < 112; col++) y[row * width + col] = (row + col) & 1 ? 24 : 220;
+    // Exercise the full-frame Y8 scanner with ordinary low-frequency contrast.
+    // A one-pixel checkerboard is pathological for QR finder search and can turn
+    // this transport smoke into an accidental worst-case decoder benchmark.
+    for (let row = 38; row < 82; row++) {
+      for (let col = 50; col < 110; col++) y[row * width + col] = 28;
     }
     const frame = y.buffer;
     worker.postMessage({
