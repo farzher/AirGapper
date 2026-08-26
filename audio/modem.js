@@ -13,9 +13,10 @@ function quietBandLabel(db) {
   return "none";
 }
 function updateQuietReadout(element, levels) {
-  if (!element || !Array.isArray(levels) || levels.length < 3) return;
-  element.textContent = `Quiet band · 17–18k ${quietBandLabel(levels[0])} · 18–19k ${quietBandLabel(levels[1])} · 19–21k ${quietBandLabel(levels[2])}`;
-  element.title = `Received peaks · 17–18 kHz ${levels[0].toFixed(0)} dBFS · 18–19 kHz ${levels[1].toFixed(0)} dBFS · 19–21 kHz ${levels[2].toFixed(0)} dBFS`;
+  if (!element || !Array.isArray(levels) || levels.length < 4) return;
+  const frequencies = [17, 18, 19, 20];
+  element.textContent = `Quiet · ${frequencies.map((frequency, i) => `${frequency}k ${quietBandLabel(levels[i])}`).join(" · ")}`;
+  element.title = `Received peaks · ${frequencies.map((frequency, i) => `${frequency} kHz ${levels[i].toFixed(0)} dBFS`).join(" · ")}`;
 }
 
 class StreamingResampler {
@@ -131,7 +132,7 @@ class AcousticReceiver {
     this.silent.gain.value = 0;
     const readout = document.createElement("small");
     readout.className = "audio-channel-readout";
-    readout.textContent = "Quiet band · listening…";
+    readout.textContent = "Quiet · listening…";
     readout.style.display = "block";
     readout.style.margin = "8px 0 0";
     readout.style.textAlign = "center";
