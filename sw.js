@@ -14,6 +14,7 @@
     "./audio/modem.js",
     "./audio/quiet-modem.js",
     "./audio/reliable-worker.js",
+    "./audio/quiet-worker.js",
     "./audio/fast-modem.js",
     "./audio/fast-worker.js",
     "./audio/output-level.js",
