@@ -343,7 +343,7 @@ const AUTO_OPTICS_POSE_MAX_SCALE_LOG2 = 0.10;
 const AUTO_OPTICS_MIN_VISIBLE_SLOTS = 1;
 const AUTO_OPTICS_ACQUISITION_RESCUE_MS = 850;
 const AUTO_OPTICS_HISTORY_BAD_COOLDOWN_MS = 5 * 60 * 1000;
-const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v5";
+const AUTO_OPTICS_MEMORY_KEY = "airgapper:auto-optics-memory:v6";
 const AUTO_OPTICS_MEMORY_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTO_OPTICS_MEMORY_MIN_SCALE = 0.25;
 const AUTO_OPTICS_MEMORY_MAX_SCALE = 1;
@@ -385,6 +385,8 @@ let autoOpticsHoldSample;
 let autoOpticsHoldCollapseSince = 0;
 let autoOpticsHeldYield = 0;
 let autoOpticsAeBaseline;
+// Pre-play manual bootstrap for cameras with shutter+ISO but no negative EV axis.
+const autoOpticsPreplaySeeds = new WeakMap();
 let autoOpticsMemoryBootAt = 0;
 let autoOpticsMemoryBoot;
 let autoOpticsMeasurementSlots;
@@ -3633,12 +3635,16 @@ function automaticOpticsMemoryHealthy(saved) {
   return Boolean(saved && Number(saved.yieldRate) >= minimumYield &&
     Number.isFinite(saved.exposure) && saved.exposure > 0 && Number.isFinite(saved.iso) && saved.iso > 0);
 }
-function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps) {
+function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt) {
   const aeProduct = baseline.exposure * baseline.iso;
-  const seedPolicy = automaticOpticsAcquisitionSeed(autoOpticsSeedAttempt);
-  // Acquisition can explore both sides of the meter, but every seed keeps a
-  // short shutter so rolling-shutter safety is never traded away.
-  const targetProduct = Math.max(exposureRange.min * isoRange.min, aeProduct * seedPolicy.lightScale);
+  const seedPolicy = automaticOpticsAcquisitionSeed(attempt);
+  // lightScale is absolute relative to photographic neutral. Normalize against
+  // the EV scale the meter actually accepted so a biased baseline is not darkened twice.
+  const baselineScale = Number.isFinite(baseline.lightScale) && baseline.lightScale > 0 ? baseline.lightScale : 1;
+  const targetProduct = Math.max(
+    exposureRange.min * isoRange.min,
+    aeProduct * seedPolicy.lightScale / baselineScale
+  );
   let exposure = quantizeCameraRange(
     Math.min(exposureRange.max, seedPolicy.maxExposure, 1e4 / fps * seedPolicy.frameFraction),
     exposureRange
@@ -3660,7 +3666,11 @@ async function readAutomaticAeBaseline(track) {
   const caps = track.getCapabilities?.() ?? {};
   const patch = { exposureMode: "continuous" };
   if (caps.exposureCompensation && caps.exposureCompensation.min <= 0 && caps.exposureCompensation.max >= 0) {
-    patch.exposureCompensation = quantizeCameraRange(0, caps.exposureCompensation);
+    // Meter below photographic neutral; do not brighten back to 0 EV while settling.
+    patch.exposureCompensation = quantizeCameraRange(
+      Math.max(caps.exposureCompensation.min, Math.min(0, AUTO_QR_EV_BIAS)),
+      caps.exposureCompensation
+    );
   }
   delete desiredCamera.exposureTime;
   delete desiredCamera.iso;
@@ -3674,7 +3684,9 @@ async function readAutomaticAeBaseline(track) {
   const exposure = Number(settings.exposureTime);
   const iso = Number(settings.iso);
   if (!(exposure > 0) || !(iso > 0)) return void 0;
-  return { exposure, iso, at: receiverNow(), neutral: true };
+  const actualEv = Number(settings.exposureCompensation);
+  const lightScale = Number.isFinite(actualEv) ? Math.min(1, Math.pow(2, actualEv)) : 1;
+  return { exposure, iso, at: receiverNow(), neutral: lightScale >= 0.999, lightScale };
 }
 async function applyAutomaticShortSeed(track, baseline, reason) {
   const caps = track.getCapabilities?.() ?? {};
@@ -3703,6 +3715,44 @@ async function applyAutomaticShortSeed(track, baseline, reason) {
   autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
   focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");
   return true;
+}
+async function primeAutomaticQrOpticsBeforePlayback(track) {
+  if (!track || track.readyState !== "live") return false;
+  const caps = track.getCapabilities?.() ?? {};
+  const evRange = caps.exposureCompensation;
+  if (evRange && evRange.min < 0 && evRange.max >= 0) {
+    await applyExposureSetting(track);
+    return true;
+  }
+
+  // If there is no EV axis but shutter+ISO are writable, use the camera's initial
+  // AE numbers only as a meter and install the dark seed before playback.
+  const exposureRange = caps.exposureTime;
+  const isoRange = caps.iso;
+  const modes = Array.isArray(caps.exposureMode) ? caps.exposureMode : [];
+  const settings = track.getSettings();
+  const exposure = Number(settings.exposureTime);
+  const iso = Number(settings.iso);
+  if (modes.includes("manual") && exposureRange && isoRange && exposure > 0 && iso > 0) {
+    const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
+    const baseline = { exposure, iso, at: receiverNow(), neutral: true, lightScale: 1 };
+    const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, 0);
+    const accepted = await applyCameraConstraint(track, { exposureMode: "manual", exposureTime: seed.exposure, iso: seed.iso });
+    if (accepted && track.readyState === "live") {
+      const actual = track.getSettings();
+      autoOpticsPreplaySeeds.set(track, {
+        baseline,
+        exposure: Number(actual.exposureTime) || seed.exposure,
+        iso: Number(actual.iso) || seed.iso,
+        policy: seed.seedPolicy
+      });
+      return true;
+    }
+  }
+
+  // No browser-exposed mechanism can force darkness on this camera.
+  await applyExposureSetting(track);
+  return false;
 }
 async function applyAutomaticOpticsMemoryBoot(track, saved) {
   if (!saved || !automaticOpticsMemoryHealthy(saved)) return false;
@@ -3754,12 +3804,26 @@ async function primeAutomaticQrOpticsStartup(track) {
     // QR wall than the camera's photographic AE. Try it first and require it to
     // prove itself quickly; a stale scene can never trap acquisition because the
     // memory state has a short deadline and automatically falls through.
+    const preplaySeed = autoOpticsPreplaySeeds.get(track);
+    autoOpticsPreplaySeeds.delete(track);
     const memory = usableAutomaticOpticsMemory(track);
     if (memory && await applyAutomaticOpticsMemoryBoot(track, memory)) return;
 
-    // No usable memory: consult AE only as a brief light meter, then immediately
-    // leave it for a faster, deliberately darker shutter seed. Neutral AE remains
-    // the final rescue path, not the default operating point.
+    if (preplaySeed) {
+      const now = receiverNow();
+      autoOpticsAeBaseline = preplaySeed.baseline;
+      autoOpticsRuntimeState = "seed";
+      autoOpticsSeedFullScansAt = fullScans;
+      autoOpticsLockSince = 0;
+      autoOpticsAcquisitionSince = now;
+      autoOpticsRetryAt = 0;
+      autoOpticsRescueRetryAt = now + AUTO_OPTICS_ACQUISITION_RESCUE_MS;
+      autoOpticsTuneSummary = `pre-play ${preplaySeed.policy.label} · ${formatExposureMs(preplaySeed.exposure)} · ISO ${Math.round(preplaySeed.iso)}`;
+      focusController.adoptAutomaticCameraState("dark short-shutter seed installed before first receiver frame");
+      return;
+    }
+
+    // Use already-biased AE only as a meter, then switch to a short shutter.
     const baseline = await readAutomaticAeBaseline(track);
     if (!automaticOpticsSessionAlive(track)) return;
     if (baseline && await applyAutomaticShortSeed(track, baseline, "fast-dark startup seed")) return;
@@ -3904,8 +3968,8 @@ async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held 
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = 0;
-    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · neutral hardware AE recovery`;
-    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; neutral hardware AE restored");
+    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · QR-biased hardware AE recovery`;
+    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; QR-biased hardware AE restored");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4390,9 +4454,11 @@ async function rescueAutomaticQrAcquisition(track, now) {
     const value = quantizeCameraRange(raw, range);
     if (!candidates.some((item) => Math.abs(item.value - value) < 1e-6)) candidates.push({ value, label });
   };
-  if (range.min < 0) add(Math.max(range.min, -1), "dark rescue");
-  if (range.max > 0) add(Math.min(range.max, 1), "bright rescue");
-  add(0, "neutral retry");
+  if (range.min < 0) {
+    add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");
+    add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");
+    if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");
+  }
   if (!candidates.length) return;
 
   const step = autoOpticsAeRescueStep % candidates.length;
@@ -4444,7 +4510,7 @@ function maintainAutomaticQrOptics(now) {
       // Motion is not ordinary exposure evidence, but finder/body evidence plus
       // several seconds of zero CRC payload is different: the wall is still in
       // view and this held sensor state is no longer doing its job. Escape to
-      // neutral hardware AE instead of allowing motion to protect a blind HOLD
+      // QR-biased hardware AE instead of allowing motion to protect a blind HOLD
       // forever. Merely pointing the camera away produces no finder evidence and
       // therefore preserves the proven HOLD.
       if (payloadSilenceMs >= AUTO_OPTICS_HOLD_EMERGENCY_SILENCE_MS && finderEvidenceFresh) {
@@ -5632,9 +5698,10 @@ async function start() {
   }
   stream = acquiredStream;
   const startupOpticsTrack = stream.getVideoTracks()[0];
-  if (startupOpticsTrack && !automaticOptics) {
+  if (startupOpticsTrack) {
     seedDesiredCamera(startupOpticsTrack);
-    await applyExposureSetting(startupOpticsTrack);
+    if (automaticOptics) await primeAutomaticQrOpticsBeforePlayback(startupOpticsTrack);
+    else await applyExposureSetting(startupOpticsTrack);
   }
   startBtn.style.display = "none";
   preview.style.display = "";

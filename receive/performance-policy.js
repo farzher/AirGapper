@@ -10,16 +10,12 @@ export const ACQUISITION_HUNT_EVERY_SCANS = 12;
 export const ACQUISITION_SIGHTING_EVERY_SCANS = 4;
 
 const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([
-  // Default QR seed: short enough to avoid rolling-shutter smear and darker
-  // than photographic AE so white modules do not bloom into their neighbors.
+  // Absolute light products relative to photographic neutral. Every candidate
+  // stays darker; runtime normalizes them against the AE bias actually accepted.
   Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),
-  // A noisy/max-ISO camera can still be much too bright for a binary modem.
-  // Explore the darker direction before assuming the first miss meant "more light".
   Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),
-  // Then try neutral short-shutter exposure if the darker seeds were starved.
-  Object.freeze({ lightScale: 1, maxExposure: 45, frameFraction: 0.14, label: "neutral-short" }),
-  // Last QR-specific rescue before handing control back to hardware AE.
-  Object.freeze({ lightScale: Math.pow(2, 0.5), maxExposure: 55, frameFraction: 0.18, label: "bright-short" })
+  Object.freeze({ lightScale: Math.pow(2, -0.5), maxExposure: 45, frameFraction: 0.14, label: "less-dark-short" }),
+  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 55, frameFraction: 0.18, label: "least-dark-short" })
 ]);
 
 export function acquisitionRacePolicy({
@@ -105,8 +101,8 @@ export function lockedRecoveryPolicy({
 
 // Auto Optics acquisition is allowed to explore, but it should explore settings
 // designed for animated QR capture rather than immediately handing control back
-// to photographic AE. The ladder is intentionally tiny and bounded; once all
-// entries fail, hardware AE remains the universal fallback.
+// to photographic AE. The ladder is intentionally tiny and bounded; if it is
+// exhausted, runtime falls back to hardware AE while retaining the QR bias where supported.
 export function automaticOpticsAcquisitionSeed(attempt = 0) {
   const index = Math.max(0, Math.min(AUTO_OPTICS_ACQUISITION_SEEDS.length - 1,
     Math.trunc(Number(attempt) || 0)));
