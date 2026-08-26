@@ -13,10 +13,13 @@ try {
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
     const jobId = 991351;
     const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
+    // This is a correctness smoke, not a cold-start performance benchmark. A
+    // hosted CI runner can spend tens of seconds compiling/instantiating the
+    // first SIMD WASM module and starve page timers while Chrome does so.
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error("direct Y8 worker smoke test timed out"));
-    }, 45_000);
+    }, 90_000);
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
