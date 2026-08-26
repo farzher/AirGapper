@@ -11,13 +11,15 @@ function portraitFallbackRotation() {
   const angle = Number(screen.orientation?.angle ?? window.orientation);
   return angle === 270 || angle === -90 ? "90deg" : "-90deg";
 }
+const portraitLockEnabled = isIOS || isAndroid || isAndroidApp();
 function syncPortraitFallback() {
-  const landscape = window.innerWidth > window.innerHeight;
+  const landscape = portraitLockEnabled && window.innerWidth > window.innerHeight;
   document.body.classList.toggle("portrait-fallback", landscape);
   if (landscape) document.documentElement.style.setProperty("--portrait-fallback-rotation", portraitFallbackRotation());
   else document.documentElement.style.removeProperty("--portrait-fallback-rotation");
 }
 async function requestPortraitLock() {
+  if (!portraitLockEnabled) return;
   try {
     await screen.orientation?.lock?.("portrait-primary");
   } catch {
