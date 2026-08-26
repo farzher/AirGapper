@@ -101,8 +101,8 @@ export function lockedRecoveryPolicy({
 
 // Auto Optics acquisition is allowed to explore, but it should explore settings
 // designed for animated QR capture rather than immediately handing control back
-// to photographic AE. The ladder is intentionally tiny and bounded; once all
-// entries fail, hardware AE remains the universal fallback.
+// to photographic AE. The ladder is intentionally tiny and bounded; if it is
+// exhausted, runtime falls back to hardware AE while retaining the QR bias where supported.
 export function automaticOpticsAcquisitionSeed(attempt = 0) {
   const index = Math.max(0, Math.min(AUTO_OPTICS_ACQUISITION_SEEDS.length - 1,
     Math.trunc(Number(attempt) || 0)));

@@ -3968,8 +3968,8 @@ async function recoverCollapsedAutomaticOptics(track, yieldRate, reason = "held 
     autoOpticsHoldSample = void 0;
     autoOpticsHoldCollapseSince = 0;
     autoOpticsHeldYield = 0;
-    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · neutral hardware AE recovery`;
-    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; neutral hardware AE restored");
+    autoOpticsTuneSummary = `${reason} ${(yieldRate * 100).toFixed(0)}% · QR-biased hardware AE recovery`;
+    focusController.adoptAutomaticCameraState("held QR-proven optics genuinely collapsed; QR-biased hardware AE restored");
   } finally {
     autoOpticsMutationRunning = false;
   }
@@ -4510,7 +4510,7 @@ function maintainAutomaticQrOptics(now) {
       // Motion is not ordinary exposure evidence, but finder/body evidence plus
       // several seconds of zero CRC payload is different: the wall is still in
       // view and this held sensor state is no longer doing its job. Escape to
-      // neutral hardware AE instead of allowing motion to protect a blind HOLD
+      // QR-biased hardware AE instead of allowing motion to protect a blind HOLD
       // forever. Merely pointing the camera away produces no finder evidence and
       // therefore preserves the proven HOLD.
       if (payloadSilenceMs >= AUTO_OPTICS_HOLD_EMERGENCY_SILENCE_MS && finderEvidenceFresh) {
