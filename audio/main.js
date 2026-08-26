@@ -34,6 +34,12 @@ import {
   FAST_PACKETS_PER_FRAME,
   modulateFastFrame
 } from "./fast-stream.js";
+import {
+  ULTRA_ESTIMATED_KBPS,
+  ULTRA_FRAME_MS,
+  ULTRA_PACKETS_PER_FRAME,
+  modulateUltraFrame
+} from "./ultra-stream.js";
 
 const audioView = document.getElementById("audioView");
 const directionChooser = document.querySelector(".audio-mode-switch");
@@ -58,7 +64,6 @@ const headerReceiverQr = document.getElementById("receiver-link-qr");
 
 const VALID_PACKET_FLASH_MS = 120;
 const PROFILE_KEY = "airgapper:audio-profile:v1";
-const ULTRA_REPEAT = 4;
 
 let currentMode = null;
 let sendSession = null;
@@ -398,6 +403,7 @@ async function failReceiveSession(session, message) {
   if (receiveSession === session) receiveSession = null;
   try { session.decoder?.free?.(); } catch {}
   try { session.fast?.stop?.(); } catch {}
+  try { session.ultra?.stop?.(); } catch {}
   try { session.analyser?.disconnect(); } catch {}
   try { await session.receiver?.stop?.(); } catch {}
   releaseScreenWakeLock();
@@ -433,7 +439,11 @@ async function acceptPacket(session, frame) {
     session.mode = frame.mode;
     session.sourceBlockSize = sourceBlockSize(frame.mode, frame.blockSize);
     session.targetPackets = k;
-    session.startedAt = frame.profile === "fast" ? performance.now() - FAST_FRAME_MS : performance.now();
+    session.startedAt = frame.profile === "fast"
+      ? performance.now() - FAST_FRAME_MS
+      : frame.profile === "ultra"
+        ? performance.now() - ULTRA_FRAME_MS
+        : performance.now();
     session.usefulFrameTimes.length = 0;
     sizeLabel.textContent = formatBytes(frame.totalLen);
   }
@@ -452,6 +462,7 @@ async function acceptPacket(session, frame) {
     const file = await unpackFile(recovered);
     if (!await verifyFile(file)) throw new Error("Received file did not verify.");
     session.fast?.stop?.();
+    session.ultra?.stop?.();
     await session.receiver.stop();
     session.decoder.free();
     if (receiveSession === session) receiveSession = null;
@@ -491,6 +502,31 @@ class FastWorkerClient {
     this.worker = null;
   }
 }
+class UltraWorkerClient {
+  constructor(onPacket, onSignal = () => void 0) {
+    const url = new URL("./ultra-worker.js", import.meta.url);
+    url.search = new URL(import.meta.url).search;
+    this.worker = new Worker(url, { type: "module" });
+    this.worker.onmessage = (event) => {
+      if (event.data?.type === "signal") {
+        onSignal(Number(event.data.quality) || 0);
+        return;
+      }
+      const packet = event.data?.packet;
+      if (!packet || !(packet.block instanceof ArrayBuffer)) return;
+      onPacket({ ...packet, block: new Uint8Array(packet.block) });
+    };
+  }
+  append(chunk) {
+    if (!this.worker || !chunk?.length) return;
+    const copy = new Float32Array(chunk);
+    this.worker.postMessage({ type: "samples", samples: copy.buffer }, [copy.buffer]);
+  }
+  stop() {
+    this.worker?.terminate();
+    this.worker = null;
+  }
+}
 async function stopReceiver(reset = true) {
   const session = receiveSession;
   receiveSession = null;
@@ -498,6 +534,7 @@ async function stopReceiver(reset = true) {
     stopReceiveStats(session);
     session.decoder?.free?.();
     session.fast?.stop?.();
+    session.ultra?.stop?.();
     try { session.analyser?.disconnect(); } catch {}
     await session.receiver.stop();
   }
@@ -515,6 +552,7 @@ async function startListening() {
     const session = {
       receiver: null,
       fast: null,
+      ultra: null,
       analyser: null,
       decoder: null,
       identity: "",
@@ -539,8 +577,12 @@ async function startListening() {
     const receiver = new AcousticReceiver((frame) => enqueue([frame]));
     const nativeAppend = receiver.append.bind(receiver);
     session.fast = new FastWorkerClient(enqueue);
+    session.ultra = new UltraWorkerClient((frame) => enqueue([frame]), (quality) => {
+      if (quality >= 0.12) setVisualizerSignal(true);
+    });
     receiver.append = (chunk) => {
       session.fast?.append(chunk);
+      session.ultra?.append(chunk);
       nativeAppend(chunk);
     };
     session.receiver = receiver;
@@ -548,6 +590,7 @@ async function startListening() {
     await receiver.start();
     if (receiveSession !== session) {
       session.fast?.stop();
+      session.ultra?.stop();
       await receiver.stop();
       return;
     }
@@ -629,7 +672,7 @@ function activeProfile() {
 function profileEstimate(profile) {
   if (profile === "fast") return FAST_ESTIMATED_KBPS;
   if (profile === "quiet") return QUIET_ESTIMATED_KBPS;
-  if (profile === "ultra") return AUDIO_ESTIMATED_KBPS / ULTRA_REPEAT;
+  if (profile === "ultra") return ULTRA_ESTIMATED_KBPS;
   return AUDIO_ESTIMATED_KBPS;
 }
 function formatProfileRate(kbs) {
@@ -724,11 +767,6 @@ function takeBlocks(transport, count) {
   }
   return { startOrdinal, blocks };
 }
-function repeatWaveform(waveform, count) {
-  const out = new Float32Array(waveform.length * count);
-  for (let i = 0; i < count; i++) out.set(waveform, i * waveform.length);
-  return out;
-}
 function buildSendWaveform(session) {
   const profile = activeProfile();
   const epoch = session.profileEpoch;
@@ -749,12 +787,19 @@ function buildSendWaveform(session) {
       waveform: modulateQuietFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
     };
   }
+  if (profile === "ultra") {
+    const { startOrdinal, blocks } = takeBlocks(transport, ULTRA_PACKETS_PER_FRAME);
+    return {
+      epoch,
+      profile,
+      waveform: modulateUltraFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
+    };
+  }
   const { startOrdinal, blocks } = takeBlocks(transport, RELIABLE_PACKETS_PER_FRAME);
-  const waveform = modulateReliableFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks);
   return {
     epoch,
     profile,
-    waveform: profile === "ultra" ? repeatWaveform(waveform, ULTRA_REPEAT) : waveform
+    waveform: modulateReliableFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
   };
 }
 function scheduleWaveform(session, prepared) {
