@@ -8212,6 +8212,23 @@ function waitForWorkers() {
     poll();
   });
 }
+function waitForWorkerPoolReady(timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const started = performance.now();
+    const poll = () => {
+      if (pool.size > 0 && pool.freeSlots.length === pool.size) {
+        resolve();
+        return;
+      }
+      if (performance.now() - started >= timeoutMs) {
+        reject(new Error(`Decode workers did not become ready (${pool.freeSlots.length}/${pool.size})`));
+        return;
+      }
+      setTimeout(poll, 10);
+    };
+    poll();
+  });
+}
 async function runOracle(corpus) {
   const latencies = [];
   const firstPass = new Array(corpus.length);
@@ -8384,6 +8401,11 @@ async function runReceiverBenchmark({ productionOnly = false } = {}) {
   benchmarkCompletionChecked = false;
   done = false;
   pool.resize(selectedWorkerCount());
+  // Maximum-speed replay can consume an entire synthetic corpus before a cold
+  // WASM worker reaches its id:-1 ready handshake. Real camera startup merely
+  // drops those early frames; the benchmark must start frame 0 from a warm pool
+  // so it measures decoding rather than worker initialization scheduling.
+  await waitForWorkerPoolReady();
   const firstTime = (_b = (_a = corpus.meta(0)) == null ? void 0 : _a.callbackTimeMs) != null ? _b : 0;
   cameraStartedTs = firstTime;
   const wallStart = performance.now();
