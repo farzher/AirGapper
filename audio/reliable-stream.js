@@ -7,28 +7,30 @@ const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x32]); // AGR2
+const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x33]); // AGR3
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
 
-// Room-range Reliable PHY: noncoherent 16-FSK plus a low-band repeated
-// multitone pilot. The pilot provides phase-independent symbol timing on every
-// symbol; CRC finds frame boundaries from a rolling window, so there is no
-// special sync burst to acquire or periodically hear.
+// Room-range Reliable PHY. Payload is noncoherent 16-FSK in the strong
+// audible phone band. Every 10 ms symbol also carries the same low-band PN
+// timing pilot. I/Q matched correlation on that pilot is phase-insensitive and
+// resolves room echoes; frame boundaries are found by rolling CRC, so there is
+// no dedicated recurring sync burst.
 const TONE_COUNT = 16;
 const BITS_PER_TONE = 4;
 const SYMBOL_SAMPLES = 480; // 10 ms
 const TONE_BASE_HZ = 2500;
 const TONE_SPACING_HZ = 300;
-const DATA_AMPLITUDE = 0.62;
-const PILOT_AMPLITUDE = 0.20;
-const ACQUIRE_THRESHOLD = 0.085;
-const TRACK_THRESHOLD = 0.045;
-const TRACK_WINDOW = 20;
+const DATA_AMPLITUDE = 0.63;
+const PILOT_AMPLITUDE = 0.24;
+const ACQUIRE_THRESHOLD = 0.075;
+const TRACK_THRESHOLD = 0.038;
+const TRACK_WINDOW = 24;
 const FREQ_OFFSETS = new Int16Array([-50, 0, 50]);
-const PILOT_CYCLES = new Uint8Array([5, 7, 10, 13, 17, 19]);
-const PILOT_PHASES = new Float64Array([0.23, 1.31, 2.47, 0.82, 2.91, 1.77]);
+const PILOT_CHIPS = new Int8Array([1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1, 1, -1, -1, -1]);
+const PILOT_SAMPLES_PER_CHIP = SYMBOL_SAMPLES / PILOT_CHIPS.length;
+const PILOT_CARRIER_HZ = 1500;
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -129,19 +131,19 @@ const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
 const AUDIO_ESTIMATED_KBPS =
   (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
-const PILOT_TEMPLATE = new Float64Array(SYMBOL_SAMPLES);
-for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-  let sample = 0;
-  for (let tone = 0; tone < PILOT_CYCLES.length; tone++) {
-    sample += Math.sin(2 * Math.PI * PILOT_CYCLES[tone] * i / SYMBOL_SAMPLES + PILOT_PHASES[tone]);
-  }
-  PILOT_TEMPLATE[i] = sample;
+const PILOT_CODE = new Int8Array(SYMBOL_SAMPLES);
+const PILOT_SIN = new Float64Array(SYMBOL_SAMPLES);
+const PILOT_COS = new Float64Array(SYMBOL_SAMPLES);
+const pilotOmega = 2 * Math.PI * PILOT_CARRIER_HZ / SAMPLE_RATE;
+for (let chip = 0; chip < PILOT_CHIPS.length; chip++) {
+  PILOT_CODE.fill(PILOT_CHIPS[chip], chip * PILOT_SAMPLES_PER_CHIP, (chip + 1) * PILOT_SAMPLES_PER_CHIP);
 }
-let pilotEnergy = 0;
-for (const sample of PILOT_TEMPLATE) pilotEnergy += sample * sample;
-const PILOT_SCALE = 1 / Math.sqrt(pilotEnergy / SYMBOL_SAMPLES);
-for (let i = 0; i < PILOT_TEMPLATE.length; i++) PILOT_TEMPLATE[i] *= PILOT_SCALE;
-pilotEnergy = SYMBOL_SAMPLES;
+let pilotReferenceEnergy = 0;
+for (let i = 0; i < SYMBOL_SAMPLES; i++) {
+  PILOT_SIN[i] = Math.sin(pilotOmega * i);
+  PILOT_COS[i] = Math.cos(pilotOmega * i);
+  pilotReferenceEnergy += PILOT_SIN[i] * PILOT_SIN[i];
+}
 
 const TONE_COEFF = Array.from({ length: FREQ_OFFSETS.length }, () => new Float64Array(TONE_COUNT));
 const TONE_OMEGA = new Float64Array(TONE_COUNT);
@@ -213,8 +215,9 @@ function deinterleaveSoft(slots) {
 function writeSymbol(waveform, offset, tone) {
   const omega = TONE_OMEGA[tone];
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const sample = DATA_AMPLITUDE * Math.sin(omega * i) + PILOT_AMPLITUDE * PILOT_TEMPLATE[i];
-    waveform[offset + i] = clamp(sample, -0.92, 0.92);
+    const data = DATA_AMPLITUDE * Math.sin(omega * i);
+    const pilot = PILOT_AMPLITUDE * PILOT_CODE[i] * PILOT_SIN[i];
+    waveform[offset + i] = clamp(data + pilot, -0.94, 0.94);
   }
 }
 function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
@@ -232,18 +235,20 @@ function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
 }
 
 function pilotCorrelation(samples, offset, stride = 2) {
-  let dot = 0;
+  let inPhase = 0;
+  let quadrature = 0;
   let energy = 0;
   let referenceEnergy = 0;
   for (let i = 0; i < SYMBOL_SAMPLES; i += stride) {
     const sample = samples[offset + i];
-    const reference = PILOT_TEMPLATE[i];
-    dot += sample * reference;
+    const code = PILOT_CODE[i];
+    inPhase += sample * code * PILOT_SIN[i];
+    quadrature += sample * code * PILOT_COS[i];
     energy += sample * sample;
-    referenceEnergy += reference * reference;
+    referenceEnergy += PILOT_SIN[i] * PILOT_SIN[i];
   }
-  if (energy < 1e-9) return 0;
-  return Math.abs(dot) / Math.sqrt(energy * referenceEnergy);
+  if (energy < 1e-9 || referenceEnergy < 1e-9) return 0;
+  return Math.hypot(inPhase, quadrature) / Math.sqrt(energy * referenceEnergy);
 }
 function toneEnergy(samples, offset, tone, frequencyIndex) {
   const coeff = TONE_COEFF[frequencyIndex][tone];
@@ -386,11 +391,8 @@ class ReliableScanner {
       if (this.lockedSymbols < FRAME_SYMBOLS) return;
       this.lockedSymbols = 0;
       const packet = decodeSymbolQueue(this.symbolQueue);
-      if (packet) {
-        this.onPacket(packet);
-      } else {
-        this.frameLocked = false;
-      }
+      if (packet) this.onPacket(packet);
+      else this.frameLocked = false;
       return;
     }
 
@@ -423,12 +425,12 @@ class ReliableScanner {
       }
 
       const decision = bestFrequencyEnergies(this.samples, start, this.frequencyIndex);
-      if (!decision || decision.confidence < 0.015) {
+      if (!decision || decision.confidence < 0.012) {
         this.failures++;
       } else {
         this.failures = 0;
         this.frequencyIndex = decision.frequencyIndex;
-        const quality = clamp(0.55 * pilotScore / 0.25 + 0.45 * decision.confidence / 0.65, 0, 1);
+        const quality = clamp(0.55 * pilotScore / 0.3 + 0.45 * decision.confidence / 0.65, 0, 1);
         this.onSignal(quality);
         this.consumeSoft(softFromEnergies(decision.energies, decision.confidence));
       }
