@@ -1,4 +1,4 @@
-import { ReliableScanner } from "./modem.js";
+import { ReliableScanner } from "./reliable-stream.js";
 
 function sendPacket(packet) {
   const block = packet.block.slice();
