@@ -13,8 +13,8 @@ def replace_once(path, old, new, label):
 replace_once(
     "benchmark/offline-runner.mjs",
     '''  const fullLimit = name === "camera-dense-y8" ? 8 : 5;''',
-    '''  const fullLimit = name === "camera-dense-y8" ? 8 : name === "stable-y8" ? 6 : 5;''',
-    "stable acquisition budget",
+    '''  const fullLimit = name === "camera-dense-y8" ? 8 : ["stable-y8", "motion-y8"].includes(name) ? 6 : 5;''',
+    "stable/motion acquisition budget",
 )
 
 replace_once(
