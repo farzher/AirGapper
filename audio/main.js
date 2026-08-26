@@ -21,6 +21,7 @@ import {
 } from "./modem.js";
 
 const audioView = document.getElementById("audioView");
+const directionChooser = document.querySelector(".audio-mode-switch");
 const sendModeButton = document.getElementById("audio-mode-send");
 const receiveModeButton = document.getElementById("audio-mode-receive");
 const sendPane = document.getElementById("audio-send-pane");
@@ -38,66 +39,30 @@ const legacyProgress = document.getElementById("audio-progress");
 const result = document.getElementById("audio-result");
 const standardResult = document.getElementById("result");
 
-let currentMode = "send";
+let currentMode = "choose";
 let sendSession = null;
 let receiveSession = null;
+let visualizerFrame = 0;
+let visualizerCanvas = null;
+let visualizerAnalyser = null;
+let visualizerSignal = false;
+let smoothedBars = new Float32Array(48);
 
+// Audio is a transport, not a second miniature app. The direction choice is a
+// one-time entry screen and disappears once Send or Receive is selected.
+audioView.classList.remove("audio-shell");
+audioView.style.width = "100%";
+directionChooser.className = "home";
+sendModeButton.className = "mode";
+receiveModeButton.className = "mode";
+sendModeButton.textContent = "Send audio";
+receiveModeButton.textContent = "Receive audio";
+sendModeButton.removeAttribute("role");
+receiveModeButton.removeAttribute("role");
+sendModeButton.removeAttribute("aria-selected");
+receiveModeButton.removeAttribute("aria-selected");
 legacyProgress.hidden = true;
-receivePane.classList.add("receiver-primary");
 result.remove();
-
-const receivePanel = document.createElement("section");
-receivePanel.className = "transfer-panel";
-receivePanel.setAttribute("aria-live", "polite");
-
-const receiveProgress = document.createElement("div");
-receiveProgress.className = "transfer-progress";
-
-const receiveSummary = document.createElement("div");
-receiveSummary.className = "transfer-summary";
-const receivePrompt = document.createElement("span");
-receivePrompt.className = "settings-prompt";
-const receiveTitle = document.createElement("b");
-receiveTitle.textContent = "Audio";
-const receiveState = document.createElement("span");
-receiveState.className = "settings-actual";
-receivePrompt.append(receiveTitle, receiveState);
-const completeLabel = document.createElement("strong");
-completeLabel.className = "complete-label";
-completeLabel.textContent = "✓ Complete";
-const speedFeedback = document.createElement("span");
-speedFeedback.className = "speed-feedback";
-const speedValue = document.createElement("strong");
-speedFeedback.append(speedValue);
-receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
-
-const progressTrack = document.createElement("div");
-progressTrack.className = "progress";
-progressTrack.setAttribute("role", "progressbar");
-progressTrack.setAttribute("aria-label", "Audio transfer progress");
-progressTrack.setAttribute("aria-valuemin", "0");
-progressTrack.setAttribute("aria-valuemax", "100");
-const progressBar = document.createElement("div");
-progressTrack.append(progressBar);
-
-const receiveMeta = document.createElement("div");
-receiveMeta.className = "transfer-meta";
-const receiveEstimate = document.createElement("span");
-receiveEstimate.className = "transfer-estimate";
-const progressLabel = document.createElement("strong");
-progressLabel.className = "progress-amount";
-const sizeLabel = document.createElement("span");
-const etaLabel = document.createElement("span");
-receiveEstimate.append(progressLabel, sizeLabel, etaLabel);
-const codingLabel = document.createElement("span");
-receiveMeta.append(receiveEstimate, codingLabel);
-receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
-receivePanel.append(receiveProgress);
-receivePane.append(result, receivePanel);
-
-function transportName(mode) {
-  return mode === "direct" ? "Direct" : mode === "mds" ? "MDS" : "RaptorQ";
-}
 
 function sourceBlockSize(mode) {
   return mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
@@ -116,26 +81,6 @@ function setStatus(text, error = false) {
   status.classList.toggle("error", error);
 }
 
-function setReceiveState(text, error = false) {
-  receiveState.textContent = text;
-  receiveState.style.color = error ? "var(--bad)" : "";
-}
-
-function resetReceiveUi(state = "Ready") {
-  receivePrompt.hidden = false;
-  completeLabel.style.display = "";
-  speedValue.textContent = "👂";
-  progressLabel.hidden = false;
-  progressLabel.textContent = "0%";
-  sizeLabel.textContent = "";
-  etaLabel.textContent = "";
-  codingLabel.textContent = "";
-  progressBar.classList.remove("finalizing", "error");
-  progressBar.style.width = "0%";
-  progressTrack.setAttribute("aria-valuenow", "0");
-  setReceiveState(state);
-}
-
 function clearResult() {
   result.replaceChildren();
   clearReceivedResult();
@@ -148,17 +93,198 @@ async function showReceivedResult(file) {
   result.replaceChildren(...standardResult.childNodes);
 }
 
+function makePreviewCanvas(label) {
+  const zone = document.createElement("div");
+  zone.className = "preview-zone";
+  const preview = document.createElement("div");
+  preview.className = "preview receive-card";
+  preview.style.minHeight = "clamp(220px, 45dvh, 440px)";
+  preview.style.background = "var(--card)";
+  preview.style.border = "1px solid var(--line)";
+  preview.style.borderRadius = "14px";
+  const canvas = document.createElement("canvas");
+  canvas.setAttribute("aria-label", label);
+  canvas.style.display = "block";
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+  canvas.style.position = "absolute";
+  canvas.style.inset = "0";
+  preview.append(canvas);
+  zone.append(preview);
+  return { zone, canvas };
+}
+
+function resizeVisualizer(canvas) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+    smoothedBars = new Float32Array(48);
+  }
+  return { width, height, dpr };
+}
+
+function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
+  if (!canvas?.isConnected) return;
+  const { width, height, dpr } = resizeVisualizer(canvas);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const styles = getComputedStyle(document.documentElement);
+  const ink = styles.getPropertyValue(signal ? "--good" : "--ink").trim() || "#171717";
+  const muted = styles.getPropertyValue("--line").trim() || "#e7e7e3";
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = styles.getPropertyValue("--card").trim() || "#fff";
+  ctx.fillRect(0, 0, width, height);
+
+  const bars = smoothedBars.length;
+  let bins = null;
+  if (analyser) {
+    bins = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(bins);
+  }
+  const padding = 24 * dpr;
+  const availableWidth = Math.max(1, width - padding * 2);
+  const gap = Math.max(2 * dpr, availableWidth / bars * 0.26);
+  const barWidth = Math.max(2 * dpr, (availableWidth - gap * (bars - 1)) / bars);
+  const center = height * 0.5;
+  const maxHalf = Math.max(12 * dpr, height * 0.34);
+
+  ctx.fillStyle = muted;
+  ctx.globalAlpha = 0.65;
+  ctx.fillRect(padding, center - 0.5 * dpr, availableWidth, dpr);
+  ctx.globalAlpha = 1;
+
+  for (let i = 0; i < bars; i++) {
+    let target = idle ? 0.025 + 0.012 * Math.sin(performance.now() / 700 + i * 0.55) : 0.018;
+    if (bins?.length) {
+      // Bias the display toward the useful speech/music band while still showing
+      // the modem's wide upper carriers. Log-ish bin spacing keeps it readable.
+      const t = i / Math.max(1, bars - 1);
+      const index = Math.min(bins.length - 1, Math.round((0.025 + Math.pow(t, 1.45) * 0.86) * bins.length));
+      target = Math.pow(bins[index] / 255, 1.3);
+    }
+    smoothedBars[i] = smoothedBars[i] * 0.77 + target * 0.23;
+    const half = Math.max(1.2 * dpr, smoothedBars[i] * maxHalf);
+    const x = padding + i * (barWidth + gap);
+    ctx.fillStyle = ink;
+    ctx.globalAlpha = 0.22 + Math.min(0.78, smoothedBars[i] * 1.7);
+    const radius = Math.min(barWidth / 2, 3 * dpr);
+    ctx.beginPath();
+    ctx.roundRect(x, center - half, barWidth, half * 2, radius);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function stopVisualizer() {
+  cancelAnimationFrame(visualizerFrame);
+  visualizerFrame = 0;
+  visualizerCanvas = null;
+  visualizerAnalyser = null;
+  visualizerSignal = false;
+}
+
+function startVisualizer(canvas, analyser = null, signal = false) {
+  stopVisualizer();
+  visualizerCanvas = canvas;
+  visualizerAnalyser = analyser;
+  visualizerSignal = signal;
+  const tick = () => {
+    if (!visualizerCanvas?.isConnected) return;
+    drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerSignal, !visualizerAnalyser);
+    visualizerFrame = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function setVisualizerAnalyser(analyser) {
+  visualizerAnalyser = analyser;
+}
+
+function setVisualizerSignal(active) {
+  visualizerSignal = active;
+}
+
+// Receive -------------------------------------------------------------------
+receivePane.replaceChildren();
+receivePane.className = "receiver-primary";
+
+listenButton.textContent = "Enable microphone";
+listenButton.className = "enable-camera";
+listenButton.hidden = false;
+const receivePreview = makePreviewCanvas("Live audio level visualizer");
+
+const receivePanel = document.createElement("section");
+receivePanel.className = "transfer-panel";
+receivePanel.setAttribute("aria-live", "polite");
+receivePanel.hidden = true;
+const receiveProgress = document.createElement("div");
+receiveProgress.className = "transfer-progress";
+const receiveSummary = document.createElement("div");
+receiveSummary.className = "transfer-summary";
+const receivePrompt = document.createElement("span");
+receivePrompt.className = "settings-prompt";
+receivePrompt.style.paddingLeft = "0";
+const receiveState = document.createElement("span");
+receivePrompt.append(receiveState);
+const completeLabel = document.createElement("strong");
+completeLabel.className = "complete-label";
+completeLabel.textContent = "✓ Complete";
+const speedFeedback = document.createElement("span");
+speedFeedback.className = "speed-feedback";
+const speedValue = document.createElement("strong");
+speedFeedback.append(speedValue);
+receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
+const progressTrack = document.createElement("div");
+progressTrack.className = "progress";
+progressTrack.setAttribute("role", "progressbar");
+progressTrack.setAttribute("aria-label", "Audio transfer progress");
+progressTrack.setAttribute("aria-valuemin", "0");
+progressTrack.setAttribute("aria-valuemax", "100");
+const progressBar = document.createElement("div");
+progressTrack.append(progressBar);
+const receiveMeta = document.createElement("div");
+receiveMeta.className = "transfer-meta";
+const receiveEstimate = document.createElement("span");
+receiveEstimate.className = "transfer-estimate";
+const progressLabel = document.createElement("strong");
+progressLabel.className = "progress-amount";
+const sizeLabel = document.createElement("span");
+const etaLabel = document.createElement("span");
+receiveEstimate.append(progressLabel, sizeLabel, etaLabel);
+receiveMeta.append(receiveEstimate);
+receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
+receivePanel.append(receiveProgress);
+receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
+
+function resetReceiveUi() {
+  receivePanel.hidden = true;
+  receivePrompt.hidden = false;
+  receiveState.textContent = "Receiving";
+  completeLabel.style.display = "";
+  speedValue.textContent = "";
+  progressLabel.hidden = false;
+  progressLabel.textContent = "0%";
+  sizeLabel.textContent = "";
+  etaLabel.textContent = "";
+  progressBar.classList.remove("finalizing", "error");
+  progressBar.style.width = "0%";
+  progressTrack.setAttribute("aria-valuenow", "0");
+  listenButton.textContent = "Enable microphone";
+  listenButton.hidden = false;
+  receivePreview.zone.hidden = false;
+  drawVisualizer(receivePreview.canvas, null, false, true);
+}
+
 function updateReceiveProgress(session) {
   if (!session.identity || !session.startedAt || !session.decoder) return;
+  receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
   const rank = session.decoder.solvedCount;
   const usefulSymbols = session.decoder.usefulSymbols;
-  const estimate = estimateTransferProgress(
-    session.targetPackets,
-    usefulSymbols,
-    elapsedSeconds,
-    rank
-  );
+  const estimate = estimateTransferProgress(session.targetPackets, usefulSymbols, elapsedSeconds, rank);
   const percent = Math.min(98, Math.max(0, estimate.fraction * 100));
   progressBar.style.width = `${percent}%`;
   progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
@@ -166,12 +292,11 @@ function updateReceiveProgress(session) {
   sizeLabel.textContent = formatBytes(session.totalLen);
   etaLabel.textContent = estimate.etaSeconds === undefined ? "" : `${formatDuration(estimate.etaSeconds)} left`;
   const liveKbs = usefulSymbols * session.sourceBlockSize / 1024 / elapsedSeconds;
-  speedValue.textContent = usefulSymbols >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "👂";
-  codingLabel.textContent = transportName(session.mode);
-  setReceiveState("Receiving");
+  speedValue.textContent = usefulSymbols >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "";
 }
 
 function completeReceiveUi(session, file) {
+  receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
   const goodput = completedGoodputKbs(file.bytes.length, elapsedSeconds);
   progressBar.classList.add("finalizing");
@@ -182,21 +307,212 @@ function completeReceiveUi(session, file) {
   progressLabel.hidden = true;
   sizeLabel.textContent = formatBytes(file.bytes.length);
   etaLabel.textContent = "";
-  codingLabel.textContent = transportName(session.mode);
   speedValue.textContent = `${goodput.toFixed(goodput >= 10 ? 0 : 1)} KB/s`;
+  receivePreview.zone.hidden = true;
+  stopVisualizer();
 }
 
-function failReceiveUi(message) {
-  progressBar.classList.add("error");
-  setReceiveState(message, true);
-  speedValue.textContent = "—";
+async function failReceiveSession(session, message) {
+  if (receiveSession === session) receiveSession = null;
+  try { session.decoder?.free?.(); } catch {}
+  try { session.analyser?.disconnect(); } catch {}
+  try { await session.receiver?.stop?.(); } catch {}
+  releaseScreenWakeLock();
+  showReceiveError(message);
 }
+
+function showReceiveError(message) {
+  clearResult();
+  const error = document.createElement("p");
+  error.className = "failed";
+  error.textContent = message;
+  result.append(error);
+  listenButton.textContent = "Enable microphone";
+  listenButton.hidden = false;
+  receivePanel.hidden = true;
+  setVisualizerAnalyser(null);
+  setVisualizerSignal(false);
+}
+
+async function acceptPacket(session, frame) {
+  if (receiveSession !== session || session.finishing) return;
+  const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
+  if (identity !== session.identity) {
+    session.decoder?.free?.();
+    const k = sourceBlockCount(frame.totalLen, frame.mode);
+    if (codingMode(k) !== frame.mode) return;
+    if (frame.mode === "raptorq") await prepareRaptorQ();
+    if (receiveSession !== session || session.finishing) return;
+    session.decoder = new TransportDecoder(k, frame.blockSize, frame.totalLen);
+    session.identity = identity;
+    session.payloadId = frame.payloadId;
+    session.totalLen = frame.totalLen;
+    session.mode = frame.mode;
+    session.sourceBlockSize = sourceBlockSize(frame.mode);
+    session.targetPackets = k;
+    session.startedAt = performance.now();
+    sizeLabel.textContent = formatBytes(frame.totalLen);
+  }
+
+  session.decoder.addFrame(frame.encodingId, frame.block);
+  updateReceiveProgress(session);
+  if (!session.decoder.isComplete) return;
+  const recovered = session.decoder.assemble();
+  if (!recovered) return;
+
+  session.finishing = true;
+  try {
+    if (fnv1a(recovered) !== session.payloadId) throw new Error("Recovered audio data did not verify.");
+    const file = await unpackFile(recovered);
+    if (!await verifyFile(file)) throw new Error("Received file did not verify.");
+    await session.receiver.stop();
+    session.decoder.free();
+    if (receiveSession === session) receiveSession = null;
+    releaseScreenWakeLock();
+    completeReceiveUi(session, file);
+    await showReceivedResult(file);
+  } catch (error) {
+    session.finishing = false;
+    await failReceiveSession(session, error?.message || "Audio receive failed.");
+  }
+}
+
+async function stopReceiver(reset = true) {
+  const session = receiveSession;
+  receiveSession = null;
+  if (session) {
+    session.decoder?.free?.();
+    try { session.analyser?.disconnect(); } catch {}
+    await session.receiver.stop();
+  }
+  if (reset) resetReceiveUi();
+  releaseScreenWakeLock();
+}
+
+async function startListening() {
+  stopSender(false);
+  await stopReceiver(false);
+  clearResult();
+  receivePanel.hidden = true;
+  listenButton.hidden = true;
+  startVisualizer(receivePreview.canvas, null, false);
+  try {
+    const session = {
+      receiver: null,
+      analyser: null,
+      decoder: null,
+      identity: "",
+      payloadId: 0,
+      totalLen: 0,
+      mode: "",
+      sourceBlockSize: AUDIO_BLOCK_SIZE,
+      targetPackets: 0,
+      startedAt: 0,
+      finishing: false,
+      queue: Promise.resolve()
+    };
+    const receiver = new AcousticReceiver(
+      (frame) => {
+        session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
+          if (receiveSession === session) void failReceiveSession(session, error?.message || "Audio receive failed.");
+        });
+      },
+      () => {
+        if (receiveSession === session) {
+          setVisualizerSignal(true);
+          setTimeout(() => {
+            if (receiveSession === session && !session.identity) setVisualizerSignal(false);
+          }, 240);
+        }
+      }
+    );
+    session.receiver = receiver;
+    receiveSession = session;
+    await receiver.start();
+    if (receiveSession !== session) {
+      await receiver.stop();
+      return;
+    }
+    const analyser = receiver.context.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.78;
+    receiver.source.connect(analyser);
+    session.analyser = analyser;
+    setVisualizerAnalyser(analyser);
+    void requestScreenWakeLock();
+  } catch (error) {
+    if (receiveSession) await stopReceiver(false);
+    showReceiveError(error?.name === "NotAllowedError" ? "Microphone permission is required." : error?.message || "Could not start the microphone.");
+  }
+}
+
+// Send ----------------------------------------------------------------------
+const sendPreview = makePreviewCanvas("Audio output visualizer");
+sendActive.className = "";
+sendActive.replaceChildren();
+sendActive.style.width = "100%";
+sendActive.append(sendPreview.zone);
+
+const sendToolbar = document.createElement("div");
+sendToolbar.className = "send-toolbar";
+const settingsButton = document.createElement("button");
+settingsButton.type = "button";
+settingsButton.className = "secondary-button send-toolbar-button";
+settingsButton.textContent = "Settings";
+settingsButton.setAttribute("aria-expanded", "false");
+stopSendButton.className = "secondary-button send-toolbar-button";
+stopSendButton.textContent = "Stop";
+const settingsPanel = document.createElement("div");
+settingsPanel.className = "send-settings-panel";
+settingsPanel.hidden = true;
+const settingsGrid = document.createElement("div");
+settingsGrid.className = "send-settings-grid";
+const volumeLabel = document.createElement("label");
+const volumeTitle = document.createElement("span");
+volumeTitle.textContent = "Volume";
+const volumeInput = document.createElement("input");
+volumeInput.type = "range";
+volumeInput.min = "20";
+volumeInput.max = "100";
+volumeInput.step = "5";
+volumeInput.value = "100";
+volumeInput.setAttribute("aria-label", "Audio output volume");
+const volumeValue = document.createElement("span");
+volumeValue.style.fontSize = "11px";
+volumeValue.style.textTransform = "none";
+volumeValue.style.letterSpacing = "0";
+volumeLabel.append(volumeTitle, volumeInput, volumeValue);
+settingsGrid.append(volumeLabel);
+settingsPanel.append(settingsGrid);
+sendToolbar.append(settingsButton, stopSendButton, settingsPanel);
+sendActive.append(sendToolbar);
+
+const VOLUME_KEY = "airgapper:audio-volume:v1";
+try {
+  const saved = Number(localStorage.getItem(VOLUME_KEY));
+  if (Number.isFinite(saved) && saved >= 20 && saved <= 100) volumeInput.value = String(saved);
+} catch {}
+function syncVolume() {
+  const percent = Math.max(20, Math.min(100, Number(volumeInput.value) || 100));
+  volumeValue.textContent = `${percent}%`;
+  if (sendSession?.gain) sendSession.gain.gain.setTargetAtTime(percent / 100, sendSession.context.currentTime, 0.015);
+  try { localStorage.setItem(VOLUME_KEY, String(percent)); } catch {}
+}
+syncVolume();
+volumeInput.addEventListener("input", syncVolume);
+settingsButton.addEventListener("click", () => {
+  settingsPanel.hidden = !settingsPanel.hidden;
+  settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
+});
 
 function resetSendUi() {
   sendInputs.hidden = false;
   sendActive.hidden = true;
   fileInput.disabled = false;
   sendTextButton.disabled = false;
+  settingsPanel.hidden = true;
+  settingsButton.setAttribute("aria-expanded", "false");
+  stopVisualizer();
 }
 
 function cleanupSendSession(session) {
@@ -204,6 +520,8 @@ function cleanupSendSession(session) {
   session.stopped = true;
   try { session.source?.stop(); } catch {}
   try { session.source?.disconnect(); } catch {}
+  try { session.analyser?.disconnect(); } catch {}
+  try { session.gain?.disconnect(); } catch {}
   try { session.encoder?.free(); } catch {}
   if (session.context?.state !== "closed") void session.context?.close().catch(() => void 0);
 }
@@ -215,20 +533,6 @@ function stopSender(reset = true) {
   if (reset) {
     resetSendUi();
     if (currentMode === "send") setStatus("");
-  }
-  releaseScreenWakeLock();
-}
-
-async function stopReceiver(reset = true) {
-  const session = receiveSession;
-  receiveSession = null;
-  if (session) {
-    session.decoder?.free?.();
-    await session.receiver.stop();
-  }
-  if (reset) {
-    listenButton.textContent = "Listen";
-    resetReceiveUi();
   }
   releaseScreenWakeLock();
 }
@@ -256,7 +560,7 @@ async function playWaveform(session, waveform) {
   buffer.copyToChannel(waveform, 0);
   const source = session.context.createBufferSource();
   source.buffer = buffer;
-  source.connect(session.context.destination);
+  source.connect(session.analyser);
   session.source = source;
   await new Promise((resolve) => {
     source.onended = resolve;
@@ -283,9 +587,18 @@ async function startSending(container, label) {
     const context = new AudioContextType({ latencyHint: "playback" });
     await context.resume();
     const encoder = new TransportEncoder(container, AUDIO_BLOCK_SIZE, mode);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.8;
+    const gain = context.createGain();
+    gain.gain.value = Math.max(0.2, Math.min(1, Number(volumeInput.value) / 100));
+    analyser.connect(gain);
+    gain.connect(context.destination);
     const session = {
       context,
       encoder,
+      analyser,
+      gain,
       mode,
       payloadId: fnv1a(container),
       totalLen: container.length,
@@ -298,7 +611,8 @@ async function startSending(container, label) {
     sendActive.hidden = false;
     fileInput.disabled = true;
     sendTextButton.disabled = true;
-    setStatus(`Sending ${label} · ${transportName(mode)} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
+    setStatus(`Sending ${label} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
+    startVisualizer(sendPreview.canvas, analyser, true);
     void requestScreenWakeLock();
 
     while (sendSession === session && !session.stopped) {
@@ -306,13 +620,7 @@ async function startSending(container, label) {
       for (let i = 0; i < 4; i++) {
         const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
         const block = session.encoder.encode(encodingId);
-        frames.push(modulateAudioPacket(
-          session.payloadId,
-          session.totalLen,
-          session.mode,
-          encodingId,
-          block
-        ));
+        frames.push(modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block));
       }
       await playWaveform(session, joinedWaveform(frames));
     }
@@ -351,114 +659,35 @@ async function sendText() {
   }
 }
 
-async function acceptPacket(session, frame) {
-  if (receiveSession !== session || session.finishing) return;
-  const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
-  if (identity !== session.identity) {
-    session.decoder?.free?.();
-    const k = sourceBlockCount(frame.totalLen, frame.mode);
-    if (codingMode(k) !== frame.mode) return;
-    if (frame.mode === "raptorq") await prepareRaptorQ();
-    if (receiveSession !== session || session.finishing) return;
-    session.decoder = new TransportDecoder(k, frame.blockSize, frame.totalLen);
-    session.identity = identity;
-    session.payloadId = frame.payloadId;
-    session.totalLen = frame.totalLen;
-    session.mode = frame.mode;
-    session.sourceBlockSize = sourceBlockSize(frame.mode);
-    session.targetPackets = k;
-    session.startedAt = performance.now();
-    sizeLabel.textContent = formatBytes(frame.totalLen);
-    codingLabel.textContent = transportName(frame.mode);
-  }
-
-  session.decoder.addFrame(frame.encodingId, frame.block);
-  updateReceiveProgress(session);
-  if (!session.decoder.isComplete) return;
-  const recovered = session.decoder.assemble();
-  if (!recovered) return;
-
-  session.finishing = true;
-  try {
-    if (fnv1a(recovered) !== session.payloadId) throw new Error("Recovered audio data did not verify.");
-    const file = await unpackFile(recovered);
-    if (!await verifyFile(file)) throw new Error("Received file did not verify.");
-    await session.receiver.stop();
-    session.decoder.free();
-    if (receiveSession === session) receiveSession = null;
-    releaseScreenWakeLock();
-    listenButton.textContent = "Listen again";
-    completeReceiveUi(session, file);
-    await showReceivedResult(file);
-  } catch (error) {
-    session.finishing = false;
-    failReceiveUi(error?.message || "Audio receive failed.");
-  }
-}
-
-async function startListening() {
-  stopSender(false);
-  await stopReceiver(false);
-  clearResult();
-  resetReceiveUi("Starting microphone…");
-  try {
-    const session = {
-      receiver: null,
-      decoder: null,
-      identity: "",
-      payloadId: 0,
-      totalLen: 0,
-      mode: "",
-      sourceBlockSize: AUDIO_BLOCK_SIZE,
-      targetPackets: 0,
-      startedAt: 0,
-      finishing: false,
-      queue: Promise.resolve()
-    };
-    const receiver = new AcousticReceiver(
-      (frame) => {
-        session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
-          if (receiveSession === session) failReceiveUi(error?.message || "Audio receive failed.");
-        });
-      },
-      () => {
-        if (receiveSession === session && !session.identity) setReceiveState("Signal found…");
-      }
-    );
-    session.receiver = receiver;
-    receiveSession = session;
-    await receiver.start();
-    if (receiveSession !== session) {
-      await receiver.stop();
-      return;
-    }
-    listenButton.textContent = "Stop";
-    setReceiveState("Listening…");
-    void requestScreenWakeLock();
-  } catch (error) {
-    if (receiveSession) await stopReceiver(false);
-    listenButton.textContent = "Listen";
-    failReceiveUi(error?.name === "NotAllowedError" ? "Microphone permission is required." : error?.message || "Could not start the microphone.");
-  }
-}
-
+// Navigation ----------------------------------------------------------------
 async function setMode(mode) {
   if (mode !== "send" && mode !== "receive") return;
   await stopAll(false);
   currentMode = mode;
-  sendModeButton.classList.toggle("active", mode === "send");
-  receiveModeButton.classList.toggle("active", mode === "receive");
-  sendModeButton.setAttribute("aria-selected", String(mode === "send"));
-  receiveModeButton.setAttribute("aria-selected", String(mode === "receive"));
+  directionChooser.hidden = true;
   sendPane.hidden = mode !== "send";
   receivePane.hidden = mode !== "receive";
   status.hidden = mode === "receive";
-  resetSendUi();
-  listenButton.textContent = "Listen";
-  resetReceiveUi();
   clearResult();
   setStatus("");
+  resetSendUi();
+  resetReceiveUi();
+  if (mode === "receive") startVisualizer(receivePreview.canvas, null, false);
   if (mode === "send" && !matchMedia("(pointer: coarse)").matches) textInput.focus({ preventScroll: true });
+}
+
+async function showDirectionChooser() {
+  await stopAll(false);
+  currentMode = "choose";
+  directionChooser.hidden = false;
+  sendPane.hidden = true;
+  receivePane.hidden = true;
+  status.hidden = true;
+  clearResult();
+  setStatus("");
+  resetSendUi();
+  resetReceiveUi();
+  stopVisualizer();
 }
 
 sendModeButton.addEventListener("click", () => void setMode("send"));
@@ -467,8 +696,7 @@ sendTextButton.addEventListener("click", () => void sendText());
 fileInput.addEventListener("change", () => void sendFile(fileInput.files?.[0]));
 stopSendButton.addEventListener("click", () => stopSender(true));
 listenButton.addEventListener("click", () => {
-  if (receiveSession) void stopReceiver(true);
-  else void startListening();
+  if (!receiveSession) void startListening();
 });
 
 for (const type of ["dragenter", "dragover"]) {
@@ -485,17 +713,25 @@ for (const type of ["dragleave", "drop"]) {
 }
 filePicker.addEventListener("drop", (event) => void sendFile(event.dataTransfer?.files?.[0]));
 
+window.addEventListener("resize", () => {
+  if (visualizerCanvas) drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerSignal, !visualizerAnalyser);
+});
 window.addEventListener("airgapper:leave-mode", () => {
-  if (audioView.classList.contains("active") || sendSession || receiveSession) void stopAll(true);
+  if (audioView.classList.contains("active") || sendSession || receiveSession) {
+    void showDirectionChooser();
+  }
 });
 window.addEventListener("airgapper:pause-mode", () => {
   if (audioView.classList.contains("active") && (sendSession || receiveSession)) {
     void stopAll(false).then(() => {
-      resetSendUi();
-      listenButton.textContent = "Listen";
-      resetReceiveUi("Stopped");
+      if (currentMode === "send") resetSendUi();
+      if (currentMode === "receive") resetReceiveUi();
     });
   }
 });
+window.addEventListener("airgapper:resume-mode", () => {
+  if (!audioView.classList.contains("active")) return;
+  if (currentMode === "receive" && !receiveSession) startVisualizer(receivePreview.canvas, null, false);
+});
 
-void setMode("send");
+void showDirectionChooser();
