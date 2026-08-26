@@ -1,9 +1,15 @@
 import { formatBytes } from "../shared/format.js";
+import { completedGoodputKbs, estimateTransferProgress, formatDuration } from "../shared/progress.js";
 import { fnv1a, packFile, unpackFile, verifyFile } from "../shared/protocol.js";
 import { RaptorDecoder, RaptorEncoder, prepareRaptorQ } from "../shared/raptorq.js";
 import { raptorPacketEsi } from "../shared/coding-mode.js";
 import { isSnippet, packSnippet, snippetText } from "../shared/snippet.js";
 import { releaseScreenWakeLock, requestScreenWakeLock } from "../shared/wake-lock.js";
+import {
+  clearReceivedResult,
+  showReceivedFile as showStandardReceivedFile,
+  showReceivedSnippet
+} from "../receive/result.js";
 import {
   AUDIO_ESTIMATED_KBPS,
   AUDIO_SYMBOL_SIZE,
@@ -27,31 +33,143 @@ const sendTextButton = document.getElementById("audio-send-text");
 const stopSendButton = document.getElementById("audio-stop-send");
 const listenButton = document.getElementById("audio-listen");
 const status = document.getElementById("audio-status");
-const progress = document.getElementById("audio-progress");
-const progressBar = document.getElementById("audio-progress-bar");
+const legacyProgress = document.getElementById("audio-progress");
 const result = document.getElementById("audio-result");
+const standardResult = document.getElementById("result");
 
 let currentMode = "send";
 let sendSession = null;
 let receiveSession = null;
-let resultUrl = null;
+
+legacyProgress.hidden = true;
+receivePane.classList.add("receiver-primary");
+result.remove();
+
+const receivePanel = document.createElement("section");
+receivePanel.className = "transfer-panel";
+receivePanel.setAttribute("aria-live", "polite");
+
+const receiveProgress = document.createElement("div");
+receiveProgress.className = "transfer-progress";
+
+const receiveSummary = document.createElement("div");
+receiveSummary.className = "transfer-summary";
+const receivePrompt = document.createElement("span");
+receivePrompt.className = "settings-prompt";
+const receiveTitle = document.createElement("b");
+receiveTitle.textContent = "Audio";
+const receiveState = document.createElement("span");
+receiveState.className = "settings-actual";
+receivePrompt.append(receiveTitle, receiveState);
+const completeLabel = document.createElement("strong");
+completeLabel.className = "complete-label";
+completeLabel.textContent = "✓ Complete";
+const speedFeedback = document.createElement("span");
+speedFeedback.className = "speed-feedback";
+const speedValue = document.createElement("strong");
+speedFeedback.append(speedValue);
+receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
+
+const progressTrack = document.createElement("div");
+progressTrack.className = "progress";
+progressTrack.setAttribute("role", "progressbar");
+progressTrack.setAttribute("aria-label", "Audio transfer progress");
+progressTrack.setAttribute("aria-valuemin", "0");
+progressTrack.setAttribute("aria-valuemax", "100");
+const progressBar = document.createElement("div");
+progressTrack.append(progressBar);
+
+const receiveMeta = document.createElement("div");
+receiveMeta.className = "transfer-meta";
+const receiveEstimate = document.createElement("span");
+receiveEstimate.className = "transfer-estimate";
+const progressLabel = document.createElement("strong");
+progressLabel.className = "progress-amount";
+const sizeLabel = document.createElement("span");
+const etaLabel = document.createElement("span");
+receiveEstimate.append(progressLabel, sizeLabel, etaLabel);
+const codingLabel = document.createElement("span");
+codingLabel.textContent = "RaptorQ";
+receiveMeta.append(receiveEstimate, codingLabel);
+receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
+receivePanel.append(receiveProgress);
+receivePane.append(result, receivePanel);
 
 function setStatus(text, error = false) {
   status.textContent = text;
   status.classList.toggle("error", error);
 }
 
-function setProgress(value, visible = value > 0) {
-  const percent = Math.max(0, Math.min(100, Number(value) || 0));
-  progress.hidden = !visible;
-  progress.setAttribute("aria-valuenow", String(Math.round(percent)));
-  progressBar.style.width = `${percent}%`;
+function setReceiveState(text, error = false) {
+  receiveState.textContent = text;
+  receiveState.style.color = error ? "var(--bad)" : "";
+}
+
+function resetReceiveUi(state = "Ready") {
+  receivePrompt.hidden = false;
+  completeLabel.style.display = "";
+  speedValue.textContent = "👂";
+  progressLabel.hidden = false;
+  progressLabel.textContent = "0%";
+  sizeLabel.textContent = "";
+  etaLabel.textContent = "";
+  progressBar.classList.remove("finalizing", "error");
+  progressBar.style.width = "0%";
+  progressTrack.setAttribute("aria-valuenow", "0");
+  setReceiveState(state);
 }
 
 function clearResult() {
   result.replaceChildren();
-  if (resultUrl) URL.revokeObjectURL(resultUrl);
-  resultUrl = null;
+  clearReceivedResult();
+}
+
+async function showReceivedResult(file) {
+  clearResult();
+  if (isSnippet(file)) showReceivedSnippet(snippetText(file));
+  else await showStandardReceivedFile(file);
+  result.replaceChildren(...standardResult.childNodes);
+}
+
+function updateReceiveProgress(session) {
+  if (!session.identity || !session.startedAt) return;
+  const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
+  const sourceRank = Math.min(session.targetPackets - 1, session.seen.size);
+  const estimate = estimateTransferProgress(
+    session.targetPackets,
+    session.seen.size,
+    elapsedSeconds,
+    Math.max(0, sourceRank)
+  );
+  const percent = Math.min(98, Math.max(0, estimate.fraction * 100));
+  progressBar.style.width = `${percent}%`;
+  progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+  progressLabel.textContent = `${Math.floor(percent)}%`;
+  sizeLabel.textContent = formatBytes(session.totalLen);
+  etaLabel.textContent = estimate.etaSeconds === undefined ? "" : `${formatDuration(estimate.etaSeconds)} left`;
+  const liveKbs = session.seen.size * AUDIO_SYMBOL_SIZE / 1024 / elapsedSeconds;
+  speedValue.textContent = session.seen.size >= 2 ? `${liveKbs.toFixed(liveKbs >= 10 ? 0 : 1)} KB/s` : "👂";
+  setReceiveState("Receiving");
+}
+
+function completeReceiveUi(session, file) {
+  const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
+  const goodput = completedGoodputKbs(file.bytes.length, elapsedSeconds);
+  progressBar.classList.add("finalizing");
+  progressBar.style.width = "100%";
+  progressTrack.setAttribute("aria-valuenow", "100");
+  receivePrompt.hidden = true;
+  completeLabel.style.display = "block";
+  progressLabel.hidden = true;
+  sizeLabel.textContent = formatBytes(file.bytes.length);
+  etaLabel.textContent = "";
+  speedValue.textContent = `${goodput.toFixed(goodput >= 10 ? 0 : 1)} KB/s`;
+}
+
+function failReceiveUi(message) {
+  progressBar.classList.add("error");
+  setReceiveState(message, true);
+  speedValue.textContent = "—";
 }
 
 function resetSendUi() {
@@ -90,8 +208,7 @@ async function stopReceiver(reset = true) {
   }
   if (reset) {
     listenButton.textContent = "Listen";
-    setProgress(0, false);
-    if (currentMode === "receive") setStatus("");
+    resetReceiveUi();
   }
   releaseScreenWakeLock();
 }
@@ -133,7 +250,6 @@ async function startSending(container, label) {
   await stopReceiver(false);
   stopSender(false);
   clearResult();
-  setProgress(0, false);
   if (container.length > MAX_AUDIO_BYTES) {
     resetSendUi();
     setStatus(`Audio is limited to ${formatBytes(MAX_AUDIO_BYTES)}.`, true);
@@ -197,55 +313,13 @@ async function sendFile(file) {
 }
 
 async function sendText() {
-  const text = textInput.value;
   setStatus("Preparing…");
   try {
-    const packed = await packSnippet(text);
+    const packed = await packSnippet(textInput.value);
     await startSending(packed.container, "text");
   } catch (error) {
     setStatus(error?.message || "Could not prepare that text.", true);
   }
-}
-
-function showReceivedFile(file) {
-  clearResult();
-  if (isSnippet(file)) {
-    const text = snippetText(file);
-    const body = document.createElement("p");
-    body.className = "received-note";
-    body.textContent = text;
-    const actions = document.createElement("div");
-    actions.className = "note-actions";
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "download";
-    copy.textContent = "Copy";
-    copy.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(text);
-        copy.textContent = "Copied";
-        setTimeout(() => { copy.textContent = "Copy"; }, 1500);
-      } catch {
-        copy.textContent = "Copy failed";
-      }
-    });
-    actions.append(copy);
-    result.append(body, actions);
-    return;
-  }
-  resultUrl = URL.createObjectURL(new Blob([file.bytes], { type: file.type }));
-  const card = document.createElement("div");
-  card.className = "audio-file-result";
-  const link = document.createElement("a");
-  link.className = "download";
-  link.href = resultUrl;
-  link.download = file.name;
-  link.textContent = file.name;
-  const size = document.createElement("span");
-  size.className = "hint";
-  size.textContent = formatBytes(file.bytes.length);
-  card.append(link, size);
-  result.append(card);
 }
 
 async function acceptPacket(session, frame) {
@@ -259,14 +333,14 @@ async function acceptPacket(session, frame) {
     session.totalLen = frame.totalLen;
     session.seen.clear();
     session.targetPackets = Math.max(1, Math.ceil(frame.totalLen / frame.symbolSize));
+    session.startedAt = performance.now();
+    sizeLabel.textContent = formatBytes(frame.totalLen);
   }
   const esi = raptorPacketEsi(frame.packet);
   if (esi < 0 || session.seen.has(esi)) return;
   session.seen.add(esi);
   const recovered = session.decoder.add(frame.packet);
-  const percent = Math.min(99, session.seen.size / session.targetPackets * 100);
-  setProgress(percent, true);
-  setStatus(`Receiving · ${Math.floor(percent)}%`);
+  updateReceiveProgress(session);
   if (!recovered) return;
 
   session.finishing = true;
@@ -279,12 +353,11 @@ async function acceptPacket(session, frame) {
     if (receiveSession === session) receiveSession = null;
     releaseScreenWakeLock();
     listenButton.textContent = "Listen again";
-    setProgress(100, true);
-    setStatus("Complete");
-    showReceivedFile(file);
+    completeReceiveUi(session, file);
+    await showReceivedResult(file);
   } catch (error) {
     session.finishing = false;
-    setStatus(error?.message || "Audio receive failed.", true);
+    failReceiveUi(error?.message || "Audio receive failed.");
   }
 }
 
@@ -292,8 +365,7 @@ async function startListening() {
   stopSender(false);
   await stopReceiver(false);
   clearResult();
-  setProgress(0, false);
-  setStatus("Starting microphone…");
+  resetReceiveUi("Starting microphone…");
   try {
     await prepareRaptorQ();
     const session = {
@@ -304,12 +376,13 @@ async function startListening() {
       totalLen: 0,
       targetPackets: 0,
       seen: new Set(),
+      startedAt: 0,
       finishing: false
     };
     const receiver = new AcousticReceiver(
       (frame) => void acceptPacket(session, frame),
       () => {
-        if (receiveSession === session && !session.identity) setStatus("Signal found…");
+        if (receiveSession === session && !session.identity) setReceiveState("Signal found…");
       }
     );
     session.receiver = receiver;
@@ -320,12 +393,12 @@ async function startListening() {
       return;
     }
     listenButton.textContent = "Stop";
-    setStatus("Listening…");
+    setReceiveState("Listening…");
     void requestScreenWakeLock();
   } catch (error) {
     if (receiveSession) await stopReceiver(false);
     listenButton.textContent = "Listen";
-    setStatus(error?.name === "NotAllowedError" ? "Microphone permission is required." : error?.message || "Could not start the microphone.", true);
+    failReceiveUi(error?.name === "NotAllowedError" ? "Microphone permission is required." : error?.message || "Could not start the microphone.");
   }
 }
 
@@ -339,9 +412,10 @@ async function setMode(mode) {
   receiveModeButton.setAttribute("aria-selected", String(mode === "receive"));
   sendPane.hidden = mode !== "send";
   receivePane.hidden = mode !== "receive";
+  status.hidden = mode === "receive";
   resetSendUi();
   listenButton.textContent = "Listen";
-  setProgress(0, false);
+  resetReceiveUi();
   clearResult();
   setStatus("");
   if (mode === "send" && !matchMedia("(pointer: coarse)").matches) textInput.focus({ preventScroll: true });
@@ -379,8 +453,7 @@ window.addEventListener("airgapper:pause-mode", () => {
     void stopAll(false).then(() => {
       resetSendUi();
       listenButton.textContent = "Listen";
-      setProgress(0, false);
-      setStatus("Stopped");
+      resetReceiveUi("Stopped");
     });
   }
 });
