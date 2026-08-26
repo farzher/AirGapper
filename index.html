@@ -16,24 +16,12 @@
        runtime already paints 100% before assembling; make that final width a
        snap instead of a 220ms transition so it cannot visibly freeze at 97–99%. */
     #bar[style*="width: 100%"] { transition: none !important; animation: none !important; opacity: 1 !important; }
-    .audio-home-mode { grid-column: 1 / -1; min-height: 105px; font-size: 22px; }
-    .audio-shell { width: min(720px, 100%); margin-inline: auto; }
-    .audio-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-    .audio-mode-switch button { min-height: 42px; border: 1px solid var(--line); background: var(--card); border-radius: 11px; cursor: pointer; font-weight: 650; }
-    .audio-mode-switch button.active { border-color: #171717; background: #171717; color: white; }
     .audio-send-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .audio-card { min-height: 180px; border: 1px solid var(--line); background: var(--card); border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 22px; text-align: center; }
-    .audio-card strong { font-size: 18px; }
-    .audio-card p { margin: 0; color: var(--muted); font-size: 12px; }
     .audio-status { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; text-align: center; }
     .audio-status.error { color: var(--bad); font-weight: 650; }
-    .audio-progress { height: 6px; margin-top: 8px; overflow: hidden; background: var(--line); border-radius: 999px; }
-    .audio-progress > div { width: 0; height: 100%; background: #171717; transition: width .16s ease; }
     .audio-result { display: grid; gap: 10px; margin-top: 12px; }
-    .audio-file-result { display: flex; align-items: center; justify-content: center; gap: 10px; }
     @media (max-width: 700px) {
       .audio-send-inputs { grid-template-columns: 1fr; }
-      .audio-home-mode { min-height: 92px; }
     }
     @media (orientation: landscape) {
       body.portrait-fallback .audio-send-inputs { grid-template-columns: 1fr; }
@@ -67,7 +55,8 @@
       <div class="home">
         <button class="mode" data-mode="send" type="button">Send</button>
         <button class="mode" data-mode="receive" type="button">Receive</button>
-        <button class="mode audio-home-mode" data-mode="audio" type="button">Audio</button>
+        <button class="mode" data-mode="audio" data-audio-direction="send" type="button">Send (audio)</button>
+        <button class="mode" data-mode="audio" data-audio-direction="receive" type="button">Receive (audio)</button>
       </div>
     </section>
 
@@ -109,12 +98,9 @@
       <div class="hint status-line" id="specs"></div>
     </section>
 
-    <section id="audioView" class="view audio-shell">
-      <div class="audio-mode-switch" role="tablist" aria-label="Audio transfer direction">
-        <button id="audio-mode-send" class="active" type="button" role="tab" aria-selected="true">Send</button>
-        <button id="audio-mode-receive" type="button" role="tab" aria-selected="false">Receive</button>
-      </div>
-      <section id="audio-send-pane">
+    <section id="audioView" class="view">
+      <div class="audio-mode-switch" hidden></div>
+      <section id="audio-send-pane" hidden>
         <div class="audio-send-inputs" id="audio-send-inputs">
           <label class="file-picker drop" id="audio-file-picker">
             <input id="audio-file" type="file" />
@@ -126,20 +112,13 @@
             <button id="audio-send-text" type="button">Send text</button>
           </div>
         </div>
-        <div class="audio-card" id="audio-send-active" hidden>
-          <strong>Sending audio</strong>
-          <p>Stop when the other device receives it.</p>
-          <button class="secondary-button" id="audio-stop-send" type="button">Stop</button>
-        </div>
+        <div id="audio-send-active" hidden><button id="audio-stop-send" type="button" hidden>Stop</button></div>
       </section>
       <section id="audio-receive-pane" hidden>
-        <div class="audio-card">
-          <strong>Receive audio</strong>
-          <button class="download" id="audio-listen" type="button">Listen</button>
-        </div>
+        <button id="audio-listen" type="button" hidden>Enable microphone</button>
       </section>
-      <div class="audio-status" id="audio-status" role="status" aria-live="polite"></div>
-      <div class="audio-progress" id="audio-progress" role="progressbar" aria-label="Audio transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div id="audio-progress-bar"></div></div>
+      <div class="audio-status" id="audio-status" role="status" aria-live="polite" hidden></div>
+      <div id="audio-progress" hidden></div>
       <div class="audio-result" id="audio-result"></div>
     </section>
 
