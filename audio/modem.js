@@ -1,5 +1,6 @@
 import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
+import { QuietScanner, isQuietProfile, modulateQuietPacket } from "./quiet-modem.js";
 
 const SAMPLE_RATE = 48000;
 const FFT_SIZE = 512;
@@ -283,6 +284,7 @@ function applyDqpsk(real, imag, a, b) {
   }
 }
 function modulateAudioPacket(payloadId, totalLen, mode, encodingId, block) {
+  if (isQuietProfile()) return modulateQuietPacket(payloadId, totalLen, mode, encodingId, block);
   const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
   const coded = convolutionalEncode(bytesToBits(raw));
   const slots = interleave(coded);
@@ -491,6 +493,7 @@ class AcousticReceiver {
   constructor(onPacket, onSignal = () => void 0) {
     this.onPacket = onPacket;
     this.onSignal = onSignal;
+    this.quiet = new QuietScanner(onPacket);
     this.stream = null;
     this.context = null;
     this.source = null;
@@ -551,6 +554,7 @@ class AcousticReceiver {
   }
   append(chunk) {
     if (!chunk.length) return;
+    this.quiet.append(chunk);
     if (this.length + chunk.length > this.samples.length) {
       const grown = new Float32Array(Math.max(this.samples.length * 2, this.length + chunk.length));
       grown.set(this.samples.subarray(0, this.length));
@@ -624,6 +628,7 @@ class AcousticReceiver {
     this.stream = this.context = this.source = this.processor = this.silent = this.resampler = null;
     this.length = 0;
     this.scan = 0;
+    this.quiet.reset();
     if (context && context.state !== "closed") await context.close().catch(() => void 0);
   }
 }
