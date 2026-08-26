@@ -5,6 +5,17 @@ import {
   SAMPLE_RATE,
   modulateReliablePacket
 } from "./reliable-stream.js";
+import { modulateQuietPacket } from "./quiet-stream.js";
+
+const PROFILE_KEY = "airgapper:audio-profile:v1";
+
+function modulateAudioPacket(payloadId, totalLen, mode, encodingId, block) {
+  let quiet = false;
+  try { quiet = localStorage.getItem(PROFILE_KEY) === "quiet"; } catch {}
+  return quiet
+    ? modulateQuietPacket(payloadId, totalLen, mode, encodingId, block)
+    : modulateReliablePacket(payloadId, totalLen, mode, encodingId, block);
+}
 
 class StreamingResampler {
   constructor(inputRate) {
@@ -151,5 +162,6 @@ export {
   AcousticReceiver,
   MAX_AUDIO_BYTES,
   SAMPLE_RATE,
+  modulateAudioPacket,
   modulateReliablePacket
 };
