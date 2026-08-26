@@ -1,0 +1,43 @@
+name: one-shot manual optics fix
+
+on:
+  push:
+    branches: [chatgpt/manual-optics-ui-523]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/manual-optics-ui-523
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply manual optics UI repair
+        run: python3 .github/scripts/one-shot-manual-optics-fix.py
+
+      - name: Validate targeted changes
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/camera-constraints.js
+          node --input-type=module --check < benchmark/manual-optics-ui-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/manual-optics-ui-smoke.mjs
+          git diff --check
+
+      - name: Commit repaired manual optics UI
+        run: |
+          set -euo pipefail
+          git config user.name "AirGapper Build"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "v0.5.523 fix manual optics controls"
+          git push origin HEAD:chatgpt/manual-optics-ui-523
