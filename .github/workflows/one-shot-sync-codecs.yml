@@ -1,0 +1,45 @@
+name: one-shot sync codec artifacts
+
+on:
+  push:
+    branches:
+      - chatgpt/auto-optics-dark-ci-515
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/auto-optics-dark-ci-515
+          fetch-depth: 1
+      - name: Cache codec toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            codec/source/emsdk
+            codec/source/third_party
+            codec/source/build-simd
+            codec/source/build-scalar
+          key: airgapper-codec-emsdk-6.0.6-zxing-${{ hashFiles('codec/source/zxing-cpp.commit') }}
+      - name: Rebuild checked-in codecs
+        shell: bash
+        run: |
+          set -euo pipefail
+          AIRGAPPER_CODEC_SIMD=1 AIRGAPPER_CODEC_OUTPUT_DIR=.. codec/source/build.sh
+          AIRGAPPER_CODEC_SIMD=0 AIRGAPPER_CODEC_OUTPUT_DIR=../scalar codec/source/build.sh
+          git status --short codec/airgapper_codec.js codec/airgapper_codec.wasm codec/scalar/airgapper_codec.js codec/scalar/airgapper_codec.wasm
+      - name: Commit artifacts and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/one-shot-sync-codecs.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add codec/airgapper_codec.js codec/airgapper_codec.wasm codec/scalar/airgapper_codec.js codec/scalar/airgapper_codec.wasm .github/workflows/one-shot-sync-codecs.yml
+          git commit -m 'Rebuild codecs without LTO'
+          git push origin HEAD:chatgpt/auto-optics-dark-ci-515
