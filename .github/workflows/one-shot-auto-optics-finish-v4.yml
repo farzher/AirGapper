@@ -1,0 +1,103 @@
+name: finish auto optics light starved rescue v4
+
+on:
+  push:
+    branches: [chatgpt/auto-optics-dark-ci-515]
+    paths: [.github/workflows/one-shot-auto-optics-finish-v4.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply reviewed patches
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def extract_step(path, marker):
+              lines = Path(path).read_text().splitlines()
+              marker_index = next(i for i, line in enumerate(lines) if marker in line)
+              command = next(i for i in range(marker_index + 1, len(lines)) if lines[i].strip() == "python3 - <<'PY'")
+              start = command + 1
+              end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'PY')
+              return '\n'.join(line[10:] if line.startswith('          ') else line for line in lines[start:end]) + '\n'
+
+          def extract_heredoc(path, marker, terminator='EOF'):
+              lines = Path(path).read_text().splitlines()
+              marker_index = next(i for i, line in enumerate(lines) if marker in line)
+              command = next(i for i in range(marker_index + 1, len(lines)) if "<<'EOF'" in lines[i])
+              start = command + 1
+              end = next(i for i in range(start, len(lines)) if lines[i].strip() == terminator)
+              return '\n'.join(line[10:] if line.startswith('          ') else line for line in lines[start:end]) + '\n'
+
+          Path('/tmp/feature.py').write_text(extract_step(
+            '.github/workflows/one-shot-auto-optics-finish.yml', 'Apply guarded production fixes'))
+          Path('/tmp/tighten.py').write_text(extract_step(
+            '.github/workflows/one-shot-auto-optics-finish-v2.yml', 'Tighten evidence freshness and dormant regression semantics'))
+          Path('benchmark/track-processor-proxy-smoke.mjs').write_text(extract_heredoc(
+            '.github/workflows/one-shot-auto-optics-finish-v3.yml', 'Update TrackProcessor smoke to current architecture'))
+          PY
+          python3 /tmp/feature.py
+          python3 /tmp/tighten.py
+
+      - name: Retarget worker pool smoke to integrated policy
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('benchmark/worker-pool-reuse-smoke.mjs')
+          s = p.read_text()
+          old = '''import { DecodeWorkerPool } from "../shared/worker-pool.js";\n\n// The receiver imports worker-capacity-guard.js before constructing its pool.\n// Mock the tiny browser surface it needs so this smoke exercises the same\n// patched submitAtSlot() prototype instead of only the unwrapped base class.\nconst receiveVideo = { srcObject: { active: true } };\nglobalThis.document = {\n  getElementById: (id) => id === "video" ? receiveVideo : null,\n  body: { classList: { contains: (name) => name === "receive-mode" } }\n};\nglobalThis.window = globalThis;\nawait import("../receive/worker-capacity-guard.js");\nif (!DecodeWorkerPool.prototype.submitAtSlot.__airgapperWorkerPolicy)\n  throw new Error("worker-capacity guard did not patch submitAtSlot");\n'''
+          new = '''// shared/worker-pool.js now owns receiver capacity policy directly. Install the\n// fake receiver DOM before importing it because the live camera element is\n// intentionally captured once at module initialization.\nconst receiveVideo = { srcObject: { active: true } };\nglobalThis.document = {\n  getElementById: (id) => id === "video" ? receiveVideo : null,\n  body: { classList: { contains: (name) => name === "receive-mode" } }\n};\nglobalThis.window = globalThis;\nconst { DecodeWorkerPool } = await import("../shared/worker-pool.js");\n'''
+          if s.count(old) != 1:
+              raise SystemExit('worker pool smoke old guard preamble not found exactly once')
+          s = s.replace(old, new, 1)
+          s = s.replace('  guardedSubmitPath: true,', '  integratedCapacityPolicy: true,', 1)
+          p.write_text(s)
+          PY
+
+      - name: Run targeted regressions
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node --input-type=module --check < receive/grid-lattice.js
+          node --input-type=module --check < shared/worker-pool.js
+          node --input-type=module --check < benchmark/browser-performance-policy-smoke.mjs
+          node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
+          node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/auto-phase-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+          node benchmark/guided-motion-smoke.mjs
+          node benchmark/rgba-luma-smoke.mjs
+          node benchmark/track-processor-proxy-smoke.mjs
+          node benchmark/worker-pool-reuse-smoke.mjs
+          git diff --check
+
+      - name: Commit tested fixes
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-auto-optics-finish.yml \
+            .github/workflows/one-shot-auto-optics-finish-v2.yml \
+            .github/workflows/one-shot-auto-optics-finish-v3.yml \
+            .github/workflows/one-shot-auto-optics-finish-v4.yml
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add receive/runtime.js receive/performance-policy.js receive/grid-lattice.js \
+            benchmark/grid-lattice-regression.mjs benchmark/browser-performance-policy-smoke.mjs \
+            benchmark/track-processor-proxy-smoke.mjs benchmark/worker-pool-reuse-smoke.mjs version.js
+          git commit -m "Finish Auto Optics light-starved rescue v0.5.516"
+          git push
