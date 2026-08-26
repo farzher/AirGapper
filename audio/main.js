@@ -51,8 +51,8 @@ const headerReceiverQr = document.getElementById("receiver-link-qr");
 
 const VALID_PACKET_FLASH_MS = 120;
 const FAST_FRAME_MS = 3326;
-const SPEED_KEY = "airgapper:audio-speed:v1";
-const SOUND_KEY = "airgapper:audio-sound:v1";
+const PROFILE_KEY = "airgapper:audio-profile:v1";
+const MODEM_SOUND_KEY = "airgapper:audio-sound:v1";
 
 let currentMode = null;
 let sendSession = null;
@@ -585,44 +585,39 @@ settingsPanel.hidden = true;
 const settingsGrid = document.createElement("div");
 settingsGrid.className = "send-settings-grid";
 
-const speedLabel = document.createElement("label");
-const speedTitle = document.createElement("span");
-speedTitle.textContent = "Speed";
-const speedInput = document.createElement("select");
-speedInput.setAttribute("aria-label", "Audio speed profile");
-speedInput.append(new Option("Reliable", "reliable"), new Option("Fast", "fast"));
-speedLabel.append(speedTitle, speedInput);
-
-const soundLabel = document.createElement("label");
-soundLabel.dataset.audioSound = "";
-const soundTitle = document.createElement("span");
-soundTitle.textContent = "Sound";
-const soundInput = document.createElement("select");
-soundInput.setAttribute("aria-label", "Audio sound profile");
-soundInput.append(new Option("Normal", "normal"), new Option("Quiet", "quiet"));
-soundLabel.append(soundTitle, soundInput);
-settingsGrid.append(speedLabel, soundLabel);
+const profileLabel = document.createElement("label");
+profileLabel.dataset.audioSound = "";
+const profileTitle = document.createElement("span");
+profileTitle.textContent = "Profile";
+const profileInput = document.createElement("select");
+profileInput.setAttribute("aria-label", "Audio profile");
+profileInput.append(
+  new Option("Reliable", "reliable"),
+  new Option("Fast", "fast"),
+  new Option("Quiet", "quiet")
+);
+profileLabel.append(profileTitle, profileInput);
+settingsGrid.append(profileLabel);
 settingsPanel.append(settingsGrid);
 sendToolbar.append(settingsButton, receiverQrButton, stopSendButton, settingsPanel);
 sendActive.append(sendToolbar);
 
 try {
-  const savedSpeed = localStorage.getItem(SPEED_KEY);
-  if (savedSpeed === "fast" || savedSpeed === "reliable") speedInput.value = savedSpeed;
-  const savedSound = localStorage.getItem(SOUND_KEY);
-  if (savedSound === "quiet" || savedSound === "normal") soundInput.value = savedSound;
+  const savedProfile = localStorage.getItem(PROFILE_KEY);
+  if (savedProfile === "reliable" || savedProfile === "fast" || savedProfile === "quiet") profileInput.value = savedProfile;
+  localStorage.removeItem("airgapper:audio-speed:v1");
 } catch {}
-if (!speedInput.value) speedInput.value = "reliable";
-if (!soundInput.value) soundInput.value = "normal";
-try {
-  localStorage.setItem(SPEED_KEY, speedInput.value);
-  localStorage.setItem(SOUND_KEY, soundInput.value);
-} catch {}
+if (!profileInput.value) profileInput.value = "reliable";
+function syncStoredProfile() {
+  try {
+    localStorage.setItem(PROFILE_KEY, profileInput.value);
+    localStorage.setItem(MODEM_SOUND_KEY, profileInput.value === "quiet" ? "quiet" : "normal");
+  } catch {}
+}
+syncStoredProfile();
 
-function activeProfile(session = sendSession) {
-  if (soundInput.value === "quiet") return "quiet";
-  if (speedInput.value === "fast") return "fast";
-  return "reliable";
+function activeProfile() {
+  return profileInput.value === "fast" || profileInput.value === "quiet" ? profileInput.value : "reliable";
 }
 function profileEstimate(profile) {
   if (profile === "fast") return FAST_ESTIMATED_KBPS;
@@ -631,22 +626,18 @@ function profileEstimate(profile) {
 }
 function updateSendStatus(session) {
   if (!session || sendSession !== session) return;
-  const profile = activeProfile(session);
+  const profile = activeProfile();
   setStatus(`Sending ${session.label} · ~${profileEstimate(profile).toFixed(1)} KB/s`);
 }
 function syncProfileSettings() {
-  try {
-    localStorage.setItem(SPEED_KEY, speedInput.value === "fast" ? "fast" : "reliable");
-    localStorage.setItem(SOUND_KEY, soundInput.value === "quiet" ? "quiet" : "normal");
-  } catch {}
+  syncStoredProfile();
   const session = sendSession;
   if (!session || session.stopped) return;
   session.profileEpoch++;
   updateSendStatus(session);
   try { session.source?.stop(); } catch {}
 }
-speedInput.addEventListener("change", syncProfileSettings);
-soundInput.addEventListener("change", syncProfileSettings);
+profileInput.addEventListener("change", syncProfileSettings);
 settingsButton.addEventListener("click", () => {
   settingsPanel.hidden = !settingsPanel.hidden;
   settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
@@ -706,7 +697,7 @@ async function stopAll(reset = true) {
   await stopReceiver(reset);
 }
 function buildSendWaveform(session) {
-  const profile = activeProfile(session);
+  const profile = activeProfile();
   const epoch = session.profileEpoch;
   if (profile === "fast") {
     const startOrdinal = session.ordinal;
