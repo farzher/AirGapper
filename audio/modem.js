@@ -15,13 +15,13 @@ const DATA_CARRIERS = CARRIER_COUNT - PILOT_COUNT;
 const BITS_PER_SYMBOL = DATA_CARRIERS * 2;
 const SYNC_SYMBOL_COUNT = 2;
 const SYNC_SAMPLES = SYMBOL_SAMPLES * SYNC_SYMBOL_COUNT;
-const PRE_GUARD = 64;
-const TAIL_GUARD = 64;
+const PRE_GUARD = 0;
+const TAIL_GUARD = 0;
 const FFT_WINDOW_EARLY = 16;
 const SYNC_THRESHOLD = 0.11;
 const SYMBOL_RMS = 0.19;
-const SYNC_TX_GAIN = 1.14;
-const REFERENCE_TX_GAIN = 1.05;
+const SYNC_TX_GAIN = 1;
+const REFERENCE_TX_GAIN = 1;
 const PINK_TILT = 0.65;
 const HIGH_BAND_FLOOR = 0.35;
 const TRACK_WINDOW = 1024;
@@ -194,9 +194,9 @@ function phaseVector(seed) {
     state ^= state << 13;
     state ^= state >>> 17;
     state ^= state << 5;
-    const quadrant = state >>> 0 & 3;
-    real[carrier] = quadrant === 0 ? 1 : quadrant === 2 ? -1 : 0;
-    imag[carrier] = quadrant === 1 ? 1 : quadrant === 3 ? -1 : 0;
+    const phase = (state >>> 0) / 4294967296 * Math.PI * 2;
+    real[carrier] = Math.cos(phase);
+    imag[carrier] = Math.sin(phase);
   }
   return { real, imag };
 }
