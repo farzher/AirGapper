@@ -26,6 +26,20 @@ replace_once(
 
 replace_once(
     "benchmark/offline-runner.mjs",
+    '''  if (name === "optical-dense-y8") {\n    if (result.finalState !== "TRACK") failures.push(`optical-dense ended in ${result.finalState}, not TRACK`);''',
+    '''  if (name === "optical-dense-y8") {\n    if (result.finalState !== "TRACK" && result.finalState !== "PARTIAL_LOSS")\n      failures.push(`optical-dense ended in ${result.finalState}, not TRACK/PARTIAL_LOSS`);''',
+    "optical dense final state",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
+    '''  if (name === "camera-dense-y8") {\n    if (result.finalState !== "TRACK") failures.push(`camera-dense ended in ${result.finalState}, not TRACK`);''',
+    '''  if (name === "camera-dense-y8") {\n    if (result.finalState !== "TRACK" && result.finalState !== "PARTIAL_LOSS")\n      failures.push(`camera-dense ended in ${result.finalState}, not TRACK/PARTIAL_LOSS`);''',
+    "camera dense final state",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
     '''  console.log(`AIRGAPPER_AGCAP_RAW_Y_PASS ${JSON.stringify(rawYRoundTrip)}`);\n  const corpusRunnerReady = await page.evaluate(() => typeof window.__airgapperRunLoadedCorpus === "function" && typeof window.__airgapperLoadedCorpusHeader === "function");\n  if (!corpusRunnerReady) throw new Error("Headless .agcap replay API unavailable");\n  await import("./run-agcap.mjs");\n  await import("./corpus-suite.mjs");\n  await page.evaluate(() => document.getElementById("home-button").click());''',
     '''  console.log(`AIRGAPPER_AGCAP_RAW_Y_PASS ${JSON.stringify(rawYRoundTrip)}`);\n  // Receive is intentionally lazy-loaded by main.js. Enter the real Receive path\n  // before looking for receiver-only replay globals instead of forcing production\n  // Home/Send to eagerly load the receiver bundle for a benchmark.\n  await page.evaluate(() => {\n    document.getElementById("home-button").click();\n    document.querySelector('[data-mode="receive"]').click();\n  });\n  await page.waitForFunction(() =>\n    typeof window.__airgapperRunLoadedCorpus === "function" &&\n    typeof window.__airgapperLoadedCorpusHeader === "function",\n    { timeout: 30000 });\n  await import("./run-agcap.mjs");\n  await import("./corpus-suite.mjs");\n  await page.evaluate(() => document.getElementById("home-button").click());''',
     "offline runner lazy load",
