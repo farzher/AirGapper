@@ -88,9 +88,12 @@ jobs:
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
           node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
+          node --input-type=module --check < benchmark/direct-y8-worker-smoke.mjs
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
-          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
+          node --input-type=module --check < benchmark/offline-runner.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
+          node --input-type=module --check < benchmark/run-agcap.mjs
+          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
           node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
           node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
           node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
