@@ -36,6 +36,8 @@ import {
   acquisitionRacePolicy,
   automaticOpticsAcquisitionSeed,
   automaticOpticsHasAnotherAcquisitionSeed,
+  automaticOpticsLightStarvedEvidence,
+  automaticOpticsLightStarvedRescueSeed,
   automaticOpticsHoldEligible,
   automaticOpticsHoldThreshold,
   legacyTemporalRiskWeight,
@@ -379,6 +381,7 @@ let autoOpticsRetryAt = 0;
 let autoOpticsAcquisitionSince = 0;
 let autoOpticsRescueRetryAt = 0;
 let autoOpticsAeRescueStep = 0;
+let autoOpticsLightRescueUsed = false;
 let autoOpticsSeedAttempt = 0;
 let autoOpticsAeBias = 0;
 let autoOpticsHoldSample;
@@ -765,6 +768,13 @@ const focusController = new FocusController(
   () => frameId
 );
 const opticsAnalyzer = new StaticQrOpticsAnalyzer();
+let lastAutomaticOpticsMetrics;
+function currentAutomaticOpticsMetrics(now = receiverNow()) {
+  const metrics = lastAutomaticOpticsMetrics;
+  if (!metrics || !Number.isFinite(metrics.at) ||
+      metrics.at < autoOpticsAcquisitionSince || now - metrics.at > 1500) return void 0;
+  return metrics;
+}
 function attachCameraController(track) {
   focusController.attach(track);
   if (automaticOptics) void primeAutomaticQrOpticsStartup(track);
@@ -3479,6 +3489,7 @@ function resetAutomaticOpticsRuntime() {
   autoOpticsAcquisitionSince = 0;
   autoOpticsRescueRetryAt = 0;
   autoOpticsAeRescueStep = 0;
+  autoOpticsLightRescueUsed = false;
   autoOpticsSeedAttempt = 0;
   autoOpticsAeBias = 0;
   autoOpticsHoldSample = void 0;
@@ -3635,9 +3646,9 @@ function automaticOpticsMemoryHealthy(saved) {
   return Boolean(saved && Number(saved.yieldRate) >= minimumYield &&
     Number.isFinite(saved.exposure) && saved.exposure > 0 && Number.isFinite(saved.iso) && saved.iso > 0);
 }
-function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt) {
+function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt, seedPolicyOverride = void 0) {
   const aeProduct = baseline.exposure * baseline.iso;
-  const seedPolicy = automaticOpticsAcquisitionSeed(attempt);
+  const seedPolicy = seedPolicyOverride ?? automaticOpticsAcquisitionSeed(attempt);
   // lightScale is absolute relative to photographic neutral. Normalize against
   // the EV scale the meter actually accepted so a biased baseline is not darkened twice.
   const baselineScale = Number.isFinite(baseline.lightScale) && baseline.lightScale > 0 ? baseline.lightScale : 1;
@@ -3688,14 +3699,14 @@ async function readAutomaticAeBaseline(track) {
   const lightScale = Number.isFinite(actualEv) ? Math.min(1, Math.pow(2, actualEv)) : 1;
   return { exposure, iso, at: receiverNow(), neutral: lightScale >= 0.999, lightScale };
 }
-async function applyAutomaticShortSeed(track, baseline, reason) {
+async function applyAutomaticShortSeed(track, baseline, reason, seedPolicyOverride = void 0) {
   const caps = track.getCapabilities?.() ?? {};
   const exposureRange = caps.exposureTime;
   const isoRange = caps.iso;
   if (!baseline || !exposureRange || !isoRange) return false;
   const settings = track.getSettings();
   const fps = Math.max(12, Math.min(120, Number(settings.frameRate) || 30));
-  const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps);
+  const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, autoOpticsSeedAttempt, seedPolicyOverride);
   const accepted = await applyCameraConstraint(track, {
     exposureMode: "manual",
     exposureTime: seed.exposure,
@@ -3715,6 +3726,20 @@ async function applyAutomaticShortSeed(track, baseline, reason) {
   autoOpticsTuneSummary = `${reason} · ${seed.seedPolicy.label} ${seed.seedPolicy.index + 1}/${seed.seedPolicy.count} · ${formatExposureMs(actual.exposureTime ?? seed.exposure)} · ISO ${Math.round(actual.iso ?? seed.iso)}`;
   focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");
   return true;
+}
+async function applyAutomaticLightStarvedSeed(track, baseline, reason) {
+  if (autoOpticsLightRescueUsed || !baseline) return false;
+  const metrics = currentAutomaticOpticsMetrics();
+  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(metrics);
+  // With measured QR modules, never infer direction from low separation alone.
+  // With no QR optical target at all after the full dark ladder, allow exactly
+  // one neutral-equivalent short-shutter attempt as the universal last resort.
+  if (metrics && !measuredUnderexposure) return false;
+  autoOpticsLightRescueUsed = true;
+  const evidence = metrics ? "measured light-starved" : "no QR optics evidence; last resort";
+  return applyAutomaticShortSeed(
+    track, baseline, `${reason} · ${evidence}`, automaticOpticsLightStarvedRescueSeed()
+  );
 }
 async function primeAutomaticQrOpticsBeforePlayback(track) {
   if (!track || track.readyState !== "live") return false;
@@ -3855,6 +3880,9 @@ async function abandonAutomaticShortSeed(track, reason = "short-shutter seed pro
   autoOpticsMutationRunning = true;
   try {
     if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;
+    if (await applyAutomaticLightStarvedSeed(
+      track, autoOpticsAeBaseline, `${reason} · dark ladder exhausted`
+    )) return;
     const baseline = await readAutomaticAeBaseline(track);
     if (!automaticOpticsSessionAlive(track)) return;
     const now = receiverNow();
@@ -4450,15 +4478,20 @@ async function rescueAutomaticQrAcquisition(track, now) {
   }
 
   const candidates = [];
-  const add = (raw, label) => {
+  const add = (raw, label, lightRescue = false) => {
     const value = quantizeCameraRange(raw, range);
-    if (!candidates.some((item) => Math.abs(item.value - value) < 1e-6)) candidates.push({ value, label });
+    if (!candidates.some((item) => Math.abs(item.value - value) < 1e-6)) candidates.push({ value, label, lightRescue });
   };
   if (range.min < 0) {
     add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");
     add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");
     if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");
   }
+  const rescueMetrics = currentAutomaticOpticsMetrics(now);
+  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(rescueMetrics);
+  const lightRescueAllowed = !autoOpticsLightRescueUsed &&
+    (!rescueMetrics || measuredUnderexposure);
+  if (lightRescueAllowed && range.max >= 0) add(0, "light-starved neutral rescue", true);
   if (!candidates.length) return;
 
   const step = autoOpticsAeRescueStep % candidates.length;
@@ -4471,6 +4504,7 @@ async function rescueAutomaticQrAcquisition(track, now) {
       autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;
       return;
     }
+    if (candidate.lightRescue) autoOpticsLightRescueUsed = true;
     const appliedSequence = latestSourceFrameSequence;
     await waitForFreshAutoOpticsFrames(track, appliedSequence, 2, 420);
     autoOpticsAeRescueStep = (step + 1) % candidates.length;
@@ -5508,6 +5542,7 @@ function stopReceiver() {
   cameraStartedTs = 0;
   lastOpticalSampleAt = -Infinity;
   lastOpticalSourceSequence = -1;
+  lastAutomaticOpticsMetrics = void 0;
   opticalAnalyzeCount = 0;
   opticalAnalyzeTotalMs = 0;
   opticalAnalyzeMaxMs = 0;
@@ -6457,6 +6492,9 @@ function inspectStaticQrOptics(source, image, ox = 0, oy = 0) {
   lastOpticalSampleAt = now;
   const analyzeStarted = performance.now();
   const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);
+  if (metrics && Number.isFinite(metrics.blackLevel) && Number.isFinite(metrics.whiteLevel)) {
+    lastAutomaticOpticsMetrics = { ...metrics, at: now, sourceSequence: source.sequence };
+  }
   const analyzeMs = performance.now() - analyzeStarted;
   opticalAnalyzeCount++;
   opticalAnalyzeTotalMs += analyzeMs;

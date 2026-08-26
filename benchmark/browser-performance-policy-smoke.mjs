@@ -50,12 +50,25 @@ assert.deepEqual(policy.lockedRecoveryPolicy({
 const seeds = [0, 1, 2, 3].map((index) => policy.automaticOpticsAcquisitionSeed(index));
 assert.deepEqual(seeds.map((seed) => seed.label), ["fast-dark", "extra-dark", "less-dark-short", "least-dark-short"]);
 assert(seeds.every((seed) => seed.lightScale < 1));
+assert(seeds.every((seed) => seed.maxExposure <= 50), "ordinary QR search must stay at or below 5 ms");
 assert(seeds[1].lightScale < seeds[0].lightScale);
 assert(seeds[2].lightScale > seeds[0].lightScale);
 assert(seeds[3].lightScale > seeds[2].lightScale);
 assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(0), true);
 assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(2), true);
 assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);
+const lightRescue = policy.automaticOpticsLightStarvedRescueSeed();
+assert.equal(lightRescue.lightScale, 1);
+assert.equal(lightRescue.maxExposure, 50, "last-resort neutral light must still cap shutter at 5 ms");
+assert.equal(policy.automaticOpticsLightStarvedEvidence({
+  tiles: 3, confidence: 0.82, blackLevel: 8, whiteLevel: 118, separation: 110, banding: 0.08, temporalContamination: 0.12
+}), true);
+assert.equal(policy.automaticOpticsLightStarvedEvidence({
+  tiles: 3, confidence: 0.9, blackLevel: 118, whiteLevel: 150, separation: 32, banding: 0.08, temporalContamination: 0.12
+}), false, "lifted blacks / low separation must not be misread as darkness");
+assert.equal(policy.automaticOpticsLightStarvedEvidence({
+  tiles: 3, confidence: 0.9, blackLevel: 10, whiteLevel: 210, separation: 200, banding: 0.08, temporalContamination: 0.12
+}), false, "healthy bright whites do not justify a brighter rescue");
 
 // Production must bias exposure before playback/frame capture. Cameras without
 // an EV axis must use a dark manual seed when shutter+ISO are available.
@@ -68,6 +81,11 @@ assert(runtimeSource.includes('const seed = automaticShortShutterSeed(baseline, 
 assert(runtimeSource.includes('Math.min(0, AUTO_QR_EV_BIAS)'));
 assert(!runtimeSource.includes('"bright rescue"'));
 assert(!runtimeSource.includes('"neutral retry"'));
+assert(runtimeSource.includes('async function applyAutomaticLightStarvedSeed(track, baseline, reason)'));
+assert(runtimeSource.includes('function currentAutomaticOpticsMetrics(now = receiverNow())'));
+assert(runtimeSource.includes('metrics.at < autoOpticsAcquisitionSince || now - metrics.at > 1500'));
+assert(runtimeSource.includes('add(0, "light-starved neutral rescue", true)'));
+assert(runtimeSource.includes('if (candidate.lightRescue) autoOpticsLightRescueUsed = true;'));
 
 // HOLD requires real spatial QR evidence, not aggregate yield alone.
 const cohort = { cohortSize: 4, cohortCoverage: 4, tailYield: 0.30 };

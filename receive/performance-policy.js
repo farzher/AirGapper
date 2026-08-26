@@ -15,8 +15,15 @@ const AUTO_OPTICS_ACQUISITION_SEEDS = Object.freeze([
   Object.freeze({ lightScale: Math.pow(2, -0.75), maxExposure: 35, frameFraction: 0.10, label: "fast-dark" }),
   Object.freeze({ lightScale: Math.pow(2, -1.5), maxExposure: 35, frameFraction: 0.10, label: "extra-dark" }),
   Object.freeze({ lightScale: Math.pow(2, -0.5), maxExposure: 45, frameFraction: 0.14, label: "less-dark-short" }),
-  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 55, frameFraction: 0.18, label: "least-dark-short" })
+  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 50, frameFraction: 0.18, label: "least-dark-short" })
 ]);
+
+// One bounded final rescue may reproduce photographic-neutral light while still
+// holding the shutter at 5 ms or faster. It is deliberately not part of the
+// ordinary acquisition ladder.
+const AUTO_OPTICS_LIGHT_STARVED_RESCUE = Object.freeze({
+  lightScale: 1, maxExposure: 50, frameFraction: 0.16, label: "light-starved-neutral"
+});
 
 export function acquisitionRacePolicy({
   scanIndex,
@@ -111,6 +118,25 @@ export function automaticOpticsAcquisitionSeed(attempt = 0) {
 
 export function automaticOpticsHasAnotherAcquisitionSeed(attempt = 0) {
   return Math.trunc(Number(attempt) || 0) + 1 < AUTO_OPTICS_ACQUISITION_SEEDS.length;
+}
+
+export function automaticOpticsLightStarvedRescueSeed() {
+  return { ...AUTO_OPTICS_LIGHT_STARVED_RESCUE, index: 0, count: 1 };
+}
+
+// Low contrast alone has no exposure direction. A brighter rescue is justified
+// only when known QR modules say both black and white are genuinely low.
+export function automaticOpticsLightStarvedEvidence(metrics) {
+  if (!metrics || Number(metrics.tiles) < 1) return false;
+  const confidence = Number(metrics.confidence);
+  const black = Number(metrics.blackLevel);
+  const white = Number(metrics.whiteLevel);
+  const separation = Number(metrics.separation);
+  const banding = Number(metrics.banding);
+  const temporal = Number(metrics.temporalContamination);
+  if (![confidence, black, white, separation, banding, temporal].every(Number.isFinite)) return false;
+  return confidence >= 0.68 && black <= 48 && white <= 145 && separation >= 38 &&
+    banding <= 0.55 && temporal <= 0.55;
 }
 
 // HOLD is a production state, not a guess. A setting must prove that it can
