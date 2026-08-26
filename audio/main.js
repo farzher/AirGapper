@@ -43,6 +43,9 @@ const receiverLinkQrLarge = document.getElementById("receiver-link-qr-large");
 const receiverLinkUrl = document.getElementById("receiver-link-url");
 const headerReceiverQr = document.getElementById("receiver-link-qr");
 
+const VALID_PACKET_FLASH_MS = 120;
+const SEND_BATCH_FRAMES = 4;
+
 let currentMode = null;
 let sendSession = null;
 let receiveSession = null;
@@ -52,6 +55,7 @@ let visualizerAnalyser = null;
 let visualizerSignal = false;
 let smoothedBars = new Float32Array(48);
 let audioDialogActive = false;
+let packetFlashTimer = 0;
 
 audioView.classList.remove("audio-shell");
 audioView.style.width = "100%";
@@ -145,6 +149,7 @@ function makePreviewCanvas(label) {
   preview.style.background = "var(--card)";
   preview.style.border = "1px solid var(--line)";
   preview.style.borderRadius = "14px";
+  preview.style.position = "relative";
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-label", label);
   canvas.style.display = "block";
@@ -154,7 +159,7 @@ function makePreviewCanvas(label) {
   canvas.style.inset = "0";
   preview.append(canvas);
   zone.append(preview);
-  return { zone, canvas };
+  return { zone, preview, canvas };
 }
 function resizeVisualizer(canvas) {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -173,7 +178,7 @@ function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const styles = getComputedStyle(document.documentElement);
-  const ink = styles.getPropertyValue(signal ? "--good" : "--ink").trim() || "#171717";
+  const ink = styles.getPropertyValue(signal ? "--good" : "--muted").trim() || (signal ? "#21864a" : "#777");
   const muted = styles.getPropertyValue("--line").trim() || "#e7e7e3";
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = styles.getPropertyValue("--card").trim() || "#fff";
@@ -205,7 +210,7 @@ function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
     const half = Math.max(1.2 * dpr, smoothedBars[i] * maxHalf);
     const x = padding + i * (barWidth + gap);
     ctx.fillStyle = ink;
-    ctx.globalAlpha = 0.22 + Math.min(0.78, smoothedBars[i] * 1.7);
+    ctx.globalAlpha = 0.18 + Math.min(0.72, smoothedBars[i] * 1.55);
     const radius = Math.min(barWidth / 2, 3 * dpr);
     ctx.beginPath();
     ctx.roundRect(x, center - half, barWidth, half * 2, radius);
@@ -264,6 +269,46 @@ listenButton.textContent = "Enable microphone";
 listenButton.className = "enable-camera";
 listenButton.hidden = false;
 const receivePreview = makePreviewCanvas("Live audio level visualizer");
+const receiveOverlay = document.createElement("div");
+receiveOverlay.textContent = "Listening";
+receiveOverlay.setAttribute("aria-hidden", "true");
+Object.assign(receiveOverlay.style, {
+  position: "absolute",
+  left: "10px",
+  bottom: "10px",
+  zIndex: "4",
+  pointerEvents: "none",
+  padding: "5px 8px",
+  borderRadius: "7px",
+  borderLeft: "3px solid #8d9298",
+  background: "rgba(12, 14, 18, 0.58)",
+  color: "rgba(255,255,255,0.78)",
+  font: "700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace",
+  letterSpacing: ".01em",
+  whiteSpace: "nowrap",
+  transition: "border-color 100ms ease, color 100ms ease, background 100ms ease"
+});
+receivePreview.preview.append(receiveOverlay);
+function setReceiveOverlayListening() {
+  receiveOverlay.textContent = "Listening";
+  receiveOverlay.style.borderLeftColor = "#8d9298";
+  receiveOverlay.style.background = "rgba(12, 14, 18, 0.58)";
+  receiveOverlay.style.color = "rgba(255,255,255,0.78)";
+}
+function flashValidPacket() {
+  clearTimeout(packetFlashTimer);
+  setVisualizerSignal(true);
+  receiveOverlay.textContent = "Packet ✓";
+  receiveOverlay.style.borderLeftColor = "#35d66f";
+  receiveOverlay.style.background = "rgba(12, 34, 22, 0.70)";
+  receiveOverlay.style.color = "#fff";
+  packetFlashTimer = setTimeout(() => {
+    packetFlashTimer = 0;
+    if (currentMode !== "receive") return;
+    setVisualizerSignal(false);
+    setReceiveOverlayListening();
+  }, VALID_PACKET_FLASH_MS);
+}
 const receivePanel = document.createElement("section");
 receivePanel.className = "transfer-panel";
 receivePanel.setAttribute("aria-live", "polite");
@@ -309,6 +354,8 @@ receivePanel.append(receiveProgress);
 receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
 
 function resetReceiveUi() {
+  clearTimeout(packetFlashTimer);
+  packetFlashTimer = 0;
   receivePanel.hidden = false;
   receivePrompt.hidden = true;
   receiveState.textContent = "";
@@ -324,6 +371,8 @@ function resetReceiveUi() {
   listenButton.textContent = "Enable microphone";
   listenButton.hidden = false;
   receivePreview.zone.hidden = false;
+  setVisualizerSignal(false);
+  setReceiveOverlayListening();
   drawVisualizer(receivePreview.canvas, null, false, true);
 }
 function updateReceiveProgress(session, now = performance.now()) {
@@ -348,15 +397,16 @@ function updateReceiveProgress(session, now = performance.now()) {
 function completeReceiveUi(session, file) {
   receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
-  const goodput = completedGoodputKbs(file.bytes.length, elapsedSeconds);
+  const transmittedSize = Number(file.transmittedSize) || file.bytes.length;
+  const goodput = completedGoodputKbs(transmittedSize, elapsedSeconds);
   progressBar.classList.add("finalizing");
   progressBar.style.width = "100%";
   progressTrack.setAttribute("aria-valuenow", "100");
   receivePrompt.hidden = true;
   completeLabel.style.display = "block";
   progressLabel.hidden = true;
-  sizeLabel.textContent = formatBytes(file.bytes.length);
-  etaLabel.textContent = "";
+  sizeLabel.textContent = "";
+  etaLabel.textContent = `${formatBytes(transmittedSize)} in ${formatDuration(elapsedSeconds)}`;
   speedValue.textContent = `${goodput.toFixed(1)} KB/s`;
   receivePreview.zone.hidden = true;
   stopVisualizer();
@@ -380,11 +430,16 @@ function showReceiveError(message) {
   listenButton.hidden = false;
   receivePanel.hidden = false;
   speedValue.textContent = "—";
+  receiveOverlay.textContent = "Microphone off";
+  receiveOverlay.style.borderLeftColor = "#8d9298";
+  receiveOverlay.style.background = "rgba(12, 14, 18, 0.58)";
+  receiveOverlay.style.color = "rgba(255,255,255,0.78)";
   setVisualizerAnalyser(null);
   setVisualizerSignal(false);
 }
 async function acceptPacket(session, frame) {
   if (receiveSession !== session || session.finishing) return;
+  flashValidPacket();
   const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
   if (identity !== session.identity) {
     session.decoder?.free?.();
@@ -446,6 +501,7 @@ async function startListening() {
   clearResult();
   receivePanel.hidden = false;
   listenButton.hidden = true;
+  setReceiveOverlayListening();
   startVisualizer(receivePreview.canvas, null, false);
   try {
     const session = {
@@ -464,21 +520,11 @@ async function startListening() {
       finishing: false,
       queue: Promise.resolve()
     };
-    const receiver = new AcousticReceiver(
-      (frame) => {
-        session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
-          if (receiveSession === session) void failReceiveSession(session, error?.message || "Audio receive failed.");
-        });
-      },
-      () => {
-        if (receiveSession === session) {
-          setVisualizerSignal(true);
-          setTimeout(() => {
-            if (receiveSession === session && !session.identity) setVisualizerSignal(false);
-          }, 240);
-        }
-      }
-    );
+    const receiver = new AcousticReceiver((frame) => {
+      session.queue = session.queue.then(() => acceptPacket(session, frame)).catch((error) => {
+        if (receiveSession === session) void failReceiveSession(session, error?.message || "Audio receive failed.");
+      });
+    });
     session.receiver = receiver;
     receiveSession = session;
     await receiver.start();
@@ -628,6 +674,15 @@ function joinedWaveform(frames) {
   }
   return joined;
 }
+function buildSendWaveform(session) {
+  const frames = [];
+  for (let i = 0; i < SEND_BATCH_FRAMES; i++) {
+    const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
+    const block = session.encoder.encode(encodingId);
+    frames.push(modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block));
+  }
+  return joinedWaveform(frames);
+}
 async function playWaveform(session, waveform) {
   if (sendSession !== session || session.stopped) return;
   const buffer = session.context.createBuffer(1, waveform.length, SAMPLE_RATE);
@@ -688,14 +743,13 @@ async function startSending(container, label) {
     setStatus(`Sending ${label} · ~${AUDIO_ESTIMATED_KBPS.toFixed(1)} KB/s`);
     startVisualizer(sendPreview.canvas, analyser, true);
     void requestScreenWakeLock();
+    let waveform = buildSendWaveform(session);
     while (sendSession === session && !session.stopped) {
-      const frames = [];
-      for (let i = 0; i < 4; i++) {
-        const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
-        const block = session.encoder.encode(encodingId);
-        frames.push(modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block));
-      }
-      await playWaveform(session, joinedWaveform(frames));
+      const playback = playWaveform(session, waveform);
+      const nextWaveform = buildSendWaveform(session);
+      await playback;
+      if (sendSession !== session || session.stopped) break;
+      waveform = nextWaveform;
     }
   } catch (error) {
     if (sendSession) stopSender(false);
