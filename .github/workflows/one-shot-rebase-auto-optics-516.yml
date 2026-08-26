@@ -1,0 +1,97 @@
+name: rebase tested auto optics 516
+
+on:
+  push:
+    branches: [chatgpt/auto-optics-dark-ci-515]
+    paths: [.github/workflows/one-shot-rebase-auto-optics-516.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply exact tested diff onto current master
+        run: |
+          set -euo pipefail
+          git fetch origin chatgpt/auto-optics-staging-backup --depth=30
+          git diff f861d958fbc961fb2e7aea57c0d8b523183261fd origin/chatgpt/auto-optics-staging-backup -- \
+            .github/workflows/fast-regression.yml \
+            benchmark/browser-performance-policy-smoke.mjs \
+            benchmark/camera-constraints-smoke.mjs \
+            benchmark/grid-lattice-regression.mjs \
+            benchmark/track-processor-proxy-smoke.mjs \
+            benchmark/worker-pool-reuse-smoke.mjs \
+            receive/grid-lattice.js \
+            receive/performance-policy.js \
+            receive/runtime.js > /tmp/auto-optics-tested.patch
+          test -s /tmp/auto-optics-tested.patch
+          git apply --3way --index /tmp/auto-optics-tested.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('version.js')
+          s = p.read_text()
+          old = 'export const APP_VERSION = "0.5.515";'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected current master version anchor once, got {s.count(old)}')
+          p.write_text(s.replace(old, 'export const APP_VERSION = "0.5.516";', 1))
+          PY
+          git add version.js
+          git diff --cached --check
+
+      - name: Verify current-master manual optics survived merge
+        run: |
+          set -euo pipefail
+          grep -q 'const cameraExposureManual = document.getElementById("camera-exposure-manual")' receive/runtime.js
+          grep -q 'function syncManualOpticsReadback' receive/runtime.js
+          grep -q 'slider.disabled = automatic' receive/runtime.js
+          if grep -q 'let manualFocusMode = ' receive/runtime.js; then
+            echo 'old manual-focus UI state was accidentally resurrected' >&2
+            exit 1
+          fi
+
+      - name: Run targeted regression suite
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < version.js
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node --input-type=module --check < receive/grid-lattice.js
+          node --input-type=module --check < shared/worker-pool.js
+          node --input-type=module --check < benchmark/browser-performance-policy-smoke.mjs
+          node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
+          node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/auto-phase-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+          node benchmark/guided-motion-smoke.mjs
+          node benchmark/rgba-luma-smoke.mjs
+          node benchmark/track-processor-proxy-smoke.mjs
+          node benchmark/worker-pool-reuse-smoke.mjs
+          git diff --cached --check
+
+      - name: Commit rebased tested tree
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-rebase-auto-optics-516.yml
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add .github/workflows/fast-regression.yml \
+            benchmark/browser-performance-policy-smoke.mjs benchmark/camera-constraints-smoke.mjs \
+            benchmark/grid-lattice-regression.mjs benchmark/track-processor-proxy-smoke.mjs \
+            benchmark/worker-pool-reuse-smoke.mjs receive/grid-lattice.js \
+            receive/performance-policy.js receive/runtime.js version.js
+          git commit -m "Improve Auto Optics dark-first rescue v0.5.516"
+          git push
