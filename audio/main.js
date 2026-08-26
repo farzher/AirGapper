@@ -53,6 +53,8 @@ let smoothedBars = new Float32Array(48);
 audioView.classList.remove("audio-shell");
 audioView.style.width = "100%";
 directionChooser.className = "home";
+directionChooser.removeAttribute("role");
+directionChooser.removeAttribute("aria-label");
 sendModeButton.className = "mode";
 receiveModeButton.className = "mode";
 sendModeButton.textContent = "Send audio";
@@ -62,6 +64,7 @@ receiveModeButton.removeAttribute("role");
 sendModeButton.removeAttribute("aria-selected");
 receiveModeButton.removeAttribute("aria-selected");
 legacyProgress.hidden = true;
+status.hidden = true;
 result.remove();
 
 function sourceBlockSize(mode) {
@@ -79,6 +82,7 @@ function selectAudioTransport(totalLen) {
 function setStatus(text, error = false) {
   status.textContent = text;
   status.classList.toggle("error", error);
+  status.hidden = currentMode !== "send" || !text;
 }
 
 function clearResult() {
@@ -664,6 +668,8 @@ async function setMode(mode) {
   if (mode !== "send" && mode !== "receive") return;
   await stopAll(false);
   currentMode = mode;
+  audioView.classList.toggle("receiver-shell", mode === "receive");
+  document.body.classList.toggle("receive-mode", mode === "receive");
   directionChooser.hidden = true;
   sendPane.hidden = mode !== "send";
   receivePane.hidden = mode !== "receive";
@@ -679,6 +685,8 @@ async function setMode(mode) {
 async function showDirectionChooser() {
   await stopAll(false);
   currentMode = "choose";
+  audioView.classList.remove("receiver-shell");
+  document.body.classList.remove("receive-mode");
   directionChooser.hidden = false;
   sendPane.hidden = true;
   receivePane.hidden = true;
