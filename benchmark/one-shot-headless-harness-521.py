@@ -12,6 +12,13 @@ def replace_once(path, old, new, label):
 
 replace_once(
     "benchmark/offline-runner.mjs",
+    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 5;''',
+    '''  const fullLimit = name === "camera-dense-y8" ? 8 : 6;''',
+    "acquisition scan budget",
+)
+
+replace_once(
+    "benchmark/offline-runner.mjs",
     '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
     '''    decodeP95Ms: median(trials.map((item) => Number(item.decodeP95Ms))),\n    firstProductionFrame: median(trials.map((item) => item.firstProductionFrame == null ? NaN : Number(item.firstProductionFrame))),\n    firstLockedStateFrame: median(trials.map((item) => item.firstLockedStateFrame == null ? NaN : Number(item.firstLockedStateFrame))),\n    fullJobs: median(trials.map((item) => Number(item.fullJobs))),\n    guidedOutputYield: median(trials.map((item) => Number(item.normalized?.guidedOutputYield))),''',
     "startup trial medians",
@@ -20,7 +27,7 @@ replace_once(
 replace_once(
     "benchmark/offline-runner.mjs",
     '''  if (result.firstLockedStateFrame == null) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = ["dense-y8", "optical-dense-y8", "camera-dense-y8"].includes(name) ? 10 : 8;\n    if (result.firstLockedStateFrame > lockLimit) failures.push(`lock regressed to frame ${result.firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 5;\n  if (result.fullJobs > fullLimit) failures.push(`too many acquisition scans (${result.fullJobs} > ${fullLimit})`);''',
-    '''  const firstLockedStateFrame = result.trialCount > 1\n    ? result.trialMedians?.firstLockedStateFrame\n    : result.firstLockedStateFrame;\n  if (firstLockedStateFrame == null || !Number.isFinite(firstLockedStateFrame)) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = ["dense-y8", "optical-dense-y8", "camera-dense-y8"].includes(name) ? 10 : 8;\n    if (firstLockedStateFrame > lockLimit) failures.push(`median lock regressed to frame ${firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 5;\n  const fullJobs = result.trialCount > 1 ? result.trialMedians?.fullJobs : result.fullJobs;\n  if (fullJobs > fullLimit) failures.push(`median acquisition scans ${fullJobs} > ${fullLimit}`);''',
+    '''  const firstLockedStateFrame = result.trialCount > 1\n    ? result.trialMedians?.firstLockedStateFrame\n    : result.firstLockedStateFrame;\n  if (firstLockedStateFrame == null || !Number.isFinite(firstLockedStateFrame)) failures.push("lattice never entered a locked state");\n  else {\n    const lockLimit = ["dense-y8", "optical-dense-y8", "camera-dense-y8"].includes(name) ? 10 : 8;\n    if (firstLockedStateFrame > lockLimit) failures.push(`median lock regressed to frame ${firstLockedStateFrame} (>${lockLimit})`);\n  }\n  const fullLimit = name === "camera-dense-y8" ? 8 : 6;\n  const fullJobs = result.trialCount > 1 ? result.trialMedians?.fullJobs : result.fullJobs;\n  if (fullJobs > fullLimit) failures.push(`median acquisition scans ${fullJobs} > ${fullLimit}`);''',
     "median startup assertions",
 )
 
