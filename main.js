@@ -7,6 +7,35 @@ installCameraStartGuard();
 window.AIRGAPPER_BUILD = APP_BUILD;
 document.querySelector(".app-version").textContent = APP_BUILD;
 
+function portraitFallbackRotation() {
+  const angle = Number(screen.orientation?.angle ?? window.orientation);
+  return angle === 270 || angle === -90 ? "90deg" : "-90deg";
+}
+function syncPortraitFallback() {
+  const landscape = window.innerWidth > window.innerHeight;
+  document.body.classList.toggle("portrait-fallback", landscape);
+  if (landscape) document.documentElement.style.setProperty("--portrait-fallback-rotation", portraitFallbackRotation());
+  else document.documentElement.style.removeProperty("--portrait-fallback-rotation");
+}
+async function requestPortraitLock() {
+  try {
+    await screen.orientation?.lock?.("portrait-primary");
+  } catch {
+    // Browser tabs (notably iOS) commonly reject orientation locking. The CSS
+    // fallback below keeps the app portrait without depending on this API.
+  }
+  syncPortraitFallback();
+}
+syncPortraitFallback();
+void requestPortraitLock();
+window.addEventListener("resize", syncPortraitFallback);
+window.addEventListener("orientationchange", syncPortraitFallback);
+screen.orientation?.addEventListener?.("change", syncPortraitFallback);
+document.addEventListener("pointerdown", () => {
+  // Some browsers only allow lock() from a user gesture/fullscreen context.
+  if (document.body.classList.contains("portrait-fallback")) void requestPortraitLock();
+}, { capture: true });
+
 const serviceWorkers = navigator.serviceWorker;
 let registration;
 

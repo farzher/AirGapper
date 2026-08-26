@@ -476,16 +476,47 @@ dialog::backdrop { background: #0004; }
 }
 
 
-/* Browser tabs cannot reliably lock orientation, especially on iOS. In a short
-   landscape receiver viewport, spend the height on the camera instead. */
-@media (orientation: landscape) and (max-height: 600px) {
-  body.receive-mode .app-header { display: none; }
-  body.receive-mode .app-main { width: 100%; max-width: none; padding: 0; }
-  body.receive-mode .receiver-primary { gap: 0; }
-  body.receive-mode .receiver-heading { display: none; }
-  body.receive-mode .preview-zone { flex: 1 1 0; min-height: 0; }
-  body.receive-mode .transfer-panel { padding: 6px 10px; border-inline: 0; border-bottom: 0; border-radius: 0; }
-  body.receive-mode .transfer-panel details.settings > .row { max-height: min(140px, 42vh); padding-bottom: 6px; }
-  body.receive-mode .progress { height: 5px; margin-top: 6px; }
-  body.receive-mode .transfer-meta { margin-top: 5px; }
+/* Keep AirGapper logically portrait even when a browser refuses orientation.lock().
+   The transformed shell uses the swapped viewport dimensions; hit testing follows
+   the transform, so controls remain ordinary DOM controls. */
+@media (orientation: landscape) {
+  body.portrait-fallback { width: 100vw; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+  body.portrait-fallback .app {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 100vh;
+    width: 100dvh;
+    height: 100vw;
+    height: 100dvw;
+    min-height: 0;
+    overflow: auto;
+    transform: translate(-50%, -50%) rotate(var(--portrait-fallback-rotation, -90deg));
+    transform-origin: center;
+  }
+  body.portrait-fallback.qr-full .app { overflow: hidden; }
+  body.portrait-fallback.qr-full #stage { width: 100%; height: 100%; min-height: 100%; }
+
+  /* The viewport media queries still see the physical landscape width. Mirror
+     the normal mobile layout against the shell's logical portrait width. */
+  body.portrait-fallback .app-header { padding-top: 14px; }
+  body.portrait-fallback .app-main { padding-top: 0; }
+  body.portrait-fallback .home,
+  body.portrait-fallback .send-inputs { grid-template-columns: 1fr; }
+  body.portrait-fallback .mode { min-height: 130px; }
+  body.portrait-fallback .file-picker,
+  body.portrait-fallback .note-composer { min-height: 130px; }
+  body.portrait-fallback .send-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  body.portrait-fallback .stage { min-height: 0; }
+  body.portrait-fallback .receiver-primary { gap: 8px; }
+  body.portrait-fallback .preview { min-height: 0; }
+  body.portrait-fallback .transfer-panel { padding: 10px 12px; }
+  body.portrait-fallback .transfer-meta { margin-top: 7px; }
+  body.portrait-fallback .pipeline-metrics { gap: 10px; }
+}
+
+@media (orientation: landscape) and (max-height: 390px) {
+  body.portrait-fallback .receiver-settings .row { grid-template-columns: minmax(0, 1.5fr) minmax(62px, .7fr) auto auto; gap: 6px; }
+  body.portrait-fallback .receiver-settings .optics-manual { grid-column: 1 / -1; grid-row: 2; }
+  body.portrait-fallback .receiver-settings { padding-inline: 9px; }
 }
