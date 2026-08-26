@@ -17,6 +17,33 @@ function monotonicNow() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
+function dormantReseedUsable(lattice, detection) {
+  const candidate = lattice.candidate;
+  if (!candidate || detection?.identity !== lattice.identity) return false;
+  const modules = Number(detection.modules);
+  const slot = Number(detection.slotIndex);
+  if (!Number.isInteger(modules) || modules < 21 || modules > 177 || modules % 4 !== 1 ||
+      !Number.isInteger(slot) || slot < 0 || slot >= candidate.layout.cols * candidate.layout.rows) return false;
+  if (detection.extendedGrid) {
+    if (!candidate.layout.extendedGrid || Number(detection.gridCols) !== candidate.layout.cols ||
+        Number(detection.gridRows) !== candidate.layout.rows) return false;
+  } else if (candidate.layout.extendedGrid || Number(detection.layoutId) !== Number(candidate.layout.id)) {
+    return false;
+  }
+  const quad = detection.quad;
+  const points = quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];
+  if (points.length !== 4 || !points.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y))) return false;
+  const edges = points.map((point, index) =>
+    Math.hypot(point.x - points[(index + 1) % 4].x, point.y - points[(index + 1) % 4].y));
+  const shortest = Math.min(...edges);
+  const longest = Math.max(...edges);
+  const area = Math.abs(points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % 4];
+    return sum + point.x * next.y - point.y * next.x;
+  }, 0) / 2);
+  return shortest >= 20 && longest / shortest < 2.25 && area > shortest * shortest * 0.35;
+}
+
 class GridLattice extends GeometryGridLattice {
   constructor(onTransition) {
     super((from, to, reason, at) => {
@@ -170,6 +197,10 @@ class GridLattice extends GeometryGridLattice {
 
   accept(detection, frameWidth, frameHeight) {
     const at = Number(detection?.at);
+
+    if (this.state === "DORMANT" && Number.isFinite(at) && dormantReseedUsable(this, detection)) {
+      this.reacquire(at, "fresh verified QR re-seeded dormant lattice");
+    }
 
     if (this.sameFrameCompatible(detection)) {
       // Same-frame cache reuse is already fenced by current identity, declared
