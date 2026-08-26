@@ -13,52 +13,60 @@ try {
   const result = await page.evaluate(() => new Promise((resolve, reject) => {
     const jobId = 991351;
     const worker = new Worker(new URL("/receive/worker.js", location.href), { type: "module" });
-    // This is a transport/correctness smoke, not a decoder stress benchmark.
-    // Keep enough room for first-use WASM startup without hiding a hung worker.
-    const timer = setTimeout(() => {
-      worker.terminate();
-      reject(new Error("direct Y8 worker smoke test timed out"));
-    }, 30_000);
+    let timer;
+    const armTimeout = (phase, milliseconds) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error(`direct Y8 worker smoke timed out during ${phase}`));
+      }, milliseconds);
+    };
+    armTimeout("WASM readiness", 30_000);
+
     worker.onerror = (event) => {
       clearTimeout(timer);
       worker.terminate();
       reject(new Error(event.message || "direct Y8 worker failed"));
     };
     worker.onmessage = (event) => {
+      if (event.data?.id === -1) {
+        // Production DecodeWorkerPool does not submit until this exact ready
+        // handshake arrives. The standalone smoke must obey the same contract.
+        const width = 160;
+        const height = 120;
+        const y = new Uint8Array(width * height);
+        y.fill(235);
+        // Ordinary low-frequency contrast exercises full-frame Y8 transport and
+        // scanning without manufacturing a pathological finder-pattern workload.
+        for (let row = 38; row < 82; row++) {
+          for (let col = 50; col < 110; col++) y[row * width + col] = 28;
+        }
+        const frame = y.buffer;
+        armTimeout("direct Y8 decode", 15_000);
+        worker.postMessage({
+          id: jobId,
+          videoFrame: frame,
+          cropX: 0,
+          cropY: 0,
+          w: width,
+          h: height,
+          ox: 0,
+          oy: 0,
+          full: true,
+          tracks: [],
+          pixelFormat: "y8",
+          yOffset: 0,
+          yStride: width,
+          payloadBytes: frame.byteLength,
+          acquisitionMode: "fast"
+        }, [frame]);
+        return;
+      }
       if (event.data?.id !== jobId) return;
       clearTimeout(timer);
       worker.terminate();
       resolve(event.data);
     };
-
-    const width = 160;
-    const height = 120;
-    const y = new Uint8Array(width * height);
-    y.fill(235);
-    // Exercise the full-frame Y8 scanner with ordinary low-frequency contrast.
-    // A one-pixel checkerboard is pathological for QR finder search and can turn
-    // this transport smoke into an accidental worst-case decoder benchmark.
-    for (let row = 38; row < 82; row++) {
-      for (let col = 50; col < 110; col++) y[row * width + col] = 28;
-    }
-    const frame = y.buffer;
-    worker.postMessage({
-      id: jobId,
-      videoFrame: frame,
-      cropX: 0,
-      cropY: 0,
-      w: width,
-      h: height,
-      ox: 0,
-      oy: 0,
-      full: true,
-      tracks: [],
-      pixelFormat: "y8",
-      yOffset: 0,
-      yStride: width,
-      payloadBytes: frame.byteLength,
-      acquisitionMode: "fast"
-    }, [frame]);
   }));
 
   if (result?.id !== 991351) throw new Error(`unexpected worker reply id: ${result?.id}`);
