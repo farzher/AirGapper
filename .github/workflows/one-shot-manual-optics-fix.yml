@@ -20,19 +20,25 @@ jobs:
         with:
           node-version: 22
 
-      - name: Repair one-shot guard matcher
+      - name: Apply manual optics UI repair
+        run: python3 .github/scripts/one-shot-manual-optics-fix.py
+
+      - name: Repair emitted guard matcher
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('.github/scripts/one-shot-manual-optics-fix.py')
+          path = Path('benchmark/manual-optics-ui-smoke.mjs')
           text = path.read_text()
-          text = text.replace('populateManualSelect\\\\(cameraExposure', 'populateManualSelect\\\\(\\\\s*cameraExposure')
-          text = text.replace('populateManualSelect\\\\(cameraIso', 'populateManualSelect\\\\(\\\\s*cameraIso')
+          text = text.replace(
+              'assert.match(runtime, /populateManualSelect\\(cameraExposure/, "shutter options should come from camera capabilities");',
+              'assert.match(runtime, /populateManualSelect\\([\\s\\S]{0,100}cameraExposure/, "shutter options should come from camera capabilities");'
+          )
+          text = text.replace(
+              'assert.match(runtime, /populateManualSelect\\(cameraIso/, "ISO options should come from camera capabilities");',
+              'assert.match(runtime, /populateManualSelect\\([\\s\\S]{0,100}cameraIso/, "ISO options should come from camera capabilities");'
+          )
           path.write_text(text)
           PY
-
-      - name: Apply manual optics UI repair
-        run: python3 .github/scripts/one-shot-manual-optics-fix.py
 
       - name: Validate targeted changes
         run: |
