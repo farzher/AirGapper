@@ -48,42 +48,63 @@ try {
       return new URL("/receive/worker.js", location.href);
     }
 
-    const firstSignature = await new Promise((resolve, reject) => {
-      const worker = new Worker(workerUrl(), { type: "module" });
-      const timer = setTimeout(() => {
-        worker.terminate();
-        reject(new Error("repeat signature preflight timed out"));
-      }, 15_000);
-      worker.onerror = (event) => {
-        clearTimeout(timer);
-        worker.terminate();
-        reject(new Error(event.message || "repeat signature worker failed"));
-      };
-      worker.onmessage = (event) => {
-        const message = event.data;
-        if (message?.id !== 71001 || !message.preflight) return;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(message.frameSignature);
-      };
-      const frame = makeFrame();
-      worker.postMessage({
-        id: 71001,
-        videoFrame: frame,
-        w: width,
-        h: height,
-        ox: 0,
-        oy: 0,
-        full: false,
-        tracks,
-        pixelFormat: "y8",
-        yOffset: 0,
-        yStride: width,
-        payloadBytes: frame.byteLength,
-        guidedDecode: true,
-        repeatFilter: true,
-        sourceSequence: 10
-      }, [frame]);
+    function runWorker({ id, sourceSequence, previousFrameSignature, preflight }) {
+      return new Promise((resolve, reject) => {
+        const worker = new Worker(workerUrl(), { type: "module" });
+        let timer;
+        const armTimeout = (phase, milliseconds) => {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            worker.terminate();
+            reject(new Error(`repeat signature ${phase} timed out`));
+          }, milliseconds);
+        };
+        armTimeout("WASM readiness", 30_000);
+        worker.onerror = (event) => {
+          clearTimeout(timer);
+          worker.terminate();
+          reject(new Error(event.message || "repeat signature worker failed"));
+        };
+        worker.onmessage = (event) => {
+          const message = event.data;
+          if (message?.id === -1) {
+            // Match DecodeWorkerPool: jobs are legal only after worker.js emits
+            // its WASM-ready handshake.
+            const frame = makeFrame();
+            armTimeout(preflight ? "preflight" : "duplicate test", 15_000);
+            worker.postMessage({
+              id,
+              videoFrame: frame,
+              w: width,
+              h: height,
+              ox: 0,
+              oy: 0,
+              full: false,
+              tracks,
+              pixelFormat: "y8",
+              yOffset: 0,
+              yStride: width,
+              payloadBytes: frame.byteLength,
+              guidedDecode: true,
+              repeatFilter: true,
+              sourceSequence,
+              previousFrameSignature
+            }, [frame]);
+            return;
+          }
+          if (message?.id !== id || Boolean(message.preflight) !== preflight) return;
+          clearTimeout(timer);
+          worker.terminate();
+          resolve(preflight ? message.frameSignature : message);
+        };
+      });
+    }
+
+    const firstSignature = await runWorker({
+      id: 71001,
+      sourceSequence: 10,
+      previousFrameSignature: undefined,
+      preflight: true
     });
 
     if (!firstSignature || !(firstSignature.bits instanceof Uint8Array) ||
@@ -91,43 +112,11 @@ try {
       throw new Error("worker did not return a typed repeat signature");
     }
 
-    const second = await new Promise((resolve, reject) => {
-      const worker = new Worker(workerUrl(), { type: "module" });
-      const timer = setTimeout(() => {
-        worker.terminate();
-        reject(new Error("repeat signature duplicate test timed out"));
-      }, 15_000);
-      worker.onerror = (event) => {
-        clearTimeout(timer);
-        worker.terminate();
-        reject(new Error(event.message || "repeat signature duplicate worker failed"));
-      };
-      worker.onmessage = (event) => {
-        const message = event.data;
-        if (message?.id !== 71002 || message.preflight) return;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(message);
-      };
-      const frame = makeFrame();
-      worker.postMessage({
-        id: 71002,
-        videoFrame: frame,
-        w: width,
-        h: height,
-        ox: 0,
-        oy: 0,
-        full: false,
-        tracks,
-        pixelFormat: "y8",
-        yOffset: 0,
-        yStride: width,
-        payloadBytes: frame.byteLength,
-        guidedDecode: true,
-        repeatFilter: true,
-        sourceSequence: 11,
-        previousFrameSignature: firstSignature
-      }, [frame]);
+    const second = await runWorker({
+      id: 71002,
+      sourceSequence: 11,
+      previousFrameSignature: firstSignature,
+      preflight: false
     });
 
     return {
