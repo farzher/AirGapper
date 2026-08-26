@@ -310,8 +310,8 @@ const completeLabel = document.createElement("strong");
 completeLabel.className = "complete-label";
 completeLabel.textContent = "✓ Complete";
 const speedFeedback = document.createElement("span");
-const speedValue = document.createElement("strong");
 speedFeedback.className = "speed-feedback";
+const speedValue = document.createElement("strong");
 speedFeedback.append(speedValue);
 receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
 const progressTrack = document.createElement("div");
@@ -598,8 +598,8 @@ profileTitle.textContent = "Profile";
 const profileInput = document.createElement("select");
 profileInput.setAttribute("aria-label", "Audio profile");
 profileInput.append(
-  new Option("Reliable", "reliable"),
-  new Option("Ultra Reliable", "ultra"),
+  new Option("Normal", "reliable"),
+  new Option("Reliable", "ultra"),
   new Option("Fast", "fast"),
   new Option("Quiet", "quiet")
 );
