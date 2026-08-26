@@ -1,3 +1,4 @@
+import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
@@ -13,13 +14,14 @@ const SYNC_GAP = 32;
 const PRE_GUARD = 96;
 const TAIL_GUARD = 64;
 const SYNC_THRESHOLD = 0.32;
-const AUDIO_SYMBOL_SIZE = 256;
-const RAPTOR_PACKET_BYTES = AUDIO_SYMBOL_SIZE + 4;
+const AUDIO_BLOCK_SIZE = 260;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
-const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + RAPTOR_PACKET_BYTES + AUDIO_CRC_BYTES;
+const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x41, 0x31]); // AGA1
+const MAGIC = new Uint8Array([0x41, 0x47, 0x41, 0x32]); // AGA2
+const MODE_NAMES = ["direct", "mds", "raptorq"];
+const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const PUNCTURE = new Uint8Array([1, 1, 1, 0]);
 const TAIL_BITS = 6;
 
@@ -129,7 +131,10 @@ const SLOT_BITS = DATA_SYMBOLS * BITS_PER_SYMBOL;
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
 const FRAME_FROM_SYNC_SAMPLES = SYNC_SAMPLES + SYNC_GAP + SYMBOL_SAMPLES * (DATA_SYMBOLS + 1) + TAIL_GUARD;
 const FRAME_TOTAL_SAMPLES = PRE_GUARD + FRAME_FROM_SYNC_SAMPLES;
-const AUDIO_ESTIMATED_KBPS = AUDIO_SYMBOL_SIZE / (FRAME_TOTAL_SAMPLES / SAMPLE_RATE) / 1024;
+// RaptorQ has the smallest source payload per 260-byte transport block, so
+// advertise that conservative rate even though Direct/MDS get four extra bytes.
+const AUDIO_ESTIMATED_KBPS =
+  (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_TOTAL_SAMPLES / SAMPLE_RATE) / 1024;
 
 function fft(real, imag, inverse = false) {
   const n = real.length;
@@ -233,22 +238,33 @@ function ofdmSymbol(carrierReal, carrierImag) {
 
 const REFERENCE_SYMBOL = ofdmSymbol(REFERENCE_REAL, REFERENCE_IMAG);
 
-function packetBytes(payloadId, totalLen, raptorPacket) {
-  if (!(raptorPacket instanceof Uint8Array) || raptorPacket.length !== RAPTOR_PACKET_BYTES) {
-    throw new Error("Unexpected RaptorQ audio packet size.");
+function packetBytes(payloadId, totalLen, mode, encodingId, block) {
+  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) {
+    throw new Error("Unexpected audio transport block size.");
   }
   if (!Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) {
     throw new Error("Audio payload is too large.");
   }
+  const modeCode = MODE_CODES.get(mode);
+  if (modeCode === undefined) throw new Error("Unknown audio transport mode.");
+  const id = Number(encodingId) >>> 0;
+  if (id > 0xffffff) throw new Error("Audio encoding ID is out of range.");
+
   const out = new Uint8Array(AUDIO_PACKET_BYTES);
   out.set(MAGIC, 0);
   const view = new DataView(out.buffer);
   view.setUint32(4, payloadId >>> 0, true);
   view.setUint32(8, totalLen >>> 0, true);
-  view.setUint16(12, AUDIO_SYMBOL_SIZE, true);
-  view.setUint16(14, RAPTOR_PACKET_BYTES, true);
-  out.set(raptorPacket, AUDIO_HEADER_BYTES);
-  view.setUint32(AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES, crc32(out.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES)), true);
+  out[12] = modeCode;
+  out[13] = id >>> 16 & 255;
+  out[14] = id >>> 8 & 255;
+  out[15] = id & 255;
+  out.set(block, AUDIO_HEADER_BYTES);
+  view.setUint32(
+    AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES,
+    crc32(out.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES)),
+    true
+  );
   return out;
 }
 
@@ -282,8 +298,8 @@ function applyDqpsk(real, imag, a, b) {
   }
 }
 
-function modulateAudioPacket(payloadId, totalLen, raptorPacket) {
-  const raw = packetBytes(payloadId, totalLen, raptorPacket);
+function modulateAudioPacket(payloadId, totalLen, mode, encodingId, block) {
+  const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
   const coded = convolutionalEncode(bytesToBits(raw));
   const slots = interleave(coded);
   const waveform = new Float32Array(FRAME_TOTAL_SAMPLES);
@@ -316,15 +332,25 @@ function parseAudioPacket(raw) {
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const storedCrc = view.getUint32(AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES, true);
   if (storedCrc !== crc32(raw.subarray(0, AUDIO_PACKET_BYTES - AUDIO_CRC_BYTES))) return null;
+
   const totalLen = view.getUint32(8, true);
-  const symbolSize = view.getUint16(12, true);
-  const packetLength = view.getUint16(14, true);
-  if (totalLen < 1 || totalLen > MAX_AUDIO_BYTES || symbolSize !== AUDIO_SYMBOL_SIZE || packetLength !== RAPTOR_PACKET_BYTES) return null;
+  const mode = MODE_NAMES[raw[12]];
+  if (totalLen < 1 || totalLen > MAX_AUDIO_BYTES || !mode) return null;
+  const encodingId = raw[13] * 65536 + raw[14] * 256 + raw[15];
+  const sourceSize = mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
+  const k = Math.max(1, Math.ceil(totalLen / sourceSize));
+  if (codingMode(k) !== mode) return null;
+  if (mode === "direct" && encodingId !== 0) return null;
+  if (mode === "mds" && encodingId >= 256) return null;
+  if (mode === "raptorq" && encodingId >= 0xff0000) return null;
+
   return {
     payloadId: view.getUint32(4, true) >>> 0,
     totalLen,
-    symbolSize,
-    packet: raw.slice(AUDIO_HEADER_BYTES, AUDIO_HEADER_BYTES + packetLength)
+    mode,
+    encodingId,
+    blockSize: AUDIO_BLOCK_SIZE,
+    block: raw.slice(AUDIO_HEADER_BYTES, AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE)
   };
 }
 
@@ -550,8 +576,8 @@ class AcousticReceiver {
 }
 
 export {
+  AUDIO_BLOCK_SIZE,
   AUDIO_ESTIMATED_KBPS,
-  AUDIO_SYMBOL_SIZE,
   AcousticReceiver,
   MAX_AUDIO_BYTES,
   SAMPLE_RATE,
