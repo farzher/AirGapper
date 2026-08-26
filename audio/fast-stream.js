@@ -1,5 +1,4 @@
 import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
-import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
 const FFT_SIZE = 1024;
@@ -10,7 +9,7 @@ const ACTIVE_FIRST = 24; // 1.125 kHz
 const ACTIVE_LAST = 405; // 18.98 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
 const PILOT_EVERY = 16;
-const FRAME_SYMBOLS = 16;
+const FRAME_SYMBOLS = 20;
 const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
 const BITS_PER_CARRIER = 3;
 const SYMBOL_RMS = 0.18;
@@ -19,12 +18,12 @@ const ACQUIRE_SYMBOLS = 3;
 const ACQUIRE_THRESHOLD = 0.14;
 const TRACK_THRESHOLD = 0.045;
 const MARKER_MAX_RESIDUAL = 0.90;
-const PUNCTURE = new Uint8Array([1, 1, 0, 1]); // rate 2/3
+const PUNCTURE = new Uint8Array([1, 1, 0, 1, 1, 0]); // rate 3/4
 const FAST_AUDIO_BLOCK_SIZE = 156;
-const FRAME_HEADER_BYTES = 16;
-const FRAME_CRC_BYTES = 4;
+const FRAME_HEADER_BYTES = 18;
+const PACKET_CRC_BYTES = 2;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x39]); // AGF9
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x41]); // AGFA
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -41,10 +40,10 @@ const PILOT_COUNT = PILOT_POSITIONS.length;
 const DATA_CARRIERS = DATA_POSITIONS.length;
 const BITS_PER_SYMBOL = DATA_CARRIERS * BITS_PER_CARRIER;
 const SLOT_BITS = DATA_SYMBOLS * BITS_PER_SYMBOL;
-const INFO_BITS = Math.floor(SLOT_BITS * 2 / 3) - TAIL_BITS;
+const INFO_BITS = Math.floor(SLOT_BITS * 3 / 4) - TAIL_BITS;
 const INFO_BYTES = Math.floor(INFO_BITS / 8);
-const FAST_PACKETS_PER_FRAME = Math.floor((INFO_BYTES - FRAME_HEADER_BYTES - FRAME_CRC_BYTES) / FAST_AUDIO_BLOCK_SIZE);
-const FRAME_BYTES = FRAME_HEADER_BYTES + FAST_PACKETS_PER_FRAME * FAST_AUDIO_BLOCK_SIZE + FRAME_CRC_BYTES;
+const FAST_PACKETS_PER_FRAME = Math.floor((INFO_BYTES - FRAME_HEADER_BYTES) / (FAST_AUDIO_BLOCK_SIZE + PACKET_CRC_BYTES));
+const FRAME_BYTES = FRAME_HEADER_BYTES + FAST_PACKETS_PER_FRAME * (FAST_AUDIO_BLOCK_SIZE + PACKET_CRC_BYTES);
 const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
 const FAST_FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000;
 const FAST_ESTIMATED_KBPS = FAST_PACKETS_PER_FRAME * (FAST_AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
@@ -58,6 +57,14 @@ function parity(value) {
   value ^= value >>> 2;
   value ^= value >>> 1;
   return value & 1;
+}
+function crc16(bytes) {
+  let crc = 0xffff;
+  for (const value of bytes) {
+    crc ^= value << 8;
+    for (let bit = 0; bit < 8; bit++) crc = crc & 0x8000 ? (crc << 1 ^ 0x1021) & 0xffff : crc << 1 & 0xffff;
+  }
+  return crc;
 }
 function nextRandom(state) {
   state ^= state << 13;
@@ -124,13 +131,13 @@ function convolutionalEncode(info) {
 function puncture(coded) {
   const out = new Uint8Array(SLOT_BITS);
   let write = 0;
-  for (let i = 0; i < coded.length && write < out.length; i++) if (PUNCTURE[i & 3]) out[write++] = coded[i];
+  for (let i = 0; i < coded.length && write < out.length; i++) if (PUNCTURE[i % PUNCTURE.length]) out[write++] = coded[i];
   return out;
 }
 function depuncture(soft) {
   const full = new Float32Array((INFO_BITS + TAIL_BITS) * 2);
   let read = 0;
-  for (let i = 0; i < full.length; i++) if (PUNCTURE[i & 3]) full[i] = soft[read++] || 0;
+  for (let i = 0; i < full.length; i++) if (PUNCTURE[i % PUNCTURE.length]) full[i] = soft[read++] || 0;
   return full;
 }
 function softBitCost(expected, observation) {
@@ -264,13 +271,14 @@ function buildInfo(payloadId, totalLen, mode, startOrdinal, blocks) {
   raw[13] = ordinal >>> 16 & 255;
   raw[14] = ordinal >>> 8 & 255;
   raw[15] = ordinal & 255;
+  view.setUint16(16, crc16(raw.subarray(0, 16)), true);
   let offset = FRAME_HEADER_BYTES;
   for (const block of blocks) {
     if (!(block instanceof Uint8Array) || block.length !== FAST_AUDIO_BLOCK_SIZE) throw new Error("Unexpected Fast transport block size.");
     raw.set(block, offset);
-    offset += FAST_AUDIO_BLOCK_SIZE;
+    view.setUint16(offset + FAST_AUDIO_BLOCK_SIZE, crc16(block), true);
+    offset += FAST_AUDIO_BLOCK_SIZE + PACKET_CRC_BYTES;
   }
-  view.setUint32(FRAME_BYTES - FRAME_CRC_BYTES, crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES)), true);
   const rawBits = bytesToBits(raw);
   const info = randomBits(INFO_BITS, payloadId ^ Math.imul((startOrdinal >>> 0) + 1, 0x51f15e));
   info.set(rawBits.subarray(0, Math.min(rawBits.length, info.length)));
@@ -280,7 +288,7 @@ function parseFrame(info) {
   const raw = bitsToBytes(info, FRAME_BYTES);
   for (let i = 0; i < MAGIC.length; i++) if (raw[i] !== MAGIC[i]) return [];
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-  if (view.getUint32(FRAME_BYTES - FRAME_CRC_BYTES, true) !== crc32(raw.subarray(0, FRAME_BYTES - FRAME_CRC_BYTES))) return [];
+  if (view.getUint16(16, true) !== crc16(raw.subarray(0, 16))) return [];
   const totalLen = view.getUint32(8, true);
   const mode = MODE_NAMES[raw[12]];
   if (!mode || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return [];
@@ -291,16 +299,19 @@ function parseFrame(info) {
   const packets = [];
   let offset = FRAME_HEADER_BYTES;
   for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
-    packets.push({
-      payloadId,
-      totalLen,
-      mode,
-      encodingId: scheduledId(mode, startOrdinal + i),
-      blockSize: FAST_AUDIO_BLOCK_SIZE,
-      block: raw.slice(offset, offset + FAST_AUDIO_BLOCK_SIZE),
-      profile: "fast"
-    });
-    offset += FAST_AUDIO_BLOCK_SIZE;
+    const block = raw.slice(offset, offset + FAST_AUDIO_BLOCK_SIZE);
+    if (view.getUint16(offset + FAST_AUDIO_BLOCK_SIZE, true) === crc16(block)) {
+      packets.push({
+        payloadId,
+        totalLen,
+        mode,
+        encodingId: scheduledId(mode, startOrdinal + i),
+        blockSize: FAST_AUDIO_BLOCK_SIZE,
+        block,
+        profile: "fast"
+      });
+    }
+    offset += FAST_AUDIO_BLOCK_SIZE + PACKET_CRC_BYTES;
   }
   return packets;
 }
