@@ -2,29 +2,27 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
-const FFT_SIZE = 512;
-const CYCLIC_PREFIX = 128;
+const FFT_SIZE = 1024;
+const CYCLIC_PREFIX = 256;
 const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
-const FFT_WINDOW_EARLY = 16;
-const ACTIVE_FIRST = 12;
-const ACTIVE_LAST = 176;
+const FFT_WINDOW_EARLY = 48;
+const ACTIVE_FIRST = 32; // 1.50 kHz
+const ACTIVE_LAST = 181; // 8.48 kHz
 const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
-const PILOT_EVERY = 12;
-const FRAME_SYMBOLS = 16;
-const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
-const BITS_PER_CARRIER = 2;
-const SYMBOL_RMS = 0.18;
-const PEAK_LIMIT = 0.86;
+const PILOT_EVERY = 8;
+const SPREAD_COPIES = 2;
+const SYMBOL_RMS = 0.20;
+const PEAK_LIMIT = 0.90;
 const ACQUIRE_SYMBOLS = 4;
-const ACQUIRE_THRESHOLD = 0.18;
-const TRACK_THRESHOLD = 0.06;
-const MARKER_MAX_RESIDUAL = 0.82;
+const ACQUIRE_THRESHOLD = 0.10;
+const TRACK_THRESHOLD = 0.03;
+const MARKER_MAX_RESIDUAL = 1.10;
 const AUDIO_BLOCK_SIZE = 260;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x41, 0x35]); // AGA5
+const MAGIC = new Uint8Array([0x41, 0x47, 0x41, 0x36]); // AGA6
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -36,8 +34,13 @@ for (let carrier = 0; carrier < CARRIER_COUNT; carrier++) {
   else DATA_POSITIONS.push(carrier);
 }
 const PILOT_COUNT = PILOT_POSITIONS.length;
-const DATA_CARRIERS = DATA_POSITIONS.length;
-const BITS_PER_SYMBOL = DATA_CARRIERS * BITS_PER_CARRIER;
+const SPREAD_GROUP_COUNT = Math.floor(DATA_POSITIONS.length / SPREAD_COPIES);
+const SPREAD_GROUPS = Array.from({ length: SPREAD_GROUP_COUNT }, (_, group) => [
+  DATA_POSITIONS[group],
+  DATA_POSITIONS[group + SPREAD_GROUP_COUNT]
+]);
+const UNUSED_DATA_POSITIONS = DATA_POSITIONS.slice(SPREAD_GROUP_COUNT * SPREAD_COPIES);
+const BITS_PER_SYMBOL = SPREAD_GROUP_COUNT;
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -131,6 +134,8 @@ function interleaveStep(capacity) {
 
 const RAW_PACKET_BITS = AUDIO_PACKET_BYTES * 8;
 const CODED_BITS = convolutionalEncode(new Uint8Array(RAW_PACKET_BITS)).length;
+const DATA_SYMBOLS = Math.ceil(CODED_BITS / BITS_PER_SYMBOL);
+const FRAME_SYMBOLS = DATA_SYMBOLS + 1;
 const SLOT_BITS = DATA_SYMBOLS * BITS_PER_SYMBOL;
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
 const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
@@ -198,6 +203,14 @@ function randomPhaseVector(seed, count) {
   }
   return { real, imag };
 }
+function spreadChip(symbol, group, copy) {
+  let state = 0xa511e9b3
+    ^ Math.imul(symbol + 1, 0x45d9f3b)
+    ^ Math.imul(group + 1, 0x27d4eb2d)
+    ^ Math.imul(copy + 1, 0x165667b1);
+  state = nextRandom(state >>> 0);
+  return state >>> 31;
+}
 
 const PILOT_REAL = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
 const PILOT_IMAG = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
@@ -263,23 +276,6 @@ function deinterleaveSoft(slots) {
   for (let i = 0; i < coded.length; i++) coded[i] = slots[i * INTERLEAVE_STEP % SLOT_BITS];
   return coded;
 }
-function applyDqpsk(real, imag, a, b) {
-  for (let i = 0; i < real.length; i++) {
-    const r = real[i];
-    const q = imag[i];
-    if (a[i] === 0 && b[i] === 0) continue;
-    if (a[i] === 0 && b[i] === 1) {
-      real[i] = -q;
-      imag[i] = r;
-    } else if (a[i] === 1 && b[i] === 1) {
-      real[i] = -r;
-      imag[i] = -q;
-    } else {
-      real[i] = q;
-      imag[i] = -r;
-    }
-  }
-}
 function ofdmSymbol(carrierReal, carrierImag) {
   const real = new Float64Array(FFT_SIZE);
   const imag = new Float64Array(FFT_SIZE);
@@ -318,17 +314,24 @@ function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
   }
   waveform.set(ofdmSymbol(carrierReal, carrierImag), 0);
 
-  const a = new Uint8Array(CARRIER_COUNT);
-  const b = new Uint8Array(CARRIER_COUNT);
   let read = 0;
   for (let symbol = 1; symbol < FRAME_SYMBOLS; symbol++) {
-    a.fill(0);
-    b.fill(0);
-    for (const carrier of DATA_POSITIONS) {
-      a[carrier] = slots[read++] || 0;
-      b[carrier] = slots[read++] || 0;
+    for (let group = 0; group < SPREAD_GROUP_COUNT; group++) {
+      const bit = slots[read++] || 0;
+      for (let copy = 0; copy < SPREAD_COPIES; copy++) {
+        const carrier = SPREAD_GROUPS[group][copy];
+        if ((bit ^ spreadChip(symbol, group, copy)) === 0) continue;
+        carrierReal[carrier] = -carrierReal[carrier];
+        carrierImag[carrier] = -carrierImag[carrier];
+      }
     }
-    applyDqpsk(carrierReal, carrierImag, a, b);
+    for (let index = 0; index < UNUSED_DATA_POSITIONS.length; index++) {
+      const carrier = UNUSED_DATA_POSITIONS[index];
+      if (spreadChip(symbol, SPREAD_GROUP_COUNT + index, 0)) {
+        carrierReal[carrier] = -carrierReal[carrier];
+        carrierImag[carrier] = -carrierImag[carrier];
+      }
+    }
     for (let p = 0; p < PILOT_COUNT; p++) {
       const carrier = PILOT_POSITIONS[p];
       carrierReal[carrier] = PILOT_REAL[symbol][p];
@@ -373,11 +376,13 @@ function acquisitionScore(samples, offset) {
 function fitPhaseCorrection(errorReal, errorImag) {
   const real = new Float64Array(PILOT_COUNT);
   const imag = new Float64Array(PILOT_COUNT);
+  let magnitudeTotal = 0;
   for (let p = 0; p < PILOT_COUNT; p++) {
     const magnitude = Math.hypot(errorReal[p], errorImag[p]);
     if (Number.isFinite(magnitude) && magnitude > 1e-12) {
       real[p] = errorReal[p] / magnitude;
       imag[p] = errorImag[p] / magnitude;
+      magnitudeTotal += magnitude;
     }
   }
   let slopeTotal = 0;
@@ -429,7 +434,8 @@ function fitPhaseCorrection(errorReal, errorImag) {
     slope: slopeTotal,
     cpe,
     residual,
-    reliability: clamp(1 / (1 + 5 * residual), 0.08, 1)
+    pilotMagnitude: magnitudeTotal / Math.max(1, PILOT_COUNT),
+    reliability: clamp(1 / (1 + 4 * residual), 0.05, 1)
   };
 }
 function classifyMarker(previous, current) {
@@ -459,30 +465,45 @@ function classifyMarker(previous, current) {
   }
   return best && best.residual <= MARKER_MAX_RESIDUAL ? best : null;
 }
-function decodeTransition(previous, current, correction, slots, write) {
-  for (const carrier of DATA_POSITIONS) {
-    const bin = ACTIVE_FIRST + carrier;
-    const pr = previous.real[bin];
-    const pi = previous.imag[bin];
-    const cr = current.real[bin];
-    const ci = current.imag[bin];
-    let r = cr * pr + ci * pi;
-    let q = ci * pr - cr * pi;
-    const angle = -(correction.cpe + correction.slope * carrier);
-    const ar = Math.cos(angle);
-    const ai = Math.sin(angle);
-    const nr = r * ar - q * ai;
-    const nq = r * ai + q * ar;
-    const magnitude = Math.hypot(nr, nq);
-    if (!Number.isFinite(magnitude) || magnitude < 1e-12) {
-      slots[write++] = 0;
-      slots[write++] = 0;
-      continue;
+function spreadEvidence(previous, current, correction, carrier, chip) {
+  const bin = ACTIVE_FIRST + carrier;
+  const pr = previous.real[bin];
+  const pi = previous.imag[bin];
+  const cr = current.real[bin];
+  const ci = current.imag[bin];
+  const dr = cr * pr + ci * pi;
+  const di = ci * pr - cr * pi;
+  const angle = -(correction.cpe + correction.slope * carrier);
+  const ar = Math.cos(angle);
+  const ai = Math.sin(angle);
+  const nr = dr * ar - di * ai;
+  const nq = dr * ai + di * ar;
+  const magnitude = Math.hypot(nr, nq);
+  if (!Number.isFinite(magnitude) || magnitude < 1e-12) return null;
+  const chipSign = chip ? -1 : 1;
+  const evidence = -(nr / magnitude) * chipSign;
+  const weight = clamp(magnitude / Math.max(correction.pilotMagnitude, 1e-12), 0.04, 2.5);
+  return { evidence, weight };
+}
+function decodeTransition(previous, current, correction, slots, write, symbol) {
+  for (let group = 0; group < SPREAD_GROUP_COUNT; group++) {
+    let weighted = 0;
+    let weightTotal = 0;
+    for (let copy = 0; copy < SPREAD_COPIES; copy++) {
+      const evidence = spreadEvidence(
+        previous,
+        current,
+        correction,
+        SPREAD_GROUPS[group][copy],
+        spreadChip(symbol, group, copy)
+      );
+      if (!evidence) continue;
+      weighted += evidence.evidence * evidence.weight;
+      weightTotal += evidence.weight;
     }
-    r = nr / magnitude;
-    q = nq / magnitude;
-    slots[write++] = clamp(-(r + q), -1, 1) * correction.reliability;
-    slots[write++] = clamp(q - r, -1, 1) * correction.reliability;
+    slots[write++] = weightTotal > 0
+      ? clamp(weighted / weightTotal, -1, 1) * correction.reliability
+      : 0;
   }
   return write;
 }
@@ -495,7 +516,7 @@ class ReliableScanner {
   constructor(onPacket, onSignal = () => void 0) {
     this.onPacket = onPacket;
     this.onSignal = onSignal;
-    this.samples = new Float32Array(65536);
+    this.samples = new Float32Array(131072);
     this.length = 0;
     this.scan = 0;
     this.nextSymbolStart = -1;
@@ -522,7 +543,7 @@ class ReliableScanner {
     if (maxCandidate < this.scan) return false;
     let bestOffset = -1;
     let bestScore = 0;
-    for (let offset = this.scan; offset <= maxCandidate; offset += 8) {
+    for (let offset = this.scan; offset <= maxCandidate; offset += 16) {
       const score = acquisitionScore(this.samples, offset);
       if (score > bestScore) {
         bestScore = score;
@@ -535,7 +556,7 @@ class ReliableScanner {
       return false;
     }
     const coarse = bestOffset;
-    for (let offset = Math.max(this.scan, coarse - 8); offset <= Math.min(maxCandidate, coarse + 8); offset++) {
+    for (let offset = Math.max(this.scan, coarse - 16); offset <= Math.min(maxCandidate, coarse + 16); offset++) {
       const score = acquisitionScore(this.samples, offset);
       if (score > bestScore) {
         bestScore = score;
@@ -572,7 +593,7 @@ class ReliableScanner {
       const predicted = this.nextSymbolStart;
       let start = predicted;
       let cpScore = cpCorrelation(this.samples, start, 2);
-      for (let candidate = Math.max(0, predicted - 6); candidate <= predicted + 6; candidate++) {
+      for (let candidate = Math.max(0, predicted - 12); candidate <= predicted + 12; candidate++) {
         if (candidate + SYMBOL_SAMPLES > this.length) break;
         const score = cpCorrelation(this.samples, candidate, 2);
         if (score > cpScore) {
@@ -602,7 +623,14 @@ class ReliableScanner {
           } else {
             if (!this.frameSlots && symbol === 1) this.beginFrame();
             if (this.frameSlots && symbol === this.frameNextSymbol) {
-              this.frameWrite = decodeTransition(this.previousSpectrum, current, marker, this.frameSlots, this.frameWrite);
+              this.frameWrite = decodeTransition(
+                this.previousSpectrum,
+                current,
+                marker,
+                this.frameSlots,
+                this.frameWrite,
+                symbol
+              );
               if (symbol === FRAME_SYMBOLS - 1) {
                 const packet = decodeSlots(this.frameSlots);
                 if (packet) this.onPacket(packet);
@@ -624,7 +652,7 @@ class ReliableScanner {
       this.previousSpectrum = current;
       this.nextSymbolStart = start + SYMBOL_SAMPLES;
       this.scan = this.nextSymbolStart;
-      if (this.markerFailures >= 3) {
+      if (this.markerFailures >= 4) {
         this.loseLock(start);
         continue;
       }
@@ -633,7 +661,7 @@ class ReliableScanner {
   }
   compact() {
     const cursor = this.nextSymbolStart >= 0 ? this.nextSymbolStart : this.scan;
-    if (cursor < 32768) return;
+    if (cursor < 65536) return;
     const keepFrom = Math.max(0, cursor - SYMBOL_SAMPLES * 2);
     this.samples.copyWithin(0, keepFrom, this.length);
     this.length -= keepFrom;
