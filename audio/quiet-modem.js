@@ -7,24 +7,24 @@ const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x31]); // AGQ1
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x32]); // AGQ2
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
-const PUNCTURE = new Uint8Array([1, 1, 1, 0]);
+const PUNCTURE = new Uint8Array([1, 1]);
 const TAIL_BITS = 6;
 
-// Quiet is intentionally non-coherent. Cyrinx found that phone speakers can
-// radiate ultrasonic power while scrambling phase above ~18 kHz, so coherent
-// OFDM/QAM is the wrong waveform class here. 8-FSK only measures tone energy.
+// Non-coherent near-ultrasonic FSK. 19.1-21.75 kHz stays much farther from
+// Nyquist than the old 20.1-22.75 kHz band, where phone audio paths commonly
+// roll off sharply, while remaining effectively inaudible for normal use.
 const TONE_COUNT = 8;
 const BITS_PER_TONE = 3;
 const SYMBOL_SAMPLES = 128;
-const TONE_BASE_HZ = 20125;
+const TONE_BASE_HZ = 19125;
 const TONE_SPACING_HZ = 375;
 const PREAMBLE = new Uint8Array([0, 7, 1, 6, 2, 5, 3, 4, 7, 0, 6, 1]);
 const PREAMBLE_SAMPLES = PREAMBLE.length * SYMBOL_SAMPLES;
 const TAIL_SAMPLES = SYMBOL_SAMPLES * 2;
-const SYNC_THRESHOLD = 0.44;
+const SYNC_THRESHOLD = 0.28;
 const PROFILE_KEY = "airgapper:audio-sound:v1";
 
 function parity(value) {
@@ -51,20 +51,17 @@ function bitsToBytes(bits, byteLength) {
 }
 function convolutionalEncode(payloadBits) {
   const steps = payloadBits.length + TAIL_BITS;
-  const out = new Uint8Array(Math.ceil(steps * 3 / 2));
+  const out = new Uint8Array(steps * 2);
   let state = 0;
   let write = 0;
-  let puncture = 0;
   for (let step = 0; step < steps; step++) {
     const input = step < payloadBits.length ? payloadBits[step] : 0;
     const register = (state << 1 | input) & 0x7f;
-    const a = parity(register & 0x79);
-    const b = parity(register & 0x5b);
-    if (PUNCTURE[puncture++ & 3]) out[write++] = a;
-    if (PUNCTURE[puncture++ & 3]) out[write++] = b;
+    out[write++] = parity(register & 0x79);
+    out[write++] = parity(register & 0x5b);
     state = register & 0x3f;
   }
-  return write === out.length ? out : out.subarray(0, write);
+  return out;
 }
 function softBitCost(expected, observation) {
   const soft = clamp(Number(observation) || 0, -1, 1);
@@ -82,11 +79,8 @@ function convolutionalDecode(codedSoft, payloadBitLength) {
   const previousBit = new Uint8Array(steps * stateCount);
   let read = 0;
   for (let step = 0; step < steps; step++) {
-    const p = step * 2;
-    const hasA = PUNCTURE[p & 3] !== 0;
-    const hasB = PUNCTURE[p + 1 & 3] !== 0;
-    const receivedA = hasA ? codedSoft[read++] : 0;
-    const receivedB = hasB ? codedSoft[read++] : 0;
+    const receivedA = codedSoft[read++];
+    const receivedB = codedSoft[read++];
     next.fill(infinity);
     for (let state = 0; state < stateCount; state++) {
       const baseMetric = metrics[state];
@@ -94,9 +88,9 @@ function convolutionalDecode(codedSoft, payloadBitLength) {
       for (let input = 0; input < 2; input++) {
         const register = (state << 1 | input) & 0x7f;
         const target = register & 0x3f;
-        let metric = baseMetric;
-        if (hasA) metric += softBitCost(parity(register & 0x79), receivedA);
-        if (hasB) metric += softBitCost(parity(register & 0x5b), receivedB);
+        const metric = baseMetric
+          + softBitCost(parity(register & 0x79), receivedA)
+          + softBitCost(parity(register & 0x5b), receivedB);
         if (metric >= next[target]) continue;
         next[target] = metric;
         const index = step * stateCount + target;
@@ -184,7 +178,8 @@ function parsePacket(raw) {
     mode,
     encodingId,
     blockSize: AUDIO_BLOCK_SIZE,
-    block: raw.slice(AUDIO_HEADER_BYTES, AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE)
+    block: raw.slice(AUDIO_HEADER_BYTES, AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE),
+    profile: "quiet"
   };
 }
 function interleave(coded) {
@@ -224,7 +219,7 @@ function syncScore(samples, offset) {
     power += e + a;
     score += (e - a) / Math.max(1e-12, e + a);
   }
-  if (power < 1e-5) return -1;
+  if (power < 1e-6) return -1;
   return score / PREAMBLE.length;
 }
 function decodeFrame(samples, offset, shift = 0) {
@@ -267,7 +262,7 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
   for (const tone of tones) {
     const omega = TONE_OMEGA[tone];
     for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-      waveform[out++] = 0.64 * Math.sin(phase);
+      waveform[out++] = 0.68 * Math.sin(phase);
       phase += omega;
       if (phase > Math.PI * 2) phase -= Math.PI * 2;
     }
@@ -327,7 +322,7 @@ class QuietScanner {
     }
     let packet = decodeFrame(this.samples, refinedOffset, 0);
     if (!packet) {
-      for (const shift of [-4, 4, -8, 8, -12, 12]) {
+      for (const shift of [-4, 4, -8, 8, -12, 12, -16, 16]) {
         packet = decodeFrame(this.samples, refinedOffset, shift);
         if (packet) break;
       }
@@ -356,30 +351,5 @@ class QuietScanner {
 function isQuietProfile() {
   try { return localStorage.getItem(PROFILE_KEY) === "quiet"; } catch { return false; }
 }
-function installQuietControl() {
-  const grid = document.querySelector("#audioView .send-settings-grid");
-  if (!grid || grid.querySelector("[data-audio-sound]")) return false;
-  const label = document.createElement("label");
-  label.dataset.audioSound = "";
-  const title = document.createElement("span");
-  title.textContent = "Sound";
-  const select = document.createElement("select");
-  select.setAttribute("aria-label", "Audio sound profile");
-  select.append(new Option("Normal", "normal"), new Option("Quiet", "quiet"));
-  select.value = isQuietProfile() ? "quiet" : "normal";
-  select.addEventListener("change", () => {
-    try { localStorage.setItem(PROFILE_KEY, select.value === "quiet" ? "quiet" : "normal"); } catch {}
-  });
-  label.append(title, select);
-  grid.prepend(label);
-  return true;
-}
-queueMicrotask(() => {
-  if (installQuietControl()) return;
-  let tries = 0;
-  const timer = setInterval(() => {
-    if (installQuietControl() || ++tries > 20) clearInterval(timer);
-  }, 50);
-});
 
 export { QUIET_ESTIMATED_KBPS, QuietScanner, isQuietProfile, modulateQuietPacket };
