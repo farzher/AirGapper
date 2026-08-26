@@ -2,12 +2,12 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
-const AUDIO_BLOCK_SIZE = 260;
+const AUDIO_BLOCK_SIZE = 32;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x34]); // AGQ4
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x35]); // AGQ5
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
@@ -22,6 +22,8 @@ const PREAMBLE_SAMPLES = PREAMBLE.length * SYMBOL_SAMPLES;
 const TAIL_SAMPLES = SYMBOL_SAMPLES * 2;
 const SYNC_THRESHOLD = 0.14;
 const TRACK_WINDOW = 96;
+const DATA_TRACK_WINDOW = 12;
+const DECODE_MARGIN = 512;
 
 function parity(value) {
   value ^= value >>> 4;
@@ -108,7 +110,7 @@ function gcd(a, b) {
   return Math.abs(a) || 1;
 }
 function interleaveStep(capacity) {
-  let step = 521;
+  let step = 257;
   while (gcd(step, capacity) !== 1) step += 2;
   return step;
 }
@@ -203,6 +205,19 @@ function allToneEnergies(samples, offset) {
   for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone);
   return energies;
 }
+function toneConfidence(energies) {
+  let first = 0;
+  let second = 0;
+  for (const energy of energies) {
+    if (energy > first) {
+      second = first;
+      first = energy;
+    } else if (energy > second) {
+      second = energy;
+    }
+  }
+  return (first - second) / Math.max(1e-12, first + second);
+}
 function syncScore(samples, offset) {
   let score = 0;
   let power = 0;
@@ -220,21 +235,37 @@ function syncScore(samples, offset) {
   return score / PREAMBLE.length;
 }
 function decodeFrame(samples, offset, shift = 0) {
-  const start = offset + PREAMBLE_SAMPLES + shift;
-  if (start < 0 || start + DATA_SYMBOLS * SYMBOL_SAMPLES > samples.length) return null;
+  let cursor = offset + PREAMBLE_SAMPLES + shift;
+  if (cursor < 0) return null;
   const slots = new Float32Array(SLOT_BITS);
   let write = 0;
   for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
-    const energies = allToneEnergies(samples, start + symbol * SYMBOL_SAMPLES);
+    let bestStart = -1;
+    let bestConfidence = -1;
+    let bestEnergies = null;
+    for (let delta = -DATA_TRACK_WINDOW; delta <= DATA_TRACK_WINDOW; delta += 4) {
+      const start = Math.round(cursor + delta);
+      if (start < 0 || start + SYMBOL_SAMPLES > samples.length) continue;
+      const energies = allToneEnergies(samples, start);
+      const confidence = toneConfidence(energies);
+      if (confidence > bestConfidence) {
+        bestConfidence = confidence;
+        bestStart = start;
+        bestEnergies = energies;
+      }
+    }
+    if (!bestEnergies) return null;
     for (let bit = BITS_PER_TONE - 1; bit >= 0; bit--) {
       let e0 = 0;
       let e1 = 0;
       for (let tone = 0; tone < TONE_COUNT; tone++) {
-        if (tone >>> bit & 1) e1 += energies[tone];
-        else e0 += energies[tone];
+        if (tone >>> bit & 1) e1 += bestEnergies[tone];
+        else e0 += bestEnergies[tone];
       }
-      slots[write++] = clamp((e1 - e0) / Math.max(1e-12, e1 + e0), -1, 1);
+      slots[write++] = clamp((e1 - e0) / Math.max(1e-12, e1 + e0), -1, 1)
+        * clamp(0.35 + bestConfidence, 0.2, 1);
     }
+    cursor = bestStart + SYMBOL_SAMPLES;
   }
   const coded = deinterleaveSoft(slots);
   const decoded = convolutionalDecode(coded, RAW_PACKET_BITS);
@@ -276,7 +307,7 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
 class QuietScanner {
   constructor(onPacket) {
     this.onPacket = onPacket;
-    this.samples = new Float32Array(524288);
+    this.samples = new Float32Array(262144);
     this.length = 0;
     this.scan = 0;
     this.expected = -1;
@@ -314,7 +345,7 @@ class QuietScanner {
   }
   process() {
     while (true) {
-      const maxCandidate = this.length - FRAME_SAMPLES;
+      const maxCandidate = this.length - FRAME_SAMPLES - DECODE_MARGIN;
       if (maxCandidate < this.scan) return;
 
       if (this.expected >= 0 && this.expected <= maxCandidate) {
@@ -331,7 +362,7 @@ class QuietScanner {
 
       let bestOffset = -1;
       let bestScore = -1;
-      for (let offset = this.scan; offset <= maxCandidate; offset += 32) {
+      for (let offset = this.scan; offset <= maxCandidate; offset += 24) {
         const score = syncScore(this.samples, offset);
         if (score > bestScore) {
           bestScore = score;
@@ -356,7 +387,7 @@ class QuietScanner {
   }
   compact() {
     const cursor = this.expected >= 0 ? Math.min(this.scan, this.expected) : this.scan;
-    if (cursor < 131072) return;
+    if (cursor < 65536) return;
     const keepFrom = Math.max(0, cursor - PREAMBLE_SAMPLES);
     this.samples.copyWithin(0, keepFrom, this.length);
     this.length -= keepFrom;
