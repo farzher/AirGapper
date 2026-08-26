@@ -30,7 +30,7 @@ jobs:
           PY
           python3 /tmp/auto-optics-finish.py
 
-      - name: Tighten evidence freshness and reseed expectation
+      - name: Tighten evidence freshness and dormant regression semantics
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -58,6 +58,14 @@ jobs:
           rep("benchmark/grid-lattice-regression.mjs",
               '''assert.equal(lattice.state, "GRID_LOCK");\nassert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");''',
               '''assert.equal(lattice.state, "TRACK", "fresh CRC payload should immediately promote the re-seeded wall to TRACK");\nassert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");''')
+
+          rep("benchmark/grid-lattice-regression.mjs",
+              '''// Repeated per-slot self-heals are local failures. They must not destroy a wall\n// that still has a valid global pose; only whole-wall silence or explicit pose\n// invalidation is allowed to hard-reacquire.''',
+              '''// Repeated per-slot self-heals are local failures. They must not destroy a wall\n// that still has a valid global pose. Whole-wall silence moves the prior off the\n// hot path into DORMANT; explicit pose invalidation is the immediate hard reset.''')
+
+          rep("benchmark/grid-lattice-regression.mjs",
+              '''assert.equal(healing.tick(961), null, "actual whole-wall silence must still hard-reacquire");\nassert.equal(healing.state, "REACQUIRE");''',
+              '''const dormantHealing = healing.tick(2000);\nassert(dormantHealing, "whole-wall silence should retain only an inactive re-anchor prior");\nassert.equal(healing.state, "DORMANT");\nassert.equal(healing.locked, false);\nassert.equal(healing.active, false);\nassert.equal(dormantHealing.provisional, true);''')
 
           rep("benchmark/browser-performance-policy-smoke.mjs",
               '''assert(runtimeSource.includes('async function applyAutomaticLightStarvedSeed(track, baseline, reason)'));\nassert(runtimeSource.includes('add(0, "light-starved neutral rescue", true)'));''',
