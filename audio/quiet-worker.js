@@ -6,9 +6,9 @@ import {
 } from "./quiet-stream.js";
 
 const SAMPLE_RATE = 48000;
-const WINDOW_SAMPLES = 192;
-const WINDOW_STEP = 48;
-const DIAGNOSTIC_SAMPLES = 1536;
+const WINDOW_SAMPLES = 384;
+const WINDOW_STEP = 96;
+const DIAGNOSTIC_SAMPLES = 3072;
 const REPORT_SAMPLES = 8192;
 const TONE_COEFF = new Float64Array(QUIET_TONE_COUNT);
 for (let tone = 0; tone < QUIET_TONE_COUNT; tone++) {
@@ -37,12 +37,10 @@ function toneDb(samples, offset, tone) {
   const amplitude = 2 * Math.sqrt(power) / WINDOW_SAMPLES;
   return 20 * Math.log10(Math.max(1e-8, amplitude));
 }
-function bandMaxDb(samples, firstTone, lastTone) {
+function toneMaxDb(samples, tone) {
   let best = -160;
   for (let offset = 0; offset + WINDOW_SAMPLES <= samples.length; offset += WINDOW_STEP) {
-    for (let tone = firstTone; tone <= lastTone; tone++) {
-      best = Math.max(best, toneDb(samples, offset, tone));
-    }
+    best = Math.max(best, toneDb(samples, offset, tone));
   }
   return best;
 }
@@ -58,11 +56,7 @@ function appendDiagnostic(chunk) {
   samplesSinceReport = 0;
   postMessage({
     type: "spectrum",
-    levels: [
-      bandMaxDb(diagnostic, 0, 1),
-      bandMaxDb(diagnostic, 2, 3),
-      bandMaxDb(diagnostic, 4, 7)
-    ]
+    levels: Array.from({ length: QUIET_TONE_COUNT }, (_, tone) => toneMaxDb(diagnostic, tone))
   });
 }
 
