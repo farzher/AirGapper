@@ -1,4 +1,4 @@
-import { QuietScanner } from "./quiet-modem.js";
+import { QuietScanner } from "./quiet-stream.js";
 
 function sendPacket(packet) {
   const block = packet.block.slice();
