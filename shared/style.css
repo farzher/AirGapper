@@ -271,13 +271,13 @@ details.receiver-settings .row { display: grid; grid-template-columns: minmax(0,
 .focus-tuning summary { cursor: pointer; }
 .focus-tuning > div { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 6px; padding-top: 6px; }
 .focus-tuning input { width: 100%; }
-.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; align-items: center; }
+.optics-manual { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 10px; align-items: end; }
 .optics-manual[hidden], .optics-manual .axis-control[hidden] { display: none !important; }
-.axis-control { display: grid; grid-template-columns: auto minmax(72px, 1fr); align-items: center; gap: 6px; min-width: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
-.axis-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; min-width: 76px; }
-.axis-title { min-width: 0; color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
-.axis-heading output { min-width: 0; color: var(--ink); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.axis-control input[type="range"] { min-width: 0; width: 100%; min-height: 18px; height: 18px; margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.axis-control { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.axis-title { min-width: 0; color: var(--muted); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.axis-control select { width: 100%; min-width: 0; font-size: 12px; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+.optics-readback { grid-column: 1 / -1; min-height: 14px; margin-top: -1px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.optics-readback:empty { display: none; }
 .setting-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 8px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .setting-toggle input { margin: 0; accent-color: #222; }
 select, input[type="range"], input[type="number"] { min-height: 34px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }

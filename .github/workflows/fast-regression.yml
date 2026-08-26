@@ -90,6 +90,7 @@ jobs:
           node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
           node --input-type=module --check < benchmark/direct-y8-worker-smoke.mjs
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
+          node --input-type=module --check < benchmark/manual-optics-ui-smoke.mjs
           node --input-type=module --check < benchmark/offline-runner.mjs
           node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
           node --input-type=module --check < benchmark/run-agcap.mjs
@@ -108,6 +109,7 @@ jobs:
           node benchmark/auto-phase-policy-smoke.mjs
           node benchmark/version-source-smoke.mjs
           node benchmark/guided-motion-smoke.mjs
+          node benchmark/manual-optics-ui-smoke.mjs
           node benchmark/rgba-luma-smoke.mjs
           node benchmark/track-processor-proxy-smoke.mjs
           node benchmark/worker-pool-reuse-smoke.mjs

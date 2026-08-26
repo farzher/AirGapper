@@ -61,36 +61,6 @@ function closeNumber(a, b, ratio = 0.02) {
   return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * ratio);
 }
 
-function syncManualAxis(id, autoId, actual) {
-  const input = document.getElementById(id);
-  const automatic = document.getElementById(autoId);
-  const value = Number(actual);
-  if (!(input instanceof HTMLInputElement) || automatic?.checked || !Number.isFinite(value)) return false;
-  if (closeNumber(input.value, value)) return false;
-  const min = Number(input.min);
-  const max = Number(input.max);
-  const clamped = Math.max(Number.isFinite(min) ? min : -Infinity, Math.min(Number.isFinite(max) ? max : Infinity, value));
-  input.value = String(clamped);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  return true;
-}
-
-function installSettledExposureSync() {
-  window.addEventListener("airgapper:exposure-settled", (event) => {
-    const detail = event?.detail;
-    const track = activeCameraTrack();
-    if (!track || detail?.track !== track || track.readyState !== "live") return;
-    if (document.getElementById("camera-exposure-auto")?.checked) return;
-    const requested = detail.requested ?? {};
-    const actual = detail.actual ?? {};
-
-    if (requested.exposureTime !== undefined)
-      syncManualAxis("camera-exposure", "exposure-axis-auto", actual.exposureTime);
-    if (requested.iso !== undefined)
-      syncManualAxis("camera-iso", "iso-axis-auto", actual.iso);
-  });
-}
-
 const EXPOSURE_KEYS = ["exposureMode", "exposureTime", "iso", "exposureCompensation"];
 const CAMERA_CONSTRAINT_TIMEOUT_MS = 900;
 const CAMERA_CONSTRAINT_TIMEOUT_BACKOFF_MS = 3000;
@@ -318,6 +288,5 @@ async function applyAdvancedConstraint(track, set, { allowHealthyPerturbation = 
 }
 
 installManualToAutoReopen();
-installSettledExposureSync();
 
 export { applyAdvancedConstraint };
