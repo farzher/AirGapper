@@ -19,14 +19,15 @@ import {
   AcousticReceiver,
   MAX_AUDIO_BYTES,
   SAMPLE_RATE,
-  modulateAudioPacket
+  modulateReliablePacket
 } from "./modem.js";
-import { QUIET_ESTIMATED_KBPS } from "./quiet-modem.js";
+import { QUIET_ESTIMATED_KBPS, modulateQuietPacket } from "./quiet-stream.js";
 import {
   FAST_ESTIMATED_KBPS,
+  FAST_FRAME_MS,
   FAST_PACKETS_PER_FRAME,
   modulateFastFrame
-} from "./fast-modem.js";
+} from "./fast-stream.js";
 
 const audioView = document.getElementById("audioView");
 const directionChooser = document.querySelector(".audio-mode-switch");
@@ -50,9 +51,7 @@ const receiverLinkUrl = document.getElementById("receiver-link-url");
 const headerReceiverQr = document.getElementById("receiver-link-qr");
 
 const VALID_PACKET_FLASH_MS = 120;
-const FAST_FRAME_MS = 3326;
 const PROFILE_KEY = "airgapper:audio-profile:v1";
-const MODEM_SOUND_KEY = "airgapper:audio-sound:v1";
 
 let currentMode = null;
 let sendSession = null;
@@ -606,13 +605,11 @@ try {
   const savedProfile = localStorage.getItem(PROFILE_KEY);
   if (savedProfile === "reliable" || savedProfile === "fast" || savedProfile === "quiet") profileInput.value = savedProfile;
   localStorage.removeItem("airgapper:audio-speed:v1");
+  localStorage.removeItem("airgapper:audio-sound:v1");
 } catch {}
 if (!profileInput.value) profileInput.value = "reliable";
 function syncStoredProfile() {
-  try {
-    localStorage.setItem(PROFILE_KEY, profileInput.value);
-    localStorage.setItem(MODEM_SOUND_KEY, profileInput.value === "quiet" ? "quiet" : "normal");
-  } catch {}
+  try { localStorage.setItem(PROFILE_KEY, profileInput.value); } catch {}
 }
 syncStoredProfile();
 
@@ -626,8 +623,15 @@ function profileEstimate(profile) {
 }
 function updateSendStatus(session) {
   if (!session || sendSession !== session) return;
-  const profile = activeProfile();
-  setStatus(`Sending ${session.label} · ~${profileEstimate(profile).toFixed(1)} KB/s`);
+  setStatus(`Sending ${session.label} · ~${profileEstimate(activeProfile()).toFixed(1)} KB/s`);
+}
+function stopScheduledSources(session) {
+  if (!session) return;
+  for (const source of session.scheduledSources ?? []) {
+    try { source.stop(); } catch {}
+  }
+  session.scheduledSources?.clear();
+  session.nextStartTime = 0;
 }
 function syncProfileSettings() {
   syncStoredProfile();
@@ -635,7 +639,7 @@ function syncProfileSettings() {
   if (!session || session.stopped) return;
   session.profileEpoch++;
   updateSendStatus(session);
-  try { session.source?.stop(); } catch {}
+  stopScheduledSources(session);
 }
 profileInput.addEventListener("change", syncProfileSettings);
 settingsButton.addEventListener("click", () => {
@@ -655,8 +659,7 @@ function resetSendUi() {
 function cleanupSendSession(session) {
   if (!session) return;
   session.stopped = true;
-  try { session.source?.stop(); } catch {}
-  try { session.source?.disconnect(); } catch {}
+  stopScheduledSources(session);
   try { session.analyser?.disconnect(); } catch {}
   try { session.encoder?.free(); } catch {}
   if (session.context?.state !== "closed") void session.context?.close().catch(() => void 0);
@@ -717,23 +720,52 @@ function buildSendWaveform(session) {
   return {
     epoch,
     profile,
-    waveform: modulateAudioPacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
+    waveform: profile === "quiet"
+      ? modulateQuietPacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
+      : modulateReliablePacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
   };
 }
-async function playWaveform(session, prepared) {
-  if (sendSession !== session || session.stopped || prepared.epoch !== session.profileEpoch) return;
+function scheduleWaveform(session, prepared) {
+  if (sendSession !== session || session.stopped || prepared.epoch !== session.profileEpoch) return null;
   const buffer = session.context.createBuffer(1, prepared.waveform.length, SAMPLE_RATE);
   buffer.copyToChannel(prepared.waveform, 0);
   const source = session.context.createBufferSource();
   source.buffer = buffer;
   source.connect(session.analyser);
-  session.source = source;
-  await new Promise((resolve) => {
-    source.onended = resolve;
-    source.start();
+  const startAt = Math.max(session.context.currentTime + 0.012, session.nextStartTime || 0);
+  session.nextStartTime = startAt + buffer.duration;
+  session.scheduledSources.add(source);
+  const ended = new Promise((resolve) => {
+    source.onended = () => {
+      session.scheduledSources.delete(source);
+      try { source.disconnect(); } catch {}
+      resolve();
+    };
   });
-  try { source.disconnect(); } catch {}
-  if (session.source === source) session.source = null;
+  source.start(startAt);
+  return { epoch: prepared.epoch, ended };
+}
+async function runSendQueue(session) {
+  let queue = [];
+  while (sendSession === session && !session.stopped) {
+    if (queue.length && queue[0].epoch !== session.profileEpoch) {
+      queue = [];
+      session.nextStartTime = 0;
+    }
+    while (queue.length < 2 && sendSession === session && !session.stopped) {
+      const prepared = buildSendWaveform(session);
+      if (prepared.epoch !== session.profileEpoch) break;
+      const scheduled = scheduleWaveform(session, prepared);
+      if (!scheduled) break;
+      queue.push(scheduled);
+    }
+    if (!queue.length) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      continue;
+    }
+    await queue[0].ended;
+    queue.shift();
+  }
 }
 async function startSending(container, label) {
   await stopReceiver(false);
@@ -766,7 +798,8 @@ async function startSending(container, label) {
       totalLen: container.length,
       ordinal: 0,
       profileEpoch: 0,
-      source: null,
+      scheduledSources: new Set(),
+      nextStartTime: 0,
       stopped: false,
       backgroundPaused: false
     };
@@ -778,16 +811,7 @@ async function startSending(container, label) {
     updateSendStatus(session);
     startVisualizer(sendPreview.canvas, analyser, true);
     void requestScreenWakeLock();
-    let prepared = buildSendWaveform(session);
-    while (sendSession === session && !session.stopped) {
-      const playing = prepared;
-      const playback = playWaveform(session, playing);
-      let next = null;
-      if (playing.epoch === session.profileEpoch) next = buildSendWaveform(session);
-      await playback;
-      if (sendSession !== session || session.stopped) break;
-      prepared = next && next.epoch === session.profileEpoch ? next : buildSendWaveform(session);
-    }
+    await runSendQueue(session);
   } catch (error) {
     if (sendSession) stopSender(false);
     resetSendUi();
