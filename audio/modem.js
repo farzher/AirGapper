@@ -2,8 +2,9 @@ import {
   AUDIO_BLOCK_SIZE,
   AUDIO_ESTIMATED_KBPS,
   MAX_AUDIO_BYTES,
+  RELIABLE_PACKETS_PER_FRAME,
   SAMPLE_RATE,
-  modulateReliablePacket
+  modulateReliableFrame
 } from "./reliable-stream.js";
 
 function quietBandLabel(db) {
@@ -182,6 +183,7 @@ export {
   AUDIO_ESTIMATED_KBPS,
   AcousticReceiver,
   MAX_AUDIO_BYTES,
+  RELIABLE_PACKETS_PER_FRAME,
   SAMPLE_RATE,
-  modulateReliablePacket
+  modulateReliableFrame
 };
