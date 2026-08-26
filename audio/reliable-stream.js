@@ -2,35 +2,42 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
+const FFT_SIZE = 1024;
+const CYCLIC_PREFIX = 256;
+const SYMBOL_SAMPLES = FFT_SIZE + CYCLIC_PREFIX;
+const FFT_WINDOW_EARLY = 48;
+const ACTIVE_FIRST = 32; // 1.50 kHz
+const ACTIVE_LAST = 213; // 9.98 kHz
+const CARRIER_COUNT = ACTIVE_LAST - ACTIVE_FIRST + 1;
+const PILOT_EVERY = 8;
+const FRAME_SYMBOLS = 18;
+const DATA_SYMBOLS = FRAME_SYMBOLS - 1;
+const SYMBOL_RMS = 0.21;
+const PEAK_LIMIT = 0.90;
+const ACQUIRE_SYMBOLS = 3;
+const ACQUIRE_THRESHOLD = 0.10;
+const TRACK_THRESHOLD = 0.035;
+const MARKER_MAX_RESIDUAL = 0.95;
+const SPREAD_COPIES = 3;
 const AUDIO_BLOCK_SIZE = 24;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x33]); // AGR3
+const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x34]); // AGR4
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
 
-// Room-range Reliable PHY. Payload is noncoherent 16-FSK in the strong
-// audible phone band. Every 10 ms symbol also carries the same low-band PN
-// timing pilot. I/Q matched correlation on that pilot is phase-insensitive and
-// resolves room echoes; frame boundaries are found by rolling CRC, so there is
-// no dedicated recurring sync burst.
-const TONE_COUNT = 16;
-const BITS_PER_TONE = 4;
-const SYMBOL_SAMPLES = 480; // 10 ms
-const TONE_BASE_HZ = 2500;
-const TONE_SPACING_HZ = 300;
-const DATA_AMPLITUDE = 0.63;
-const PILOT_AMPLITUDE = 0.24;
-const ACQUIRE_THRESHOLD = 0.075;
-const TRACK_THRESHOLD = 0.038;
-const TRACK_WINDOW = 24;
-const FREQ_OFFSETS = new Int16Array([-50, 0, 50]);
-const PILOT_CHIPS = new Int8Array([1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1, 1, -1, -1, -1]);
-const PILOT_SAMPLES_PER_CHIP = SYMBOL_SAMPLES / PILOT_CHIPS.length;
-const PILOT_CARRIER_HZ = 1500;
+const PILOT_POSITIONS = [];
+const DATA_POSITIONS = [];
+for (let carrier = 0; carrier < CARRIER_COUNT; carrier++) {
+  if (carrier % PILOT_EVERY === 0) PILOT_POSITIONS.push(carrier);
+  else DATA_POSITIONS.push(carrier);
+}
+const PILOT_COUNT = PILOT_POSITIONS.length;
+const DATA_CARRIERS = DATA_POSITIONS.length;
+const SLOT_BITS = DATA_SYMBOLS * DATA_CARRIERS;
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -117,42 +124,88 @@ function gcd(a, b) {
   return Math.abs(a) || 1;
 }
 function interleaveStep(capacity) {
-  let step = 257;
+  let step = 521;
   while (gcd(step, capacity) !== 1) step += 2;
   return step;
+}
+function nextRandom(state) {
+  state ^= state << 13;
+  state ^= state >>> 17;
+  state ^= state << 5;
+  return state >>> 0;
+}
+function randomPhaseVector(seed, count) {
+  const real = new Float64Array(count);
+  const imag = new Float64Array(count);
+  let state = (seed >>> 0) || 0x9e3779b9;
+  for (let i = 0; i < count; i++) {
+    state = nextRandom(state);
+    const phase = state / 4294967296 * Math.PI * 2;
+    real[i] = Math.cos(phase);
+    imag[i] = Math.sin(phase);
+  }
+  return { real, imag };
 }
 
 const RAW_PACKET_BITS = AUDIO_PACKET_BYTES * 8;
 const CODED_BITS = convolutionalEncode(new Uint8Array(RAW_PACKET_BITS)).length;
-const FRAME_SYMBOLS = Math.ceil(CODED_BITS / BITS_PER_TONE);
-const SLOT_BITS = FRAME_SYMBOLS * BITS_PER_TONE;
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
+if (CODED_BITS * SPREAD_COPIES > SLOT_BITS) throw new Error("Reliable PHY capacity is too small.");
+const SPREAD_SLOTS = new Uint16Array(CODED_BITS * SPREAD_COPIES);
+for (let i = 0; i < SPREAD_SLOTS.length; i++) SPREAD_SLOTS[i] = i * INTERLEAVE_STEP % SLOT_BITS;
 const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
 const AUDIO_ESTIMATED_KBPS =
   (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
-const PILOT_CODE = new Int8Array(SYMBOL_SAMPLES);
-const PILOT_SIN = new Float64Array(SYMBOL_SAMPLES);
-const PILOT_COS = new Float64Array(SYMBOL_SAMPLES);
-const pilotOmega = 2 * Math.PI * PILOT_CARRIER_HZ / SAMPLE_RATE;
-for (let chip = 0; chip < PILOT_CHIPS.length; chip++) {
-  PILOT_CODE.fill(PILOT_CHIPS[chip], chip * PILOT_SAMPLES_PER_CHIP, (chip + 1) * PILOT_SAMPLES_PER_CHIP);
-}
-let pilotReferenceEnergy = 0;
-for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-  PILOT_SIN[i] = Math.sin(pilotOmega * i);
-  PILOT_COS[i] = Math.cos(pilotOmega * i);
-  pilotReferenceEnergy += PILOT_SIN[i] * PILOT_SIN[i];
+function fft(real, imag, inverse = false) {
+  const n = real.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
+    }
+  }
+  for (let length = 2; length <= n; length <<= 1) {
+    const angle = (inverse ? 2 : -2) * Math.PI / length;
+    const wr0 = Math.cos(angle);
+    const wi0 = Math.sin(angle);
+    for (let base = 0; base < n; base += length) {
+      let wr = 1;
+      let wi = 0;
+      for (let j = 0; j < length / 2; j++) {
+        const even = base + j;
+        const odd = even + length / 2;
+        const tr = real[odd] * wr - imag[odd] * wi;
+        const ti = real[odd] * wi + imag[odd] * wr;
+        const er = real[even];
+        const ei = imag[even];
+        real[even] = er + tr;
+        imag[even] = ei + ti;
+        real[odd] = er - tr;
+        imag[odd] = ei - ti;
+        const nextWr = wr * wr0 - wi * wi0;
+        wi = wr * wi0 + wi * wr0;
+        wr = nextWr;
+      }
+    }
+  }
+  if (inverse) {
+    for (let i = 0; i < n; i++) {
+      real[i] /= n;
+      imag[i] /= n;
+    }
+  }
 }
 
-const TONE_COEFF = Array.from({ length: FREQ_OFFSETS.length }, () => new Float64Array(TONE_COUNT));
-const TONE_OMEGA = new Float64Array(TONE_COUNT);
-for (let tone = 0; tone < TONE_COUNT; tone++) {
-  const frequency = TONE_BASE_HZ + tone * TONE_SPACING_HZ;
-  TONE_OMEGA[tone] = 2 * Math.PI * frequency / SAMPLE_RATE;
-  for (let offset = 0; offset < FREQ_OFFSETS.length; offset++) {
-    TONE_COEFF[offset][tone] = 2 * Math.cos(2 * Math.PI * (frequency + FREQ_OFFSETS[offset]) / SAMPLE_RATE);
-  }
+const PILOT_REAL = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
+const PILOT_IMAG = Array.from({ length: FRAME_SYMBOLS }, () => new Float64Array(PILOT_COUNT));
+for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
+  const vector = randomPhaseVector(0x5f356495 ^ Math.imul(symbol + 1, 0x45d9f3b), PILOT_COUNT);
+  PILOT_REAL[symbol].set(vector.real);
+  PILOT_IMAG[symbol].set(vector.imag);
 }
 
 function packetBytes(payloadId, totalLen, mode, encodingId, block) {
@@ -201,117 +254,238 @@ function parsePacket(raw) {
     profile: "reliable"
   };
 }
-function interleave(coded) {
+
+function makeSlots(coded, seed) {
   const slots = new Uint8Array(SLOT_BITS);
-  for (let i = 0; i < coded.length; i++) slots[i * INTERLEAVE_STEP % SLOT_BITS] = coded[i];
+  let state = (seed >>> 0) || 0x85ebca6b;
+  for (let i = 0; i < slots.length; i++) {
+    state = nextRandom(state);
+    slots[i] = state >>> 31;
+  }
+  let spread = 0;
+  for (let bit = 0; bit < coded.length; bit++) {
+    for (let copy = 0; copy < SPREAD_COPIES; copy++) slots[SPREAD_SLOTS[spread++]] = coded[bit];
+  }
   return slots;
 }
-function deinterleaveSoft(slots) {
+function combineSpreadSoft(slots) {
   const coded = new Float32Array(CODED_BITS);
-  for (let i = 0; i < coded.length; i++) coded[i] = slots[i * INTERLEAVE_STEP % SLOT_BITS];
+  let spread = 0;
+  for (let bit = 0; bit < CODED_BITS; bit++) {
+    const a = slots[SPREAD_SLOTS[spread++]];
+    const b = slots[SPREAD_SLOTS[spread++]];
+    const c = slots[SPREAD_SLOTS[spread++]];
+    const low = Math.min(a, b, c);
+    const high = Math.max(a, b, c);
+    const median = a + b + c - low - high;
+    coded[bit] = clamp(median * 0.8 + (a + b + c) / 3 * 0.2, -1, 1);
+  }
   return coded;
 }
-
-function writeSymbol(waveform, offset, tone) {
-  const omega = TONE_OMEGA[tone];
-  for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const data = DATA_AMPLITUDE * Math.sin(omega * i);
-    const pilot = PILOT_AMPLITUDE * PILOT_CODE[i] * PILOT_SIN[i];
-    waveform[offset + i] = clamp(data + pilot, -0.94, 0.94);
+function ofdmSymbol(carrierReal, carrierImag) {
+  const real = new Float64Array(FFT_SIZE);
+  const imag = new Float64Array(FFT_SIZE);
+  for (let carrier = 0; carrier < CARRIER_COUNT; carrier++) {
+    const bin = ACTIVE_FIRST + carrier;
+    real[bin] = carrierReal[carrier];
+    imag[bin] = carrierImag[carrier];
+    real[FFT_SIZE - bin] = carrierReal[carrier];
+    imag[FFT_SIZE - bin] = -carrierImag[carrier];
   }
+  fft(real, imag, true);
+  let energy = 0;
+  for (const sample of real) energy += sample * sample;
+  const scale = SYMBOL_RMS / (Math.sqrt(energy / FFT_SIZE) || 1);
+  const body = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) body[i] = clamp(real[i] * scale, -PEAK_LIMIT, PEAK_LIMIT);
+  const out = new Float32Array(SYMBOL_SAMPLES);
+  out.set(body.subarray(FFT_SIZE - CYCLIC_PREFIX), 0);
+  out.set(body, CYCLIC_PREFIX);
+  return out;
 }
 function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
   const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
   const coded = convolutionalEncode(bytesToBits(raw));
-  const slots = interleave(coded);
+  const slots = makeSlots(coded, payloadId ^ Math.imul((encodingId >>> 0) + 1, 0x9e3779b1));
   const waveform = new Float32Array(FRAME_SAMPLES);
+  const anchor = randomPhaseVector((payloadId ^ Math.imul((encodingId >>> 0) + 1, 0x85ebca6b)) >>> 0, CARRIER_COUNT);
+  const carrierReal = anchor.real;
+  const carrierImag = anchor.imag;
+  for (let p = 0; p < PILOT_COUNT; p++) {
+    const carrier = PILOT_POSITIONS[p];
+    carrierReal[carrier] = PILOT_REAL[0][p];
+    carrierImag[carrier] = PILOT_IMAG[0][p];
+  }
+  waveform.set(ofdmSymbol(carrierReal, carrierImag), 0);
+
   let read = 0;
-  for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
-    let tone = 0;
-    for (let bit = 0; bit < BITS_PER_TONE; bit++) tone = tone << 1 | (slots[read++] || 0);
-    writeSymbol(waveform, symbol * SYMBOL_SAMPLES, tone);
+  for (let symbol = 1; symbol < FRAME_SYMBOLS; symbol++) {
+    for (const carrier of DATA_POSITIONS) {
+      if (slots[read++]) {
+        carrierReal[carrier] = -carrierReal[carrier];
+        carrierImag[carrier] = -carrierImag[carrier];
+      }
+    }
+    for (let p = 0; p < PILOT_COUNT; p++) {
+      const carrier = PILOT_POSITIONS[p];
+      carrierReal[carrier] = PILOT_REAL[symbol][p];
+      carrierImag[carrier] = PILOT_IMAG[symbol][p];
+    }
+    waveform.set(ofdmSymbol(carrierReal, carrierImag), symbol * SYMBOL_SAMPLES);
   }
   return waveform;
 }
 
-function pilotCorrelation(samples, offset, stride = 2) {
-  let inPhase = 0;
-  let quadrature = 0;
-  let energy = 0;
-  let referenceEnergy = 0;
-  for (let i = 0; i < SYMBOL_SAMPLES; i += stride) {
-    const sample = samples[offset + i];
-    const code = PILOT_CODE[i];
-    inPhase += sample * code * PILOT_SIN[i];
-    quadrature += sample * code * PILOT_COS[i];
-    energy += sample * sample;
-    referenceEnergy += PILOT_SIN[i] * PILOT_SIN[i];
+function spectrumAt(samples, symbolStart) {
+  const body = symbolStart + CYCLIC_PREFIX - FFT_WINDOW_EARLY;
+  if (body < 0 || body + FFT_SIZE > samples.length) return null;
+  const real = new Float64Array(FFT_SIZE);
+  const imag = new Float64Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) real[i] = samples[body + i];
+  fft(real, imag, false);
+  return { real, imag };
+}
+function cpCorrelation(samples, offset, stride = 2) {
+  let dot = 0;
+  let leftEnergy = 0;
+  let rightEnergy = 0;
+  for (let i = 0; i < CYCLIC_PREFIX; i += stride) {
+    const left = samples[offset + i];
+    const right = samples[offset + FFT_SIZE + i];
+    dot += left * right;
+    leftEnergy += left * left;
+    rightEnergy += right * right;
   }
-  if (energy < 1e-9 || referenceEnergy < 1e-9) return 0;
-  return Math.hypot(inPhase, quadrature) / Math.sqrt(energy * referenceEnergy);
+  if (leftEnergy < 1e-8 || rightEnergy < 1e-8) return 0;
+  return dot / Math.sqrt(leftEnergy * rightEnergy);
 }
-function toneEnergy(samples, offset, tone, frequencyIndex) {
-  const coeff = TONE_COEFF[frequencyIndex][tone];
-  let s1 = 0;
-  let s2 = 0;
-  for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (SYMBOL_SAMPLES - 1));
-    const s0 = samples[offset + i] * window + coeff * s1 - s2;
-    s2 = s1;
-    s1 = s0;
+function acquisitionScore(samples, offset) {
+  let score = 0;
+  for (let symbol = 0; symbol < ACQUIRE_SYMBOLS; symbol++) {
+    score += Math.max(0, cpCorrelation(samples, offset + symbol * SYMBOL_SAMPLES, 4));
   }
-  return Math.max(0, s1 * s1 + s2 * s2 - coeff * s1 * s2);
+  return score / ACQUIRE_SYMBOLS;
 }
-function allToneEnergies(samples, offset, frequencyIndex) {
-  const energies = new Float64Array(TONE_COUNT);
-  for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone, frequencyIndex);
-  return energies;
-}
-function toneConfidence(energies) {
-  let first = 0;
-  let second = 0;
-  for (const energy of energies) {
-    if (energy > first) {
-      second = first;
-      first = energy;
-    } else if (energy > second) {
-      second = energy;
+function fitPhaseCorrection(errorReal, errorImag) {
+  const real = new Float64Array(PILOT_COUNT);
+  const imag = new Float64Array(PILOT_COUNT);
+  let strength = 0;
+  for (let p = 0; p < PILOT_COUNT; p++) {
+    const magnitude = Math.hypot(errorReal[p], errorImag[p]);
+    strength += magnitude;
+    if (Number.isFinite(magnitude) && magnitude > 1e-12) {
+      real[p] = errorReal[p] / magnitude;
+      imag[p] = errorImag[p] / magnitude;
     }
   }
-  return (first - second) / Math.max(1e-12, first + second);
+  strength /= Math.max(1, PILOT_COUNT);
+  let slopeTotal = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    let sr = 0;
+    let si = 0;
+    for (let p = 1; p < PILOT_COUNT; p++) {
+      sr += real[p] * real[p - 1] + imag[p] * imag[p - 1];
+      si += imag[p] * real[p - 1] - real[p] * imag[p - 1];
+    }
+    const slope = Math.atan2(si, sr) / PILOT_EVERY;
+    if (!Number.isFinite(slope)) break;
+    slopeTotal += slope;
+    for (let p = 0; p < PILOT_COUNT; p++) {
+      const angle = -slope * PILOT_POSITIONS[p];
+      const cr = Math.cos(angle);
+      const ci = Math.sin(angle);
+      const nr = real[p] * cr - imag[p] * ci;
+      const ni = real[p] * ci + imag[p] * cr;
+      real[p] = nr;
+      imag[p] = ni;
+    }
+  }
+  let sr = 0;
+  let si = 0;
+  for (let p = 0; p < PILOT_COUNT; p++) {
+    sr += real[p];
+    si += imag[p];
+  }
+  const cpe = Math.atan2(si, sr);
+  let residual = 0;
+  for (let p = 0; p < PILOT_COUNT; p++) {
+    const angle = -(cpe + slopeTotal * PILOT_POSITIONS[p]);
+    const cr = Math.cos(angle);
+    const ci = Math.sin(angle);
+    const nr = errorReal[p] * cr - errorImag[p] * ci;
+    const ni = errorReal[p] * ci + errorImag[p] * cr;
+    const magnitude = Math.hypot(nr, ni);
+    if (!Number.isFinite(magnitude) || magnitude < 1e-12) {
+      residual += 4;
+      continue;
+    }
+    const ur = nr / magnitude;
+    const ui = ni / magnitude;
+    residual += (ur - 1) * (ur - 1) + ui * ui;
+  }
+  residual /= PILOT_COUNT;
+  return {
+    slope: slopeTotal,
+    cpe,
+    residual,
+    strength,
+    reliability: clamp(1 / (1 + 5 * residual), 0.04, 1)
+  };
 }
-function bestFrequencyEnergies(samples, offset, preferredIndex) {
+function classifyMarker(previous, current) {
   let best = null;
-  for (let index = 0; index < FREQ_OFFSETS.length; index++) {
-    if (preferredIndex >= 0 && Math.abs(index - preferredIndex) > 1) continue;
-    const energies = allToneEnergies(samples, offset, index);
-    const confidence = toneConfidence(energies);
-    if (!best || confidence > best.confidence) best = { energies, confidence, frequencyIndex: index };
-  }
-  return best;
-}
-function softFromEnergies(energies, confidence) {
-  const soft = new Float32Array(BITS_PER_TONE);
-  for (let bit = BITS_PER_TONE - 1, write = 0; bit >= 0; bit--, write++) {
-    let best0 = 0;
-    let best1 = 0;
-    for (let tone = 0; tone < TONE_COUNT; tone++) {
-      if (tone >> bit & 1) best1 = Math.max(best1, energies[tone]);
-      else best0 = Math.max(best0, energies[tone]);
+  for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
+    const previousSymbol = (symbol + FRAME_SYMBOLS - 1) % FRAME_SYMBOLS;
+    const errorReal = new Float64Array(PILOT_COUNT);
+    const errorImag = new Float64Array(PILOT_COUNT);
+    for (let p = 0; p < PILOT_COUNT; p++) {
+      const carrier = PILOT_POSITIONS[p];
+      const bin = ACTIVE_FIRST + carrier;
+      const pr = previous.real[bin];
+      const pi = previous.imag[bin];
+      const cr = current.real[bin];
+      const ci = current.imag[bin];
+      const dr = cr * pr + ci * pi;
+      const di = ci * pr - cr * pi;
+      const er = PILOT_REAL[symbol][p] * PILOT_REAL[previousSymbol][p]
+        + PILOT_IMAG[symbol][p] * PILOT_IMAG[previousSymbol][p];
+      const ei = PILOT_IMAG[symbol][p] * PILOT_REAL[previousSymbol][p]
+        - PILOT_REAL[symbol][p] * PILOT_IMAG[previousSymbol][p];
+      errorReal[p] = dr * er + di * ei;
+      errorImag[p] = di * er - dr * ei;
     }
-    soft[write] = clamp((best1 - best0) / Math.max(1e-12, best1 + best0), -1, 1)
-      * clamp(0.3 + confidence, 0.15, 1);
+    const correction = fitPhaseCorrection(errorReal, errorImag);
+    if (!best || correction.residual < best.residual) best = { symbol, ...correction };
   }
-  return soft;
+  return best && best.residual <= MARKER_MAX_RESIDUAL ? best : null;
 }
-function decodeSymbolQueue(queue) {
-  if (queue.length !== FRAME_SYMBOLS) return null;
-  const slots = new Float32Array(SLOT_BITS);
-  let write = 0;
-  for (const soft of queue) {
-    for (let bit = 0; bit < BITS_PER_TONE; bit++) slots[write++] = soft[bit];
+function decodeTransition(previous, current, correction, slots, write) {
+  const reference = Math.max(1e-9, correction.strength);
+  for (const carrier of DATA_POSITIONS) {
+    const bin = ACTIVE_FIRST + carrier;
+    const pr = previous.real[bin];
+    const pi = previous.imag[bin];
+    const cr = current.real[bin];
+    const ci = current.imag[bin];
+    const dr = cr * pr + ci * pi;
+    const di = ci * pr - cr * pi;
+    const angle = -(correction.cpe + correction.slope * carrier);
+    const ar = Math.cos(angle);
+    const ai = Math.sin(angle);
+    const nr = dr * ar - di * ai;
+    const nq = dr * ai + di * ar;
+    const magnitude = Math.hypot(nr, nq);
+    if (!Number.isFinite(magnitude) || magnitude < 1e-12) {
+      slots[write++] = 0;
+      continue;
+    }
+    const strength = clamp(magnitude / (reference * 0.7), 0.05, 1);
+    slots[write++] = clamp(-nr / magnitude, -1, 1) * correction.reliability * strength;
   }
-  const coded = deinterleaveSoft(slots);
+  return write;
+}
+function decodeSlots(slots) {
+  const coded = combineSpreadSoft(slots);
   const decoded = convolutionalDecode(coded, RAW_PACKET_BITS);
   return parsePacket(bitsToBytes(decoded, AUDIO_PACKET_BYTES));
 }
@@ -324,11 +498,11 @@ class ReliableScanner {
     this.length = 0;
     this.scan = 0;
     this.nextSymbolStart = -1;
-    this.frequencyIndex = 1;
-    this.failures = 0;
-    this.symbolQueue = [];
-    this.frameLocked = false;
-    this.lockedSymbols = 0;
+    this.previousSpectrum = null;
+    this.frameSlots = null;
+    this.frameWrite = 0;
+    this.frameNextSymbol = -1;
+    this.markerFailures = 0;
   }
   append(chunk) {
     if (!chunk?.length) return;
@@ -342,12 +516,13 @@ class ReliableScanner {
     this.process();
   }
   acquire() {
-    const maxCandidate = this.length - SYMBOL_SAMPLES;
+    const needed = ACQUIRE_SYMBOLS * SYMBOL_SAMPLES;
+    const maxCandidate = this.length - needed;
     if (maxCandidate < this.scan) return false;
     let bestOffset = -1;
     let bestScore = 0;
-    for (let offset = this.scan; offset <= maxCandidate; offset += 8) {
-      const score = pilotCorrelation(this.samples, offset, 4);
+    for (let offset = this.scan; offset <= maxCandidate; offset += 12) {
+      const score = acquisitionScore(this.samples, offset);
       if (score > bestScore) {
         bestScore = score;
         bestOffset = offset;
@@ -359,48 +534,34 @@ class ReliableScanner {
       return false;
     }
     const coarse = bestOffset;
-    for (let offset = Math.max(this.scan, coarse - 8); offset <= Math.min(maxCandidate, coarse + 8); offset++) {
-      const score = pilotCorrelation(this.samples, offset, 1);
+    for (let offset = Math.max(this.scan, coarse - 12); offset <= Math.min(maxCandidate, coarse + 12); offset++) {
+      const score = acquisitionScore(this.samples, offset);
       if (score > bestScore) {
         bestScore = score;
         bestOffset = offset;
       }
     }
     this.nextSymbolStart = bestOffset;
-    this.failures = 0;
-    this.symbolQueue.length = 0;
-    this.frameLocked = false;
-    this.lockedSymbols = 0;
+    this.previousSpectrum = null;
+    this.frameSlots = null;
+    this.frameWrite = 0;
+    this.frameNextSymbol = -1;
+    this.markerFailures = 0;
     return true;
   }
-  loseSymbolLock(start) {
+  loseLock(start) {
     this.nextSymbolStart = -1;
-    this.failures = 0;
-    this.symbolQueue.length = 0;
-    this.frameLocked = false;
-    this.lockedSymbols = 0;
+    this.previousSpectrum = null;
+    this.frameSlots = null;
+    this.frameWrite = 0;
+    this.frameNextSymbol = -1;
+    this.markerFailures = 0;
     this.scan = Math.max(this.scan, start + Math.floor(SYMBOL_SAMPLES / 2));
   }
-  consumeSoft(soft) {
-    this.symbolQueue.push(soft);
-    if (this.symbolQueue.length > FRAME_SYMBOLS) this.symbolQueue.shift();
-    if (this.symbolQueue.length < FRAME_SYMBOLS) return;
-
-    if (this.frameLocked) {
-      this.lockedSymbols++;
-      if (this.lockedSymbols < FRAME_SYMBOLS) return;
-      this.lockedSymbols = 0;
-      const packet = decodeSymbolQueue(this.symbolQueue);
-      if (packet) this.onPacket(packet);
-      else this.frameLocked = false;
-      return;
-    }
-
-    const packet = decodeSymbolQueue(this.symbolQueue);
-    if (!packet) return;
-    this.onPacket(packet);
-    this.frameLocked = true;
-    this.lockedSymbols = 0;
+  beginFrame() {
+    this.frameSlots = new Float32Array(SLOT_BITS);
+    this.frameWrite = 0;
+    this.frameNextSymbol = 1;
   }
   process() {
     while (true) {
@@ -409,36 +570,61 @@ class ReliableScanner {
 
       const predicted = this.nextSymbolStart;
       let start = predicted;
-      let pilotScore = pilotCorrelation(this.samples, start, 2);
-      for (let candidate = Math.max(0, predicted - TRACK_WINDOW);
-           candidate <= predicted + TRACK_WINDOW && candidate + SYMBOL_SAMPLES <= this.length;
-           candidate += 2) {
-        const score = pilotCorrelation(this.samples, candidate, 2);
-        if (score > pilotScore) {
-          pilotScore = score;
+      let cpScore = cpCorrelation(this.samples, start, 2);
+      for (let candidate = Math.max(0, predicted - 12); candidate <= predicted + 12; candidate++) {
+        if (candidate + SYMBOL_SAMPLES > this.length) break;
+        const score = cpCorrelation(this.samples, candidate, 2);
+        if (score > cpScore) {
+          cpScore = score;
           start = candidate;
         }
       }
-      if (pilotScore < TRACK_THRESHOLD) {
-        this.loseSymbolLock(start);
+      if (cpScore < TRACK_THRESHOLD) {
+        this.loseLock(start);
         continue;
       }
+      const current = spectrumAt(this.samples, start);
+      if (!current) return;
 
-      const decision = bestFrequencyEnergies(this.samples, start, this.frequencyIndex);
-      if (!decision || decision.confidence < 0.012) {
-        this.failures++;
-      } else {
-        this.failures = 0;
-        this.frequencyIndex = decision.frequencyIndex;
-        const quality = clamp(0.55 * pilotScore / 0.3 + 0.45 * decision.confidence / 0.65, 0, 1);
-        this.onSignal(quality);
-        this.consumeSoft(softFromEnergies(decision.energies, decision.confidence));
+      if (this.previousSpectrum) {
+        const marker = classifyMarker(this.previousSpectrum, current);
+        if (!marker) {
+          this.markerFailures++;
+          this.frameSlots = null;
+          this.frameNextSymbol = -1;
+        } else {
+          this.markerFailures = 0;
+          this.onSignal(clamp(1 - marker.residual / MARKER_MAX_RESIDUAL, 0, 1));
+          const symbol = marker.symbol;
+          if (symbol === 0) {
+            this.beginFrame();
+          } else {
+            if (!this.frameSlots && symbol === 1) this.beginFrame();
+            if (this.frameSlots && symbol === this.frameNextSymbol) {
+              this.frameWrite = decodeTransition(this.previousSpectrum, current, marker, this.frameSlots, this.frameWrite);
+              if (symbol === FRAME_SYMBOLS - 1) {
+                const packet = decodeSlots(this.frameSlots);
+                if (packet) this.onPacket(packet);
+                this.frameSlots = null;
+                this.frameWrite = 0;
+                this.frameNextSymbol = -1;
+              } else {
+                this.frameNextSymbol++;
+              }
+            } else {
+              this.frameSlots = null;
+              this.frameWrite = 0;
+              this.frameNextSymbol = -1;
+            }
+          }
+        }
       }
 
+      this.previousSpectrum = current;
       this.nextSymbolStart = start + SYMBOL_SAMPLES;
       this.scan = this.nextSymbolStart;
-      if (this.failures >= 4) {
-        this.loseSymbolLock(start);
+      if (this.markerFailures >= 3) {
+        this.loseLock(start);
         continue;
       }
       this.compact();
@@ -457,11 +643,11 @@ class ReliableScanner {
     this.length = 0;
     this.scan = 0;
     this.nextSymbolStart = -1;
-    this.frequencyIndex = 1;
-    this.failures = 0;
-    this.symbolQueue.length = 0;
-    this.frameLocked = false;
-    this.lockedSymbols = 0;
+    this.previousSpectrum = null;
+    this.frameSlots = null;
+    this.frameWrite = 0;
+    this.frameNextSymbol = -1;
+    this.markerFailures = 0;
   }
 }
 
