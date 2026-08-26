@@ -1,0 +1,95 @@
+name: finish auto optics light starved rescue v2
+
+on:
+  push:
+    branches: [chatgpt/auto-optics-dark-ci-515]
+    paths: [.github/workflows/one-shot-auto-optics-finish-v2.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reuse guarded production patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/one-shot-auto-optics-finish.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(source) if "python3 - <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(source)) if source[i].strip() == 'PY')
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in source[start:end]) + '\n'
+          Path('/tmp/auto-optics-finish.py').write_text(body)
+          PY
+          python3 /tmp/auto-optics-finish.py
+
+      - name: Tighten evidence freshness and reseed expectation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: anchor count {n}: {old[:140]!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          rep("receive/runtime.js",
+              '''const opticsAnalyzer = new StaticQrOpticsAnalyzer();\nlet lastAutomaticOpticsMetrics;\nfunction attachCameraController(track) {''',
+              '''const opticsAnalyzer = new StaticQrOpticsAnalyzer();\nlet lastAutomaticOpticsMetrics;\nfunction currentAutomaticOpticsMetrics(now = receiverNow()) {\n  const metrics = lastAutomaticOpticsMetrics;\n  if (!metrics || !Number.isFinite(metrics.at) ||\n      metrics.at < autoOpticsAcquisitionSince || now - metrics.at > 1500) return void 0;\n  return metrics;\n}\nfunction attachCameraController(track) {''')
+
+          rep("receive/runtime.js",
+              '''  const metrics = lastAutomaticOpticsMetrics;\n  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(metrics);''',
+              '''  const metrics = currentAutomaticOpticsMetrics();\n  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(metrics);''')
+
+          rep("receive/runtime.js",
+              '''  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(lastAutomaticOpticsMetrics);\n  const lightRescueAllowed = !autoOpticsLightRescueUsed &&\n    (!lastAutomaticOpticsMetrics || measuredUnderexposure);''',
+              '''  const rescueMetrics = currentAutomaticOpticsMetrics(now);\n  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(rescueMetrics);\n  const lightRescueAllowed = !autoOpticsLightRescueUsed &&\n    (!rescueMetrics || measuredUnderexposure);''')
+
+          rep("benchmark/grid-lattice-regression.mjs",
+              '''assert.equal(lattice.state, "GRID_LOCK");\nassert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");''',
+              '''assert.equal(lattice.state, "TRACK", "fresh CRC payload should immediately promote the re-seeded wall to TRACK");\nassert.equal(snapshot.distributedFit, false, "one-QR re-anchor is local until cross-axis evidence returns");''')
+
+          rep("benchmark/browser-performance-policy-smoke.mjs",
+              '''assert(runtimeSource.includes('async function applyAutomaticLightStarvedSeed(track, baseline, reason)'));\nassert(runtimeSource.includes('add(0, "light-starved neutral rescue", true)'));''',
+              '''assert(runtimeSource.includes('async function applyAutomaticLightStarvedSeed(track, baseline, reason)'));\nassert(runtimeSource.includes('function currentAutomaticOpticsMetrics(now = receiverNow())'));\nassert(runtimeSource.includes('metrics.at < autoOpticsAcquisitionSince || now - metrics.at > 1500'));\nassert(runtimeSource.includes('add(0, "light-starved neutral rescue", true)'));''')
+          PY
+
+      - name: Run targeted regressions
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node --input-type=module --check < receive/grid-lattice.js
+          node --input-type=module --check < benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/auto-phase-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+          node benchmark/guided-motion-smoke.mjs
+          node benchmark/rgba-luma-smoke.mjs
+          node benchmark/track-processor-proxy-smoke.mjs
+          node benchmark/worker-pool-reuse-smoke.mjs
+          git diff --check
+
+      - name: Commit tested fixes
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-auto-optics-finish.yml .github/workflows/one-shot-auto-optics-finish-v2.yml
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add receive/runtime.js receive/performance-policy.js receive/grid-lattice.js \
+            benchmark/grid-lattice-regression.mjs benchmark/browser-performance-policy-smoke.mjs version.js
+          git commit -m "Finish Auto Optics light-starved rescue v0.5.516"
+          git push
