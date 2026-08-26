@@ -1,0 +1,156 @@
+name: finish auto optics light starved rescue
+
+on:
+  push:
+    branches: [chatgpt/auto-optics-dark-ci-515]
+    paths: [.github/workflows/one-shot-auto-optics-finish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply guarded production fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: anchor count {n}: {old[:140]!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          # Production dark ladder stays below neutral and at/below the 5 ms shutter ceiling.
+          rep("receive/performance-policy.js",
+              '  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 55, frameFraction: 0.18, label: "least-dark-short" })\n]);',
+              '  Object.freeze({ lightScale: Math.pow(2, -0.25), maxExposure: 50, frameFraction: 0.18, label: "least-dark-short" })\n]);\n\n// One bounded final rescue may reproduce photographic-neutral light while still\n// holding the shutter at 5 ms or faster. It is deliberately not part of the\n// ordinary acquisition ladder.\nconst AUTO_OPTICS_LIGHT_STARVED_RESCUE = Object.freeze({\n  lightScale: 1, maxExposure: 50, frameFraction: 0.16, label: "light-starved-neutral"\n});')
+
+          rep("receive/performance-policy.js",
+              '''export function automaticOpticsHasAnotherAcquisitionSeed(attempt = 0) {\n  return Math.trunc(Number(attempt) || 0) + 1 < AUTO_OPTICS_ACQUISITION_SEEDS.length;\n}\n''',
+              '''export function automaticOpticsHasAnotherAcquisitionSeed(attempt = 0) {\n  return Math.trunc(Number(attempt) || 0) + 1 < AUTO_OPTICS_ACQUISITION_SEEDS.length;\n}\n\nexport function automaticOpticsLightStarvedRescueSeed() {\n  return { ...AUTO_OPTICS_LIGHT_STARVED_RESCUE, index: 0, count: 1 };\n}\n\n// Low contrast alone has no exposure direction. A brighter rescue is justified\n// only when known QR modules say both black and white are genuinely low.\nexport function automaticOpticsLightStarvedEvidence(metrics) {\n  if (!metrics || Number(metrics.tiles) < 1) return false;\n  const confidence = Number(metrics.confidence);\n  const black = Number(metrics.blackLevel);\n  const white = Number(metrics.whiteLevel);\n  const separation = Number(metrics.separation);\n  const banding = Number(metrics.banding);\n  const temporal = Number(metrics.temporalContamination);\n  if (![confidence, black, white, separation, banding, temporal].every(Number.isFinite)) return false;\n  return confidence >= 0.68 && black <= 48 && white <= 145 && separation >= 38 &&\n    banding <= 0.55 && temporal <= 0.55;\n}\n''')
+
+          # Runtime imports the explicit last-resort policy.
+          rep("receive/runtime.js",
+              '''  automaticOpticsHasAnotherAcquisitionSeed,\n  automaticOpticsHoldEligible,''',
+              '''  automaticOpticsHasAnotherAcquisitionSeed,\n  automaticOpticsLightStarvedEvidence,\n  automaticOpticsLightStarvedRescueSeed,\n  automaticOpticsHoldEligible,''')
+
+          rep("receive/runtime.js",
+              '''let autoOpticsAeRescueStep = 0;\nlet autoOpticsSeedAttempt = 0;''',
+              '''let autoOpticsAeRescueStep = 0;\nlet autoOpticsLightRescueUsed = false;\nlet autoOpticsSeedAttempt = 0;''')
+
+          rep("receive/runtime.js",
+              '''  autoOpticsAeRescueStep = 0;\n  autoOpticsSeedAttempt = 0;\n  autoOpticsAeBias = 0;''',
+              '''  autoOpticsAeRescueStep = 0;\n  autoOpticsLightRescueUsed = false;\n  autoOpticsSeedAttempt = 0;\n  autoOpticsAeBias = 0;''')
+
+          # Allow a policy override without duplicating shutter/ISO math.
+          rep("receive/runtime.js",
+              'function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt) {',
+              'function automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, attempt = autoOpticsSeedAttempt, seedPolicyOverride = void 0) {')
+          rep("receive/runtime.js",
+              '  const seedPolicy = automaticOpticsAcquisitionSeed(attempt);',
+              '  const seedPolicy = seedPolicyOverride ?? automaticOpticsAcquisitionSeed(attempt);')
+          rep("receive/runtime.js",
+              'async function applyAutomaticShortSeed(track, baseline, reason) {',
+              'async function applyAutomaticShortSeed(track, baseline, reason, seedPolicyOverride = void 0) {')
+          rep("receive/runtime.js",
+              '  const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps);',
+              '  const seed = automaticShortShutterSeed(baseline, exposureRange, isoRange, fps, autoOpticsSeedAttempt, seedPolicyOverride);')
+
+          rep("receive/runtime.js",
+              '''  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");\n  return true;\n}\nasync function primeAutomaticQrOpticsBeforePlayback(track) {''',
+              '''  focusController.adoptAutomaticCameraState("short-shutter automatic optics bootstrap active before QR lock");\n  return true;\n}\nasync function applyAutomaticLightStarvedSeed(track, baseline, reason) {\n  if (autoOpticsLightRescueUsed || !baseline) return false;\n  const metrics = lastAutomaticOpticsMetrics;\n  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(metrics);\n  // With measured QR modules, never infer direction from low separation alone.\n  // With no QR optical target at all after the full dark ladder, allow exactly\n  // one neutral-equivalent short-shutter attempt as the universal last resort.\n  if (metrics && !measuredUnderexposure) return false;\n  autoOpticsLightRescueUsed = true;\n  const evidence = metrics ? "measured light-starved" : "no QR optics evidence; last resort";\n  return applyAutomaticShortSeed(\n    track, baseline, `${reason} · ${evidence}`, automaticOpticsLightStarvedRescueSeed()\n  );\n}\nasync function primeAutomaticQrOpticsBeforePlayback(track) {''')
+
+          # The neutral-equivalent rescue happens only after all ordinary dark seeds fail.
+          rep("receive/runtime.js",
+              '''    if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;\n    const baseline = await readAutomaticAeBaseline(track);''',
+              '''    if (await advanceAutomaticOpticsAcquisitionSeed(track, reason)) return;\n    if (await applyAutomaticLightStarvedSeed(\n      track, autoOpticsAeBaseline, `${reason} · dark ladder exhausted`\n    )) return;\n    const baseline = await readAutomaticAeBaseline(track);''')
+
+          # Remember current targeted QR optical levels for direction-aware rescue.
+          rep("receive/runtime.js",
+              'const opticsAnalyzer = new StaticQrOpticsAnalyzer();',
+              'const opticsAnalyzer = new StaticQrOpticsAnalyzer();\nlet lastAutomaticOpticsMetrics;')
+          rep("receive/runtime.js",
+              '''  lastOpticalSourceSequence = -1;\n  opticalAnalyzeCount = 0;''',
+              '''  lastOpticalSourceSequence = -1;\n  lastAutomaticOpticsMetrics = void 0;\n  opticalAnalyzeCount = 0;''')
+          rep("receive/runtime.js",
+              '''  const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);\n  const analyzeMs = performance.now() - analyzeStarted;''',
+              '''  const metrics = opticsAnalyzer.analyze(image, opticalTargets, ox, oy);\n  if (metrics && Number.isFinite(metrics.blackLevel) && Number.isFinite(metrics.whiteLevel)) {\n    lastAutomaticOpticsMetrics = { ...metrics, at: now, sourceSequence: source.sequence };\n  }\n  const analyzeMs = performance.now() - analyzeStarted;''')
+
+          # EV-only cameras get the same one-shot neutral last resort, never positive EV.
+          rep("receive/runtime.js",
+              '''  const add = (raw, label) => {\n    const value = quantizeCameraRange(raw, range);\n    if (!candidates.some((item) => Math.abs(item.value - value) < 1e-6)) candidates.push({ value, label });\n  };''',
+              '''  const add = (raw, label, lightRescue = false) => {\n    const value = quantizeCameraRange(raw, range);\n    if (!candidates.some((item) => Math.abs(item.value - value) < 1e-6)) candidates.push({ value, label, lightRescue });\n  };''')
+          rep("receive/runtime.js",
+              '''  if (range.min < 0) {\n    add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");\n    add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");\n    if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");\n  }\n  if (!candidates.length) return;''',
+              '''  if (range.min < 0) {\n    add(Math.max(range.min, AUTO_QR_EV_BIAS - 0.5), "extra-dark rescue");\n    add(Math.max(range.min, AUTO_QR_EV_BIAS), "dark retry");\n    if (range.max > AUTO_QR_EV_BIAS) add(Math.min(-0.25, range.max), "less-dark rescue");\n  }\n  const measuredUnderexposure = automaticOpticsLightStarvedEvidence(lastAutomaticOpticsMetrics);\n  const lightRescueAllowed = !autoOpticsLightRescueUsed &&\n    (!lastAutomaticOpticsMetrics || measuredUnderexposure);\n  if (lightRescueAllowed && range.max >= 0) add(0, "light-starved neutral rescue", true);\n  if (!candidates.length) return;''')
+          rep("receive/runtime.js",
+              '''    if (!accepted) {\n      autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;\n      return;\n    }\n    const appliedSequence = latestSourceFrameSequence;''',
+              '''    if (!accepted) {\n      autoOpticsRescueRetryAt = receiverNow() + AUTO_OPTICS_AE_RESCUE_RETRY_MS;\n      return;\n    }\n    if (candidate.lightRescue) autoOpticsLightRescueUsed = true;\n    const appliedSequence = latestSourceFrameSequence;''')
+
+          # DORMANT keeps the cheap prior for acquisition, but the first fresh CRC-valid
+          # QR must own the new pose instead of being mixed with stale observations.
+          rep("receive/grid-lattice.js",
+              '''function monotonicNow() {\n  return globalThis.performance?.now?.() ?? Date.now();\n}\n\nclass GridLattice extends GeometryGridLattice {''',
+              '''function monotonicNow() {\n  return globalThis.performance?.now?.() ?? Date.now();\n}\n\nfunction dormantReseedUsable(lattice, detection) {\n  const candidate = lattice.candidate;\n  if (!candidate || detection?.identity !== lattice.identity) return false;\n  const modules = Number(detection.modules);\n  const slot = Number(detection.slotIndex);\n  if (!Number.isInteger(modules) || modules < 21 || modules > 177 || modules % 4 !== 1 ||\n      !Number.isInteger(slot) || slot < 0 || slot >= candidate.layout.cols * candidate.layout.rows) return false;\n  if (detection.extendedGrid) {\n    if (!candidate.layout.extendedGrid || Number(detection.gridCols) !== candidate.layout.cols ||\n        Number(detection.gridRows) !== candidate.layout.rows) return false;\n  } else if (candidate.layout.extendedGrid || Number(detection.layoutId) !== Number(candidate.layout.id)) {\n    return false;\n  }\n  const quad = detection.quad;\n  const points = quad ? [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft] : [];\n  if (points.length !== 4 || !points.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y))) return false;\n  const edges = points.map((point, index) =>\n    Math.hypot(point.x - points[(index + 1) % 4].x, point.y - points[(index + 1) % 4].y));\n  const shortest = Math.min(...edges);\n  const longest = Math.max(...edges);\n  const area = Math.abs(points.reduce((sum, point, index) => {\n    const next = points[(index + 1) % 4];\n    return sum + point.x * next.y - point.y * next.x;\n  }, 0) / 2);\n  return shortest >= 20 && longest / shortest < 2.25 && area > shortest * shortest * 0.35;\n}\n\nclass GridLattice extends GeometryGridLattice {''')
+          rep("receive/grid-lattice.js",
+              '''  accept(detection, frameWidth, frameHeight) {\n    const at = Number(detection?.at);\n\n    if (this.sameFrameCompatible(detection)) {''',
+              '''  accept(detection, frameWidth, frameHeight) {\n    const at = Number(detection?.at);\n\n    if (this.state === "DORMANT" && Number.isFinite(at) && dormantReseedUsable(this, detection)) {\n      this.reacquire(at, "fresh verified QR re-seeded dormant lattice");\n    }\n\n    if (this.sameFrameCompatible(detection)) {''')
+
+          rep("benchmark/grid-lattice-regression.mjs",
+              '''// A stale pose must never pin the receiver indefinitely. Hard loss preserves\n// stream identity but drops the old homography so main.js can enter fresh acquisition.\nsnapshot = lattice.tick(2361);\nassert.equal(snapshot, null, "hard loss should discard stale pose geometry");\nassert.equal(lattice.state, "REACQUIRE");\nassert.equal(lattice.locked, false);\nassert.equal(lattice.active, false);\n\n// One CRC-valid QR at a radically different camera pose can immediately seed\n// the same transfer again after the hard geometry reset.''',
+              '''// A stale pose must never stay on the hot path. After whole-wall payload and\n// geometry silence, retain it only as an inactive acquisition prior.\nsnapshot = lattice.tick(2361);\nassert(snapshot, "dormant loss should retain a cheap re-anchor prior");\nassert.equal(lattice.state, "DORMANT");\nassert.equal(lattice.locked, false);\nassert.equal(lattice.active, false);\nassert.equal(snapshot.provisional, true);\n\n// The first fresh CRC-valid QR owns the new pose. Even a radically different\n// camera position must re-seed from that packet instead of mixing stale anchors.''')
+
+          # Strengthen the policy smoke around exposure direction and the 5 ms ceiling.
+          rep("benchmark/browser-performance-policy-smoke.mjs",
+              '''assert(seeds.every((seed) => seed.lightScale < 1));\nassert(seeds[1].lightScale < seeds[0].lightScale);''',
+              '''assert(seeds.every((seed) => seed.lightScale < 1));\nassert(seeds.every((seed) => seed.maxExposure <= 50), "ordinary QR search must stay at or below 5 ms");\nassert(seeds[1].lightScale < seeds[0].lightScale);''')
+          rep("benchmark/browser-performance-policy-smoke.mjs",
+              '''assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);\n\n// Production must bias exposure before playback/frame capture.''',
+              '''assert.equal(policy.automaticOpticsHasAnotherAcquisitionSeed(3), false);\nconst lightRescue = policy.automaticOpticsLightStarvedRescueSeed();\nassert.equal(lightRescue.lightScale, 1);\nassert.equal(lightRescue.maxExposure, 50, "last-resort neutral light must still cap shutter at 5 ms");\nassert.equal(policy.automaticOpticsLightStarvedEvidence({\n  tiles: 3, confidence: 0.82, blackLevel: 8, whiteLevel: 118, separation: 110, banding: 0.08, temporalContamination: 0.12\n}), true);\nassert.equal(policy.automaticOpticsLightStarvedEvidence({\n  tiles: 3, confidence: 0.9, blackLevel: 118, whiteLevel: 150, separation: 32, banding: 0.08, temporalContamination: 0.12\n}), false, "lifted blacks / low separation must not be misread as darkness");\nassert.equal(policy.automaticOpticsLightStarvedEvidence({\n  tiles: 3, confidence: 0.9, blackLevel: 10, whiteLevel: 210, separation: 200, banding: 0.08, temporalContamination: 0.12\n}), false, "healthy bright whites do not justify a brighter rescue");\n\n// Production must bias exposure before playback/frame capture.''')
+          rep("benchmark/browser-performance-policy-smoke.mjs",
+              '''assert(!runtimeSource.includes('"bright rescue"'));\nassert(!runtimeSource.includes('"neutral retry"'));''',
+              '''assert(!runtimeSource.includes('"bright rescue"'));\nassert(!runtimeSource.includes('"neutral retry"'));\nassert(runtimeSource.includes('async function applyAutomaticLightStarvedSeed(track, baseline, reason)'));\nassert(runtimeSource.includes('add(0, "light-starved neutral rescue", true)'));\nassert(runtimeSource.includes('if (candidate.lightRescue) autoOpticsLightRescueUsed = true;'));''')
+
+          rep("version.js", 'export const APP_VERSION = "0.5.515";', 'export const APP_VERSION = "0.5.516";')
+          PY
+
+      - name: Run targeted regressions
+        run: |
+          set -euo pipefail
+          node --input-type=module --check < receive/runtime.js
+          node --input-type=module --check < receive/performance-policy.js
+          node --input-type=module --check < receive/grid-lattice.js
+          node --input-type=module --check < benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/grid-lattice-regression.mjs
+          node benchmark/browser-performance-policy-smoke.mjs
+          node benchmark/camera-start-guard-smoke.mjs
+          node benchmark/camera-constraints-smoke.mjs
+          node benchmark/auto-phase-policy-smoke.mjs
+          node benchmark/version-source-smoke.mjs
+          node benchmark/guided-motion-smoke.mjs
+          node benchmark/rgba-luma-smoke.mjs
+          node benchmark/track-processor-proxy-smoke.mjs
+          node benchmark/worker-pool-reuse-smoke.mjs
+          git diff --check
+
+      - name: Commit tested fixes
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/one-shot-auto-optics-finish.yml
+          git config user.name "AirGapper Agent"
+          git config user.email "actions@github.com"
+          git add receive/runtime.js receive/performance-policy.js receive/grid-lattice.js \
+            benchmark/grid-lattice-regression.mjs benchmark/browser-performance-policy-smoke.mjs version.js
+          git commit -m "Finish Auto Optics light-starved rescue v0.5.516"
+          git push
