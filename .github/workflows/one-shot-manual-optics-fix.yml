@@ -50,11 +50,15 @@ jobs:
           node benchmark/manual-optics-ui-smoke.mjs
           git diff --check
 
-      - name: Commit repaired manual optics UI
+      - name: Commit validated product files
         run: |
           set -euo pipefail
+          # Workflow tokens may not update workflow files. Keep the validated
+          # product/test diff, but restore temporary/CI files before this push;
+          # ChatGPT will wire CI and remove this scaffold through the GitHub API.
+          git restore --source=HEAD -- .github/workflows/fast-regression.yml .github/workflows/one-shot-manual-optics-fix.yml .github/scripts/one-shot-manual-optics-fix.py
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add index.html shared/style.css receive/runtime.js receive/camera-constraints.js benchmark/manual-optics-ui-smoke.mjs version.js
           git commit -m "v0.5.523 fix manual optics controls"
           git push origin HEAD:chatgpt/manual-optics-ui-523
