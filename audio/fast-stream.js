@@ -20,12 +20,12 @@ const ACQUIRE_THRESHOLD = 0.16;
 const TRACK_THRESHOLD = 0.05;
 const MARKER_MAX_RESIDUAL = 0.86;
 const PUNCTURE = new Uint8Array([1, 1, 0, 1]);
-const AUDIO_BLOCK_SIZE = 260;
+const AUDIO_BLOCK_SIZE = 32;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x34]); // AGF4
+const MAGIC = new Uint8Array([0x41, 0x47, 0x46, 0x35]); // AGF5
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
