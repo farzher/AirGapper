@@ -18,11 +18,17 @@ import {
   AUDIO_ESTIMATED_KBPS,
   AcousticReceiver,
   MAX_AUDIO_BYTES,
+  RELIABLE_PACKETS_PER_FRAME,
   SAMPLE_RATE,
-  modulateReliablePacket
+  modulateReliableFrame
 } from "./modem.js";
-import { QUIET_ESTIMATED_KBPS, modulateQuietPacket } from "./quiet-stream.js";
 import {
+  QUIET_ESTIMATED_KBPS,
+  QUIET_PACKETS_PER_FRAME,
+  modulateQuietFrame
+} from "./quiet-stream.js";
+import {
+  FAST_AUDIO_BLOCK_SIZE,
   FAST_ESTIMATED_KBPS,
   FAST_FRAME_MS,
   FAST_PACKETS_PER_FRAME,
@@ -73,14 +79,14 @@ sendPane.hidden = true;
 receivePane.hidden = true;
 result.remove();
 
-function sourceBlockSize(mode) {
-  return mode === "raptorq" ? AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : AUDIO_BLOCK_SIZE;
+function sourceBlockSize(mode, blockSize = AUDIO_BLOCK_SIZE) {
+  return mode === "raptorq" ? blockSize - RAPTOR_PACKET_ID_BYTES : blockSize;
 }
-function sourceBlockCount(totalLen, mode) {
-  return Math.max(1, Math.ceil(totalLen / sourceBlockSize(mode)));
+function sourceBlockCount(totalLen, mode, blockSize = AUDIO_BLOCK_SIZE) {
+  return Math.max(1, Math.ceil(totalLen / sourceBlockSize(mode, blockSize)));
 }
-function selectAudioTransport(totalLen) {
-  return codingMode(Math.max(1, Math.ceil(totalLen / AUDIO_BLOCK_SIZE)));
+function selectAudioTransport(totalLen, blockSize = AUDIO_BLOCK_SIZE) {
+  return codingMode(Math.max(1, Math.ceil(totalLen / blockSize)));
 }
 function setStatus(text, error = false) {
   status.textContent = text;
@@ -415,7 +421,7 @@ async function acceptPacket(session, frame) {
   const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
   if (identity !== session.identity) {
     session.decoder?.free?.();
-    const k = sourceBlockCount(frame.totalLen, frame.mode);
+    const k = sourceBlockCount(frame.totalLen, frame.mode, frame.blockSize);
     if (codingMode(k) !== frame.mode) return;
     if (frame.mode === "raptorq") await prepareRaptorQ();
     if (receiveSession !== session || session.finishing) return;
@@ -424,7 +430,7 @@ async function acceptPacket(session, frame) {
     session.payloadId = frame.payloadId;
     session.totalLen = frame.totalLen;
     session.mode = frame.mode;
-    session.sourceBlockSize = sourceBlockSize(frame.mode);
+    session.sourceBlockSize = sourceBlockSize(frame.mode, frame.blockSize);
     session.targetPackets = k;
     session.startedAt = frame.profile === "fast" ? performance.now() - FAST_FRAME_MS : performance.now();
     session.usefulFrameTimes.length = 0;
@@ -661,7 +667,9 @@ function cleanupSendSession(session) {
   session.stopped = true;
   stopScheduledSources(session);
   try { session.analyser?.disconnect(); } catch {}
-  try { session.encoder?.free(); } catch {}
+  for (const transport of Object.values(session.transports ?? {})) {
+    try { transport.encoder?.free(); } catch {}
+  }
   if (session.context?.state !== "closed") void session.context?.close().catch(() => void 0);
 }
 function stopSender(reset = true) {
@@ -699,30 +707,40 @@ async function stopAll(reset = true) {
   stopSender(reset);
   await stopReceiver(reset);
 }
+function takeBlocks(transport, count) {
+  const startOrdinal = transport.ordinal;
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const encodingId = scheduledEncodingId(transport.encoder.k, transport.ordinal++);
+    blocks.push(transport.encoder.encode(encodingId));
+  }
+  return { startOrdinal, blocks };
+}
 function buildSendWaveform(session) {
   const profile = activeProfile();
   const epoch = session.profileEpoch;
+  const transport = profile === "fast" ? session.transports.fast : session.transports.small;
   if (profile === "fast") {
-    const startOrdinal = session.ordinal;
-    const blocks = [];
-    for (let i = 0; i < FAST_PACKETS_PER_FRAME; i++) {
-      const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
-      blocks.push(session.encoder.encode(encodingId));
-    }
+    const { startOrdinal, blocks } = takeBlocks(transport, FAST_PACKETS_PER_FRAME);
     return {
       epoch,
       profile,
-      waveform: modulateFastFrame(session.payloadId, session.totalLen, session.mode, startOrdinal, blocks)
+      waveform: modulateFastFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
     };
   }
-  const encodingId = scheduledEncodingId(session.encoder.k, session.ordinal++);
-  const block = session.encoder.encode(encodingId);
+  if (profile === "quiet") {
+    const { startOrdinal, blocks } = takeBlocks(transport, QUIET_PACKETS_PER_FRAME);
+    return {
+      epoch,
+      profile,
+      waveform: modulateQuietFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
+    };
+  }
+  const { startOrdinal, blocks } = takeBlocks(transport, RELIABLE_PACKETS_PER_FRAME);
   return {
     epoch,
     profile,
-    waveform: profile === "quiet"
-      ? modulateQuietPacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
-      : modulateReliablePacket(session.payloadId, session.totalLen, session.mode, encodingId, block)
+    waveform: modulateReliableFrame(session.payloadId, session.totalLen, transport.mode, startOrdinal, blocks)
   };
 }
 function scheduleWaveform(session, prepared) {
@@ -777,26 +795,36 @@ async function startSending(container, label) {
     return;
   }
   try {
-    const mode = selectAudioTransport(container.length);
-    if (mode === "raptorq") await prepareRaptorQ();
+    const smallMode = selectAudioTransport(container.length, AUDIO_BLOCK_SIZE);
+    const fastMode = selectAudioTransport(container.length, FAST_AUDIO_BLOCK_SIZE);
+    if (smallMode === "raptorq" || fastMode === "raptorq") await prepareRaptorQ();
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextType) throw new Error("Web Audio is not available in this browser.");
     const context = new AudioContextType({ latencyHint: "playback" });
     await context.resume();
-    const encoder = new TransportEncoder(container, AUDIO_BLOCK_SIZE, mode);
+    const transports = {
+      small: {
+        encoder: new TransportEncoder(container, AUDIO_BLOCK_SIZE, smallMode),
+        mode: smallMode,
+        ordinal: 0
+      },
+      fast: {
+        encoder: new TransportEncoder(container, FAST_AUDIO_BLOCK_SIZE, fastMode),
+        mode: fastMode,
+        ordinal: 0
+      }
+    };
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.8;
     analyser.connect(context.destination);
     const session = {
       context,
-      encoder,
+      transports,
       analyser,
-      mode,
       label,
       payloadId: fnv1a(container),
       totalLen: container.length,
-      ordinal: 0,
       profileEpoch: 0,
       scheduledSources: new Set(),
       nextStartTime: 0,
