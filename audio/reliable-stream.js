@@ -2,34 +2,33 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
-const AUDIO_BLOCK_SIZE = 32;
+const AUDIO_BLOCK_SIZE = 24;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x31]); // AGR1
+const MAGIC = new Uint8Array([0x41, 0x47, 0x52, 0x32]); // AGR2
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
 
-// Room-range DSSS. A 63-chip m-sequence repeats every symbol. The code
-// pedestal gives immediate timing acquisition; orthogonal low-rate amplitude
-// waves carry four coded bits per symbol while keeping the transmitted signal
-// noise-like and concentrated in the strong phone speaker/mic band.
-const CODE_CHIPS = 63;
-const SAMPLES_PER_CHIP = 16;
-const SYMBOL_SAMPLES = CODE_CHIPS * SAMPLES_PER_CHIP; // 21 ms, 3 kchip/s
-const CARRIER_CYCLES = 84; // exactly 4 kHz over one symbol
-const DATA_VALUES = 16;
-const SYNC_VALUES = new Uint8Array([16, 17, 18, 19]);
-const VALUE_COUNT = DATA_VALUES + SYNC_VALUES.length;
-const DATA_CYCLE_FIRST = 4;
-const PEDESTAL = 1.0;
-const DATA_DEPTH = 0.85;
-const AMPLITUDE = 0.46;
-const ACQUIRE_THRESHOLD = 0.12;
-const TRACK_THRESHOLD = 0.065;
-const TRACK_WINDOW = 12;
+// Room-range Reliable PHY: noncoherent 16-FSK plus a low-band repeated
+// multitone pilot. The pilot provides phase-independent symbol timing on every
+// symbol; CRC finds frame boundaries from a rolling window, so there is no
+// special sync burst to acquire or periodically hear.
+const TONE_COUNT = 16;
+const BITS_PER_TONE = 4;
+const SYMBOL_SAMPLES = 480; // 10 ms
+const TONE_BASE_HZ = 2500;
+const TONE_SPACING_HZ = 300;
+const DATA_AMPLITUDE = 0.62;
+const PILOT_AMPLITUDE = 0.20;
+const ACQUIRE_THRESHOLD = 0.085;
+const TRACK_THRESHOLD = 0.045;
+const TRACK_WINDOW = 20;
+const FREQ_OFFSETS = new Int16Array([-50, 0, 50]);
+const PILOT_CYCLES = new Uint8Array([5, 7, 10, 13, 17, 19]);
+const PILOT_PHASES = new Float64Array([0.23, 1.31, 2.47, 0.82, 2.91, 1.77]);
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -123,46 +122,39 @@ function interleaveStep(capacity) {
 
 const RAW_PACKET_BITS = AUDIO_PACKET_BYTES * 8;
 const CODED_BITS = convolutionalEncode(new Uint8Array(RAW_PACKET_BITS)).length;
-const DATA_SYMBOLS = Math.ceil(CODED_BITS / 4);
-const SLOT_BITS = DATA_SYMBOLS * 4;
+const FRAME_SYMBOLS = Math.ceil(CODED_BITS / BITS_PER_TONE);
+const SLOT_BITS = FRAME_SYMBOLS * BITS_PER_TONE;
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
-const FRAME_SYMBOLS = SYNC_VALUES.length + DATA_SYMBOLS;
 const FRAME_SAMPLES = FRAME_SYMBOLS * SYMBOL_SAMPLES;
 const AUDIO_ESTIMATED_KBPS =
   (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
-function makeCode() {
-  const chips = new Int8Array(CODE_CHIPS);
-  let state = 0x3f;
-  for (let i = 0; i < CODE_CHIPS; i++) {
-    chips[i] = state & 1 ? 1 : -1;
-    const feedback = ((state >> 0) ^ (state >> 5)) & 1;
-    state = (state >> 1) | (feedback << 5);
-  }
-  return chips;
-}
-const CODE_CHIP_VALUES = makeCode();
-const CODE_SAMPLES = new Int8Array(SYMBOL_SAMPLES);
-for (let chip = 0; chip < CODE_CHIPS; chip++) {
-  CODE_SAMPLES.fill(CODE_CHIP_VALUES[chip], chip * SAMPLES_PER_CHIP, (chip + 1) * SAMPLES_PER_CHIP);
-}
-const CARRIER_SIN = new Float64Array(SYMBOL_SAMPLES);
-const CARRIER_COS = new Float64Array(SYMBOL_SAMPLES);
+const PILOT_TEMPLATE = new Float64Array(SYMBOL_SAMPLES);
 for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-  const phase = 2 * Math.PI * CARRIER_CYCLES * i / SYMBOL_SAMPLES;
-  CARRIER_SIN[i] = Math.sin(phase);
-  CARRIER_COS[i] = Math.cos(phase);
+  let sample = 0;
+  for (let tone = 0; tone < PILOT_CYCLES.length; tone++) {
+    sample += Math.sin(2 * Math.PI * PILOT_CYCLES[tone] * i / SYMBOL_SAMPLES + PILOT_PHASES[tone]);
+  }
+  PILOT_TEMPLATE[i] = sample;
 }
-const VALUE_WAVES = Array.from({ length: VALUE_COUNT }, (_, value) => {
-  const wave = new Float64Array(SYMBOL_SAMPLES);
-  const cycles = DATA_CYCLE_FIRST + value;
-  for (let i = 0; i < SYMBOL_SAMPLES; i++) wave[i] = Math.sin(2 * Math.PI * cycles * i / SYMBOL_SAMPLES);
-  return wave;
-});
-const PEDESTAL_REFERENCE_ENERGY = SYMBOL_SAMPLES * 0.5;
+let pilotEnergy = 0;
+for (const sample of PILOT_TEMPLATE) pilotEnergy += sample * sample;
+const PILOT_SCALE = 1 / Math.sqrt(pilotEnergy / SYMBOL_SAMPLES);
+for (let i = 0; i < PILOT_TEMPLATE.length; i++) PILOT_TEMPLATE[i] *= PILOT_SCALE;
+pilotEnergy = SYMBOL_SAMPLES;
+
+const TONE_COEFF = Array.from({ length: FREQ_OFFSETS.length }, () => new Float64Array(TONE_COUNT));
+const TONE_OMEGA = new Float64Array(TONE_COUNT);
+for (let tone = 0; tone < TONE_COUNT; tone++) {
+  const frequency = TONE_BASE_HZ + tone * TONE_SPACING_HZ;
+  TONE_OMEGA[tone] = 2 * Math.PI * frequency / SAMPLE_RATE;
+  for (let offset = 0; offset < FREQ_OFFSETS.length; offset++) {
+    TONE_COEFF[offset][tone] = 2 * Math.cos(2 * Math.PI * (frequency + FREQ_OFFSETS[offset]) / SAMPLE_RATE);
+  }
+}
 
 function packetBytes(payloadId, totalLen, mode, encodingId, block) {
-  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected audio transport block size.");
+  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Reliable transport block size.");
   if (!Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Audio payload is too large.");
   const modeCode = MODE_CODES.get(mode);
   if (modeCode === undefined) throw new Error("Unknown audio transport mode.");
@@ -218,11 +210,11 @@ function deinterleaveSoft(slots) {
   return coded;
 }
 
-function writeSymbol(waveform, offset, value) {
-  const dataWave = VALUE_WAVES[value];
+function writeSymbol(waveform, offset, tone) {
+  const omega = TONE_OMEGA[tone];
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    waveform[offset + i] = AMPLITUDE * CODE_SAMPLES[i] * CARRIER_SIN[i]
-      * (PEDESTAL + DATA_DEPTH * dataWave[i]);
+    const sample = DATA_AMPLITUDE * Math.sin(omega * i) + PILOT_AMPLITUDE * PILOT_TEMPLATE[i];
+    waveform[offset + i] = clamp(sample, -0.92, 0.92);
   }
 }
 function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
@@ -230,91 +222,90 @@ function modulateReliablePacket(payloadId, totalLen, mode, encodingId, block) {
   const coded = convolutionalEncode(bytesToBits(raw));
   const slots = interleave(coded);
   const waveform = new Float32Array(FRAME_SAMPLES);
-  let out = 0;
-  for (const value of SYNC_VALUES) {
-    writeSymbol(waveform, out, value);
-    out += SYMBOL_SAMPLES;
-  }
   let read = 0;
-  for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
-    let value = 0;
-    for (let bit = 0; bit < 4; bit++) value = value << 1 | (slots[read++] || 0);
-    writeSymbol(waveform, out, value);
-    out += SYMBOL_SAMPLES;
+  for (let symbol = 0; symbol < FRAME_SYMBOLS; symbol++) {
+    let tone = 0;
+    for (let bit = 0; bit < BITS_PER_TONE; bit++) tone = tone << 1 | (slots[read++] || 0);
+    writeSymbol(waveform, symbol * SYMBOL_SAMPLES, tone);
   }
   return waveform;
 }
 
-function pedestalCorrelation(samples, offset, stride = 1) {
-  let inPhase = 0;
-  let quadrature = 0;
+function pilotCorrelation(samples, offset, stride = 2) {
+  let dot = 0;
   let energy = 0;
-  let count = 0;
+  let referenceEnergy = 0;
   for (let i = 0; i < SYMBOL_SAMPLES; i += stride) {
     const sample = samples[offset + i];
-    const spread = sample * CODE_SAMPLES[i];
-    inPhase += spread * CARRIER_SIN[i];
-    quadrature += spread * CARRIER_COS[i];
+    const reference = PILOT_TEMPLATE[i];
+    dot += sample * reference;
     energy += sample * sample;
-    count++;
+    referenceEnergy += reference * reference;
   }
-  if (energy < 1e-10) return 0;
-  const referenceEnergy = PEDESTAL_REFERENCE_ENERGY / stride;
-  return Math.hypot(inPhase, quadrature) / Math.sqrt(energy * referenceEnergy);
+  if (energy < 1e-9) return 0;
+  return Math.abs(dot) / Math.sqrt(energy * referenceEnergy);
 }
-function symbolMetrics(samples, offset, quality = 1) {
-  let carrierI = 0;
-  let carrierQ = 0;
+function toneEnergy(samples, offset, tone, frequencyIndex) {
+  const coeff = TONE_COEFF[frequencyIndex][tone];
+  let s1 = 0;
+  let s2 = 0;
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-    const spread = samples[offset + i] * CODE_SAMPLES[i];
-    carrierI += spread * CARRIER_SIN[i];
-    carrierQ += spread * CARRIER_COS[i];
+    const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (SYMBOL_SAMPLES - 1));
+    const s0 = samples[offset + i] * window + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
   }
-  const carrierMagnitude = Math.hypot(carrierI, carrierQ);
-  if (!Number.isFinite(carrierMagnitude) || carrierMagnitude < 1e-8) return null;
-
-  const scores = new Float64Array(VALUE_COUNT);
-  for (let value = 0; value < VALUE_COUNT; value++) {
-    const dataWave = VALUE_WAVES[value];
-    let dataI = 0;
-    let dataQ = 0;
-    for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-      const spread = samples[offset + i] * CODE_SAMPLES[i] * dataWave[i];
-      dataI += spread * CARRIER_SIN[i];
-      dataQ += spread * CARRIER_COS[i];
-    }
-    scores[value] = (dataI * carrierI + dataQ * carrierQ) /
-      Math.max(1e-9, carrierMagnitude * SYMBOL_SAMPLES * 0.25);
-  }
-
-  let bestValue = 0;
-  let bestScore = scores[0];
-  let secondScore = -Infinity;
-  for (let value = 1; value < VALUE_COUNT; value++) {
-    const score = scores[value];
-    if (score > bestScore) {
-      secondScore = bestScore;
-      bestScore = score;
-      bestValue = value;
-    } else if (score > secondScore) {
-      secondScore = score;
-    }
-  }
-
-  const soft = new Float32Array(4);
-  for (let bit = 3, write = 0; bit >= 0; bit--, write++) {
-    let best0 = -Infinity;
-    let best1 = -Infinity;
-    for (let value = 0; value < DATA_VALUES; value++) {
-      if (value >> bit & 1) best1 = Math.max(best1, scores[value]);
-      else best0 = Math.max(best0, scores[value]);
-    }
-    const scale = Math.max(0.08, Math.abs(best0) + Math.abs(best1));
-    soft[write] = clamp((best1 - best0) / scale, -1, 1) * clamp(quality, 0.08, 1);
-  }
-  return { scores, bestValue, bestScore, secondScore, soft };
+  return Math.max(0, s1 * s1 + s2 * s2 - coeff * s1 * s2);
 }
-function decodeSlots(slots) {
+function allToneEnergies(samples, offset, frequencyIndex) {
+  const energies = new Float64Array(TONE_COUNT);
+  for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone, frequencyIndex);
+  return energies;
+}
+function toneConfidence(energies) {
+  let first = 0;
+  let second = 0;
+  for (const energy of energies) {
+    if (energy > first) {
+      second = first;
+      first = energy;
+    } else if (energy > second) {
+      second = energy;
+    }
+  }
+  return (first - second) / Math.max(1e-12, first + second);
+}
+function bestFrequencyEnergies(samples, offset, preferredIndex) {
+  let best = null;
+  for (let index = 0; index < FREQ_OFFSETS.length; index++) {
+    if (preferredIndex >= 0 && Math.abs(index - preferredIndex) > 1) continue;
+    const energies = allToneEnergies(samples, offset, index);
+    const confidence = toneConfidence(energies);
+    if (!best || confidence > best.confidence) best = { energies, confidence, frequencyIndex: index };
+  }
+  return best;
+}
+function softFromEnergies(energies, confidence) {
+  const soft = new Float32Array(BITS_PER_TONE);
+  for (let bit = BITS_PER_TONE - 1, write = 0; bit >= 0; bit--, write++) {
+    let best0 = 0;
+    let best1 = 0;
+    for (let tone = 0; tone < TONE_COUNT; tone++) {
+      if (tone >> bit & 1) best1 = Math.max(best1, energies[tone]);
+      else best0 = Math.max(best0, energies[tone]);
+    }
+    soft[write] = clamp((best1 - best0) / Math.max(1e-12, best1 + best0), -1, 1)
+      * clamp(0.3 + confidence, 0.15, 1);
+  }
+  return soft;
+}
+function decodeSymbolQueue(queue) {
+  if (queue.length !== FRAME_SYMBOLS) return null;
+  const slots = new Float32Array(SLOT_BITS);
+  let write = 0;
+  for (const soft of queue) {
+    for (let bit = 0; bit < BITS_PER_TONE; bit++) slots[write++] = soft[bit];
+  }
   const coded = deinterleaveSoft(slots);
   const decoded = convolutionalDecode(coded, RAW_PACKET_BITS);
   return parsePacket(bitsToBytes(decoded, AUDIO_PACKET_BYTES));
@@ -328,10 +319,11 @@ class ReliableScanner {
     this.length = 0;
     this.scan = 0;
     this.nextSymbolStart = -1;
-    this.syncIndex = 0;
-    this.frameSlots = null;
-    this.frameWrite = 0;
+    this.frequencyIndex = 1;
     this.failures = 0;
+    this.symbolQueue = [];
+    this.frameLocked = false;
+    this.lockedSymbols = 0;
   }
   append(chunk) {
     if (!chunk?.length) return;
@@ -350,7 +342,7 @@ class ReliableScanner {
     let bestOffset = -1;
     let bestScore = 0;
     for (let offset = this.scan; offset <= maxCandidate; offset += 8) {
-      const score = pedestalCorrelation(this.samples, offset, 2);
+      const score = pilotCorrelation(this.samples, offset, 4);
       if (score > bestScore) {
         bestScore = score;
         bestOffset = offset;
@@ -363,53 +355,50 @@ class ReliableScanner {
     }
     const coarse = bestOffset;
     for (let offset = Math.max(this.scan, coarse - 8); offset <= Math.min(maxCandidate, coarse + 8); offset++) {
-      const score = pedestalCorrelation(this.samples, offset, 1);
+      const score = pilotCorrelation(this.samples, offset, 1);
       if (score > bestScore) {
         bestScore = score;
         bestOffset = offset;
       }
     }
     this.nextSymbolStart = bestOffset;
-    this.syncIndex = 0;
-    this.frameSlots = null;
-    this.frameWrite = 0;
     this.failures = 0;
+    this.symbolQueue.length = 0;
+    this.frameLocked = false;
+    this.lockedSymbols = 0;
     return true;
   }
-  loseLock(start) {
+  loseSymbolLock(start) {
     this.nextSymbolStart = -1;
-    this.syncIndex = 0;
-    this.frameSlots = null;
-    this.frameWrite = 0;
     this.failures = 0;
-    this.scan = Math.max(this.scan, start + Math.floor(SYMBOL_SAMPLES / 3));
+    this.symbolQueue.length = 0;
+    this.frameLocked = false;
+    this.lockedSymbols = 0;
+    this.scan = Math.max(this.scan, start + Math.floor(SYMBOL_SAMPLES / 2));
   }
-  consumeSymbol(metrics) {
-    const value = metrics.bestValue;
-    if (!this.frameSlots) {
-      const expected = SYNC_VALUES[this.syncIndex];
-      if (value === expected) {
-        this.syncIndex++;
-        if (this.syncIndex === SYNC_VALUES.length) {
-          this.frameSlots = new Float32Array(SLOT_BITS);
-          this.frameWrite = 0;
-          this.syncIndex = 0;
-        }
+  consumeSoft(soft) {
+    this.symbolQueue.push(soft);
+    if (this.symbolQueue.length > FRAME_SYMBOLS) this.symbolQueue.shift();
+    if (this.symbolQueue.length < FRAME_SYMBOLS) return;
+
+    if (this.frameLocked) {
+      this.lockedSymbols++;
+      if (this.lockedSymbols < FRAME_SYMBOLS) return;
+      this.lockedSymbols = 0;
+      const packet = decodeSymbolQueue(this.symbolQueue);
+      if (packet) {
+        this.onPacket(packet);
       } else {
-        this.syncIndex = value === SYNC_VALUES[0] ? 1 : 0;
+        this.frameLocked = false;
       }
       return;
     }
 
-    for (let i = 0; i < 4 && this.frameWrite < SLOT_BITS; i++) {
-      this.frameSlots[this.frameWrite++] = metrics.soft[i];
-    }
-    if (this.frameWrite < SLOT_BITS) return;
-    const packet = decodeSlots(this.frameSlots);
-    if (packet) this.onPacket(packet);
-    this.frameSlots = null;
-    this.frameWrite = 0;
-    this.syncIndex = 0;
+    const packet = decodeSymbolQueue(this.symbolQueue);
+    if (!packet) return;
+    this.onPacket(packet);
+    this.frameLocked = true;
+    this.lockedSymbols = 0;
   }
   process() {
     while (true) {
@@ -418,33 +407,36 @@ class ReliableScanner {
 
       const predicted = this.nextSymbolStart;
       let start = predicted;
-      let score = pedestalCorrelation(this.samples, start, 2);
+      let pilotScore = pilotCorrelation(this.samples, start, 2);
       for (let candidate = Math.max(0, predicted - TRACK_WINDOW);
            candidate <= predicted + TRACK_WINDOW && candidate + SYMBOL_SAMPLES <= this.length;
            candidate += 2) {
-        const candidateScore = pedestalCorrelation(this.samples, candidate, 2);
-        if (candidateScore > score) {
-          score = candidateScore;
+        const score = pilotCorrelation(this.samples, candidate, 2);
+        if (score > pilotScore) {
+          pilotScore = score;
           start = candidate;
         }
       }
-      if (score < TRACK_THRESHOLD) {
-        this.loseLock(start);
+      if (pilotScore < TRACK_THRESHOLD) {
+        this.loseSymbolLock(start);
         continue;
       }
-      const quality = clamp((score - TRACK_THRESHOLD) / 0.55, 0, 1);
-      this.onSignal(quality);
-      const metrics = symbolMetrics(this.samples, start, quality);
-      if (!metrics) {
+
+      const decision = bestFrequencyEnergies(this.samples, start, this.frequencyIndex);
+      if (!decision || decision.confidence < 0.015) {
         this.failures++;
       } else {
         this.failures = 0;
-        this.consumeSymbol(metrics);
+        this.frequencyIndex = decision.frequencyIndex;
+        const quality = clamp(0.55 * pilotScore / 0.25 + 0.45 * decision.confidence / 0.65, 0, 1);
+        this.onSignal(quality);
+        this.consumeSoft(softFromEnergies(decision.energies, decision.confidence));
       }
+
       this.nextSymbolStart = start + SYMBOL_SAMPLES;
       this.scan = this.nextSymbolStart;
-      if (this.failures >= 3) {
-        this.loseLock(start);
+      if (this.failures >= 4) {
+        this.loseSymbolLock(start);
         continue;
       }
       this.compact();
@@ -463,10 +455,11 @@ class ReliableScanner {
     this.length = 0;
     this.scan = 0;
     this.nextSymbolStart = -1;
-    this.syncIndex = 0;
-    this.frameSlots = null;
-    this.frameWrite = 0;
+    this.frequencyIndex = 1;
     this.failures = 0;
+    this.symbolQueue.length = 0;
+    this.frameLocked = false;
+    this.lockedSymbols = 0;
   }
 }
 
