@@ -24,17 +24,18 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          def extract(path, occurrence):
+          def extract_step(path, marker):
               lines = Path(path).read_text().splitlines()
-              starts = [i for i, line in enumerate(lines) if "python3 - <<'PY'" in line]
-              start = starts[occurrence] + 1
+              marker_index = next(i for i, line in enumerate(lines) if marker in line)
+              command = next(i for i in range(marker_index + 1, len(lines)) if lines[i].strip() == "python3 - <<'PY'")
+              start = command + 1
               end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'PY')
               return '\n'.join(line[10:] if line.startswith('          ') else line for line in lines[start:end]) + '\n'
 
-          # Original guarded feature patch.
-          Path('/tmp/feature.py').write_text(extract('.github/workflows/one-shot-auto-optics-finish.yml', 0))
-          # Fresh-evidence + complete DORMANT regression semantics from v2.
-          Path('/tmp/tighten.py').write_text(extract('.github/workflows/one-shot-auto-optics-finish-v2.yml', 1))
+          Path('/tmp/feature.py').write_text(extract_step(
+            '.github/workflows/one-shot-auto-optics-finish.yml', 'Apply guarded production fixes'))
+          Path('/tmp/tighten.py').write_text(extract_step(
+            '.github/workflows/one-shot-auto-optics-finish-v2.yml', 'Tighten evidence freshness and dormant regression semantics'))
           PY
           python3 /tmp/feature.py
           python3 /tmp/tighten.py
