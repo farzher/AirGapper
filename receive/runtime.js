@@ -78,9 +78,8 @@ const cameraExposureControl = document.getElementById("camera-exposure-control")
 const cameraExposureAuto = document.getElementById("camera-exposure-auto");
 const cameraOpticsManual = document.getElementById("camera-optics-manual");
 const opticsAutoActions = document.getElementById("optics-auto-actions");
-const cameraExposureManual = document.getElementById("camera-exposure-manual");
 const cameraExposure = document.getElementById("camera-exposure");
-const cameraExposureValue = document.getElementById("camera-exposure-value");
+const cameraOpticsReadback = document.getElementById("camera-optics-readback");
 const captureScanBtn = document.getElementById("capture-scan");
 const recordCorpusBtn = document.getElementById("record-corpus");
 const loadCorpusBtn = document.getElementById("load-corpus");
@@ -113,7 +112,6 @@ const opticsKeep = document.getElementById("optics-keep");
 const opticsOptimizeStatus = document.getElementById("optics-optimize-status");
 const cameraIsoControl = document.getElementById("camera-iso-control");
 const cameraIso = document.getElementById("camera-iso");
-const cameraIsoValue = document.getElementById("camera-iso-value");
 const focusDiagnostics = document.getElementById("focus-diagnostics");
 const transportDiagnostics = document.getElementById("transport-diagnostics");
 const copyDiagnostics = document.getElementById("copy-diagnostics");
@@ -2560,10 +2558,8 @@ opticsKeep.addEventListener("click", () => {
   automaticIsoAxis = false;
   preferredExposureTime = winner.exposure;
   preferredIso = winner.iso;
-  cameraExposure.value = String(winner.exposure);
-  showExposureTime(winner.exposure);
-  cameraIso.value = String(winner.iso);
-  cameraIsoValue.value = String(Number(winner.iso.toPrecision(4)));
+  ensureManualSelectValue(cameraExposure, winner.exposure, formatExposureMs);
+  ensureManualSelectValue(cameraIso, winner.iso, formatIso);
   setOptimizeEnabled(false);
   automaticOptics = false;
   cameraExposureAuto.checked = false;
@@ -3377,17 +3373,97 @@ function sameModeSize(a, b) {
 function formatExposureMs(value) {
   return value === void 0 ? "—" : `${Number((value * 0.1).toPrecision(3))} ms`;
 }
-function showExposureTime(value) {
-  cameraExposureValue.value = formatExposureMs(value);
+function formatIso(value) {
+  return Number.isFinite(Number(value)) ? String(Number(Number(value).toPrecision(4))) : "—";
 }
-function syncExposureControls() {
+const MANUAL_SHUTTER_MS_OPTIONS = [
+  0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.2, 1.5, 1.8, 2, 2.5, 3,
+  3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 22, 25, 30
+];
+const MANUAL_ISO_OPTIONS = [
+  25, 32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
+  1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800
+];
+function normalizedCameraValue(value) {
+  return Number(Number(value).toPrecision(8));
+}
+function manualRangeValues(range, curated, current, preferred, maxGenerated = 160) {
+  const min = Number(range?.min);
+  const max = Number(range?.max);
+  const step = Number(range?.step);
+  if (!(Number.isFinite(min) && Number.isFinite(max) && min <= max)) return [];
+  const usableStep = Number.isFinite(step) && step > 0 ? step : 0;
+  const values = [];
+  const add = (raw) => {
+    if (!Number.isFinite(Number(raw))) return;
+    const value = normalizedCameraValue(quantizeCameraRange(Number(raw), { min, max, step: usableStep }));
+    const tolerance = Math.max(usableStep * 0.25, 1e-7);
+    if (!values.some((candidate) => Math.abs(candidate - value) <= tolerance)) values.push(value);
+  };
+  const count = usableStep ? Math.floor((max - min) / usableStep + 1e-7) + 1 : Infinity;
+  if (count <= maxGenerated) {
+    for (let i = 0; i < count; i++) add(min + i * usableStep);
+  } else {
+    for (const value of curated) add(value);
+  }
+  add(min);
+  add(max);
+  add(current);
+  add(preferred);
+  return values.sort((a, b) => a - b);
+}
+function nearestManualValue(values, requested) {
+  if (!values.length) return void 0;
+  if (!Number.isFinite(Number(requested))) return values[0];
+  return values.reduce((best, value) => Math.abs(value - requested) < Math.abs(best - requested) ? value : best, values[0]);
+}
+function populateManualSelect(select, range, curated, current, preferred, formatter) {
+  const values = manualRangeValues(range, curated, current, preferred);
+  select.replaceChildren(...values.map((value) => new Option(formatter(value), String(value))));
+  const selected = nearestManualValue(values, preferred ?? current);
+  if (selected !== void 0) select.value = String(selected);
+  return selected;
+}
+function ensureManualSelectValue(select, value, formatter) {
+  value = Number(value);
+  if (!Number.isFinite(value)) return;
+  let option = [...select.options].find((candidate) => Math.abs(Number(candidate.value) - value) <= 1e-7);
+  if (!option) {
+    option = new Option(formatter(value), String(normalizedCameraValue(value)));
+    select.add(option);
+  }
+  select.value = option.value;
+}
+function selectedManualSummary(prefix) {
+  const pieces = [];
+  if (preferredExposureTime > 0) pieces.push(formatExposureMs(preferredExposureTime));
+  if (preferredIso > 0) pieces.push(`ISO ${formatIso(preferredIso)}`);
+  return pieces.length ? `${prefix} · ${pieces.join(" · ")}` : prefix;
+}
+function syncManualOpticsReadback(track = stream?.getVideoTracks?.()[0]) {
+  if (!cameraOpticsReadback) return;
+  if (automaticOptics || cameraOpticsManual.hidden) {
+    cameraOpticsReadback.textContent = "";
+    return;
+  }
+  const actual = track?.getSettings?.() ?? {};
+  const pieces = [];
+  if (Number(actual.exposureTime) > 0) pieces.push(formatExposureMs(Number(actual.exposureTime)));
+  if (Number(actual.iso) > 0) pieces.push(`ISO ${formatIso(Number(actual.iso))}`);
+  cameraOpticsReadback.textContent = pieces.length ? `Actual · ${pieces.join(" · ")}` : selectedManualSummary("Selected");
+}
+function showManualOpticsPending() {
+  if (cameraOpticsReadback && !automaticOptics) cameraOpticsReadback.textContent = selectedManualSummary("Applying");
+}
+function syncExposureControls(track = stream?.getVideoTracks?.()[0]) {
   cameraExposureAuto.checked = automaticOptics;
   cameraOpticsManual.hidden = automaticOptics || cameraExposureControl.hidden;
   opticsAutoActions.hidden = !automaticOptics;
   cameraExposure.disabled = false;
   cameraIso.disabled = false;
-  cameraExposureValue.value = preferredExposureTime > 0 ? formatExposureMs(preferredExposureTime) : "—";
-  cameraIsoValue.value = preferredIso > 0 ? String(Number(preferredIso.toPrecision(4))) : "—";
+  if (preferredExposureTime > 0) ensureManualSelectValue(cameraExposure, preferredExposureTime, formatExposureMs);
+  if (preferredIso > 0) ensureManualSelectValue(cameraIso, preferredIso, formatIso);
+  syncManualOpticsReadback(track);
 }
 async function applyExposureSetting(track) {
   var _a, _b;
@@ -3433,15 +3509,12 @@ async function applyExposureSetting(track) {
     ...requestedIso !== void 0 ? { iso: requestedIso } : {}
   });
   if (generation !== exposureApplyGeneration || track.readyState !== "live") return;
-  if (!automaticExposureAxis) {
-    cameraExposure.value = String(requestedExposure);
-    showExposureTime(requestedExposure);
-  }
-  if (!automaticIsoAxis && requestedIso !== void 0) {
-    cameraIso.value = String(requestedIso);
-    cameraIsoValue.value = String(Number(requestedIso.toPrecision(4)));
-  }
-  syncExposureControls();
+  if (!automaticExposureAxis) ensureManualSelectValue(cameraExposure, requestedExposure, formatExposureMs);
+  if (!automaticIsoAxis && requestedIso !== void 0) ensureManualSelectValue(cameraIso, requestedIso, formatIso);
+  syncExposureControls(track);
+  for (const delay of [140, 360]) setTimeout(() => {
+    if (generation === exposureApplyGeneration && track.readyState === "live" && !automaticOptics) syncManualOpticsReadback(track);
+  }, delay);
 }
 function resetAutomaticOpticsRuntime() {
   autoOpticsRuntimeState = "ae";
@@ -4626,27 +4699,23 @@ function populateBrowserCapabilities(track) {
   const exposureMax = exposure ? Math.min(300, exposure.max) : 0;
   cameraExposureControl.hidden = !exposure || exposureMin >= exposureMax;
   if (exposure && exposureMin < exposureMax) {
-    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime != null ? preferredExposureTime : 100));
-    preferredExposureTime = current;
-    cameraExposure.min = String(exposureMin);
-    cameraExposure.max = String(exposureMax);
-    cameraExposure.step = String(Math.max((_c = exposure.step) != null ? _c : 0, 0.1));
-    cameraExposure.value = String(current);
-    showExposureTime(current);
-    syncExposureControls();
+    const actualExposure = Number(track.getSettings().exposureTime);
+    const exposureRange = { min: exposureMin, max: exposureMax, step: Math.max((_c = exposure.step) != null ? _c : 0, 0.1) };
+    const current = Math.max(exposureMin, Math.min(exposureMax, preferredExposureTime != null ? preferredExposureTime : actualExposure || 100));
+    preferredExposureTime = populateManualSelect(
+      cameraExposure, exposureRange, MANUAL_SHUTTER_MS_OPTIONS.map((ms) => ms * 10), actualExposure, current, formatExposureMs
+    ) ?? current;
   } else {
     cameraOpticsManual.hidden = true;
   }
   const iso = caps.iso;
   cameraIsoControl.hidden = !iso;
   if (iso) {
-    preferredIso = Math.max(iso.min, Math.min(iso.max, preferredIso != null ? preferredIso : Number(track.getSettings().iso) || iso.min));
-    cameraIso.min = String(iso.min);
-    cameraIso.max = String(iso.max);
-    cameraIso.step = String((_d = iso.step) != null ? _d : 1);
-    cameraIso.value = String(preferredIso);
-    cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
+    const actualIso = Number(track.getSettings().iso);
+    const current = Math.max(iso.min, Math.min(iso.max, preferredIso != null ? preferredIso : actualIso || iso.min));
+    preferredIso = populateManualSelect(cameraIso, iso, MANUAL_ISO_OPTIONS, actualIso, current, formatIso) ?? current;
   }
+  syncExposureControls(track);
   const widthMin = (_e = caps.width.min) != null ? _e : 0;
   const widthMax = (_f = caps.width.max) != null ? _f : Infinity;
   const heightMin = (_g = caps.height.min) != null ? _g : 0;
@@ -5219,15 +5288,32 @@ cameraDevice?.addEventListener("change", () => {
 navigator.mediaDevices?.addEventListener?.("devicechange", () => {
   void refreshCameraDevices(stream?.getVideoTracks()[0]);
 });
+window.addEventListener("airgapper:exposure-settled", (event) => {
+  const detail = event?.detail;
+  const track = stream?.getVideoTracks?.()[0];
+  if (!track || detail?.track !== track || track.readyState !== "live" || automaticOptics) return;
+  const requested = detail.requested ?? {};
+  const actual = detail.actual ?? {};
+  if (requested.exposureTime !== void 0 && Number(actual.exposureTime) > 0) {
+    preferredExposureTime = Number(actual.exposureTime);
+    ensureManualSelectValue(cameraExposure, preferredExposureTime, formatExposureMs);
+  }
+  if (requested.iso !== void 0 && Number(actual.iso) > 0) {
+    preferredIso = Number(actual.iso);
+    ensureManualSelectValue(cameraIso, preferredIso, formatIso);
+  }
+  syncExposureControls(track);
+  saveCameraSettings();
+});
 cameraExposureAuto.addEventListener("change", () => {
   automaticOptics = cameraExposureAuto.checked;
   automaticExposureAxis = false;
   automaticIsoAxis = false;
   resetAutomaticOpticsRuntime();
   clearTimeout(exposureApplyTimer);
-  syncExposureControls();
-  saveCameraSettings();
   const track = stream == null ? void 0 : stream.getVideoTracks()[0];
+  syncExposureControls(track);
+  saveCameraSettings();
   if (!automaticOptics) {
     setOptimizeEnabled(false);
     manualOpticsCheckAt = 0;
@@ -5236,40 +5322,25 @@ cameraExposureAuto.addEventListener("change", () => {
   }
   if (track) void applyExposureSetting(track);
 });
-function queueExposureChange(immediate = false) {
-  holdDecoderForCameraMutation("manual exposure changing");
+function applySelectedManualOptics(reason) {
+  holdDecoderForCameraMutation(reason);
   resetGuidedRollout();
-  preferredExposureTime = Number(cameraExposure.value);
-  showExposureTime(preferredExposureTime);
+  showManualOpticsPending();
   saveCameraSettings();
   clearTimeout(exposureApplyTimer);
-  const apply = () => {
-    const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
-  };
-  if (immediate) apply();
-  else exposureApplyTimer = setTimeout(apply, 80);
+  const track = stream == null ? void 0 : stream.getVideoTracks()[0];
+  if (track && !automaticOptics) void applyAndValidateManualExposure(track);
 }
-cameraExposure.addEventListener("input", () => queueExposureChange());
-cameraExposure.addEventListener("change", () => queueExposureChange(true));
-function queueIsoChange(immediate = false) {
-  holdDecoderForCameraMutation("manual ISO changing");
-  resetGuidedRollout();
+cameraExposure.addEventListener("change", () => {
+  preferredExposureTime = Number(cameraExposure.value);
+  automaticExposureAxis = false;
+  applySelectedManualOptics("manual shutter changing");
+});
+cameraIso.addEventListener("change", () => {
   preferredIso = Number(cameraIso.value);
   automaticIsoAxis = false;
-  cameraIsoValue.value = String(Number(preferredIso.toPrecision(4)));
-  syncExposureControls();
-  saveCameraSettings();
-  clearTimeout(exposureApplyTimer);
-  const apply = () => {
-    const track = stream == null ? void 0 : stream.getVideoTracks()[0];
-    if (track && !automaticOptics) void applyAndValidateManualExposure(track);
-  };
-  if (immediate) apply();
-  else exposureApplyTimer = setTimeout(apply, 80);
-}
-cameraIso.addEventListener("input", () => queueIsoChange());
-cameraIso.addEventListener("change", () => queueIsoChange(true));
+  applySelectedManualOptics("manual ISO changing");
+});
 decodeWorkers.addEventListener("change", () => {
   saveCameraSettings();
   if (!stream || done) return;

@@ -110,14 +110,15 @@
             <label id="camera-resolution-control"><span id="camera-resolution-label">Resolution</span><select id="camera-resolution"></select></label>
             <label id="camera-exposure-control" class="exposure-auto" hidden><span>Optics</span><span class="setting-toggle"><input id="camera-exposure-auto" type="checkbox" checked /><span>Auto</span></span></label>
             <div id="camera-optics-manual" class="optics-manual" hidden>
-              <div id="camera-exposure-manual" class="axis-control">
-                <div class="axis-heading"><span class="axis-title">Exposure</span><output id="camera-exposure-value">—</output></div>
-                <input id="camera-exposure" type="range" min="0" max="0" value="0" step="1" aria-label="Exposure time" />
-              </div>
-              <div id="camera-iso-control" class="axis-control" hidden>
-                <div class="axis-heading"><span class="axis-title">ISO</span><output id="camera-iso-value">—</output></div>
-                <input id="camera-iso" type="range" min="0" max="0" step="1" value="0" aria-label="ISO" />
-              </div>
+              <label id="camera-exposure-manual" class="axis-control" for="camera-exposure">
+                <span class="axis-title">Shutter</span>
+                <select id="camera-exposure" aria-label="Shutter speed"></select>
+              </label>
+              <label id="camera-iso-control" class="axis-control" for="camera-iso" hidden>
+                <span class="axis-title">ISO</span>
+                <select id="camera-iso" aria-label="ISO"></select>
+              </label>
+              <div id="camera-optics-readback" class="optics-readback" role="status" aria-live="polite"></div>
             </div>
             <div class="receiver-dev-actions" hidden>
               <div id="optics-auto-actions" hidden><button class="secondary-button" id="optics-optimize" type="button" aria-pressed="false">Recalibrate</button><button class="secondary-button" id="optics-keep" type="button" hidden>Keep</button><span id="optics-optimize-status" role="status">Off</span></div>
