@@ -267,7 +267,7 @@ const receivePreview = makePreviewCanvas("Live audio level visualizer");
 const receivePanel = document.createElement("section");
 receivePanel.className = "transfer-panel";
 receivePanel.setAttribute("aria-live", "polite");
-receivePanel.hidden = true;
+receivePanel.hidden = false;
 const receiveProgress = document.createElement("div");
 receiveProgress.className = "transfer-progress";
 const receiveSummary = document.createElement("div");
@@ -275,6 +275,7 @@ receiveSummary.className = "transfer-summary";
 const receivePrompt = document.createElement("span");
 receivePrompt.className = "settings-prompt";
 receivePrompt.style.paddingLeft = "0";
+receivePrompt.hidden = true;
 const receiveState = document.createElement("span");
 receivePrompt.append(receiveState);
 const completeLabel = document.createElement("strong");
@@ -308,11 +309,11 @@ receivePanel.append(receiveProgress);
 receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
 
 function resetReceiveUi() {
-  receivePanel.hidden = true;
-  receivePrompt.hidden = false;
-  receiveState.textContent = "Receiving";
+  receivePanel.hidden = false;
+  receivePrompt.hidden = true;
+  receiveState.textContent = "";
   completeLabel.style.display = "";
-  speedValue.textContent = "";
+  speedValue.textContent = "👂";
   progressLabel.hidden = false;
   progressLabel.textContent = "0%";
   sizeLabel.textContent = "";
@@ -327,7 +328,6 @@ function resetReceiveUi() {
 }
 function updateReceiveProgress(session, now = performance.now()) {
   if (receiveSession !== session || session.finishing || !session.identity || !session.startedAt || !session.decoder) return;
-  receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (now - session.startedAt) / 1000);
   const rank = session.decoder.solvedCount;
   const usefulSymbols = session.decoder.usefulSymbols;
@@ -336,9 +336,13 @@ function updateReceiveProgress(session, now = performance.now()) {
   progressBar.style.width = `${percent}%`;
   progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
   progressLabel.textContent = `${Math.floor(percent)}%`;
-  sizeLabel.textContent = formatBytes(session.totalLen);
-  etaLabel.textContent = estimate.etaSeconds === undefined ? "" : `${formatDuration(estimate.etaSeconds)} left`;
+  const remainingBytes = Math.max(1, Math.ceil(session.totalLen * (1 - estimate.fraction)));
+  sizeLabel.textContent = formatBytes(remainingBytes);
   const liveKbs = liveGoodputKbs(session, now);
+  const liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 / session.sourceBlockSize : 0;
+  etaLabel.textContent = liveUsefulFps > 0 && usefulSymbols >= 3
+    ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
+    : "";
   speedValue.textContent = `${liveKbs.toFixed(1)} KB/s`;
 }
 function completeReceiveUi(session, file) {
@@ -374,7 +378,8 @@ function showReceiveError(message) {
   result.append(error);
   listenButton.textContent = "Enable microphone";
   listenButton.hidden = false;
-  receivePanel.hidden = true;
+  receivePanel.hidden = false;
+  speedValue.textContent = "—";
   setVisualizerAnalyser(null);
   setVisualizerSignal(false);
 }
@@ -439,7 +444,7 @@ async function startListening() {
   stopSender(false);
   await stopReceiver(false);
   clearResult();
-  receivePanel.hidden = true;
+  receivePanel.hidden = false;
   listenButton.hidden = true;
   startVisualizer(receivePreview.canvas, null, false);
   try {
