@@ -2,28 +2,28 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { crc32 } from "../shared/protocol.js";
 
 const SAMPLE_RATE = 48000;
-const AUDIO_BLOCK_SIZE = 32;
+const AUDIO_BLOCK_SIZE = 24;
 const AUDIO_HEADER_BYTES = 16;
 const AUDIO_CRC_BYTES = 4;
 const AUDIO_PACKET_BYTES = AUDIO_HEADER_BYTES + AUDIO_BLOCK_SIZE + AUDIO_CRC_BYTES;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x35]); // AGQ5
+const MAGIC = new Uint8Array([0x41, 0x47, 0x51, 0x36]); // AGQ6
 const MODE_NAMES = ["direct", "mds", "raptorq"];
 const MODE_CODES = new Map(MODE_NAMES.map((mode, index) => [mode, index]));
 const TAIL_BITS = 6;
 
-const TONE_COUNT = 8;
-const BITS_PER_TONE = 3;
-const SYMBOL_SAMPLES = 192;
+const TONE_COUNT = 4;
+const BITS_PER_TONE = 2;
+const SYMBOL_SAMPLES = 384; // 8 ms
 const TONE_BASE_HZ = 17000;
-const TONE_SPACING_HZ = 500;
-const PREAMBLE = new Uint8Array([0, 7, 1, 6, 2, 5, 3, 4, 7, 0, 6, 1, 5, 2, 4, 3]);
+const TONE_SPACING_HZ = 1000;
+const PREAMBLE = new Uint8Array([0, 3, 1, 2, 3, 0, 2, 1, 0, 2, 3, 1, 3, 2, 0, 1]);
 const PREAMBLE_SAMPLES = PREAMBLE.length * SYMBOL_SAMPLES;
-const TAIL_SAMPLES = SYMBOL_SAMPLES * 2;
-const SYNC_THRESHOLD = 0.14;
-const TRACK_WINDOW = 96;
-const DATA_TRACK_WINDOW = 12;
-const DECODE_MARGIN = 512;
+const SYNC_THRESHOLD = 0.12;
+const TRACK_WINDOW = 144;
+const DATA_TRACK_WINDOW = 20;
+const DECODE_MARGIN = 384;
+const FREQ_OFFSETS = new Int16Array([-100, -50, 0, 50, 100]);
 
 function parity(value) {
   value ^= value >>> 4;
@@ -120,20 +120,22 @@ const CODED_BITS = convolutionalEncode(new Uint8Array(RAW_PACKET_BITS)).length;
 const DATA_SYMBOLS = Math.ceil(CODED_BITS / BITS_PER_TONE);
 const SLOT_BITS = DATA_SYMBOLS * BITS_PER_TONE;
 const INTERLEAVE_STEP = interleaveStep(SLOT_BITS);
-const FRAME_SAMPLES = PREAMBLE_SAMPLES + DATA_SYMBOLS * SYMBOL_SAMPLES + TAIL_SAMPLES;
+const FRAME_SAMPLES = PREAMBLE_SAMPLES + DATA_SYMBOLS * SYMBOL_SAMPLES;
 const QUIET_ESTIMATED_KBPS =
   (AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (FRAME_SAMPLES / SAMPLE_RATE) / 1024;
 
-const TONE_COEFF = new Float64Array(TONE_COUNT);
 const TONE_OMEGA = new Float64Array(TONE_COUNT);
+const TONE_COEFF = Array.from({ length: FREQ_OFFSETS.length }, () => new Float64Array(TONE_COUNT));
 for (let tone = 0; tone < TONE_COUNT; tone++) {
-  const omega = 2 * Math.PI * (TONE_BASE_HZ + tone * TONE_SPACING_HZ) / SAMPLE_RATE;
-  TONE_OMEGA[tone] = omega;
-  TONE_COEFF[tone] = 2 * Math.cos(omega);
+  const frequency = TONE_BASE_HZ + tone * TONE_SPACING_HZ;
+  TONE_OMEGA[tone] = 2 * Math.PI * frequency / SAMPLE_RATE;
+  for (let offset = 0; offset < FREQ_OFFSETS.length; offset++) {
+    TONE_COEFF[offset][tone] = 2 * Math.cos(2 * Math.PI * (frequency + FREQ_OFFSETS[offset]) / SAMPLE_RATE);
+  }
 }
 
 function packetBytes(payloadId, totalLen, mode, encodingId, block) {
-  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected audio transport block size.");
+  if (!(block instanceof Uint8Array) || block.length !== AUDIO_BLOCK_SIZE) throw new Error("Unexpected Quiet transport block size.");
   if (!Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Audio payload is too large.");
   const modeCode = MODE_CODES.get(mode);
   if (modeCode === undefined) throw new Error("Unknown audio transport mode.");
@@ -188,8 +190,8 @@ function deinterleaveSoft(slots) {
   for (let i = 0; i < coded.length; i++) coded[i] = slots[i * INTERLEAVE_STEP % SLOT_BITS];
   return coded;
 }
-function toneEnergy(samples, offset, tone) {
-  const coeff = TONE_COEFF[tone];
+function toneEnergy(samples, offset, tone, frequencyIndex) {
+  const coeff = TONE_COEFF[frequencyIndex][tone];
   let s1 = 0;
   let s2 = 0;
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
@@ -200,9 +202,9 @@ function toneEnergy(samples, offset, tone) {
   }
   return Math.max(0, s1 * s1 + s2 * s2 - coeff * s1 * s2);
 }
-function allToneEnergies(samples, offset) {
+function allToneEnergies(samples, offset, frequencyIndex) {
   const energies = new Float64Array(TONE_COUNT);
-  for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone);
+  for (let tone = 0; tone < TONE_COUNT; tone++) energies[tone] = toneEnergy(samples, offset, tone, frequencyIndex);
   return energies;
 }
 function toneConfidence(energies) {
@@ -218,52 +220,65 @@ function toneConfidence(energies) {
   }
   return (first - second) / Math.max(1e-12, first + second);
 }
-function syncScore(samples, offset) {
+function bestFrequencyEnergies(samples, offset, preferredIndex = -1) {
+  let best = null;
+  for (let index = 0; index < FREQ_OFFSETS.length; index++) {
+    if (preferredIndex >= 0 && Math.abs(index - preferredIndex) > 1) continue;
+    const energies = allToneEnergies(samples, offset, index);
+    const confidence = toneConfidence(energies);
+    if (!best || confidence > best.confidence) best = { energies, confidence, frequencyIndex: index };
+  }
+  return best;
+}
+function syncScore(samples, offset, frequencyIndex) {
   let score = 0;
   let power = 0;
   for (let i = 0; i < PREAMBLE.length; i++) {
-    const energies = allToneEnergies(samples, offset + i * SYMBOL_SAMPLES);
+    const energies = allToneEnergies(samples, offset + i * SYMBOL_SAMPLES, frequencyIndex);
     const expected = energies[PREAMBLE[i]];
     let alternate = 0;
-    for (let tone = 0; tone < TONE_COUNT; tone++) {
-      if (tone !== PREAMBLE[i]) alternate = Math.max(alternate, energies[tone]);
-    }
+    for (let tone = 0; tone < TONE_COUNT; tone++) if (tone !== PREAMBLE[i]) alternate = Math.max(alternate, energies[tone]);
     power += expected + alternate;
     score += (expected - alternate) / Math.max(1e-12, expected + alternate);
   }
   if (power < 1e-6) return -1;
   return score / PREAMBLE.length;
 }
-function decodeFrame(samples, offset, shift = 0) {
-  let cursor = offset + PREAMBLE_SAMPLES + shift;
-  if (cursor < 0) return null;
+function decodeFrame(samples, offset, frequencyIndex) {
+  let cursor = offset + PREAMBLE_SAMPLES;
   const slots = new Float32Array(SLOT_BITS);
   let write = 0;
   for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
-    let bestStart = -1;
-    let bestConfidence = -1;
-    let bestEnergies = null;
+    if (cursor < 0 || cursor + SYMBOL_SAMPLES > samples.length) return null;
+    const predicted = Math.round(cursor);
+    let initial = bestFrequencyEnergies(samples, predicted, frequencyIndex);
+    if (!initial) return null;
+    let bestStart = predicted;
+    let best = initial;
+    let strongestTone = 0;
+    for (let tone = 1; tone < TONE_COUNT; tone++) if (best.energies[tone] > best.energies[strongestTone]) strongestTone = tone;
     for (let delta = -DATA_TRACK_WINDOW; delta <= DATA_TRACK_WINDOW; delta += 4) {
-      const start = Math.round(cursor + delta);
+      const start = predicted + delta;
       if (start < 0 || start + SYMBOL_SAMPLES > samples.length) continue;
-      const energies = allToneEnergies(samples, start);
-      const confidence = toneConfidence(energies);
-      if (confidence > bestConfidence) {
-        bestConfidence = confidence;
+      const energy = toneEnergy(samples, start, strongestTone, best.frequencyIndex);
+      const baseline = best.energies[strongestTone];
+      if (energy <= baseline) continue;
+      const candidate = bestFrequencyEnergies(samples, start, best.frequencyIndex);
+      if (candidate && candidate.confidence >= best.confidence) {
+        best = candidate;
         bestStart = start;
-        bestEnergies = energies;
       }
     }
-    if (!bestEnergies) return null;
+    frequencyIndex = best.frequencyIndex;
     for (let bit = BITS_PER_TONE - 1; bit >= 0; bit--) {
-      let e0 = 0;
-      let e1 = 0;
+      let best0 = 0;
+      let best1 = 0;
       for (let tone = 0; tone < TONE_COUNT; tone++) {
-        if (tone >>> bit & 1) e1 += bestEnergies[tone];
-        else e0 += bestEnergies[tone];
+        if (tone >> bit & 1) best1 = Math.max(best1, best.energies[tone]);
+        else best0 = Math.max(best0, best.energies[tone]);
       }
-      slots[write++] = clamp((e1 - e0) / Math.max(1e-12, e1 + e0), -1, 1)
-        * clamp(0.35 + bestConfidence, 0.2, 1);
+      slots[write++] = clamp((best1 - best0) / Math.max(1e-12, best1 + best0), -1, 1)
+        * clamp(0.25 + best.confidence, 0.15, 1);
     }
     cursor = bestStart + SYMBOL_SAMPLES;
   }
@@ -276,30 +291,18 @@ function modulateQuietPacket(payloadId, totalLen, mode, encodingId, block) {
   const raw = packetBytes(payloadId, totalLen, mode, encodingId, block);
   const coded = convolutionalEncode(bytesToBits(raw));
   const slots = interleave(coded);
-  const tones = new Uint8Array(PREAMBLE.length + DATA_SYMBOLS);
-  tones.set(PREAMBLE, 0);
+  const waveform = new Float32Array(FRAME_SAMPLES);
+  let out = 0;
   let read = 0;
+  for (const tone of PREAMBLE) {
+    const omega = TONE_OMEGA[tone];
+    for (let i = 0; i < SYMBOL_SAMPLES; i++) waveform[out++] = 0.76 * Math.sin(omega * i);
+  }
   for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
     let tone = 0;
     for (let bit = 0; bit < BITS_PER_TONE; bit++) tone = tone << 1 | (slots[read++] || 0);
-    tones[PREAMBLE.length + symbol] = tone;
-  }
-  const waveform = new Float32Array(FRAME_SAMPLES);
-  let phase = 0;
-  let out = 0;
-  for (const tone of tones) {
     const omega = TONE_OMEGA[tone];
-    for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-      waveform[out++] = 0.72 * Math.sin(phase);
-      phase += omega;
-      if (phase > Math.PI * 2) phase -= Math.PI * 2;
-    }
-  }
-  const fade = Math.min(96, out);
-  for (let i = 0; i < fade; i++) {
-    const gain = Math.sin((i + 1) / fade * Math.PI / 2) ** 2;
-    waveform[i] *= gain;
-    waveform[out - 1 - i] *= gain;
+    for (let i = 0; i < SYMBOL_SAMPLES; i++) waveform[out++] = 0.76 * Math.sin(omega * i);
   }
   return waveform;
 }
@@ -311,6 +314,7 @@ class QuietScanner {
     this.length = 0;
     this.scan = 0;
     this.expected = -1;
+    this.frequencyIndex = 2;
   }
   append(chunk) {
     if (!chunk?.length) return;
@@ -325,23 +329,28 @@ class QuietScanner {
   }
   tryAt(offset, maxCandidate) {
     let refinedOffset = offset;
-    let refinedScore = syncScore(this.samples, offset);
-    for (let candidate = Math.max(0, offset - TRACK_WINDOW); candidate <= Math.min(maxCandidate, offset + TRACK_WINDOW); candidate += 4) {
-      const score = syncScore(this.samples, candidate);
+    let bestFrequency = this.frequencyIndex;
+    let refinedScore = -1;
+    for (let frequencyIndex = 0; frequencyIndex < FREQ_OFFSETS.length; frequencyIndex++) {
+      const score = syncScore(this.samples, offset, frequencyIndex);
       if (score > refinedScore) {
         refinedScore = score;
-        refinedOffset = candidate;
+        bestFrequency = frequencyIndex;
+      }
+    }
+    for (let candidate = Math.max(0, offset - TRACK_WINDOW); candidate <= Math.min(maxCandidate, offset + TRACK_WINDOW); candidate += 4) {
+      for (let frequencyIndex = Math.max(0, bestFrequency - 1); frequencyIndex <= Math.min(FREQ_OFFSETS.length - 1, bestFrequency + 1); frequencyIndex++) {
+        const score = syncScore(this.samples, candidate, frequencyIndex);
+        if (score > refinedScore) {
+          refinedScore = score;
+          refinedOffset = candidate;
+          bestFrequency = frequencyIndex;
+        }
       }
     }
     if (refinedScore < SYNC_THRESHOLD) return null;
-    let packet = decodeFrame(this.samples, refinedOffset, 0);
-    if (!packet) {
-      for (const shift of [-8, 8, -16, 16, -24, 24, -32, 32, -48, 48]) {
-        packet = decodeFrame(this.samples, refinedOffset, shift);
-        if (packet) break;
-      }
-    }
-    return { packet, offset: refinedOffset };
+    const packet = decodeFrame(this.samples, refinedOffset, bestFrequency);
+    return { packet, offset: refinedOffset, frequencyIndex: bestFrequency };
   }
   process() {
     while (true) {
@@ -352,6 +361,7 @@ class QuietScanner {
         const tracked = this.tryAt(this.expected, maxCandidate);
         if (tracked?.packet) {
           this.onPacket(tracked.packet);
+          this.frequencyIndex = tracked.frequencyIndex;
           this.expected = tracked.offset + FRAME_SAMPLES;
           this.scan = Math.max(this.scan, tracked.offset + PREAMBLE_SAMPLES);
           this.compact();
@@ -362,8 +372,8 @@ class QuietScanner {
 
       let bestOffset = -1;
       let bestScore = -1;
-      for (let offset = this.scan; offset <= maxCandidate; offset += 24) {
-        const score = syncScore(this.samples, offset);
+      for (let offset = this.scan; offset <= maxCandidate; offset += 32) {
+        const score = syncScore(this.samples, offset, 2);
         if (score > bestScore) {
           bestScore = score;
           bestOffset = offset;
@@ -377,10 +387,11 @@ class QuietScanner {
       const decoded = this.tryAt(bestOffset, maxCandidate);
       if (decoded?.packet) {
         this.onPacket(decoded.packet);
+        this.frequencyIndex = decoded.frequencyIndex;
         this.expected = decoded.offset + FRAME_SAMPLES;
         this.scan = Math.max(this.scan, decoded.offset + PREAMBLE_SAMPLES);
       } else {
-        this.scan = bestOffset + PREAMBLE_SAMPLES;
+        this.scan = bestOffset + Math.floor(PREAMBLE_SAMPLES / 2);
       }
       this.compact();
     }
@@ -398,10 +409,12 @@ class QuietScanner {
     this.length = 0;
     this.scan = 0;
     this.expected = -1;
+    this.frequencyIndex = 2;
   }
 }
 
 export {
+  AUDIO_BLOCK_SIZE as QUIET_BLOCK_SIZE,
   QUIET_ESTIMATED_KBPS,
   QuietScanner,
   TONE_BASE_HZ as QUIET_TONE_BASE_HZ,
