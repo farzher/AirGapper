@@ -1,4 +1,9 @@
 import ggwaveFactory from "../vendor/ggwave.mjs";
+import {
+  GGWAVE_DSS,
+  GGWAVE_RX,
+  ULTRA_MESSAGE_LENGTH
+} from "./ultra-config.js";
 import { parseUltraMessage } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
@@ -8,8 +13,10 @@ ggwave.disableLog?.();
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
+  parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
   parameters.sampleRateInp = SAMPLE_RATE;
   parameters.sampleRateOut = SAMPLE_RATE;
+  parameters.operatingMode = GGWAVE_RX | GGWAVE_DSS;
   return ggwave.init(parameters);
 }
 let instance = createInstance();
