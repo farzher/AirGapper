@@ -26,6 +26,7 @@ function update() {
     if (canvas) {
       canvas.style.transformOrigin = "50% 50%";
       canvas.style.transition = "transform 80ms linear";
+      active.querySelector(".send-toolbar")?.style.setProperty("grid-template-columns", "repeat(2, minmax(0, 1fr))");
     }
   }
   if (canvas) {
