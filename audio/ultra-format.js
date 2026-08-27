@@ -1,4 +1,4 @@
-import { codingMode, RAPTOR_PACKET_ID_BYTES, raptorPacketEsi } from "../shared/coding-mode.js";
+import { codingMode, raptorPacketEsi } from "../shared/coding-mode.js";
 
 const ULTRA_AUDIO_BLOCK_SIZE = 24;
 const ULTRA_PACKETS_PER_FRAME = 1;
@@ -25,11 +25,11 @@ function modeForTotalLen(totalLen) {
 function scheduledId(mode, ordinal) {
   if (mode === "direct") return 0;
   if (mode === "mds") return ordinal % 256;
-  return ordinal % RAPTOR_ESI_SPACE;
+  return -1;
 }
 
 function idBytes(mode) {
-  return mode === "direct" ? 0 : mode === "mds" ? 1 : 3;
+  return mode === "mds" ? 1 : 0;
 }
 
 function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
@@ -44,9 +44,11 @@ function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
     throw new Error("Invalid Reliable transport metadata.");
   }
 
-  const encodingId = scheduledId(mode, Number(startOrdinal) >>> 0);
-  if (mode === "raptorq" && raptorPacketEsi(block) !== encodingId) {
-    throw new Error("Reliable RaptorQ packet id mismatch.");
+  const encodingId = mode === "raptorq"
+    ? raptorPacketEsi(block)
+    : scheduledId(mode, Number(startOrdinal) >>> 0);
+  if (encodingId < 0 || encodingId >= (mode === "raptorq" ? RAPTOR_ESI_SPACE : 256)) {
+    throw new Error("Invalid Reliable packet id.");
   }
 
   const idLength = idBytes(mode);
@@ -58,10 +60,6 @@ function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
   writeUint24(out, 6, totalLen);
   let offset = BASE_HEADER_BYTES;
   if (idLength === 1) out[offset++] = encodingId;
-  else if (idLength === 3) {
-    writeUint24(out, offset, encodingId);
-    offset += 3;
-  }
   out.set(block, offset);
   return out;
 }
@@ -81,15 +79,11 @@ function parseUltraMessage(message) {
   let offset = BASE_HEADER_BYTES;
   let encodingId = 0;
   if (idLength === 1) encodingId = message[offset++];
-  else if (idLength === 3) {
-    encodingId = readUint24(message, offset);
-    offset += 3;
-  }
-  if (mode === "mds" && encodingId >= 256) return null;
-  if (mode === "raptorq" && encodingId >= RAPTOR_ESI_SPACE) return null;
 
   const block = message.slice(offset, offset + ULTRA_AUDIO_BLOCK_SIZE);
-  if (mode === "raptorq" && raptorPacketEsi(block) !== encodingId) return null;
+  if (mode === "raptorq") encodingId = raptorPacketEsi(block);
+  if (encodingId < 0 || encodingId >= (mode === "raptorq" ? RAPTOR_ESI_SPACE : 256)) return null;
+
   return {
     payloadId,
     totalLen,
