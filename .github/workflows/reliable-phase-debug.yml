@@ -22,7 +22,7 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          cat >/tmp/reliable-phase.mjs <<'EOF'
+          cat >reliable-phase-debug.mjs <<'EOF'
           import { chromium } from "playwright";
           const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
           try {
@@ -75,4 +75,4 @@ jobs:
             await browser.close();
           }
           EOF
-          node /tmp/reliable-phase.mjs
+          node reliable-phase-debug.mjs
