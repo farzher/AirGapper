@@ -33,6 +33,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Vendor ggwave
+        run: |
+          set -euo pipefail
+          GGWAVE_REV=060aec73dd7123ccac200442f75bdc7369795ffe
+          mkdir -p vendor
+          curl -fsSL "https://raw.githubusercontent.com/ggerganov/ggwave/$GGWAVE_REV/bindings/javascript/ggwave.js" -o vendor/ggwave.mjs
+          printf '\nexport default ggwave_factory;\n' >> vendor/ggwave.mjs
+          curl -fsSL "https://raw.githubusercontent.com/ggerganov/ggwave/$GGWAVE_REV/LICENSE" -o vendor/ggwave.LICENSE
+
       - name: Read app version
         id: version
         run: |
@@ -104,7 +113,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish AirGapper.apk
+      - name: Publish generated files
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           set -euo pipefail
@@ -115,9 +124,9 @@ jobs:
           fi
           git config user.name "AirGapper Build"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add AirGapper.apk
+          git add AirGapper.apk vendor/ggwave.mjs vendor/ggwave.LICENSE
           if git diff --cached --quiet; then
-            echo "AirGapper.apk is already current"
+            echo "generated files are already current"
             exit 0
           fi
           git commit -m "build AirGapper.apk $APP_BUILD"
