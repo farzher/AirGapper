@@ -1,28 +1,44 @@
 import {
-  AUDIO_BLOCK_SIZE,
-  AUDIO_ESTIMATED_KBPS,
+  AUDIO_BLOCK_SIZE as ULTRA_AUDIO_BLOCK_SIZE,
+  AUDIO_ESTIMATED_KBPS as ULTRA_ESTIMATED_KBPS,
   FRAME_SAMPLES,
-  RELIABLE_PACKETS_PER_FRAME,
+  ReliableScanner,
   SAMPLE_RATE,
-  modulateReliableFrame
-} from "./reliable-stream.js";
+  modulateReliablePacket
+} from "./ultra-phy.js";
 
-const RELIABLE_REPEAT = 8;
-const ULTRA_AUDIO_BLOCK_SIZE = AUDIO_BLOCK_SIZE;
-const ULTRA_PACKETS_PER_FRAME = RELIABLE_PACKETS_PER_FRAME;
-const ULTRA_FRAME_MS = FRAME_SAMPLES * RELIABLE_REPEAT / SAMPLE_RATE * 1000;
-const ULTRA_ESTIMATED_KBPS = AUDIO_ESTIMATED_KBPS / RELIABLE_REPEAT;
+const ULTRA_PACKETS_PER_FRAME = 1;
+const ULTRA_FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000;
+
+function scheduledId(mode, ordinal) {
+  if (mode === "direct") return 0;
+  if (mode === "mds") return ordinal % 256;
+  return ordinal % 0xff0000;
+}
 
 function modulateUltraFrame(payloadId, totalLen, mode, startOrdinal, blocks) {
-  const frame = modulateReliableFrame(payloadId, totalLen, mode, startOrdinal, blocks);
-  const out = new Float32Array(frame.length * RELIABLE_REPEAT);
-  for (let repeat = 0; repeat < RELIABLE_REPEAT; repeat++) out.set(frame, repeat * frame.length);
-  return out;
+  if (!Array.isArray(blocks) || blocks.length !== ULTRA_PACKETS_PER_FRAME) {
+    throw new Error("Reliable frame packet count mismatch.");
+  }
+  return modulateReliablePacket(
+    payloadId,
+    totalLen,
+    mode,
+    scheduledId(mode, startOrdinal),
+    blocks[0]
+  );
 }
 
 class UltraScanner {
-  append() {}
-  reset() {}
+  constructor(onPacket) {
+    this.scanner = new ReliableScanner((packet) => onPacket({ ...packet, profile: "ultra" }));
+  }
+  append(chunk) {
+    this.scanner.append(chunk);
+  }
+  reset() {
+    this.scanner.reset();
+  }
 }
 
 export {
