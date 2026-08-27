@@ -5,10 +5,7 @@ function sendPacket(packet) {
   postMessage({ type: "packet", packet: { ...packet, block: block.buffer } }, [block.buffer]);
 }
 
-const scanner = new UltraScanner(
-  sendPacket,
-  (quality) => postMessage({ type: "signal", quality })
-);
+const scanner = new UltraScanner(sendPacket);
 
 self.onmessage = (event) => {
   const message = event.data;
