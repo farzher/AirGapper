@@ -17,7 +17,7 @@ ggwave.disableLog?.();
 // Reliable deliberately uses ggwave's low-frequency dual-tone protocol. Its
 // data carriers stay roughly in the 1.1-2.6 kHz speech band instead of the
 // 1.9-6.3 kHz six-tone Audible protocol, which phone audio paths can suppress.
-const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_NORMAL;
+const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
 const parameters = ggwave.getDefaultParameters();
 // ggwave's DT/MT protocols are intended for fixed-length decoding. Fixed mode
 // also avoids relying on the wide-band start/end markers that survived while
