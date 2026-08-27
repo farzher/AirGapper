@@ -2,32 +2,31 @@ import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import { ULTRA_MESSAGE_LENGTH } from "./ultra-config.js";
 
 const ULTRA_AUDIO_BLOCK_SIZE = 24;
+const ULTRA_CHUNK_SIZE = 12;
 const ULTRA_PACKETS_PER_FRAME = 1;
 const MAX_AUDIO_BYTES = 1024 * 1024;
-const MAGIC = "A1";
-const MODE_TO_CODE = new Map([
-  ["direct", "d"],
-  ["mds", "m"],
-  ["raptorq", "r"]
-]);
-const CODE_TO_MODE = new Map(Array.from(MODE_TO_CODE, ([mode, code]) => [code, mode]));
+const RAW_MESSAGE_BYTES = 26;
+const HEADER_BYTES = 12;
+const CRC_OFFSET = 24;
+const MAGIC_MASK = 0xfc;
+const MAGIC = 0xa4;
+const MODE_NAMES = ["direct", "mds", "raptorq"];
 
-function crc16(text) {
+function crc16(bytes) {
   let crc = 0xffff;
-  for (let i = 0; i < text.length; i++) {
-    crc ^= text.charCodeAt(i) << 8;
+  for (const value of bytes) {
+    crc ^= value << 8;
     for (let bit = 0; bit < 8; bit++) crc = crc & 0x8000 ? (crc << 1 ^ 0x1021) & 0xffff : crc << 1 & 0xffff;
   }
   return crc;
 }
-function encodeBase36(value, width) {
-  if (!Number.isInteger(value) || value < 0 || value >= 36 ** width) throw new Error("Reliable audio metadata is out of range.");
-  return value.toString(36).padStart(width, "0");
+function writeUint24(bytes, offset, value) {
+  bytes[offset] = value & 255;
+  bytes[offset + 1] = value >>> 8 & 255;
+  bytes[offset + 2] = value >>> 16 & 255;
 }
-function decodeBase36(text) {
-  if (!/^[0-9a-z]+$/.test(text)) return -1;
-  const value = Number.parseInt(text, 36);
-  return Number.isSafeInteger(value) ? value : -1;
+function readUint24(bytes, offset) {
+  return bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16;
 }
 function bytesToBase64Url(bytes) {
   let binary = "";
@@ -56,48 +55,65 @@ function sourceCount(totalLen, mode) {
   const sourceSize = mode === "raptorq" ? ULTRA_AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES : ULTRA_AUDIO_BLOCK_SIZE;
   return Math.max(1, Math.ceil(totalLen / sourceSize));
 }
-function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
+function validateMetadata(payloadId, totalLen, mode, encodingId) {
+  if (!Number.isInteger(payloadId) || payloadId < 0 || payloadId > 0xffffffff) return false;
+  if (!Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) return false;
+  if (!MODE_NAMES.includes(mode) || !Number.isInteger(encodingId) || encodingId < 0 || encodingId >= 0x1000000) return false;
+  if (codingMode(sourceCount(totalLen, mode)) !== mode) return false;
+  if (mode === "direct" && encodingId !== 0) return false;
+  if (mode === "mds" && encodingId >= 256) return false;
+  if (mode === "raptorq" && encodingId >= 0xff0000) return false;
+  return true;
+}
+function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks, chunkIndex) {
   if (!Array.isArray(blocks) || blocks.length !== ULTRA_PACKETS_PER_FRAME) throw new Error("Reliable frame packet count mismatch.");
   const block = blocks[0];
   if (!(block instanceof Uint8Array) || block.length !== ULTRA_AUDIO_BLOCK_SIZE) throw new Error("Unexpected Reliable transport block size.");
-  const modeCode = MODE_TO_CODE.get(mode);
-  if (!modeCode || !Number.isInteger(totalLen) || totalLen < 1 || totalLen > MAX_AUDIO_BYTES) throw new Error("Invalid Reliable transport metadata.");
+  if (chunkIndex !== 0 && chunkIndex !== 1) throw new Error("Reliable chunk index mismatch.");
+  const modeCode = MODE_NAMES.indexOf(mode);
   const encodingId = scheduledId(mode, Number(startOrdinal) >>> 0);
-  const body = MAGIC
-    + encodeBase36(payloadId >>> 0, 7)
-    + encodeBase36(totalLen, 4)
-    + modeCode
-    + encodeBase36(encodingId, 5)
-    + bytesToBase64Url(block);
-  return body + encodeBase36(crc16(body), 4);
+  if (modeCode < 0 || !validateMetadata(payloadId >>> 0, totalLen, mode, encodingId)) throw new Error("Invalid Reliable transport metadata.");
+
+  const raw = new Uint8Array(RAW_MESSAGE_BYTES);
+  raw[0] = MAGIC | modeCode;
+  new DataView(raw.buffer).setUint32(1, payloadId >>> 0, true);
+  writeUint24(raw, 5, totalLen);
+  writeUint24(raw, 8, encodingId);
+  raw[11] = chunkIndex;
+  const chunkStart = chunkIndex * ULTRA_CHUNK_SIZE;
+  raw.set(block.subarray(chunkStart, chunkStart + ULTRA_CHUNK_SIZE), HEADER_BYTES);
+  new DataView(raw.buffer).setUint16(CRC_OFFSET, crc16(raw.subarray(0, CRC_OFFSET)), true);
+  const encoded = bytesToBase64Url(raw);
+  if (encoded.length !== ULTRA_MESSAGE_LENGTH) throw new Error("Reliable frame length mismatch.");
+  return encoded;
 }
 function parseUltraMessage(text) {
-  if (typeof text !== "string" || text.length !== ULTRA_MESSAGE_LENGTH || !text.startsWith(MAGIC)) return null;
-  const body = text.slice(0, -4);
-  if (decodeBase36(text.slice(-4)) !== crc16(body)) return null;
-  const payloadId = decodeBase36(text.slice(2, 9));
-  const totalLen = decodeBase36(text.slice(9, 13));
-  const mode = CODE_TO_MODE.get(text[13]);
-  const encodingId = decodeBase36(text.slice(14, 19));
-  const block = base64UrlToBytes(text.slice(19, 51));
-  if (payloadId < 0 || payloadId > 0xffffffff || totalLen < 1 || totalLen > MAX_AUDIO_BYTES || !mode || encodingId < 0 || !block || block.length !== ULTRA_AUDIO_BLOCK_SIZE) return null;
-  if (codingMode(sourceCount(totalLen, mode)) !== mode) return null;
-  if (mode === "direct" && encodingId !== 0) return null;
-  if (mode === "mds" && encodingId >= 256) return null;
-  if (mode === "raptorq" && encodingId >= 0xff0000) return null;
+  if (typeof text !== "string" || text.length !== ULTRA_MESSAGE_LENGTH) return null;
+  const raw = base64UrlToBytes(text);
+  if (!raw || raw.length !== RAW_MESSAGE_BYTES || (raw[0] & MAGIC_MASK) !== MAGIC) return null;
+  const modeCode = raw[0] & 3;
+  const mode = MODE_NAMES[modeCode];
+  const chunkIndex = raw[11];
+  if (!mode || (chunkIndex !== 0 && chunkIndex !== 1)) return null;
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  if (view.getUint16(CRC_OFFSET, true) !== crc16(raw.subarray(0, CRC_OFFSET))) return null;
+  const payloadId = view.getUint32(1, true) >>> 0;
+  const totalLen = readUint24(raw, 5);
+  const encodingId = readUint24(raw, 8);
+  if (!validateMetadata(payloadId, totalLen, mode, encodingId)) return null;
   return {
-    payloadId: payloadId >>> 0,
+    payloadId,
     totalLen,
     mode,
     encodingId,
-    blockSize: ULTRA_AUDIO_BLOCK_SIZE,
-    block,
-    profile: "ultra"
+    chunkIndex,
+    chunk: raw.slice(HEADER_BYTES, HEADER_BYTES + ULTRA_CHUNK_SIZE)
   };
 }
 
 export {
   ULTRA_AUDIO_BLOCK_SIZE,
+  ULTRA_CHUNK_SIZE,
   ULTRA_PACKETS_PER_FRAME,
   buildUltraMessage,
   parseUltraMessage
