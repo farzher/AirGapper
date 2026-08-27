@@ -1,0 +1,78 @@
+name: Reliable phase diagnostic
+
+on:
+  push:
+    branches: [debug-reliable-phase]
+
+permissions:
+  contents: read
+
+jobs:
+  phase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Test arbitrary microphone sample phase
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          cat >/tmp/reliable-phase.mjs <<'EOF'
+          import { chromium } from "playwright";
+          const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
+          try {
+            const page = await browser.newPage();
+            await page.goto("http://127.0.0.1:8080/", { waitUntil: "domcontentloaded" });
+            const results = await page.evaluate(async () => {
+              const { modulateUltraFrame } = await import("/audio/ultra-stream.js");
+              const payloadId = 0x12345678;
+              const block = new Uint8Array(24);
+              for (let i = 0; i < block.length; i++) block[i] = (i * 31 + 7) & 255;
+              const waveform = modulateUltraFrame(payloadId, 1, "direct", 0, [block]);
+              const phases = [0, 1, 17, 127, 255, 511, 767, 1023];
+              const out = [];
+              for (const phase of phases) {
+                const ok = await new Promise((resolve) => {
+                  const worker = new Worker("/audio/ultra-worker.js", { type: "module" });
+                  const timer = setTimeout(() => { worker.terminate(); resolve(false); }, 6000);
+                  worker.onerror = () => { clearTimeout(timer); worker.terminate(); resolve(false); };
+                  worker.onmessage = async (event) => {
+                    if (event.data?.type === "ready") {
+                      const leading = new Float32Array(4096 + phase);
+                      const trailing = new Float32Array(16384);
+                      const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+                      samples.set(waveform, leading.length);
+                      let offset = 0;
+                      let posted = 0;
+                      while (offset < samples.length) {
+                        const end = Math.min(samples.length, offset + 1024);
+                        const chunk = samples.slice(offset, end);
+                        worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+                        offset = end;
+                        if (++posted % 8 === 0) await new Promise((done) => setTimeout(done, 0));
+                      }
+                      return;
+                    }
+                    const packet = event.data?.packet;
+                    if (!packet || !(packet.block instanceof ArrayBuffer)) return;
+                    clearTimeout(timer);
+                    worker.terminate();
+                    resolve(packet.payloadId === payloadId);
+                  };
+                });
+                out.push({ phase, ok });
+              }
+              return out;
+            });
+            console.log("AIRGAPPER_RELIABLE_PHASE_MATRIX", JSON.stringify(results));
+            if (results.some((x) => !x.ok)) process.exitCode = 1;
+          } finally {
+            await browser.close();
+          }
+          EOF
+          node /tmp/reliable-phase.mjs
