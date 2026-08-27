@@ -1,10 +1,10 @@
 import { codingMode, RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
+import { ULTRA_MESSAGE_LENGTH } from "./ultra-config.js";
 
 const ULTRA_AUDIO_BLOCK_SIZE = 24;
 const ULTRA_PACKETS_PER_FRAME = 1;
 const MAX_AUDIO_BYTES = 1024 * 1024;
 const MAGIC = "A1";
-const MESSAGE_LENGTH = 55;
 const MODE_TO_CODE = new Map([
   ["direct", "d"],
   ["mds", "m"],
@@ -72,7 +72,7 @@ function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
   return body + encodeBase36(crc16(body), 4);
 }
 function parseUltraMessage(text) {
-  if (typeof text !== "string" || text.length !== MESSAGE_LENGTH || !text.startsWith(MAGIC)) return null;
+  if (typeof text !== "string" || text.length !== ULTRA_MESSAGE_LENGTH || !text.startsWith(MAGIC)) return null;
   const body = text.slice(0, -4);
   if (decodeBase36(text.slice(-4)) !== crc16(body)) return null;
   const payloadId = decodeBase36(text.slice(2, 9));
