@@ -6,6 +6,7 @@ const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
 const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_NORMAL;
+const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
 // Reliable listens to one deliberately conservative protocol only. This cuts
 // false acquisitions and avoids spending receiver work on unrelated profiles.
@@ -29,6 +30,8 @@ function createInstance() {
 }
 
 let instance = createInstance();
+const frame = new Float32Array(FRAME_SAMPLES);
+let frameLength = 0;
 
 function sendPacket(packet) {
   const block = packet.block.slice();
@@ -36,7 +39,7 @@ function sendPacket(packet) {
   postMessage({ type: "signal", quality: 1 });
 }
 
-function append(samples) {
+function decodeFrame(samples) {
   const input = new Int8Array(samples.buffer, samples.byteOffset, samples.byteLength);
   const decoded = ggwave.decode(instance, input);
   if (!decoded?.length) return;
@@ -46,9 +49,24 @@ function append(samples) {
   if (packet) sendPacket(packet);
 }
 
+function append(samples) {
+  if (!samples?.length) return;
+  let read = 0;
+  while (read < samples.length) {
+    const count = Math.min(FRAME_SAMPLES - frameLength, samples.length - read);
+    frame.set(samples.subarray(read, read + count), frameLength);
+    frameLength += count;
+    read += count;
+    if (frameLength !== FRAME_SAMPLES) continue;
+    decodeFrame(frame);
+    frameLength = 0;
+  }
+}
+
 function reset() {
   try { ggwave.free(instance); } catch {}
   instance = createInstance();
+  frameLength = 0;
 }
 
 self.onmessage = (event) => {
