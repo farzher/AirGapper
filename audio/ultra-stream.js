@@ -13,12 +13,12 @@ const END_HZ = 7500;
 const AMPLITUDE = 0.78;
 const FADE_SAMPLES = 64;
 const PREAMBLE = new Uint8Array([0, 4, 1, 5, 2, 6]);
-const ACQUIRE_STEP = 32;
+const ACQUIRE_STEP = 4;
 const ACQUIRE_THRESHOLD = 0.085;
 const PREAMBLE_THRESHOLD = 0.055;
 const DATA_THRESHOLD = 0.025;
 const TIMING_SEARCH = 64;
-const TIMING_STEP = 4;
+const TIMING_STEP = 2;
 const ULTRA_AUDIO_BLOCK_SIZE = 24;
 const ULTRA_PACKETS_PER_FRAME = 1;
 const FRAME_HEADER_BYTES = 16;
@@ -347,9 +347,8 @@ function softBitsFromScores(scores, quality) {
 }
 
 class UltraScanner {
-  constructor(onPacket, onSignal = () => void 0) {
+  constructor(onPacket) {
     this.onPacket = onPacket;
-    this.onSignal = onSignal;
     this.samples = new Float32Array(524288);
     this.length = 0;
     this.scan = 0;
@@ -382,7 +381,7 @@ class UltraScanner {
     }
     quality /= PREAMBLE.length;
     if (correct < PREAMBLE.length - 1 || quality < PREAMBLE_THRESHOLD) return null;
-    return { frameStart: current, quality };
+    return { frameStart: current };
   }
   acquire() {
     const needed = PREAMBLE.length * SYMBOL_SAMPLES + TIMING_SEARCH;
@@ -396,7 +395,7 @@ class UltraScanner {
         let bestScore = coarseScore;
         const low = Math.max(this.scan, start - ACQUIRE_STEP);
         const high = Math.min(maxCandidate, start + ACQUIRE_STEP);
-        for (let refined = low; refined <= high; refined += 2) {
+        for (let refined = low; refined <= high; refined++) {
           const score = symbolScore(this.samples, refined, PREAMBLE[0]);
           if (score > bestScore) {
             bestScore = score;
@@ -408,7 +407,6 @@ class UltraScanner {
           if (locked) {
             this.frameStart = locked.frameStart;
             this.scan = bestStart;
-            this.onSignal(clamp(locked.quality, 0, 1));
             return true;
           }
           start = Math.max(start + ACQUIRE_STEP, bestStart + ACQUIRE_STEP);
@@ -427,7 +425,6 @@ class UltraScanner {
     const slots = new Float32Array(SLOT_BITS);
     let write = 0;
     let predicted = this.frameStart;
-    let qualityTotal = 0;
     for (let symbol = 0; symbol < DATA_SYMBOLS; symbol++) {
       const tracked = trackAny(this.samples, predicted);
       if (!tracked || tracked.bestScore < DATA_THRESHOLD) {
@@ -443,12 +440,10 @@ class UltraScanner {
       slots[write++] = soft[0];
       slots[write++] = soft[1];
       slots[write++] = soft[2];
-      qualityTotal += tracked.bestScore;
       predicted = tracked.start + SYMBOL_SAMPLES;
     }
     const packet = parseFrame(convolutionalDecode(recoverCoded(slots)));
     if (packet) this.onPacket(packet);
-    this.onSignal(clamp(qualityTotal / Math.max(1, DATA_SYMBOLS) * 2.5, 0, 1));
     this.scan = Math.max(this.scan, predicted - TIMING_SEARCH);
     this.frameStart = -1;
     this.compact();
