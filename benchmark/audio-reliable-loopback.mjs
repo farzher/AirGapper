@@ -1,71 +1,78 @@
-import { codingMode } from "../shared/coding-mode.js";
-import {
-  ULTRA_AUDIO_BLOCK_SIZE,
-  ULTRA_ESTIMATED_KBPS,
-  ULTRA_FRAME_MS,
-  UltraScanner,
-  modulateUltraFrame
-} from "../audio/ultra-stream.js";
+import { chromium } from "playwright";
 
-const usefulBytesPerSecond = ULTRA_ESTIMATED_KBPS * 1024;
-if (usefulBytesPerSecond < 15 || usefulBytesPerSecond > 25) {
-  throw new Error(`Reliable target rate drifted to ${usefulBytesPerSecond.toFixed(1)} B/s.`);
-}
-
-const totalLen = ULTRA_AUDIO_BLOCK_SIZE * 2;
-const mode = codingMode(Math.ceil(totalLen / ULTRA_AUDIO_BLOCK_SIZE));
-const payloadId = 0x51a9c3e7;
-const ordinal = 7;
-const block = new Uint8Array(ULTRA_AUDIO_BLOCK_SIZE);
-for (let i = 0; i < block.length; i++) block[i] = (i * 19 + 11) & 255;
-const waveform = modulateUltraFrame(payloadId, totalLen, mode, ordinal, [block]);
-
-function equalBytes(a, b) {
-  if (!(a instanceof Uint8Array) || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-function decode(input) {
-  const packets = [];
-  const scanner = new UltraScanner((packet) => packets.push(packet));
-  for (let offset = 0; offset < input.length; offset += 997) {
-    scanner.append(input.subarray(offset, Math.min(input.length, offset + 997)));
-  }
-  scanner.append(new Float32Array(4096));
-  return packets.find((packet) =>
-    packet.payloadId === payloadId &&
-    packet.totalLen === totalLen &&
-    packet.mode === mode &&
-    packet.encodingId === ordinal &&
-    equalBytes(packet.block, block)
-  );
-}
-
-if (!decode(waveform)) throw new Error("Reliable clean loopback failed.");
-
-let seed = 0x12345678;
-function noise() {
-  seed ^= seed << 13;
-  seed ^= seed >>> 17;
-  seed ^= seed << 5;
-  return ((seed >>> 0) / 4294967296) * 2 - 1;
-}
-
-// A deliberately hostile deterministic channel: ~20 ms leading delay,
-// two room-like echoes, strong broadband noise, and severe attenuation.
-const delayed = 137;
-const degraded = new Float32Array(waveform.length + delayed + 256);
-for (let i = 0; i < waveform.length; i++) {
-  degraded[i + delayed] += waveform[i] * 0.02;
-  if (i + delayed + 53 < degraded.length) degraded[i + delayed + 53] += waveform[i] * 0.007;
-  if (i + delayed + 131 < degraded.length) degraded[i + delayed + 131] += waveform[i] * 0.004;
-}
-for (let i = 0; i < degraded.length; i++) degraded[i] += noise() * 0.10;
-if (!decode(degraded)) throw new Error("Reliable low-SNR multipath loopback failed.");
-
-console.log("AIRGAPPER_AUDIO_RELIABLE_LOOPBACK_PASS", {
-  frameMs: Math.round(ULTRA_FRAME_MS),
-  usefulBytesPerSecond: Number(usefulBytesPerSecond.toFixed(1)),
-  samples: waveform.length
+const baseUrl = process.env.AIRGAPPER_URL || "http://127.0.0.1:8080/";
+const browser = await chromium.launch({
+  channel: "chrome",
+  headless: true,
+  args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 });
+
+try {
+  const page = await browser.newPage();
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  const result = await page.evaluate(async () => {
+    const stamp = String(Date.now());
+    const { modulateUltraFrame } = await import(`/audio/ultra-stream.js?loopback=${stamp}`);
+    const payloadId = 0x51a9c3e7;
+    const totalLen = 48;
+    const mode = "mds";
+    const ordinal = 7;
+    const block = new Uint8Array(24);
+    for (let i = 0; i < block.length; i++) block[i] = (i * 19 + 11) & 255;
+    const waveform = modulateUltraFrame(payloadId, totalLen, mode, ordinal, [block]);
+
+    const received = await new Promise((resolve, reject) => {
+      const workerUrl = new URL("/audio/ultra-worker.js", location.href);
+      workerUrl.searchParams.set("loopback", stamp);
+      const worker = new Worker(workerUrl, { type: "module" });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error("Reliable ggwave worker loopback timed out"));
+      }, 20_000);
+      worker.onerror = (event) => {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(new Error(event.message || "Reliable ggwave worker failed"));
+      };
+      worker.onmessage = (event) => {
+        const packet = event.data?.packet;
+        if (!packet || !(packet.block instanceof ArrayBuffer)) return;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
+      };
+
+      const leading = new Float32Array(4096);
+      const trailing = new Float32Array(16384);
+      const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+      samples.set(waveform, leading.length);
+      let offset = 0;
+      while (offset < samples.length) {
+        const end = Math.min(samples.length, offset + 997);
+        const chunk = samples.slice(offset, end);
+        worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+        offset = end;
+      }
+    });
+
+    return {
+      ...received,
+      expectedBlock: Array.from(block),
+      waveformSamples: waveform.length
+    };
+  });
+
+  if (result.payloadId !== 0x51a9c3e7) throw new Error(`Reliable payload id mismatch: ${result.payloadId}`);
+  if (result.totalLen !== 48 || result.mode !== "mds" || result.encodingId !== 7 || result.blockSize !== 24) {
+    throw new Error(`Reliable metadata mismatch: ${JSON.stringify(result)}`);
+  }
+  if (result.block.length !== result.expectedBlock.length || result.block.some((value, i) => value !== result.expectedBlock[i])) {
+    throw new Error("Reliable block mismatch");
+  }
+  console.log("AIRGAPPER_AUDIO_RELIABLE_GGWAVE_PASS", JSON.stringify({
+    waveformSamples: result.waveformSamples,
+    decodedBytes: result.block.length
+  }));
+} finally {
+  await browser.close();
+}

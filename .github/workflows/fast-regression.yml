@@ -111,7 +111,6 @@ jobs:
 
       - name: Run grid regression
         run: |
-          node benchmark/audio-reliable-loopback.mjs
           node benchmark/grid-lattice-regression.mjs
           # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
@@ -134,6 +133,8 @@ jobs:
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          # Exercise the actual Reliable sender module and Web Worker together.
+          node benchmark/audio-reliable-loopback.mjs
           # Run the lightweight worker/browser smokes first so their startup
           # deadlines are not polluted by the multi-trial stress regression.
           node benchmark/direct-y8-worker-smoke.mjs
