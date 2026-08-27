@@ -12,6 +12,7 @@ try {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(async () => {
     const { buildUltraMessage, parseUltraMessage } = await import("/audio/ultra-format.js");
+    const { modulateUltraFrame } = await import("/audio/ultra-stream.js");
     const { prepareRaptorQ } = await import("/shared/raptorq.js");
     const { TransportEncoder, scheduledEncodingId } = await import("/shared/transport.js");
     const { raptorPacketEsi } = await import("/shared/coding-mode.js");
@@ -31,42 +32,83 @@ try {
     const raptorBlock = encoder.encode(requestId);
     const embeddedEsi = raptorPacketEsi(raptorBlock);
     const raptorMessage = buildUltraMessage(payloadId, payload.length, "raptorq", 0, [raptorBlock]);
-    const raptor = parseUltraMessage(raptorMessage);
+    const raptorEnvelope = parseUltraMessage(raptorMessage);
+    if (!raptorEnvelope) throw new Error("Reliable RaptorQ envelope did not round-trip");
+
+    const waveform = modulateUltraFrame(payloadId, payload.length, "raptorq", 0, [raptorBlock]);
+    const received = await new Promise((resolve, reject) => {
+      const worker = new Worker("/audio/ultra-worker.js", { type: "module" });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error("Reliable low-band ggwave worker loopback timed out"));
+      }, 30_000);
+      worker.onerror = (event) => {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(new Error(event.message || "Reliable ggwave worker failed"));
+      };
+      worker.onmessage = async (event) => {
+        if (event.data?.type === "ready") {
+          const leading = new Float32Array(4096);
+          const trailing = new Float32Array(16384);
+          const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+          samples.set(waveform, leading.length);
+          let offset = 0;
+          let posted = 0;
+          while (offset < samples.length) {
+            const end = Math.min(samples.length, offset + 1024);
+            const chunk = samples.slice(offset, end);
+            worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+            offset = end;
+            // Mirror a live capture stream instead of flooding hundreds of
+            // transferable messages into a worker during startup.
+            if (++posted % 8 === 0) await new Promise((done) => setTimeout(done, 0));
+          }
+          return;
+        }
+        const packet = event.data?.packet;
+        if (!packet || !(packet.block instanceof ArrayBuffer)) return;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
+      };
+    });
     encoder.free();
-    if (!raptor) throw new Error("Reliable RaptorQ envelope did not round-trip");
 
     return {
-      mds: {
-        encodingId: mds.encodingId,
-        block: Array.from(mds.block)
-      },
+      mds: { encodingId: mds.encodingId, messageBytes: mdsMessage.length },
       raptor: {
         requestId,
         embeddedEsi,
-        encodingId: raptor.encodingId,
-        block: Array.from(raptor.block),
+        envelopeEncodingId: raptorEnvelope.encodingId,
+        encodingId: received.encodingId,
+        block: received.block,
         expectedBlock: Array.from(raptorBlock),
-        messageBytes: raptorMessage.length
+        messageBytes: raptorMessage.length,
+        waveformSamples: waveform.length
       }
     };
   });
 
-  if (result.mds.encodingId !== 7) throw new Error(`Reliable MDS id mismatch: ${result.mds.encodingId}`);
+  if (result.mds.encodingId !== 7 || result.mds.messageBytes !== 34) {
+    throw new Error(`Reliable MDS fixed frame mismatch: ${JSON.stringify(result.mds)}`);
+  }
   if (result.raptor.embeddedEsi <= result.raptor.requestId) {
     throw new Error(`Expected RaptorQ ESI to include the source-symbol offset: ${JSON.stringify(result.raptor)}`);
   }
-  if (result.raptor.encodingId !== result.raptor.embeddedEsi) {
+  if (result.raptor.envelopeEncodingId !== result.raptor.embeddedEsi || result.raptor.encodingId !== result.raptor.embeddedEsi) {
     throw new Error(`Reliable RaptorQ id mismatch: ${JSON.stringify(result.raptor)}`);
   }
   if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
-    throw new Error("Reliable RaptorQ block mismatch");
+    throw new Error("Reliable RaptorQ waveform block mismatch");
   }
-  if (result.raptor.messageBytes !== 33) throw new Error(`Reliable RaptorQ envelope still carries a redundant id: ${result.raptor.messageBytes} bytes`);
+  if (result.raptor.messageBytes !== 34) throw new Error(`Reliable RaptorQ fixed frame mismatch: ${result.raptor.messageBytes} bytes`);
 
-  console.log("AIRGAPPER_AUDIO_RELIABLE_RAPTORQ_PASS", JSON.stringify({
+  console.log("AIRGAPPER_AUDIO_RELIABLE_LOWBAND_PASS", JSON.stringify({
     requestId: result.raptor.requestId,
     embeddedEsi: result.raptor.embeddedEsi,
-    messageBytes: result.raptor.messageBytes
+    messageBytes: result.raptor.messageBytes,
+    waveformSamples: result.raptor.waveformSamples
   }));
 } finally {
   await browser.close();
