@@ -11,11 +11,10 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(async () => {
-    const stamp = String(Date.now());
-    const { buildUltraMessage, parseUltraMessage } = await import(`/audio/ultra-format.js?loopback=${stamp}`);
-    const { prepareRaptorQ } = await import(`/shared/raptorq.js?loopback=${stamp}`);
-    const { TransportEncoder, scheduledEncodingId } = await import(`/shared/transport.js?loopback=${stamp}`);
-    const { raptorPacketEsi } = await import(`/shared/coding-mode.js?loopback=${stamp}`);
+    const { buildUltraMessage, parseUltraMessage } = await import("/audio/ultra-format.js");
+    const { prepareRaptorQ } = await import("/shared/raptorq.js");
+    const { TransportEncoder, scheduledEncodingId } = await import("/shared/transport.js");
+    const { raptorPacketEsi } = await import("/shared/coding-mode.js");
 
     const payloadId = 0x51a9c3e7;
     const mdsBlock = new Uint8Array(24);
