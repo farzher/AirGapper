@@ -1,34 +1,12 @@
-name: fast regression
+name: Reliable diagnostic
 
 on:
   push:
+    branches: [debug-reliable]
     paths:
       - audio/**
-      - receive/**
-      - send/**
-      - shared/**
-      - codec/**
-      - android/**
-      - version.js
-      - main.js
-      - index.html
-      - sw.js
-      - benchmark/**
-      - .github/workflows/fast-regression.yml
-  pull_request:
-    branches: [master]
-    paths:
-      - audio/**
-      - receive/**
-      - send/**
-      - shared/**
-      - codec/**
-      - android/**
-      - version.js
-      - main.js
-      - index.html
-      - sw.js
-      - benchmark/**
+      - vendor/**
+      - benchmark/audio-reliable-loopback.mjs
       - .github/workflows/fast-regression.yml
   workflow_dispatch:
 
@@ -36,116 +14,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: fast-regression-${{ github.ref }}
+  group: reliable-diagnostic-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  regression:
+  diagnostic:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Cache codec toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            codec/source/emsdk
-            codec/source/third_party
-            codec/source/build-simd
-            codec/source/build-scalar
-          key: airgapper-codec-emsdk-6.0.6-zxing-${{ hashFiles('codec/source/zxing-cpp.commit') }}
-
-      - name: Build codecs
-        run: |
-          set -euo pipefail
-          AIRGAPPER_CODEC_SIMD=1 AIRGAPPER_CODEC_OUTPUT_DIR=.. codec/source/build.sh
-          AIRGAPPER_CODEC_SIMD=0 AIRGAPPER_CODEC_OUTPUT_DIR=../scalar codec/source/build.sh
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Check JavaScript syntax
-        run: |
-          set -euo pipefail
-          node --input-type=module --check < version.js
-          node --input-type=module --check < main.js
-          node --input-type=module --check < audio/main.js
-          node --input-type=module --check < audio/modem.js
-          node --input-type=module --check < audio/reliable-stream.js
-          node --input-type=module --check < audio/reliable-worker.js
-          node --input-type=module --check < audio/ultra-stream.js
-          node --input-type=module --check < audio/ultra-worker.js
-          node --input-type=module --check < audio/output-level.js
-          node --input-type=module --check < receive/main.js
-          node --input-type=module --check < receive/runtime.js
-          node --input-type=module --check < receive/camera-constraints.js
-          node --input-type=module --check < receive/auto-phase.js
-          node --input-type=module --check < receive/auto-phase-policy.js
-          node --input-type=module --check < receive/performance-policy.js
-          node --input-type=module --check < receive/grid-lattice.js
-          node --input-type=module --check < receive/guided-motion.js
-          node --input-type=module --check < receive/rgba-luma.js
-          node --input-type=module --check < receive/track-processor-proxy.js
-          node --input-type=module --check < receive/track-processor-worker.js
-          node --input-type=module --check < receive/worker-camera.js
-          node --input-type=module --check < receive/worker-rvfc.js
-          node --input-type=module --check < receive/worker.js
-          node --input-type=module --check < shared/camera-start-guard.js
-          node --input-type=module --check < shared/worker-pool.js
-          node --input-type=module --check < benchmark/audio-reliable-loopback.mjs
-          node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
-          node --input-type=module --check < benchmark/direct-y8-worker-smoke.mjs
-          node --input-type=module --check < benchmark/guided-motion-smoke.mjs
-          node --input-type=module --check < benchmark/manual-optics-ui-smoke.mjs
-          node --input-type=module --check < benchmark/offline-runner.mjs
-          node --input-type=module --check < benchmark/repeat-signature-worker-smoke.mjs
-          node --input-type=module --check < benchmark/run-agcap.mjs
-          node --input-type=module --check < benchmark/rgba-luma-smoke.mjs
-          node --input-type=module --check < benchmark/rvfc-wrapper-smoke.mjs
-          node --input-type=module --check < benchmark/track-processor-proxy-smoke.mjs
-          node --input-type=module --check < benchmark/worker-pool-reuse-smoke.mjs
-
-      - name: Run grid regression
-        run: |
-          node benchmark/grid-lattice-regression.mjs
-          # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
-          node benchmark/browser-performance-policy-smoke.mjs
-          node benchmark/camera-start-guard-smoke.mjs
-          node benchmark/camera-constraints-smoke.mjs
-          node benchmark/auto-phase-policy-smoke.mjs
-          node benchmark/version-source-smoke.mjs
-          node benchmark/guided-motion-smoke.mjs
-          node benchmark/manual-optics-ui-smoke.mjs
-          node benchmark/rgba-luma-smoke.mjs
-          node benchmark/track-processor-proxy-smoke.mjs
-          node benchmark/worker-pool-reuse-smoke.mjs
-
-      - name: Install browser benchmark dependency
+      - name: Install Playwright
         run: npm install --no-save --package-lock=false playwright@1.55.0
-
-      - name: Run production regression
+      - name: Diagnose Reliable
         run: |
           set -euo pipefail
           python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          # Exercise the actual Reliable sender module and Web Worker together.
           node benchmark/audio-reliable-loopback.mjs
-          # Run the lightweight worker/browser smokes first so their startup
-          # deadlines are not polluted by the multi-trial stress regression.
-          node benchmark/direct-y8-worker-smoke.mjs
-          node benchmark/repeat-signature-worker-smoke.mjs
-          node benchmark/rvfc-wrapper-smoke.mjs
-          node benchmark/corpus-suite.mjs
-          AIRGAPPER_TRIALS=3 node benchmark/offline-runner.mjs
-
-      - name: Build Android app
-        if: always()
-        run: |
-          set -euo pipefail
-          cd android
-          ./gradlew assembleDebug
