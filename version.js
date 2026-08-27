@@ -1,6 +1,6 @@
 import "./audio/output-level.js";
 
-export const APP_VERSION = "0.5.569";
+export const APP_VERSION = "0.5.570";
 export const APP_BUILD = `v${APP_VERSION}`;
 
 let updateCheckPending = false;

@@ -6,7 +6,7 @@ let canvas = null;
 function knownOutputLevel() {
   const androidLevel = getAndroidMediaOutputLevel();
   if (androidLevel !== null) return androidLevel;
-  if (navigator.audioSession?.state === "interrupted") return 0;
+  if (typeof navigator !== "undefined" && navigator.audioSession?.state === "interrupted") return 0;
   return 1;
 }
 
@@ -37,4 +37,4 @@ function update() {
   setTimeout(update, POLL_MS);
 }
 
-update();
+if (typeof document !== "undefined") update();

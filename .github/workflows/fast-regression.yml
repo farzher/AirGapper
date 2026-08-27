@@ -3,6 +3,7 @@ name: fast regression
 on:
   push:
     paths:
+      - audio/**
       - receive/**
       - send/**
       - shared/**
@@ -17,6 +18,7 @@ on:
   pull_request:
     branches: [master]
     paths:
+      - audio/**
       - receive/**
       - send/**
       - shared/**
@@ -71,6 +73,13 @@ jobs:
           set -euo pipefail
           node --input-type=module --check < version.js
           node --input-type=module --check < main.js
+          node --input-type=module --check < audio/main.js
+          node --input-type=module --check < audio/modem.js
+          node --input-type=module --check < audio/reliable-stream.js
+          node --input-type=module --check < audio/reliable-worker.js
+          node --input-type=module --check < audio/ultra-stream.js
+          node --input-type=module --check < audio/ultra-worker.js
+          node --input-type=module --check < audio/output-level.js
           node --input-type=module --check < receive/main.js
           node --input-type=module --check < receive/runtime.js
           node --input-type=module --check < receive/camera-constraints.js
@@ -87,6 +96,7 @@ jobs:
           node --input-type=module --check < receive/worker.js
           node --input-type=module --check < shared/camera-start-guard.js
           node --input-type=module --check < shared/worker-pool.js
+          node --input-type=module --check < benchmark/audio-reliable-loopback.mjs
           node --input-type=module --check < benchmark/camera-constraints-smoke.mjs
           node --input-type=module --check < benchmark/direct-y8-worker-smoke.mjs
           node --input-type=module --check < benchmark/guided-motion-smoke.mjs
@@ -101,6 +111,7 @@ jobs:
 
       - name: Run grid regression
         run: |
+          node benchmark/audio-reliable-loopback.mjs
           node benchmark/grid-lattice-regression.mjs
           # Keep browser scheduling/AutoOptics policy behavior covered without camera hardware.
           node benchmark/browser-performance-policy-smoke.mjs
