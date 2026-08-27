@@ -8,7 +8,7 @@ const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
 // Must match ultra-stream.js: low-frequency dual-tone Reliable transport,
 // roughly 1.1-2.6 kHz end-to-end.
-const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_NORMAL;
+const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
 const protocolValue = Number(protocol?.value ?? protocol);
 const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
