@@ -14,10 +14,10 @@ const AMPLITUDE = 0.78;
 const FADE_SAMPLES = 64;
 const PREAMBLE = new Uint8Array([0, 4, 1, 5, 2, 6]);
 const ACQUIRE_STEP = 32;
-const ACQUIRE_THRESHOLD = 0.10;
-const PREAMBLE_THRESHOLD = 0.065;
-const DATA_THRESHOLD = 0.035;
-const TIMING_SEARCH = 32;
+const ACQUIRE_THRESHOLD = 0.085;
+const PREAMBLE_THRESHOLD = 0.055;
+const DATA_THRESHOLD = 0.025;
+const TIMING_SEARCH = 64;
 const TIMING_STEP = 4;
 const ULTRA_AUDIO_BLOCK_SIZE = 24;
 const ULTRA_PACKETS_PER_FRAME = 1;
@@ -388,40 +388,41 @@ class UltraScanner {
     const needed = PREAMBLE.length * SYMBOL_SAMPLES + TIMING_SEARCH;
     const maxCandidate = this.length - needed;
     if (maxCandidate < this.scan) return false;
-    let bestStart = -1;
-    let bestScore = 0;
-    for (let start = this.scan; start <= maxCandidate; start += ACQUIRE_STEP) {
-      const score = symbolScore(this.samples, start, PREAMBLE[0]);
-      if (score > bestScore) {
-        bestScore = score;
-        bestStart = start;
+    let start = this.scan;
+    while (start <= maxCandidate) {
+      const coarseScore = symbolScore(this.samples, start, PREAMBLE[0]);
+      if (coarseScore >= ACQUIRE_THRESHOLD * 0.75) {
+        let bestStart = start;
+        let bestScore = coarseScore;
+        const low = Math.max(this.scan, start - ACQUIRE_STEP);
+        const high = Math.min(maxCandidate, start + ACQUIRE_STEP);
+        for (let refined = low; refined <= high; refined += 2) {
+          const score = symbolScore(this.samples, refined, PREAMBLE[0]);
+          if (score > bestScore) {
+            bestScore = score;
+            bestStart = refined;
+          }
+        }
+        if (bestScore >= ACQUIRE_THRESHOLD) {
+          const locked = this.validatePreamble(bestStart);
+          if (locked) {
+            this.frameStart = locked.frameStart;
+            this.scan = bestStart;
+            this.onSignal(clamp(locked.quality, 0, 1));
+            return true;
+          }
+          start = Math.max(start + ACQUIRE_STEP, bestStart + ACQUIRE_STEP);
+          continue;
+        }
       }
+      start += ACQUIRE_STEP;
     }
-    if (bestStart < 0 || bestScore < ACQUIRE_THRESHOLD) {
-      this.scan = Math.max(this.scan, maxCandidate + ACQUIRE_STEP);
-      this.compact();
-      return false;
-    }
-    const coarse = bestStart;
-    for (let start = Math.max(this.scan, coarse - ACQUIRE_STEP); start <= Math.min(maxCandidate, coarse + ACQUIRE_STEP); start += 2) {
-      const score = symbolScore(this.samples, start, PREAMBLE[0]);
-      if (score > bestScore) {
-        bestScore = score;
-        bestStart = start;
-      }
-    }
-    const locked = this.validatePreamble(bestStart);
-    if (!locked) {
-      this.scan = bestStart + ACQUIRE_STEP;
-      return false;
-    }
-    this.frameStart = locked.frameStart;
-    this.scan = bestStart;
-    this.onSignal(clamp(locked.quality, 0, 1));
-    return true;
+    this.scan = Math.max(this.scan, maxCandidate + ACQUIRE_STEP);
+    this.compact();
+    return false;
   }
   decodeFrame() {
-    const required = this.frameStart + DATA_SYMBOLS * SYMBOL_SAMPLES + TIMING_SEARCH + CHIRP_SAMPLES;
+    const required = this.frameStart + (DATA_SYMBOLS - 1) * SYMBOL_SAMPLES + TIMING_SEARCH + CHIRP_SAMPLES;
     if (required > this.length) return false;
     const slots = new Float32Array(SLOT_BITS);
     let write = 0;
