@@ -1,0 +1,26 @@
+name: Reliable low-band diagnostic
+
+on:
+  push:
+    branches:
+      - debug-reliable-lowband
+
+permissions:
+  contents: read
+
+jobs:
+  reliable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Run Reliable low-band waveform regression
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          node benchmark/audio-reliable-loopback.mjs
