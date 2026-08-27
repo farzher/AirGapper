@@ -70,7 +70,7 @@ try {
     encoder.free();
 
     return {
-      mds: { encodingId: mds.encodingId },
+      mds: { encodingId: mds.encodingId, messageBytes: mdsMessage.length },
       raptor: {
         requestId,
         embeddedEsi,
@@ -84,7 +84,9 @@ try {
     };
   });
 
-  if (result.mds.encodingId !== 7) throw new Error(`Reliable MDS id mismatch: ${result.mds.encodingId}`);
+  if (result.mds.encodingId !== 7 || result.mds.messageBytes !== 34) {
+    throw new Error(`Reliable MDS fixed frame mismatch: ${JSON.stringify(result.mds)}`);
+  }
   if (result.raptor.embeddedEsi <= result.raptor.requestId) {
     throw new Error(`Expected RaptorQ ESI to include the source-symbol offset: ${JSON.stringify(result.raptor)}`);
   }
@@ -94,7 +96,7 @@ try {
   if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
     throw new Error("Reliable RaptorQ waveform block mismatch");
   }
-  if (result.raptor.messageBytes !== 33) throw new Error(`Reliable RaptorQ envelope still carries a redundant id: ${result.raptor.messageBytes} bytes`);
+  if (result.raptor.messageBytes !== 34) throw new Error(`Reliable RaptorQ fixed frame mismatch: ${result.raptor.messageBytes} bytes`);
 
   console.log("AIRGAPPER_AUDIO_RELIABLE_LOWBAND_PASS", JSON.stringify({
     requestId: result.raptor.requestId,
