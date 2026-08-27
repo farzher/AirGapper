@@ -1,10 +1,14 @@
 import ggwaveFactory from "../vendor/ggwave.mjs";
-import { parseUltraMessage } from "./ultra-format.js";
+import { ULTRA_MESSAGE_LENGTH, parseUltraMessage } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
+const GGWAVE_DSS = 1 << 4;
+const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
-const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_NORMAL;
+// Must match ultra-stream.js: low-frequency dual-tone Reliable transport,
+// roughly 1.1-2.6 kHz end-to-end.
+const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
 const protocolValue = Number(protocol?.value ?? protocol);
 const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
@@ -18,15 +22,15 @@ for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
-  // Marker-based variable-length decoding is intentional: ggwave uses its
-  // acoustic start/end markers in this mode.
-  parameters.payloadLength = -1;
+  // DT/MT decoding is used in fixed-length mode by ggwave's own low-band
+  // examples. Sender and receiver must use the exact same acoustic length.
+  parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
   parameters.sampleRateInp = SAMPLE_RATE;
   parameters.sampleRateOut = SAMPLE_RATE;
   parameters.sampleRate = SAMPLE_RATE;
   parameters.sampleFormatInp = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
   parameters.sampleFormatOut = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-  parameters.operatingMode = ggwave.GGWAVE_OPERATING_MODE_RX;
+  parameters.operatingMode = GGWAVE_RX | GGWAVE_DSS;
   return ggwave.init(parameters);
 }
 
