@@ -2,6 +2,7 @@ import ggwaveFactory from "../vendor/ggwave.mjs";
 import { RAPTOR_PACKET_ID_BYTES } from "../shared/coding-mode.js";
 import {
   ULTRA_AUDIO_BLOCK_SIZE,
+  ULTRA_MESSAGE_LENGTH,
   ULTRA_PACKETS_PER_FRAME,
   buildUltraMessage
 } from "./ultra-format.js";
@@ -9,6 +10,7 @@ import {
 const SAMPLE_RATE = 48000;
 const GGWAVE_VOLUME = 50;
 const GUARD_SAMPLES = Math.round(SAMPLE_RATE * 0.18);
+const GGWAVE_DSS = 1 << 4;
 const GGWAVE_TX = 1 << 2;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
@@ -17,18 +19,22 @@ ggwave.disableLog?.();
 // 1.9-6.3 kHz six-tone Audible protocol, which phone audio paths can suppress.
 const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_NORMAL;
 const parameters = ggwave.getDefaultParameters();
-// Variable-length mode is intentional. ggwave emits its acoustic start/end
-// markers in this mode; fixed-length mode does not.
-parameters.payloadLength = -1;
+// ggwave's DT/MT protocols are intended for fixed-length decoding. Fixed mode
+// also avoids relying on the wide-band start/end markers that survived while
+// the old Audible payload tones did not on the tested phone audio path.
+parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
 parameters.sampleRateInp = SAMPLE_RATE;
 parameters.sampleRateOut = SAMPLE_RATE;
 parameters.sampleRate = SAMPLE_RATE;
 parameters.sampleFormatInp = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
 parameters.sampleFormatOut = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-parameters.operatingMode = GGWAVE_TX;
+parameters.operatingMode = GGWAVE_TX | GGWAVE_DSS;
 const instance = ggwave.init(parameters);
 
 function encodeMessage(message) {
+  if (!(message instanceof Uint8Array) || message.length !== ULTRA_MESSAGE_LENGTH) {
+    throw new Error("Unexpected Reliable acoustic frame size.");
+  }
   const encoded = ggwave.encode(instance, message, protocol, GGWAVE_VOLUME);
   if (!encoded?.byteLength || encoded.byteLength % 4 !== 0) {
     throw new Error("Reliable audio encoding failed.");
