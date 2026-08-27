@@ -47,25 +47,31 @@ try {
         worker.terminate();
         reject(new Error(event.message || "Reliable ggwave worker failed"));
       };
-      worker.onmessage = (event) => {
+      worker.onmessage = async (event) => {
+        if (event.data?.type === "ready") {
+          const leading = new Float32Array(4096);
+          const trailing = new Float32Array(16384);
+          const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+          samples.set(waveform, leading.length);
+          let offset = 0;
+          let posted = 0;
+          while (offset < samples.length) {
+            const end = Math.min(samples.length, offset + 1024);
+            const chunk = samples.slice(offset, end);
+            worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+            offset = end;
+            // Mirror a live capture stream instead of flooding hundreds of
+            // transferable messages into a worker during startup.
+            if (++posted % 8 === 0) await new Promise((done) => setTimeout(done, 0));
+          }
+          return;
+        }
         const packet = event.data?.packet;
         if (!packet || !(packet.block instanceof ArrayBuffer)) return;
         clearTimeout(timer);
         worker.terminate();
         resolve({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
       };
-
-      const leading = new Float32Array(4096);
-      const trailing = new Float32Array(16384);
-      const samples = new Float32Array(leading.length + waveform.length + trailing.length);
-      samples.set(waveform, leading.length);
-      let offset = 0;
-      while (offset < samples.length) {
-        const end = Math.min(samples.length, offset + 997);
-        const chunk = samples.slice(offset, end);
-        worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
-        offset = end;
-      }
     });
     encoder.free();
 
