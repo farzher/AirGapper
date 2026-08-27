@@ -35,23 +35,23 @@ try {
         reject(new Error(event.message || "Reliable worker failed"));
       };
       worker.onmessage = (event) => {
-        if (event.data?.type === "ready") {
-          const leading = new Float32Array(4096);
-          const trailing = new Float32Array(16384);
-          const samples = new Float32Array(leading.length + waveform.length + trailing.length);
-          samples.set(waveform, leading.length);
-          for (let offset = 0; offset < samples.length; offset += 997) {
-            const chunk = samples.slice(offset, Math.min(samples.length, offset + 997));
-            worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
-          }
-          return;
-        }
         const decoded = event.data?.packet;
         if (!decoded || !(decoded.block instanceof ArrayBuffer)) return;
         clearTimeout(timer);
         worker.terminate();
         resolve({ ...decoded, block: Array.from(new Uint8Array(decoded.block)) });
       };
+
+      // Intentionally post immediately, before the worker announces ready. A
+      // pass proves DedicatedWorker message queuing preserves the start marker.
+      const leading = new Float32Array(4096);
+      const trailing = new Float32Array(16384);
+      const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+      samples.set(waveform, leading.length);
+      for (let offset = 0; offset < samples.length; offset += 997) {
+        const chunk = samples.slice(offset, Math.min(samples.length, offset + 997));
+        worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+      }
     });
 
     return { packet, expected: Array.from(block), waveformSamples: waveform.length };
@@ -64,7 +64,7 @@ try {
   if (packet.block.length !== result.expected.length || packet.block.some((value, i) => value !== result.expected[i])) {
     throw new Error("Reliable block mismatch");
   }
-  console.log("AIRGAPPER_AUDIO_RELIABLE_WORKER_PASS", JSON.stringify({
+  console.log("AIRGAPPER_AUDIO_RELIABLE_EARLY_QUEUE_PASS", JSON.stringify({
     waveformSamples: result.waveformSamples,
     decodedBytes: packet.block.length
   }));
