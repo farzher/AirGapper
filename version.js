@@ -1,6 +1,6 @@
 import "./audio/output-level.js";
 
-export const APP_VERSION = "0.5.559";
+export const APP_VERSION = "0.5.560";
 export const APP_BUILD = `v${APP_VERSION}`;
 
 let updateCheckPending = false;
@@ -28,39 +28,8 @@ async function checkForAppUpdate() {
   }
 }
 
-function setupAudioSpeedColor() {
-  const selector = "#audio-receive-pane .speed-feedback strong";
-  const bind = (element) => {
-    const update = () => {
-      const value = Number.parseFloat(element.textContent);
-      element.style.color = Number.isFinite(value) && value > 1
-        ? "#2563eb"
-        : Number.isFinite(value) && value > 0
-          ? "var(--good)"
-          : "";
-    };
-    new MutationObserver(update).observe(element, { childList: true, characterData: true, subtree: true });
-    update();
-  };
-  const existing = document.querySelector(selector);
-  if (existing) {
-    bind(existing);
-    return;
-  }
-  const observer = new MutationObserver(() => {
-    const element = document.querySelector(selector);
-    if (!element) return;
-    observer.disconnect();
-    bind(element);
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-}
-
 if (typeof window !== "undefined") {
-  window.addEventListener("load", () => {
-    setupAudioSpeedColor();
-    void checkForAppUpdate();
-  }, { once: true });
+  window.addEventListener("load", () => void checkForAppUpdate(), { once: true });
   window.addEventListener("pageshow", () => void checkForAppUpdate());
   window.addEventListener("focus", () => void checkForAppUpdate());
   document.addEventListener("visibilitychange", () => {
