@@ -14,6 +14,7 @@
     "./audio/modem.js",
     "./audio/reliable-stream.js",
     "./audio/reliable-worker.js",
+    "./audio/ultra-config.js",
     "./audio/ultra-format.js",
     "./audio/ultra-stream.js",
     "./audio/ultra-worker.js",
