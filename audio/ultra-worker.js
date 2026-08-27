@@ -2,30 +2,31 @@ import ggwaveFactory from "../vendor/ggwave.mjs";
 import { parseUltraMessage } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
-const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
 const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_NORMAL;
+const protocolValue = Number(protocol?.value ?? protocol);
 const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
-// Reliable listens to one deliberately conservative protocol only. This cuts
-// false acquisitions and avoids spending receiver work on unrelated profiles.
+// Reliable listens to one deliberately conservative protocol only. Embind enum
+// values are objects, so compare their numeric .value rather than treating them
+// as JavaScript integers.
 for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
-  if (!name.startsWith("GGWAVE_PROTOCOL_") || name === "GGWAVE_PROTOCOL_COUNT" || !Number.isInteger(id)) continue;
-  ggwave.rxToggleProtocol(id, id === protocol ? 1 : 0);
+  if (!name.startsWith("GGWAVE_PROTOCOL_")) continue;
+  ggwave.rxToggleProtocol(id, Number(id?.value ?? id) === protocolValue ? 1 : 0);
 }
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
-  // Keep marker-based variable-length decoding. Fixed-length ggwave explicitly
-  // removes the start/end markers and uses a different acquisition path.
+  // Marker-based variable-length decoding is intentional: ggwave uses its
+  // acoustic start/end markers in this mode.
   parameters.payloadLength = -1;
   parameters.sampleRateInp = SAMPLE_RATE;
   parameters.sampleRateOut = SAMPLE_RATE;
   parameters.sampleRate = SAMPLE_RATE;
   parameters.sampleFormatInp = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
   parameters.sampleFormatOut = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-  parameters.operatingMode = GGWAVE_RX;
+  parameters.operatingMode = ggwave.GGWAVE_OPERATING_MODE_RX;
   return ggwave.init(parameters);
 }
 
@@ -77,3 +78,7 @@ self.onmessage = (event) => {
     reset();
   }
 };
+
+// Do not let callers transmit the beginning of a ggwave marker sequence until
+// WASM, protocol selection, and the decoder instance are all initialized.
+postMessage({ type: "ready", frameSamples: FRAME_SAMPLES });
