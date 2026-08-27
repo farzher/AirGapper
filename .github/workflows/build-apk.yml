@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - android/**
+      - audio/**
       - codec/**
       - receive/**
       - send/**
@@ -91,6 +92,7 @@ jobs:
           set -euo pipefail
           unzip -p AirGapper.apk assets/version.js | grep -Fq "APP_VERSION = \"$APP_VERSION\""
           unzip -p AirGapper.apk assets/main.js | grep -Fq 'from "./version.js"'
+          unzip -l AirGapper.apk | grep -q 'assets/audio/ultra-stream.js'
           unzip -l AirGapper.apk | grep -q 'assets/shared/camera-start-guard.js'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
           unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'

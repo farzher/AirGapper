@@ -43,42 +43,42 @@ function encodeMessage(message) {
 const probeBlock = new Uint8Array(ULTRA_AUDIO_BLOCK_SIZE);
 const probe = encodeMessage(buildUltraMessage(1, 1, "direct", 0, [probeBlock], 0));
 const MICRO_FRAME_MS = probe.length / SAMPLE_RATE * 1000;
+// The receiver can emit the logical packet as soon as A+B have decoded.
 const ULTRA_FRAME_MS = MICRO_FRAME_MS * 2;
 const ULTRA_ESTIMATED_KBPS = ULTRA_AUDIO_BLOCK_SIZE /
   (probe.length / SAMPLE_RATE * TRANSMISSIONS_PER_BLOCK) / 1024;
 
-let pending = null;
-function preparePending(payloadId, totalLen, mode, startOrdinal, blocks) {
+function modulateUltraFrame(payloadId, totalLen, mode, startOrdinal, blocks) {
   if (!Array.isArray(blocks) || blocks.length !== ULTRA_PACKETS_PER_FRAME) throw new Error("Reliable frame packet count mismatch.");
   const block = blocks[0];
   if (!(block instanceof Uint8Array) || block.length !== ULTRA_AUDIO_BLOCK_SIZE) throw new Error("Unexpected Reliable transport block size.");
-  pending = {
-    identity: `${payloadId >>> 0}:${totalLen}:${mode}`,
-    payloadId: payloadId >>> 0,
-    totalLen,
-    mode,
-    startOrdinal: Number(startOrdinal) >>> 0,
-    block: block.slice(),
-    transmission: 0
-  };
-}
-function modulateUltraFrame(payloadId, totalLen, mode, startOrdinal, blocks) {
-  const identity = `${payloadId >>> 0}:${totalLen}:${mode}`;
-  if (!pending || pending.identity !== identity || pending.transmission >= TRANSMISSIONS_PER_BLOCK) {
-    preparePending(payloadId, totalLen, mode, startOrdinal, blocks);
+
+  // One call owns exactly one transport ordinal/block. Keep all acoustic
+  // repetitions inside this waveform so the caller advances its fountain/MDS
+  // ordinal only after the complete A B A B transmission has been scheduled.
+  const parts = new Array(TRANSMISSIONS_PER_BLOCK);
+  let sampleCount = 0;
+  for (let transmission = 0; transmission < TRANSMISSIONS_PER_BLOCK; transmission++) {
+    const chunkIndex = transmission & 1;
+    const part = encodeMessage(buildUltraMessage(
+      payloadId,
+      totalLen,
+      mode,
+      startOrdinal,
+      [block],
+      chunkIndex
+    ));
+    parts[transmission] = part;
+    sampleCount += part.length;
   }
-  const chunkIndex = pending.transmission & 1;
-  const message = buildUltraMessage(
-    pending.payloadId,
-    pending.totalLen,
-    pending.mode,
-    pending.startOrdinal,
-    [pending.block],
-    chunkIndex
-  );
-  pending.transmission++;
-  if (pending.transmission >= TRANSMISSIONS_PER_BLOCK) pending = null;
-  return encodeMessage(message);
+
+  const waveform = new Float32Array(sampleCount);
+  let offset = 0;
+  for (const part of parts) {
+    waveform.set(part, offset);
+    offset += part.length;
+  }
+  return waveform;
 }
 
 export {
