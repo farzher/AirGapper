@@ -6,15 +6,10 @@ const GGWAVE_DSS = 1 << 4;
 const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
-// Must match ultra-stream.js: low-frequency dual-tone Reliable transport,
-// roughly 1.1-2.6 kHz end-to-end.
 const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
 const protocolValue = Number(protocol?.value ?? protocol);
 const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
-// Reliable listens to one deliberately conservative protocol only. Embind enum
-// values are objects, so compare their numeric .value rather than treating them
-// as JavaScript integers.
 for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
   if (!name.startsWith("GGWAVE_PROTOCOL_")) continue;
   ggwave.rxToggleProtocol(id, Number(id?.value ?? id) === protocolValue ? 1 : 0);
@@ -22,8 +17,6 @@ for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
-  // DT/MT decoding is used in fixed-length mode by ggwave's own low-band
-  // examples. Sender and receiver must use the exact same acoustic length.
   parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
   parameters.sampleRateInp = SAMPLE_RATE;
   parameters.sampleRateOut = SAMPLE_RATE;
@@ -37,21 +30,48 @@ function createInstance() {
 let instance = createInstance();
 const frame = new Float32Array(FRAME_SAMPLES);
 let frameLength = 0;
+let frames = 0;
+let raw = 0;
+let bad = 0;
+let packets = 0;
+let lastLength = 0;
+
+function reportStats(force = false) {
+  if (!force && frames % 12 !== 0) return;
+  postMessage({
+    type: "stats",
+    stats: {
+      frames,
+      sync: Number(ggwave.rxDurationFrames?.(instance)) || 0,
+      raw,
+      bad,
+      packets,
+      lastLength
+    }
+  });
+}
 
 function sendPacket(packet) {
+  packets++;
   const block = packet.block.slice();
   postMessage({ type: "packet", packet: { ...packet, block: block.buffer } }, [block.buffer]);
   postMessage({ type: "signal", quality: 1 });
 }
 
 function decodeFrame(samples) {
+  frames++;
   const input = new Int8Array(samples.buffer, samples.byteOffset, samples.byteLength);
   const decoded = ggwave.decode(instance, input);
-  if (!decoded?.length) return;
-  const bytes = new Uint8Array(decoded.length);
-  bytes.set(new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength));
-  const packet = parseUltraMessage(bytes);
-  if (packet) sendPacket(packet);
+  if (decoded?.length) {
+    raw++;
+    lastLength = decoded.length;
+    const bytes = new Uint8Array(decoded.length);
+    bytes.set(new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength));
+    const packet = parseUltraMessage(bytes);
+    if (packet) sendPacket(packet);
+    else bad++;
+  }
+  reportStats();
 }
 
 function append(samples) {
@@ -72,6 +92,12 @@ function reset() {
   try { ggwave.free(instance); } catch {}
   instance = createInstance();
   frameLength = 0;
+  frames = 0;
+  raw = 0;
+  bad = 0;
+  packets = 0;
+  lastLength = 0;
+  reportStats(true);
 }
 
 self.onmessage = (event) => {
@@ -84,3 +110,4 @@ self.onmessage = (event) => {
 };
 
 postMessage({ type: "ready", frameSamples: FRAME_SAMPLES });
+reportStats(true);
