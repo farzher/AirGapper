@@ -12,66 +12,62 @@ try {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(async () => {
     const stamp = String(Date.now());
-    const { modulateUltraFrame } = await import(`/audio/ultra-stream.js?loopback=${stamp}`);
+    const { buildUltraMessage, parseUltraMessage } = await import(`/audio/ultra-format.js?loopback=${stamp}`);
+    const { prepareRaptorQ } = await import(`/shared/raptorq.js?loopback=${stamp}`);
+    const { TransportEncoder, scheduledEncodingId } = await import(`/shared/transport.js?loopback=${stamp}`);
+    const { raptorPacketEsi } = await import(`/shared/coding-mode.js?loopback=${stamp}`);
+
     const payloadId = 0x51a9c3e7;
-    const totalLen = 48;
-    const mode = "mds";
-    const ordinal = 7;
-    const block = new Uint8Array(24);
-    for (let i = 0; i < block.length; i++) block[i] = (i * 19 + 11) & 255;
-    const waveform = modulateUltraFrame(payloadId, totalLen, mode, ordinal, [block]);
+    const mdsBlock = new Uint8Array(24);
+    for (let i = 0; i < mdsBlock.length; i++) mdsBlock[i] = (i * 19 + 11) & 255;
+    const mdsMessage = buildUltraMessage(payloadId, 48, "mds", 7, [mdsBlock]);
+    const mds = parseUltraMessage(mdsMessage);
+    if (!mds) throw new Error("Reliable MDS envelope did not round-trip");
 
-    const received = await new Promise((resolve, reject) => {
-      const workerUrl = new URL("/audio/ultra-worker.js", location.href);
-      workerUrl.searchParams.set("loopback", stamp);
-      const worker = new Worker(workerUrl, { type: "module" });
-      const timer = setTimeout(() => {
-        worker.terminate();
-        reject(new Error("Reliable ggwave worker loopback timed out"));
-      }, 20_000);
-      worker.onerror = (event) => {
-        clearTimeout(timer);
-        worker.terminate();
-        reject(new Error(event.message || "Reliable ggwave worker failed"));
-      };
-      worker.onmessage = (event) => {
-        const packet = event.data?.packet;
-        if (!packet || !(packet.block instanceof ArrayBuffer)) return;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
-      };
-
-      const leading = new Float32Array(4096);
-      const trailing = new Float32Array(16384);
-      const samples = new Float32Array(leading.length + waveform.length + trailing.length);
-      samples.set(waveform, leading.length);
-      let offset = 0;
-      while (offset < samples.length) {
-        const end = Math.min(samples.length, offset + 997);
-        const chunk = samples.slice(offset, end);
-        worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
-        offset = end;
-      }
-    });
+    await prepareRaptorQ();
+    const payload = new Uint8Array(1000);
+    for (let i = 0; i < payload.length; i++) payload[i] = (i * 29 + 17) & 255;
+    const encoder = new TransportEncoder(payload, 24, "raptorq");
+    const requestId = scheduledEncodingId(encoder.k, 0);
+    const raptorBlock = encoder.encode(requestId);
+    const embeddedEsi = raptorPacketEsi(raptorBlock);
+    const raptorMessage = buildUltraMessage(payloadId, payload.length, "raptorq", 0, [raptorBlock]);
+    const raptor = parseUltraMessage(raptorMessage);
+    encoder.free();
+    if (!raptor) throw new Error("Reliable RaptorQ envelope did not round-trip");
 
     return {
-      ...received,
-      expectedBlock: Array.from(block),
-      waveformSamples: waveform.length
+      mds: {
+        encodingId: mds.encodingId,
+        block: Array.from(mds.block)
+      },
+      raptor: {
+        requestId,
+        embeddedEsi,
+        encodingId: raptor.encodingId,
+        block: Array.from(raptor.block),
+        expectedBlock: Array.from(raptorBlock),
+        messageBytes: raptorMessage.length
+      }
     };
   });
 
-  if (result.payloadId !== 0x51a9c3e7) throw new Error(`Reliable payload id mismatch: ${result.payloadId}`);
-  if (result.totalLen !== 48 || result.mode !== "mds" || result.encodingId !== 7 || result.blockSize !== 24) {
-    throw new Error(`Reliable metadata mismatch: ${JSON.stringify(result)}`);
+  if (result.mds.encodingId !== 7) throw new Error(`Reliable MDS id mismatch: ${result.mds.encodingId}`);
+  if (result.raptor.embeddedEsi <= result.raptor.requestId) {
+    throw new Error(`Expected RaptorQ ESI to include the source-symbol offset: ${JSON.stringify(result.raptor)}`);
   }
-  if (result.block.length !== result.expectedBlock.length || result.block.some((value, i) => value !== result.expectedBlock[i])) {
-    throw new Error("Reliable block mismatch");
+  if (result.raptor.encodingId !== result.raptor.embeddedEsi) {
+    throw new Error(`Reliable RaptorQ id mismatch: ${JSON.stringify(result.raptor)}`);
   }
-  console.log("AIRGAPPER_AUDIO_RELIABLE_GGWAVE_PASS", JSON.stringify({
-    waveformSamples: result.waveformSamples,
-    decodedBytes: result.block.length
+  if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
+    throw new Error("Reliable RaptorQ block mismatch");
+  }
+  if (result.raptor.messageBytes !== 33) throw new Error(`Reliable RaptorQ envelope still carries a redundant id: ${result.raptor.messageBytes} bytes`);
+
+  console.log("AIRGAPPER_AUDIO_RELIABLE_RAPTORQ_PASS", JSON.stringify({
+    requestId: result.raptor.requestId,
+    embeddedEsi: result.raptor.embeddedEsi,
+    messageBytes: result.raptor.messageBytes
   }));
 } finally {
   await browser.close();
