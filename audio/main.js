@@ -62,7 +62,6 @@ const receiverLinkQrLarge = document.getElementById("receiver-link-qr-large");
 const receiverLinkUrl = document.getElementById("receiver-link-url");
 const headerReceiverQr = document.getElementById("receiver-link-qr");
 
-const VALID_PACKET_FLASH_MS = 120;
 const PROFILE_KEY = "airgapper:audio-profile:v1";
 
 let currentMode = null;
@@ -71,10 +70,9 @@ let receiveSession = null;
 let visualizerFrame = 0;
 let visualizerCanvas = null;
 let visualizerAnalyser = null;
-let visualizerSignal = false;
+let visualizerTone = 0;
 let smoothedBars = new Float32Array(48);
 let audioDialogActive = false;
-let packetFlashTimer = 0;
 
 audioView.classList.remove("audio-shell");
 audioView.style.width = "100%";
@@ -191,13 +189,15 @@ function resizeVisualizer(canvas) {
   }
   return { width, height, dpr };
 }
-function drawVisualizer(canvas, analyser = null, signal = false, idle = false) {
+function drawVisualizer(canvas, analyser = null, tone = 0, idle = false) {
   if (!canvas?.isConnected) return;
   const { width, height, dpr } = resizeVisualizer(canvas);
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const styles = getComputedStyle(document.documentElement);
-  const ink = styles.getPropertyValue(signal ? "--good" : "--muted").trim() || (signal ? "#21864a" : "#777");
+  const ink = tone > 1
+    ? "#2563eb"
+    : styles.getPropertyValue(tone > 0 ? "--good" : "--muted").trim() || (tone > 0 ? "#21864a" : "#777");
   const muted = styles.getPropertyValue("--line").trim() || "#e7e7e3";
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = styles.getPropertyValue("--card").trim() || "#fff";
@@ -242,16 +242,16 @@ function stopVisualizer() {
   visualizerFrame = 0;
   visualizerCanvas = null;
   visualizerAnalyser = null;
-  visualizerSignal = false;
+  visualizerTone = 0;
 }
-function startVisualizer(canvas, analyser = null, signal = false) {
+function startVisualizer(canvas, analyser = null, tone = 0) {
   stopVisualizer();
   visualizerCanvas = canvas;
   visualizerAnalyser = analyser;
-  visualizerSignal = signal;
+  visualizerTone = tone;
   const tick = () => {
     if (!visualizerCanvas?.isConnected) return;
-    drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerSignal, !visualizerAnalyser);
+    drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerTone, !visualizerAnalyser);
     visualizerFrame = requestAnimationFrame(tick);
   };
   tick();
@@ -259,8 +259,8 @@ function startVisualizer(canvas, analyser = null, signal = false) {
 function setVisualizerAnalyser(analyser) {
   visualizerAnalyser = analyser;
 }
-function setVisualizerSignal(active) {
-  visualizerSignal = active;
+function setVisualizerTone(tone) {
+  visualizerTone = tone;
 }
 
 // Receive -------------------------------------------------------------------
@@ -288,15 +288,6 @@ listenButton.textContent = "Enable microphone";
 listenButton.className = "enable-camera";
 listenButton.hidden = false;
 const receivePreview = makePreviewCanvas("Live audio level visualizer");
-function flashValidPacket() {
-  clearTimeout(packetFlashTimer);
-  setVisualizerSignal(true);
-  packetFlashTimer = setTimeout(() => {
-    packetFlashTimer = 0;
-    if (currentMode !== "receive") return;
-    setVisualizerSignal(false);
-  }, VALID_PACKET_FLASH_MS);
-}
 const receivePanel = document.createElement("section");
 receivePanel.className = "transfer-panel";
 receivePanel.setAttribute("aria-live", "polite");
@@ -341,14 +332,19 @@ receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
 receivePanel.append(receiveProgress);
 receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
 
+function setReceiveSpeed(kbs) {
+  const tone = kbs > 1 ? 2 : kbs > 0 ? 1 : 0;
+  speedValue.textContent = `${kbs.toFixed(1)} KB/s`;
+  speedValue.style.color = tone > 1 ? "#2563eb" : tone > 0 ? "var(--good)" : "";
+  if (visualizerCanvas === receivePreview.canvas) setVisualizerTone(tone);
+}
 function resetReceiveUi() {
-  clearTimeout(packetFlashTimer);
-  packetFlashTimer = 0;
   receivePanel.hidden = false;
   receivePrompt.hidden = true;
   receiveState.textContent = "";
   completeLabel.style.display = "";
   speedValue.textContent = "👂";
+  speedValue.style.color = "";
   progressLabel.hidden = false;
   progressLabel.textContent = "0%";
   sizeLabel.textContent = "";
@@ -359,8 +355,8 @@ function resetReceiveUi() {
   listenButton.textContent = "Enable microphone";
   listenButton.hidden = false;
   receivePreview.zone.hidden = false;
-  setVisualizerSignal(false);
-  drawVisualizer(receivePreview.canvas, null, false, true);
+  setVisualizerTone(0);
+  drawVisualizer(receivePreview.canvas, null, 0, true);
 }
 function updateReceiveProgress(session, now = performance.now()) {
   if (receiveSession !== session || session.finishing || !session.identity || !session.startedAt || !session.decoder) return;
@@ -379,7 +375,7 @@ function updateReceiveProgress(session, now = performance.now()) {
   etaLabel.textContent = liveUsefulFps > 0 && usefulSymbols >= 3
     ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
     : "";
-  speedValue.textContent = `${liveKbs.toFixed(1)} KB/s`;
+  setReceiveSpeed(liveKbs);
 }
 function completeReceiveUi(session, file) {
   receivePanel.hidden = false;
@@ -394,7 +390,7 @@ function completeReceiveUi(session, file) {
   progressLabel.hidden = true;
   sizeLabel.textContent = "";
   etaLabel.textContent = `${formatBytes(transmittedSize)} in ${formatDuration(elapsedSeconds)}`;
-  speedValue.textContent = `${goodput.toFixed(1)} KB/s`;
+  setReceiveSpeed(goodput);
   receivePreview.zone.hidden = true;
   stopVisualizer();
 }
@@ -419,12 +415,12 @@ function showReceiveError(message) {
   listenButton.hidden = false;
   receivePanel.hidden = false;
   speedValue.textContent = "—";
+  speedValue.style.color = "";
   setVisualizerAnalyser(null);
-  setVisualizerSignal(false);
+  setVisualizerTone(0);
 }
 async function acceptPacket(session, frame) {
   if (receiveSession !== session || session.finishing) return;
-  flashValidPacket();
   const identity = `${frame.payloadId}:${frame.totalLen}:${frame.blockSize}:${frame.mode}`;
   if (identity !== session.identity) {
     session.decoder?.free?.();
@@ -503,15 +499,11 @@ class FastWorkerClient {
   }
 }
 class UltraWorkerClient {
-  constructor(onPacket, onSignal = () => void 0) {
+  constructor(onPacket) {
     const url = new URL("./ultra-worker.js", import.meta.url);
     url.search = new URL(import.meta.url).search;
     this.worker = new Worker(url, { type: "module" });
     this.worker.onmessage = (event) => {
-      if (event.data?.type === "signal") {
-        onSignal(Number(event.data.quality) || 0);
-        return;
-      }
       const packet = event.data?.packet;
       if (!packet || !(packet.block instanceof ArrayBuffer)) return;
       onPacket({ ...packet, block: new Uint8Array(packet.block) });
@@ -547,7 +539,7 @@ async function startListening() {
   clearResult();
   receivePanel.hidden = false;
   listenButton.hidden = true;
-  startVisualizer(receivePreview.canvas, null, false);
+  startVisualizer(receivePreview.canvas, null, 0);
   try {
     const session = {
       receiver: null,
@@ -577,9 +569,7 @@ async function startListening() {
     const receiver = new AcousticReceiver((frame) => enqueue([frame]));
     const nativeAppend = receiver.append.bind(receiver);
     session.fast = new FastWorkerClient(enqueue);
-    session.ultra = new UltraWorkerClient((frame) => enqueue([frame]), (quality) => {
-      if (quality >= 0.12) setVisualizerSignal(true);
-    });
+    session.ultra = new UltraWorkerClient((frame) => enqueue([frame]));
     receiver.append = (chunk) => {
       session.fast?.append(chunk);
       session.ultra?.append(chunk);
@@ -641,8 +631,8 @@ profileTitle.textContent = "Profile";
 const profileInput = document.createElement("select");
 profileInput.setAttribute("aria-label", "Audio profile");
 profileInput.append(
-  new Option("Normal", "reliable"),
   new Option("Reliable", "ultra"),
+  new Option("Normal", "reliable"),
   new Option("Fast", "fast"),
   new Option("Quiet", "quiet")
 );
@@ -658,7 +648,7 @@ try {
   localStorage.removeItem("airgapper:audio-speed:v1");
   localStorage.removeItem("airgapper:audio-sound:v1");
 } catch {}
-if (!profileInput.value) profileInput.value = "reliable";
+if (!profileInput.value) profileInput.value = "ultra";
 function syncStoredProfile() {
   try { localStorage.setItem(PROFILE_KEY, profileInput.value); } catch {}
 }
@@ -751,7 +741,7 @@ async function resumeSender() {
   } catch {}
   if (sendSession !== session || session.stopped) return;
   session.backgroundPaused = false;
-  startVisualizer(sendPreview.canvas, session.analyser, true);
+  startVisualizer(sendPreview.canvas, session.analyser, 1);
   void requestScreenWakeLock();
 }
 async function stopAll(reset = true) {
@@ -896,7 +886,7 @@ async function startSending(container, label) {
     fileInput.disabled = true;
     sendTextButton.disabled = true;
     updateSendStatus(session);
-    startVisualizer(sendPreview.canvas, analyser, true);
+    startVisualizer(sendPreview.canvas, analyser, 1);
     void requestScreenWakeLock();
     await runSendQueue(session);
   } catch (error) {
@@ -976,7 +966,7 @@ window.addEventListener("airgapper:audio-direction", (event) => {
   if (direction === "send" || direction === "receive") void setMode(direction);
 });
 window.addEventListener("resize", () => {
-  if (visualizerCanvas) drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerSignal, !visualizerAnalyser);
+  if (visualizerCanvas) drawVisualizer(visualizerCanvas, visualizerAnalyser, visualizerTone, !visualizerAnalyser);
 });
 window.addEventListener("airgapper:leave-mode", () => {
   if (!audioView.classList.contains("active") && !sendSession && !receiveSession) return;
