@@ -92,12 +92,13 @@ jobs:
           set -euo pipefail
           unzip -p AirGapper.apk assets/version.js | grep -Fq "APP_VERSION = \"$APP_VERSION\""
           unzip -p AirGapper.apk assets/main.js | grep -Fq 'from "./version.js"'
-          unzip -l AirGapper.apk | grep -q 'assets/audio/ultra-stream.js'
-          unzip -l AirGapper.apk | grep -q 'assets/shared/camera-start-guard.js'
-          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.js'
-          unzip -l AirGapper.apk | grep -q 'assets/codec/airgapper_codec.wasm'
-          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.js'
-          unzip -l AirGapper.apk | grep -q 'assets/codec/scalar/airgapper_codec.wasm'
+          unzip -Z1 AirGapper.apk > /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/audio/ultra-stream.js' /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/shared/camera-start-guard.js' /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/codec/airgapper_codec.js' /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/codec/airgapper_codec.wasm' /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/codec/scalar/airgapper_codec.js' /tmp/airgapper-apk-files.txt
+          grep -Fxq 'assets/codec/scalar/airgapper_codec.wasm' /tmp/airgapper-apk-files.txt
 
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           test -x "$APKSIGNER"
