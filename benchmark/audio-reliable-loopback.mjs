@@ -38,12 +38,23 @@ try {
     const waveform = modulateUltraFrame(payloadId, payload.length, "raptorq", 0, [raptorBlock]);
     const received = await new Promise((resolve, reject) => {
       const worker = new Worker("/audio/ultra-worker.js", { type: "module" });
+      const packets = [];
+      let finishTimer = 0;
       const timer = setTimeout(() => {
         worker.terminate();
         reject(new Error("Reliable low-band ggwave worker loopback timed out"));
       }, 30_000);
+      const finish = () => {
+        if (finishTimer) return;
+        finishTimer = setTimeout(() => {
+          clearTimeout(timer);
+          worker.terminate();
+          resolve(packets);
+        }, 1000);
+      };
       worker.onerror = (event) => {
         clearTimeout(timer);
+        clearTimeout(finishTimer);
         worker.terminate();
         reject(new Error(event.message || "Reliable ggwave worker failed"));
       };
@@ -60,29 +71,28 @@ try {
             const chunk = samples.slice(offset, end);
             worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
             offset = end;
-            // Mirror a live capture stream instead of flooding hundreds of
-            // transferable messages into a worker during startup.
             if (++posted % 8 === 0) await new Promise((done) => setTimeout(done, 0));
           }
           return;
         }
         const packet = event.data?.packet;
         if (!packet || !(packet.block instanceof ArrayBuffer)) return;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
+        packets.push({ ...packet, block: Array.from(new Uint8Array(packet.block)) });
+        finish();
       };
     });
     encoder.free();
 
+    if (!received.length) throw new Error("Reliable worker emitted no packet");
     return {
       mds: { encodingId: mds.encodingId, messageBytes: mdsMessage.length },
       raptor: {
         requestId,
         embeddedEsi,
         envelopeEncodingId: raptorEnvelope.encodingId,
-        encodingId: received.encodingId,
-        block: received.block,
+        encodingId: received[0].encodingId,
+        emittedPackets: received.length,
+        block: received[0].block,
         expectedBlock: Array.from(raptorBlock),
         messageBytes: raptorMessage.length,
         waveformSamples: waveform.length
@@ -99,6 +109,9 @@ try {
   if (result.raptor.envelopeEncodingId !== result.raptor.embeddedEsi || result.raptor.encodingId !== result.raptor.embeddedEsi) {
     throw new Error(`Reliable RaptorQ id mismatch: ${JSON.stringify(result.raptor)}`);
   }
+  if (result.raptor.emittedPackets !== 1) {
+    throw new Error(`Reliable worker emitted one acoustic packet ${result.raptor.emittedPackets} times`);
+  }
   if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
     throw new Error("Reliable RaptorQ waveform block mismatch");
   }
@@ -107,6 +120,7 @@ try {
   console.log("AIRGAPPER_AUDIO_RELIABLE_LOWBAND_PASS", JSON.stringify({
     requestId: result.raptor.requestId,
     embeddedEsi: result.raptor.embeddedEsi,
+    emittedPackets: result.raptor.emittedPackets,
     messageBytes: result.raptor.messageBytes,
     waveformSamples: result.raptor.waveformSamples
   }));
