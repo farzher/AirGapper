@@ -10,78 +10,64 @@ const browser = await chromium.launch({
 try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-  const results = await page.evaluate(async () => {
+  const result = await page.evaluate(async () => {
     const stamp = String(Date.now());
-    const factory = (await import(`/vendor/ggwave.mjs?diag=${stamp}`)).default;
-    const ggwave = await factory();
-    ggwave.disableLog?.();
-    const normal = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_NORMAL;
-    const fast = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST;
+    const { modulateUltraFrame } = await import(`/audio/ultra-stream.js?loopback=${stamp}`);
+    const payloadId = 0x51a9c3e7;
+    const totalLen = 48;
+    const mode = "mds";
+    const ordinal = 7;
+    const block = new Uint8Array(24);
+    for (let i = 0; i < block.length; i++) block[i] = (i * 19 + 11) & 255;
+    const waveform = modulateUltraFrame(payloadId, totalLen, mode, ordinal, [block]);
 
-    function copyWaveform(encoded) {
-      const copy = new ArrayBuffer(encoded.byteLength);
-      new encoded.constructor(copy).set(encoded);
-      return new Float32Array(copy);
-    }
-
-    function makeInstance() {
-      const p = ggwave.getDefaultParameters();
-      p.sampleRateInp = 48000;
-      p.sampleRateOut = 48000;
-      return ggwave.init(p);
-    }
-
-    function feed(rx, waveform) {
-      const leading = 4096;
-      const trailing = 16384;
-      const stream = new Float32Array(leading + waveform.length + trailing);
-      stream.set(waveform, leading);
-      for (let offset = 0; offset < stream.length; offset += 1024) {
-        const frame = new Float32Array(1024);
-        frame.set(stream.subarray(offset, Math.min(stream.length, offset + 1024)));
-        const decoded = ggwave.decode(rx, new Int8Array(frame.buffer));
-        if (decoded?.length) {
-          const out = new Uint8Array(decoded.length);
-          out.set(new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength));
-          return Array.from(out);
+    const packet = await new Promise((resolve, reject) => {
+      const workerUrl = new URL("/audio/ultra-worker.js", location.href);
+      workerUrl.searchParams.set("loopback", stamp);
+      const worker = new Worker(workerUrl, { type: "module" });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error("Reliable worker loopback timed out"));
+      }, 20_000);
+      worker.onerror = (event) => {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(new Error(event.message || "Reliable worker failed"));
+      };
+      worker.onmessage = (event) => {
+        if (event.data?.type === "ready") {
+          const leading = new Float32Array(4096);
+          const trailing = new Float32Array(16384);
+          const samples = new Float32Array(leading.length + waveform.length + trailing.length);
+          samples.set(waveform, leading.length);
+          for (let offset = 0; offset < samples.length; offset += 997) {
+            const chunk = samples.slice(offset, Math.min(samples.length, offset + 997));
+            worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+          }
+          return;
         }
-      }
-      return null;
-    }
+        const decoded = event.data?.packet;
+        if (!decoded || !(decoded.block instanceof ArrayBuffer)) return;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve({ ...decoded, block: Array.from(new Uint8Array(decoded.block)) });
+      };
+    });
 
-    function run(payload, protocol, separate) {
-      const tx = makeInstance();
-      const rx = separate ? makeInstance() : tx;
-      const encoded = ggwave.encode(tx, payload, protocol, 25);
-      const waveform = copyWaveform(encoded);
-      const decoded = feed(rx, waveform);
-      if (separate) ggwave.free(rx);
-      ggwave.free(tx);
-      return { decoded, samples: waveform.length };
-    }
-
-    const binary = new Uint8Array(34);
-    for (let i = 0; i < binary.length; i++) binary[i] = i * 7 & 255;
-    binary[5] = 0;
-    binary[12] = 0;
-
-    return {
-      defaults: ggwave.getDefaultParameters(),
-      enumTypes: {
-        normalType: typeof normal,
-        normalValue: normal?.value ?? normal,
-        fastValue: fast?.value ?? fast
-      },
-      sameNormalText: run("hello", normal, false),
-      separateNormalText: run("hello", normal, true),
-      separateFastText: run("hello", fast, true),
-      separateNormalBinary: run(binary, normal, true)
-    };
+    return { packet, expected: Array.from(block), waveformSamples: waveform.length };
   });
-  console.log("GGWAVE_DIAGNOSTIC", JSON.stringify(results));
-  if (!results.sameNormalText.decoded && !results.separateNormalText.decoded && !results.separateFastText.decoded) {
-    throw new Error("Pinned ggwave cannot clean-loopback stock text in browser diagnostic");
+
+  const packet = result.packet;
+  if (packet.payloadId !== 0x51a9c3e7 || packet.totalLen !== 48 || packet.mode !== "mds" || packet.encodingId !== 7 || packet.blockSize !== 24) {
+    throw new Error(`Reliable metadata mismatch: ${JSON.stringify(packet)}`);
   }
+  if (packet.block.length !== result.expected.length || packet.block.some((value, i) => value !== result.expected[i])) {
+    throw new Error("Reliable block mismatch");
+  }
+  console.log("AIRGAPPER_AUDIO_RELIABLE_WORKER_PASS", JSON.stringify({
+    waveformSamples: result.waveformSamples,
+    decodedBytes: packet.block.length
+  }));
 } finally {
   await browser.close();
 }
