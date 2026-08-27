@@ -35,6 +35,7 @@ let raw = 0;
 let bad = 0;
 let packets = 0;
 let lastLength = 0;
+let lastPacketKey = "";
 
 function reportStats(force = false) {
   if (!force && frames % 12 !== 0) return;
@@ -52,6 +53,11 @@ function reportStats(force = false) {
 }
 
 function sendPacket(packet) {
+  const key = `${packet.payloadId}:${packet.totalLen}:${packet.mode}:${packet.encodingId}`;
+  // ggwave fixed-length DT decoding reports the same completed payload on
+  // several consecutive analysis frames. Only forward the first copy.
+  if (key === lastPacketKey) return;
+  lastPacketKey = key;
   packets++;
   const block = packet.block.slice();
   postMessage({ type: "packet", packet: { ...packet, block: block.buffer } }, [block.buffer]);
@@ -97,6 +103,7 @@ function reset() {
   bad = 0;
   packets = 0;
   lastLength = 0;
+  lastPacketKey = "";
   reportStats(true);
 }
 
