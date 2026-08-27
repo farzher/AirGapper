@@ -14,7 +14,7 @@
     "./audio/modem.js",
     "./audio/reliable-stream.js",
     "./audio/reliable-worker.js",
-    "./audio/ultra-phy.js",
+    "./audio/ultra-format.js",
     "./audio/ultra-stream.js",
     "./audio/ultra-worker.js",
     "./audio/quiet-stream.js",
@@ -84,6 +84,7 @@
     "./codec/airgapper_codec.js",
     "./codec/airgapper_codec.wasm",
     "./vendor/qrcode.js",
+    "./vendor/ggwave.mjs",
     "./vendor/raptorq/raptorq.js",
     "./vendor/raptorq/raptorq_bg.wasm"
   ];
@@ -128,7 +129,7 @@
     headers.set("Content-Range", "bytes " + start + "-" + end + "/" + blob.size);
     headers.set("Content-Length", String(body.size));
     headers.set("Accept-Ranges", "bytes");
-    return new Response(body, { status: 206, statusText: "Partial Content", headers });
+    return new Response(body, { status: 206, statusText: response.statusText, headers });
   }
 
   self.addEventListener("fetch", (event) => {
