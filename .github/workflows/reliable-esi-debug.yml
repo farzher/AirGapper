@@ -1,0 +1,96 @@
+name: Reliable ESI diagnostic
+
+on:
+  push:
+    branches: [debug-reliable-esi]
+
+permissions:
+  contents: read
+
+jobs:
+  esi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --package-lock=false playwright@1.55.0
+      - name: Test sequential Reliable packet ids
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8080 >/tmp/airgapper-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          cat >reliable-esi-debug.mjs <<'EOF'
+          import { chromium } from "playwright";
+          const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
+          try {
+            const page = await browser.newPage();
+            await page.goto("http://127.0.0.1:8080/", { waitUntil: "domcontentloaded" });
+            const result = await page.evaluate(async () => {
+              const { prepareRaptorQ } = await import("/shared/raptorq.js");
+              const { TransportEncoder, scheduledEncodingId } = await import("/shared/transport.js");
+              const { modulateUltraFrame } = await import("/audio/ultra-stream.js");
+              await prepareRaptorQ();
+              const totalLen = 100000;
+              const payload = new Uint8Array(totalLen);
+              for (let i = 0; i < payload.length; i++) payload[i] = (i * 29 + 17) & 255;
+              const encoder = new TransportEncoder(payload, 24, "raptorq");
+              const payloadId = 0x12345678;
+              const sent = [];
+              const waves = [];
+              for (let ordinal = 0; ordinal < 20; ordinal++) {
+                const requestId = scheduledEncodingId(encoder.k, ordinal);
+                const block = encoder.encode(requestId);
+                const esi = block[1] * 65536 + block[2] * 256 + block[3];
+                sent.push({ ordinal, requestId, esi });
+                waves.push(modulateUltraFrame(payloadId, totalLen, "raptorq", ordinal, [block]));
+              }
+              encoder.free();
+              let total = 4096 + 16384;
+              for (const wave of waves) total += wave.length;
+              const samples = new Float32Array(total);
+              let write = 4096;
+              for (const wave of waves) { samples.set(wave, write); write += wave.length; }
+              const received = [];
+              let stats = null;
+              await new Promise((resolve, reject) => {
+                const worker = new Worker("/audio/ultra-worker.js", { type: "module" });
+                const timer = setTimeout(() => { worker.terminate(); resolve(); }, 12000);
+                worker.onerror = (event) => { clearTimeout(timer); worker.terminate(); reject(new Error(event.message || "worker error")); };
+                worker.onmessage = async (event) => {
+                  if (event.data?.type === "ready") {
+                    let offset = 0;
+                    let posted = 0;
+                    while (offset < samples.length) {
+                      const end = Math.min(samples.length, offset + 1024);
+                      const chunk = samples.slice(offset, end);
+                      worker.postMessage({ type: "samples", samples: chunk.buffer }, [chunk.buffer]);
+                      offset = end;
+                      if (++posted % 8 === 0) await new Promise((done) => setTimeout(done, 0));
+                    }
+                    return;
+                  }
+                  if (event.data?.type === "stats") {
+                    stats = event.data.stats;
+                    if ((stats?.raw || 0) >= 20) {
+                      clearTimeout(timer);
+                      setTimeout(() => { worker.terminate(); resolve(); }, 50);
+                    }
+                    return;
+                  }
+                  const packet = event.data?.packet;
+                  if (packet?.block instanceof ArrayBuffer) received.push(packet.encodingId);
+                };
+              });
+              return { k: encoder.k, sent, received, unique: [...new Set(received)], stats };
+            });
+            console.log("AIRGAPPER_RELIABLE_ESI_MATRIX", JSON.stringify(result));
+            if (result.sent.some((x, i) => x.esi !== i)) process.exitCode = 2;
+            if (result.unique.length < 20) process.exitCode = 3;
+          } finally {
+            await browser.close();
+          }
+          EOF
+          node reliable-esi-debug.mjs
