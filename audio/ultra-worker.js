@@ -2,7 +2,7 @@ import ggwaveFactory from "../vendor/ggwave.mjs";
 import { ULTRA_MESSAGE_LENGTH, parseUltraMessage } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
-const MODEM_RATE = 36000;
+const MODEM_RATE = 40000;
 const GGWAVE_DSS = 1 << 4;
 const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
@@ -15,7 +15,7 @@ for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
   if (!name.startsWith("GGWAVE_PROTOCOL_")) continue;
   ggwave.rxToggleProtocol(id, Number(id?.value ?? id) === protocolValue ? 1 : 0);
 }
-ggwave.rxProtocolSetFreqStart(protocol, 32);
+ggwave.rxProtocolSetFreqStart(protocol, 28);
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
