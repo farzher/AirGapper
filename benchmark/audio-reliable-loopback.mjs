@@ -11,23 +11,23 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(async () => {
-    const { buildUltraMessage, parseUltraMessage } = await import("/audio/ultra-format.js");
-    const { modulateUltraFrame } = await import("/audio/ultra-stream.js");
+    const { ULTRA_AUDIO_BLOCK_SIZE, buildUltraMessage, parseUltraMessage } = await import("/audio/ultra-format.js");
+    const { ULTRA_FRAME_MS, modulateUltraFrame } = await import("/audio/ultra-stream.js");
     const { prepareRaptorQ } = await import("/shared/raptorq.js");
     const { TransportEncoder, scheduledEncodingId } = await import("/shared/transport.js");
-    const { raptorPacketEsi } = await import("/shared/coding-mode.js");
+    const { RAPTOR_PACKET_ID_BYTES, raptorPacketEsi } = await import("/shared/coding-mode.js");
 
     const payloadId = 0x51a9c3e7;
-    const mdsBlock = new Uint8Array(24);
+    const mdsBlock = new Uint8Array(ULTRA_AUDIO_BLOCK_SIZE);
     for (let i = 0; i < mdsBlock.length; i++) mdsBlock[i] = (i * 19 + 11) & 255;
-    const mdsMessage = buildUltraMessage(payloadId, 48, "mds", 7, [mdsBlock]);
+    const mdsMessage = buildUltraMessage(payloadId, ULTRA_AUDIO_BLOCK_SIZE * 2, "mds", 7, [mdsBlock]);
     const mds = parseUltraMessage(mdsMessage);
     if (!mds) throw new Error("Reliable MDS envelope did not round-trip");
 
     await prepareRaptorQ();
-    const payload = new Uint8Array(1000);
+    const payload = new Uint8Array(2000);
     for (let i = 0; i < payload.length; i++) payload[i] = (i * 29 + 17) & 255;
-    const encoder = new TransportEncoder(payload, 24, "raptorq");
+    const encoder = new TransportEncoder(payload, ULTRA_AUDIO_BLOCK_SIZE, "raptorq");
     const requestId = scheduledEncodingId(encoder.k, 0);
     const raptorBlock = encoder.encode(requestId);
     const embeddedEsi = raptorPacketEsi(raptorBlock);
@@ -36,6 +36,9 @@ try {
     if (!raptorEnvelope) throw new Error("Reliable RaptorQ envelope did not round-trip");
 
     const waveform = modulateUltraFrame(payloadId, payload.length, "raptorq", 0, [raptorBlock]);
+    let peak = 0;
+    for (const sample of waveform) peak = Math.max(peak, Math.abs(sample));
+    const usefulBps = (ULTRA_AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) / (ULTRA_FRAME_MS / 1000);
     const received = await new Promise((resolve, reject) => {
       const worker = new Worker("/audio/ultra-worker.js", { type: "module" });
       const packets = [];
@@ -85,6 +88,9 @@ try {
 
     if (!received.length) throw new Error("Reliable worker emitted no packet");
     return {
+      blockSize: ULTRA_AUDIO_BLOCK_SIZE,
+      usefulBps,
+      peak,
       mds: { encodingId: mds.encodingId, messageBytes: mdsMessage.length },
       raptor: {
         requestId,
@@ -100,8 +106,14 @@ try {
     };
   });
 
-  if (result.mds.encodingId !== 7 || result.mds.messageBytes !== 34) {
-    throw new Error(`Reliable MDS fixed frame mismatch: ${JSON.stringify(result.mds)}`);
+  if (result.blockSize !== 54 || result.mds.encodingId !== 7 || result.mds.messageBytes !== 64) {
+    throw new Error(`Reliable fixed frame mismatch: ${JSON.stringify(result)}`);
+  }
+  if (result.usefulBps < 8 || result.usefulBps > 10) {
+    throw new Error(`Reliable useful rate moved outside expected range: ${result.usefulBps} B/s`);
+  }
+  if (result.peak < 0.95 || result.peak > 1.01) {
+    throw new Error(`Reliable waveform is not using full-scale output: peak ${result.peak}`);
   }
   if (result.raptor.embeddedEsi <= result.raptor.requestId) {
     throw new Error(`Expected RaptorQ ESI to include the source-symbol offset: ${JSON.stringify(result.raptor)}`);
@@ -115,13 +127,16 @@ try {
   if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
     throw new Error("Reliable RaptorQ waveform block mismatch");
   }
-  if (result.raptor.messageBytes !== 34) throw new Error(`Reliable RaptorQ fixed frame mismatch: ${result.raptor.messageBytes} bytes`);
+  if (result.raptor.messageBytes !== 64) throw new Error(`Reliable RaptorQ fixed frame mismatch: ${result.raptor.messageBytes} bytes`);
 
   console.log("AIRGAPPER_AUDIO_RELIABLE_LOWBAND_PASS", JSON.stringify({
     requestId: result.raptor.requestId,
     embeddedEsi: result.raptor.embeddedEsi,
     emittedPackets: result.raptor.emittedPackets,
     messageBytes: result.raptor.messageBytes,
+    blockSize: result.blockSize,
+    usefulBps: Number(result.usefulBps.toFixed(2)),
+    peak: Number(result.peak.toFixed(3)),
     waveformSamples: result.raptor.waveformSamples
   }));
 } finally {

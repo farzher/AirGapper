@@ -30,54 +30,26 @@ function createInstance() {
 let instance = createInstance();
 const frame = new Float32Array(FRAME_SAMPLES);
 let frameLength = 0;
-let frames = 0;
-let raw = 0;
-let bad = 0;
-let packets = 0;
-let lastLength = 0;
 let lastPacketKey = "";
-
-function reportStats(force = false) {
-  if (!force && frames % 12 !== 0) return;
-  postMessage({
-    type: "stats",
-    stats: {
-      frames,
-      sync: Number(ggwave.rxDurationFrames?.(instance)) || 0,
-      raw,
-      bad,
-      packets,
-      lastLength
-    }
-  });
-}
 
 function sendPacket(packet) {
   const key = `${packet.payloadId}:${packet.totalLen}:${packet.mode}:${packet.encodingId}`;
-  // ggwave fixed-length DT decoding reports the same completed payload on
-  // several consecutive analysis frames. Only forward the first copy.
+  // Fixed-length ggwave can report one completed payload on several adjacent
+  // analysis frames. Forward one copy only.
   if (key === lastPacketKey) return;
   lastPacketKey = key;
-  packets++;
   const block = packet.block.slice();
   postMessage({ type: "packet", packet: { ...packet, block: block.buffer } }, [block.buffer]);
-  postMessage({ type: "signal", quality: 1 });
 }
 
 function decodeFrame(samples) {
-  frames++;
   const input = new Int8Array(samples.buffer, samples.byteOffset, samples.byteLength);
   const decoded = ggwave.decode(instance, input);
-  if (decoded?.length) {
-    raw++;
-    lastLength = decoded.length;
-    const bytes = new Uint8Array(decoded.length);
-    bytes.set(new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength));
-    const packet = parseUltraMessage(bytes);
-    if (packet) sendPacket(packet);
-    else bad++;
-  }
-  reportStats();
+  if (!decoded?.length) return;
+  const bytes = new Uint8Array(decoded.length);
+  bytes.set(new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength));
+  const packet = parseUltraMessage(bytes);
+  if (packet) sendPacket(packet);
 }
 
 function append(samples) {
@@ -98,13 +70,7 @@ function reset() {
   try { ggwave.free(instance); } catch {}
   instance = createInstance();
   frameLength = 0;
-  frames = 0;
-  raw = 0;
-  bad = 0;
-  packets = 0;
-  lastLength = 0;
   lastPacketKey = "";
-  reportStats(true);
 }
 
 self.onmessage = (event) => {
@@ -117,4 +83,3 @@ self.onmessage = (event) => {
 };
 
 postMessage({ type: "ready", frameSamples: FRAME_SAMPLES });
-reportStats(true);
