@@ -23,16 +23,19 @@ try {
     const SPF = 1024;
 
     const configs = [
-      { name: "current-dt34-v50", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 34, volume: 50, widthBins: 32 },
-      { name: "safe-dt64-v100", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 32 },
-      { name: "aud64-48k-f24", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 96 },
+      { name: "dt24-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 24, volume: 100, widthBins: 32 },
+      { name: "dt34-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 34, volume: 100, widthBins: 32 },
+      { name: "dt44-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 44, volume: 100, widthBins: 32 },
+      { name: "dt54-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 54, volume: 100, widthBins: 32 },
+      { name: "dt64-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 32 },
+      { name: "aud24-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 24, volume: 100, widthBins: 96 },
+      { name: "aud34-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 34, volume: 100, widthBins: 96 },
+      { name: "aud44-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 44, volume: 100, widthBins: 96 },
+      { name: "aud54-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 54, volume: 100, widthBins: 96 },
       { name: "aud64-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-32k-f28", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 28, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-28k-f36", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 28000, freqStart: 36, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-28k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 28000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-24k-f40", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 24000, freqStart: 40, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-24k-f36", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 24000, freqStart: 36, len: 64, volume: 100, widthBins: 96 }
+      { name: "aud24-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 24, volume: 100, widthBins: 96 },
+      { name: "aud34-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 34, volume: 100, widthBins: 96 },
+      { name: "aud44-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 44, volume: 100, widthBins: 96 }
     ];
 
     function protocolValue(id) {
@@ -141,7 +144,7 @@ try {
   });
 
   console.log("AIRGAPPER_GGWAVE_MATRIX", JSON.stringify(rows));
-  if (!rows.some((row) => row.name === "current-dt34-v50" && row.ok)) throw new Error("Current DT baseline failed");
+  if (!rows.every((row) => row.ok)) throw new Error("One or more responsive modem configurations failed loopback");
 } finally {
   await browser.close();
 }
