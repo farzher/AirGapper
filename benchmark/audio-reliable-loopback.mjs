@@ -125,10 +125,10 @@ try {
   if (result.blockSize !== 24 || result.mds.encodingId !== 7 || result.mds.messageBytes !== 34) {
     throw new Error(`Reliable fixed frame mismatch: ${JSON.stringify(result)}`);
   }
-  if (result.frameMs < 1400 || result.frameMs > 1700) {
+  if (result.frameMs < 1150 || result.frameMs > 1350) {
     throw new Error(`Reliable frame is no longer responsive: ${result.frameMs} ms`);
   }
-  if (result.usefulBps < 12 || result.usefulBps > 14) {
+  if (result.usefulBps < 15 || result.usefulBps > 17) {
     throw new Error(`Reliable useful rate moved outside expected range: ${result.usefulBps} B/s`);
   }
   if (result.peak < 0.95 || result.peak > 1.01) {
