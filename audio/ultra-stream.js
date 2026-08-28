@@ -8,19 +8,18 @@ import {
 } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
-const MODEM_RATE = 36000;
+const MODEM_RATE = 40000;
 const GGWAVE_VOLUME = 100;
-const GUARD_SAMPLES = Math.round(SAMPLE_RATE * 0.18);
+const GUARD_SAMPLES = Math.round(SAMPLE_RATE * 0.02);
 const GGWAVE_DSS = 1 << 4;
 const GGWAVE_TX = 1 << 2;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
 
-// Use the faster six-tone modem, but resample its internal clock and move its
-// carriers down to about 1.125-4.5 kHz. The short fixed frame makes Reliable
-// react in roughly 1.5 seconds instead of waiting almost six seconds per block.
+// Keep Reliable in the proven low audible band while running the modem clock
+// faster. At 40 kHz with freqStart 28 the carriers span about 1.09-4.84 kHz.
 const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FASTEST;
-ggwave.txProtocolSetFreqStart(protocol, 32);
+ggwave.txProtocolSetFreqStart(protocol, 28);
 const parameters = ggwave.getDefaultParameters();
 parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
 parameters.sampleRateInp = SAMPLE_RATE;
