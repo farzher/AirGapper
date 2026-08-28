@@ -5,7 +5,7 @@ const audioMainSource = await fs.readFile(new URL("../audio/main.js", import.met
 const requiredUiSource = [
   "const STATS_WINDOW_MS = 1000;",
   "speedValue.textContent = \"👂\";",
-  "speedValue.textContent = `${kbs.toFixed(1)} KB/s`;",
+  "speedValue.textContent = `${kbs.toFixed(2)} KB/s`;",
   "session.usefulFrameTimes.push(now)"
 ];
 for (const source of requiredUiSource) {

@@ -334,7 +334,7 @@ receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
 
 function setReceiveSpeed(kbs) {
   const tone = kbs > 1 ? 2 : kbs > 0 ? 1 : 0;
-  speedValue.textContent = `${kbs.toFixed(1)} KB/s`;
+  speedValue.textContent = `${kbs.toFixed(2)} KB/s`;
   speedValue.style.color = tone > 1 ? "#2563eb" : tone > 0 ? "var(--good)" : "";
   if (visualizerCanvas === receivePreview.canvas) setVisualizerTone(tone);
 }
