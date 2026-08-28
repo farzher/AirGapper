@@ -35,7 +35,6 @@ import {
   modulateFastFrame
 } from "./fast-stream.js";
 import {
-  ULTRA_AUDIO_BLOCK_SIZE,
   ULTRA_ESTIMATED_KBPS,
   ULTRA_FRAME_MS,
   ULTRA_PACKETS_PER_FRAME,
@@ -265,44 +264,22 @@ function setVisualizerTone(tone) {
 }
 
 // Receive -------------------------------------------------------------------
+const STATS_WINDOW_MS = 1000;
 const STATS_TICK_MS = 200;
+function pruneTimestampSamples(samples, cutoff) {
+  let count = 0;
+  while (count < samples.length && samples[count] < cutoff) count++;
+  if (count) samples.splice(0, count);
+}
 function stopReceiveStats(session) {
   if (!session?.statsTimer) return;
   clearInterval(session.statsTimer);
   session.statsTimer = 0;
 }
-function receiveStaleMs(session) {
-  if (session.profile === "ultra") return Math.max(5000, ULTRA_FRAME_MS * 1.8);
-  if (session.profile === "fast") return Math.max(1500, FAST_FRAME_MS * 3);
-  return 3000;
-}
-function liveGoodputBps(session, now) {
-  if (!session.decoder || !session.lastUsefulAt || now - session.lastUsefulAt > receiveStaleMs(session)) return 0;
-  return Math.max(0, session.smoothedBps);
-}
-function recordUsefulFrame(session, now) {
-  let sampleBps = 0;
-  if (session.lastUsefulAt > 0 && now > session.lastUsefulAt) {
-    sampleBps = session.sourceBlockSize * 1000 / (now - session.lastUsefulAt);
-  } else if (session.profile === "ultra") {
-    sampleBps = session.sourceBlockSize * 1000 / ULTRA_FRAME_MS;
-  } else if (session.profile === "fast") {
-    sampleBps = session.sourceBlockSize * 1000 / FAST_FRAME_MS;
-  }
-  if (sampleBps > 0 && Number.isFinite(sampleBps)) {
-    session.smoothedBps = session.smoothedBps > 0
-      ? session.smoothedBps * 0.72 + sampleBps * 0.28
-      : sampleBps;
-  }
-  session.lastUsefulAt = now;
-}
-function formatReceiveRate(bps, profile = "") {
-  if (!(bps > 0)) return "";
-  if (profile === "ultra" || bps < 1024) {
-    return `${bps < 10 ? bps.toFixed(1) : Math.round(bps)} B/s`;
-  }
-  const kbs = bps / 1024;
-  return `${kbs < 10 ? kbs.toFixed(1) : Math.round(kbs)} KB/s`;
+function liveGoodputKbs(session, now) {
+  pruneTimestampSamples(session.usefulFrameTimes, now - STATS_WINDOW_MS);
+  if (!session.decoder || !session.usefulFrameTimes.length) return 0;
+  return session.usefulFrameTimes.length * session.sourceBlockSize / 1024 / (STATS_WINDOW_MS / 1000);
 }
 
 receivePane.replaceChildren();
@@ -330,11 +307,7 @@ completeLabel.className = "complete-label";
 completeLabel.textContent = "✓ Complete";
 const speedFeedback = document.createElement("span");
 speedFeedback.className = "speed-feedback";
-speedFeedback.style.minWidth = "7.5rem";
-speedFeedback.style.textAlign = "right";
-speedFeedback.style.whiteSpace = "nowrap";
 const speedValue = document.createElement("strong");
-speedValue.style.fontVariantNumeric = "tabular-nums";
 speedFeedback.append(speedValue);
 receiveSummary.append(receivePrompt, completeLabel, speedFeedback);
 const progressTrack = document.createElement("div");
@@ -359,10 +332,9 @@ receiveProgress.append(receiveSummary, progressTrack, receiveMeta);
 receivePanel.append(receiveProgress);
 receivePane.append(listenButton, receivePreview.zone, result, receivePanel);
 
-function setReceiveSpeed(bps, profile = "", idleLabel = "Waiting") {
-  const active = bps > 0;
-  const tone = active ? (bps >= 1024 ? 2 : 1) : 0;
-  speedValue.textContent = active ? formatReceiveRate(bps, profile) : idleLabel;
+function setReceiveSpeed(kbs) {
+  const tone = kbs > 1 ? 2 : kbs > 0 ? 1 : 0;
+  speedValue.textContent = `${kbs.toFixed(1)} KB/s`;
   speedValue.style.color = tone > 1 ? "#2563eb" : tone > 0 ? "var(--good)" : "";
   if (visualizerCanvas === receivePreview.canvas) setVisualizerTone(tone);
 }
@@ -371,7 +343,8 @@ function resetReceiveUi() {
   receivePrompt.hidden = true;
   receiveState.textContent = "";
   completeLabel.style.display = "";
-  setReceiveSpeed(0, "", "Listening");
+  speedValue.textContent = "👂";
+  speedValue.style.color = "";
   progressLabel.hidden = false;
   progressLabel.textContent = "0%";
   sizeLabel.textContent = "";
@@ -394,20 +367,21 @@ function updateReceiveProgress(session, now = performance.now()) {
   const percent = Math.min(98, Math.max(0, estimate.fraction * 100));
   progressBar.style.width = `${percent}%`;
   progressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
-  progressLabel.textContent = percent > 0 && percent < 1 ? `${percent.toFixed(1)}%` : `${Math.floor(percent)}%`;
+  progressLabel.textContent = `${Math.floor(percent)}%`;
   const remainingBytes = Math.max(1, Math.ceil(session.totalLen * (1 - estimate.fraction)));
   sizeLabel.textContent = formatBytes(remainingBytes);
-  const liveBps = liveGoodputBps(session, now);
-  etaLabel.textContent = liveBps > 0 && usefulSymbols >= 3
-    ? `${formatDuration(estimate.remainingFrames * session.sourceBlockSize / liveBps)} left`
+  const liveKbs = liveGoodputKbs(session, now);
+  const liveUsefulFps = liveKbs > 0 ? liveKbs * 1024 / session.sourceBlockSize : 0;
+  etaLabel.textContent = liveUsefulFps > 0 && usefulSymbols >= 3
+    ? `${formatDuration(estimate.remainingFrames / liveUsefulFps)} left`
     : "";
-  setReceiveSpeed(liveBps, session.profile, session.identity ? "Waiting" : "Listening");
+  setReceiveSpeed(liveKbs);
 }
 function completeReceiveUi(session, file) {
   receivePanel.hidden = false;
   const elapsedSeconds = Math.max(1e-3, (performance.now() - session.startedAt) / 1000);
   const transmittedSize = Number(file.transmittedSize) || file.bytes.length;
-  const goodputBps = completedGoodputKbs(transmittedSize, elapsedSeconds) * 1024;
+  const goodput = completedGoodputKbs(transmittedSize, elapsedSeconds);
   progressBar.classList.add("finalizing");
   progressBar.style.width = "100%";
   progressTrack.setAttribute("aria-valuenow", "100");
@@ -416,7 +390,7 @@ function completeReceiveUi(session, file) {
   progressLabel.hidden = true;
   sizeLabel.textContent = "";
   etaLabel.textContent = `${formatBytes(transmittedSize)} in ${formatDuration(elapsedSeconds)}`;
-  setReceiveSpeed(goodputBps, session.profile);
+  setReceiveSpeed(goodput);
   receivePreview.zone.hidden = true;
   stopVisualizer();
 }
@@ -459,7 +433,6 @@ async function acceptPacket(session, frame) {
     session.payloadId = frame.payloadId;
     session.totalLen = frame.totalLen;
     session.mode = frame.mode;
-    session.profile = frame.profile || "";
     session.sourceBlockSize = sourceBlockSize(frame.mode, frame.blockSize);
     session.targetPackets = k;
     session.startedAt = frame.profile === "fast"
@@ -467,14 +440,13 @@ async function acceptPacket(session, frame) {
       : frame.profile === "ultra"
         ? performance.now() - ULTRA_FRAME_MS
         : performance.now();
-    session.lastUsefulAt = 0;
-    session.smoothedBps = 0;
+    session.usefulFrameTimes.length = 0;
     sizeLabel.textContent = formatBytes(frame.totalLen);
   }
   const usefulBefore = session.decoder.usefulSymbols;
   session.decoder.addFrame(frame.encodingId, frame.block);
   const now = Number.isFinite(frame.receivedAt) ? frame.receivedAt : performance.now();
-  if (session.decoder.usefulSymbols > usefulBefore) recordUsefulFrame(session, now);
+  if (session.decoder.usefulSymbols > usefulBefore) session.usefulFrameTimes.push(now);
   updateReceiveProgress(session, performance.now());
   if (!session.decoder.isComplete) return;
   const recovered = session.decoder.assemble();
@@ -579,12 +551,10 @@ async function startListening() {
       payloadId: 0,
       totalLen: 0,
       mode: "",
-      profile: "",
       sourceBlockSize: AUDIO_BLOCK_SIZE,
       targetPackets: 0,
       startedAt: 0,
-      lastUsefulAt: 0,
-      smoothedBps: 0,
+      usefulFrameTimes: [],
       statsTimer: 0,
       finishing: false,
       queue: Promise.resolve()
@@ -790,11 +760,7 @@ function takeBlocks(transport, count) {
 function buildSendWaveform(session) {
   const profile = activeProfile();
   const epoch = session.profileEpoch;
-  const transport = profile === "fast"
-    ? session.transports.fast
-    : profile === "ultra"
-      ? session.transports.ultra
-      : session.transports.small;
+  const transport = profile === "fast" ? session.transports.fast : session.transports.small;
   if (profile === "fast") {
     const { startOrdinal, blocks } = takeBlocks(transport, FAST_PACKETS_PER_FRAME);
     return {
@@ -879,9 +845,8 @@ async function startSending(container, label) {
   }
   try {
     const smallMode = selectAudioTransport(container.length, AUDIO_BLOCK_SIZE);
-    const ultraMode = selectAudioTransport(container.length, ULTRA_AUDIO_BLOCK_SIZE);
     const fastMode = selectAudioTransport(container.length, FAST_AUDIO_BLOCK_SIZE);
-    if (smallMode === "raptorq" || ultraMode === "raptorq" || fastMode === "raptorq") await prepareRaptorQ();
+    if (smallMode === "raptorq" || fastMode === "raptorq") await prepareRaptorQ();
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextType) throw new Error("Web Audio is not available in this browser.");
     const context = new AudioContextType({ latencyHint: "playback" });
@@ -890,11 +855,6 @@ async function startSending(container, label) {
       small: {
         encoder: new TransportEncoder(container, AUDIO_BLOCK_SIZE, smallMode),
         mode: smallMode,
-        ordinal: 0
-      },
-      ultra: {
-        encoder: new TransportEncoder(container, ULTRA_AUDIO_BLOCK_SIZE, ultraMode),
-        mode: ultraMode,
         ordinal: 0
       },
       fast: {

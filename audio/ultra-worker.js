@@ -2,11 +2,12 @@ import ggwaveFactory from "../vendor/ggwave.mjs";
 import { ULTRA_MESSAGE_LENGTH, parseUltraMessage } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
+const MODEM_RATE = 36000;
 const GGWAVE_DSS = 1 << 4;
 const GGWAVE_RX = 1 << 1;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
-const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
+const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FASTEST;
 const protocolValue = Number(protocol?.value ?? protocol);
 const FRAME_SAMPLES = Math.max(1, Math.round(ggwave.getDefaultParameters().samplesPerFrame || 1024));
 
@@ -14,13 +15,14 @@ for (const [name, id] of Object.entries(ggwave.ProtocolId)) {
   if (!name.startsWith("GGWAVE_PROTOCOL_")) continue;
   ggwave.rxToggleProtocol(id, Number(id?.value ?? id) === protocolValue ? 1 : 0);
 }
+ggwave.rxProtocolSetFreqStart(protocol, 32);
 
 function createInstance() {
   const parameters = ggwave.getDefaultParameters();
   parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
   parameters.sampleRateInp = SAMPLE_RATE;
   parameters.sampleRateOut = SAMPLE_RATE;
-  parameters.sampleRate = SAMPLE_RATE;
+  parameters.sampleRate = MODEM_RATE;
   parameters.sampleFormatInp = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
   parameters.sampleFormatOut = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
   parameters.operatingMode = GGWAVE_RX | GGWAVE_DSS;

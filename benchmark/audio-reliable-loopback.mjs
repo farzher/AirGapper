@@ -1,4 +1,19 @@
+import fs from "node:fs/promises";
 import { chromium } from "playwright";
+
+const audioMainSource = await fs.readFile(new URL("../audio/main.js", import.meta.url), "utf8");
+const requiredUiSource = [
+  "const STATS_WINDOW_MS = 1000;",
+  "speedValue.textContent = \"👂\";",
+  "speedValue.textContent = `${kbs.toFixed(1)} KB/s`;",
+  "session.usefulFrameTimes.push(now)"
+];
+for (const source of requiredUiSource) {
+  if (!audioMainSource.includes(source)) throw new Error(`Audio receive UI behavior regressed: missing ${source}`);
+}
+if (audioMainSource.includes('idleLabel = "Waiting"') || audioMainSource.includes('idleLabel = "Listening"')) {
+  throw new Error("Audio receive UI must not replace the rolling KB/s display with Waiting/Listening labels");
+}
 
 const baseUrl = process.env.AIRGAPPER_URL || "http://127.0.0.1:8080/";
 const browser = await chromium.launch({
@@ -25,7 +40,7 @@ try {
     if (!mds) throw new Error("Reliable MDS envelope did not round-trip");
 
     await prepareRaptorQ();
-    const payload = new Uint8Array(2000);
+    const payload = new Uint8Array(1000);
     for (let i = 0; i < payload.length; i++) payload[i] = (i * 29 + 17) & 255;
     const encoder = new TransportEncoder(payload, ULTRA_AUDIO_BLOCK_SIZE, "raptorq");
     const requestId = scheduledEncodingId(encoder.k, 0);
@@ -45,15 +60,15 @@ try {
       let finishTimer = 0;
       const timer = setTimeout(() => {
         worker.terminate();
-        reject(new Error("Reliable low-band ggwave worker loopback timed out"));
-      }, 30_000);
+        reject(new Error("Reliable responsive ggwave worker loopback timed out"));
+      }, 20_000);
       const finish = () => {
         if (finishTimer) return;
         finishTimer = setTimeout(() => {
           clearTimeout(timer);
           worker.terminate();
           resolve(packets);
-        }, 1000);
+        }, 500);
       };
       worker.onerror = (event) => {
         clearTimeout(timer);
@@ -89,6 +104,7 @@ try {
     if (!received.length) throw new Error("Reliable worker emitted no packet");
     return {
       blockSize: ULTRA_AUDIO_BLOCK_SIZE,
+      frameMs: ULTRA_FRAME_MS,
       usefulBps,
       peak,
       mds: { encodingId: mds.encodingId, messageBytes: mdsMessage.length },
@@ -106,14 +122,17 @@ try {
     };
   });
 
-  if (result.blockSize !== 54 || result.mds.encodingId !== 7 || result.mds.messageBytes !== 64) {
+  if (result.blockSize !== 24 || result.mds.encodingId !== 7 || result.mds.messageBytes !== 34) {
     throw new Error(`Reliable fixed frame mismatch: ${JSON.stringify(result)}`);
   }
-  if (result.usefulBps < 8 || result.usefulBps > 10) {
+  if (result.frameMs < 1400 || result.frameMs > 1700) {
+    throw new Error(`Reliable frame is no longer responsive: ${result.frameMs} ms`);
+  }
+  if (result.usefulBps < 12 || result.usefulBps > 14) {
     throw new Error(`Reliable useful rate moved outside expected range: ${result.usefulBps} B/s`);
   }
   if (result.peak < 0.95 || result.peak > 1.01) {
-    throw new Error(`Reliable waveform is not using full-scale output: peak ${result.peak}`);
+    throw new Error(`Reliable waveform is not using near-full-scale output: peak ${result.peak}`);
   }
   if (result.raptor.embeddedEsi <= result.raptor.requestId) {
     throw new Error(`Expected RaptorQ ESI to include the source-symbol offset: ${JSON.stringify(result.raptor)}`);
@@ -127,14 +146,14 @@ try {
   if (result.raptor.block.length !== result.raptor.expectedBlock.length || result.raptor.block.some((value, i) => value !== result.raptor.expectedBlock[i])) {
     throw new Error("Reliable RaptorQ waveform block mismatch");
   }
-  if (result.raptor.messageBytes !== 64) throw new Error(`Reliable RaptorQ fixed frame mismatch: ${result.raptor.messageBytes} bytes`);
 
-  console.log("AIRGAPPER_AUDIO_RELIABLE_LOWBAND_PASS", JSON.stringify({
+  console.log("AIRGAPPER_AUDIO_RELIABLE_RESPONSIVE_PASS", JSON.stringify({
     requestId: result.raptor.requestId,
     embeddedEsi: result.raptor.embeddedEsi,
     emittedPackets: result.raptor.emittedPackets,
     messageBytes: result.raptor.messageBytes,
     blockSize: result.blockSize,
+    frameMs: Number(result.frameMs.toFixed(1)),
     usefulBps: Number(result.usefulBps.toFixed(2)),
     peak: Number(result.peak.toFixed(3)),
     waveformSamples: result.raptor.waveformSamples

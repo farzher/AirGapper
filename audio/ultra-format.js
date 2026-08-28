@@ -1,8 +1,8 @@
 import { codingMode, raptorPacketEsi } from "../shared/coding-mode.js";
 
-const ULTRA_AUDIO_BLOCK_SIZE = 54;
+const ULTRA_AUDIO_BLOCK_SIZE = 24;
 const ULTRA_PACKETS_PER_FRAME = 1;
-const ULTRA_MESSAGE_LENGTH = 64;
+const ULTRA_MESSAGE_LENGTH = 34;
 const MAX_AUDIO_BYTES = 1024 * 1024;
 const MAGIC0 = 0x41; // A
 const MAGIC1 = 0x52; // R
@@ -50,9 +50,8 @@ function buildUltraMessage(payloadId, totalLen, mode, startOrdinal, blocks) {
     throw new Error("Invalid Reliable packet id.");
   }
 
-  // Fill ggwave's 64-byte fixed-payload capacity. The 54-byte transport block
-  // leaves exactly 10 bytes for AirGapper framing. RaptorQ already embeds its
-  // ESI in the transport block, so its one-byte wire id stays zero.
+  // Keep one transport-id byte in every fixed 34-byte acoustic frame.
+  // RaptorQ already embeds its ESI in the 24-byte block, so its wire id is 0.
   const out = new Uint8Array(ULTRA_MESSAGE_LENGTH);
   out[0] = MAGIC0;
   out[1] = MAGIC1;

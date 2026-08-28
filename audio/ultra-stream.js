@@ -8,20 +8,24 @@ import {
 } from "./ultra-format.js";
 
 const SAMPLE_RATE = 48000;
+const MODEM_RATE = 36000;
 const GGWAVE_VOLUME = 100;
 const GUARD_SAMPLES = Math.round(SAMPLE_RATE * 0.18);
 const GGWAVE_DSS = 1 << 4;
 const GGWAVE_TX = 1 << 2;
 const ggwave = await ggwaveFactory();
 ggwave.disableLog?.();
-// Reliable keeps the hardware-proven low-frequency dual-tone PHY. Its data
-// carriers stay roughly in the 1.1-2.6 kHz speech band.
-const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_DT_FASTEST;
+
+// Use the faster six-tone modem, but resample its internal clock and move its
+// carriers down to about 1.125-4.5 kHz. The short fixed frame makes Reliable
+// react in roughly 1.5 seconds instead of waiting almost six seconds per block.
+const protocol = ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FASTEST;
+ggwave.txProtocolSetFreqStart(protocol, 32);
 const parameters = ggwave.getDefaultParameters();
 parameters.payloadLength = ULTRA_MESSAGE_LENGTH;
 parameters.sampleRateInp = SAMPLE_RATE;
 parameters.sampleRateOut = SAMPLE_RATE;
-parameters.sampleRate = SAMPLE_RATE;
+parameters.sampleRate = MODEM_RATE;
 parameters.sampleFormatInp = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
 parameters.sampleFormatOut = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
 parameters.operatingMode = GGWAVE_TX | GGWAVE_DSS;
@@ -46,8 +50,6 @@ function encodeMessage(message) {
 const probeBlock = new Uint8Array(ULTRA_AUDIO_BLOCK_SIZE);
 const probe = encodeMessage(buildUltraMessage(1, 1, "direct", 0, [probeBlock]));
 const ULTRA_FRAME_MS = probe.length / SAMPLE_RATE * 1000;
-// Large transfers use RaptorQ, whose transport packet reserves four bytes for
-// its ESI. Keep the estimate in useful application bytes.
 const ULTRA_ESTIMATED_KBPS = (ULTRA_AUDIO_BLOCK_SIZE - RAPTOR_PACKET_ID_BYTES) /
   (probe.length / SAMPLE_RATE) / 1024;
 
