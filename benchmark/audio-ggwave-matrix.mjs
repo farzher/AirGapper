@@ -19,17 +19,20 @@ try {
     const TX = 1 << 2;
     const DSS = 1 << 4;
     const F32 = ggwave.SampleFormat.GGWAVE_SAMPLE_FORMAT_F32;
-    const OUTPUT_RATE = 48000;
+    const IO_RATE = 48000;
+    const SPF = 1024;
 
     const configs = [
-      { name: "current-dt34-v50", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", spf: 1024, freqStart: 24, len: 34, volume: 50, widthBins: 32 },
-      { name: "dt64-v100", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", spf: 1024, freqStart: 24, len: 64, volume: 100, widthBins: 32 },
-      { name: "aud64-2048-f48", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 2048, freqStart: 48, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-2048-f44", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 2048, freqStart: 44, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-1536-f36", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 1536, freqStart: 36, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-1536-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 1536, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-1536-f24", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 1536, freqStart: 24, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud64-1024-f24", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", spf: 1024, freqStart: 24, len: 64, volume: 100, widthBins: 96 }
+      { name: "current-dt34-v50", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 34, volume: 50, widthBins: 32 },
+      { name: "safe-dt64-v100", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 32 },
+      { name: "aud64-48k-f24", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-32k-f28", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 28, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-28k-f36", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 28000, freqStart: 36, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-28k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 28000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-24k-f40", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 24000, freqStart: 40, len: 64, volume: 100, widthBins: 96 },
+      { name: "aud64-24k-f36", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 24000, freqStart: 36, len: 64, volume: 100, widthBins: 96 }
     ];
 
     function protocolValue(id) {
@@ -50,13 +53,13 @@ try {
       return wanted;
     }
 
-    function makeParams(mode, len, spf) {
+    function makeParams(mode, config) {
       const p = ggwave.getDefaultParameters();
-      p.payloadLength = len;
-      p.sampleRateInp = OUTPUT_RATE;
-      p.sampleRateOut = OUTPUT_RATE;
-      p.sampleRate = OUTPUT_RATE;
-      p.samplesPerFrame = spf;
+      p.payloadLength = config.len;
+      p.sampleRateInp = IO_RATE;
+      p.sampleRateOut = IO_RATE;
+      p.sampleRate = config.rate;
+      p.samplesPerFrame = SPF;
       p.sampleFormatInp = F32;
       p.sampleFormatOut = F32;
       p.operatingMode = mode | DSS;
@@ -71,8 +74,8 @@ try {
 
     async function run(config) {
       const protocol = setOnlyProtocol(config.protocol, config.freqStart);
-      const tx = ggwave.init(makeParams(TX, config.len, config.spf));
-      const rx = ggwave.init(makeParams(RX, config.len, config.spf));
+      const tx = ggwave.init(makeParams(TX, config));
+      const rx = ggwave.init(makeParams(RX, config));
       try {
         const payload = new Uint8Array(config.len);
         for (let i = 0; i < payload.length; i++) payload[i] = (i * 73 + 19) & 255;
@@ -87,15 +90,14 @@ try {
         }
         const rms = Math.sqrt(sumSq / Math.max(1, wave.length));
 
-        const leading = new Float32Array(config.spf * 4 + 137);
-        const trailing = new Float32Array(config.spf * 24);
+        const leading = new Float32Array(4096 + 137);
+        const trailing = new Float32Array(32768);
         const samples = new Float32Array(leading.length + wave.length + trailing.length);
         samples.set(wave, leading.length);
         let decoded = null;
         let rawEvents = 0;
-        const chunkSize = config.spf;
-        for (let offset = 0; offset < samples.length; offset += chunkSize) {
-          const chunk = samples.subarray(offset, Math.min(samples.length, offset + chunkSize));
+        for (let offset = 0; offset < samples.length; offset += 1024) {
+          const chunk = samples.subarray(offset, Math.min(samples.length, offset + 1024));
           const input = new Int8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
           const out = ggwave.decode(rx, input);
           if (!out?.length) continue;
@@ -106,9 +108,9 @@ try {
           }
         }
         const ok = decoded?.length === payload.length && decoded.every((v, i) => v === payload[i]);
-        const duration = wave.length / OUTPUT_RATE;
-        const usefulBytes = Math.max(0, config.len - 14); // 10-byte AirGapper envelope + 4-byte RaptorQ ESI
-        const binHz = OUTPUT_RATE / config.spf;
+        const duration = wave.length / IO_RATE;
+        const usefulBytes = Math.max(0, config.len - 14);
+        const binHz = config.rate / SPF;
         return {
           ...config,
           ok,
