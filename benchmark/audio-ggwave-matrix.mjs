@@ -23,17 +23,11 @@ try {
     const SPF = 1024;
 
     const configs = [
-      { name: "dt24-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 24, volume: 100, widthBins: 32 },
       { name: "dt34-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 34, volume: 100, widthBins: 32 },
-      { name: "dt44-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 44, volume: 100, widthBins: 32 },
-      { name: "dt54-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 54, volume: 100, widthBins: 32 },
       { name: "dt64-48k-f24", protocol: "GGWAVE_PROTOCOL_DT_FASTEST", rate: 48000, freqStart: 24, len: 64, volume: 100, widthBins: 32 },
       { name: "aud24-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 24, volume: 100, widthBins: 96 },
       { name: "aud34-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 34, volume: 100, widthBins: 96 },
       { name: "aud44-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 44, volume: 100, widthBins: 96 },
-      { name: "aud54-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 54, volume: 100, widthBins: 96 },
-      { name: "aud64-36k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 36000, freqStart: 32, len: 64, volume: 100, widthBins: 96 },
-      { name: "aud24-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 24, volume: 100, widthBins: 96 },
       { name: "aud34-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 34, volume: 100, widthBins: 96 },
       { name: "aud44-32k-f32", protocol: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", rate: 32000, freqStart: 32, len: 44, volume: 100, widthBins: 96 }
     ];
@@ -93,16 +87,24 @@ try {
         }
         const rms = Math.sqrt(sumSq / Math.max(1, wave.length));
 
-        const leading = new Float32Array(4096 + 137);
+        const leadingLength = 4096 + 137;
+        const leading = new Float32Array(leadingLength);
         const trailing = new Float32Array(32768);
         const samples = new Float32Array(leading.length + wave.length + trailing.length);
         samples.set(wave, leading.length);
         let decoded = null;
         let rawEvents = 0;
+        let firstActiveSample = -1;
+        let maxSync = 0;
         for (let offset = 0; offset < samples.length; offset += 1024) {
           const chunk = samples.subarray(offset, Math.min(samples.length, offset + 1024));
           const input = new Int8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
           const out = ggwave.decode(rx, input);
+          const sync = Number(ggwave.rxDurationFrames?.(rx)) || 0;
+          if (sync > 0) {
+            maxSync = Math.max(maxSync, sync);
+            if (firstActiveSample < 0) firstActiveSample = Math.max(0, offset + chunk.length - leadingLength);
+          }
           if (!out?.length) continue;
           rawEvents++;
           if (!decoded) {
@@ -124,7 +126,9 @@ try {
           peak: Number(peak.toFixed(4)),
           rms: Number(rms.toFixed(4)),
           lowHz: Math.round(config.freqStart * binHz),
-          highHz: Math.round((config.freqStart + config.widthBins) * binHz)
+          highHz: Math.round((config.freqStart + config.widthBins) * binHz),
+          firstActiveMs: firstActiveSample < 0 ? null : Math.round(firstActiveSample / IO_RATE * 1000),
+          maxSync
         };
       } finally {
         ggwave.free(tx);
@@ -144,7 +148,7 @@ try {
   });
 
   console.log("AIRGAPPER_GGWAVE_MATRIX", JSON.stringify(rows));
-  if (!rows.every((row) => row.ok)) throw new Error("One or more responsive modem configurations failed loopback");
+  if (!rows.every((row) => row.ok)) throw new Error("One or more acquisition configurations failed loopback");
 } finally {
   await browser.close();
 }
